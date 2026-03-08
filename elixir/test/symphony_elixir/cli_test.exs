@@ -98,6 +98,53 @@ defmodule SymphonyElixir.CLITest do
     assert expanded_path == Path.expand("tmp/custom-logs")
   end
 
+  test "accepts --port and passes it to runtime deps" do
+    parent = self()
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn port ->
+        send(parent, {:port, port})
+        :ok
+      end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag, "--port", "4040", "WORKFLOW.md"], deps)
+    assert_received {:port, 4040}
+  end
+
+  test "rejects blank logs-root values" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "--logs-root", "   ", "WORKFLOW.md"], deps)
+    assert message =~ "Usage: symphony"
+  end
+
+  test "returns usage for invalid args and unexpected extra positional arguments" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "--bogus"], deps)
+    assert message =~ "Usage: symphony"
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "one.md", "two.md"], deps)
+    assert message =~ "Usage: symphony"
+  end
+
   test "returns not found when workflow file does not exist" do
     deps = %{
       file_regular?: fn _path -> false end,

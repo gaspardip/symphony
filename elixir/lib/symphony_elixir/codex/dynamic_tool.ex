@@ -6,8 +6,16 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   alias SymphonyElixir.Linear.Client
 
   @linear_graphql_tool "linear_graphql"
+  @report_turn_result_tool "report_agent_turn_result"
+  @report_verifier_result_tool "report_verifier_result"
   @linear_graphql_description """
   Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.
+  """
+  @report_turn_result_description """
+  Report the required machine-readable result contract for the current implementation turn.
+  """
+  @report_verifier_result_description """
+  Report the required machine-readable result contract for the verifier review turn.
   """
   @linear_graphql_input_schema %{
     "type" => "object",
@@ -25,12 +33,47 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       }
     }
   }
+  @report_turn_result_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["summary", "files_touched", "needs_another_turn", "blocked", "blocker_type"],
+    "properties" => %{
+      "summary" => %{"type" => "string"},
+      "files_touched" => %{"type" => "array", "items" => %{"type" => "string"}},
+      "needs_another_turn" => %{"type" => "boolean"},
+      "blocked" => %{"type" => "boolean"},
+      "blocker_type" => %{"type" => "string"}
+    }
+  }
+  @report_verifier_result_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => ["verdict", "summary", "acceptance_gaps", "risky_areas", "evidence", "raw_output"],
+    "properties" => %{
+      "verdict" => %{"type" => "string"},
+      "summary" => %{"type" => "string"},
+      "acceptance_gaps" => %{"type" => "array", "items" => %{"type" => "string"}},
+      "risky_areas" => %{"type" => "array", "items" => %{"type" => "string"}},
+      "evidence" => %{"type" => "array", "items" => %{"type" => "string"}},
+      "raw_output" => %{"type" => "string"}
+    }
+  }
 
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @report_turn_result_tool ->
+        success_response(%{
+          "reported" => true
+        })
+
+      @report_verifier_result_tool ->
+        success_response(%{
+          "reported" => true
+        })
 
       other ->
         failure_response(%{
@@ -49,6 +92,16 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
+      },
+      %{
+        "name" => @report_turn_result_tool,
+        "description" => @report_turn_result_description,
+        "inputSchema" => @report_turn_result_input_schema
+      },
+      %{
+        "name" => @report_verifier_result_tool,
+        "description" => @report_verifier_result_description,
+        "inputSchema" => @report_verifier_result_input_schema
       }
     ]
   end
@@ -132,6 +185,18 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp failure_response(payload) do
     %{
       "success" => false,
+      "contentItems" => [
+        %{
+          "type" => "inputText",
+          "text" => encode_payload(payload)
+        }
+      ]
+    }
+  end
+
+  defp success_response(payload) do
+    %{
+      "success" => true,
       "contentItems" => [
         %{
           "type" => "inputText",

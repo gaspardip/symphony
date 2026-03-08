@@ -19,14 +19,10 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    case evaluate(args) do
-      :ok ->
-        wait_for_shutdown()
-
-      {:error, message} ->
-        IO.puts(:stderr, message)
-        System.halt(1)
-    end
+    run_main(args, runtime_deps(), &wait_for_shutdown/0, fn message ->
+      IO.puts(:stderr, message)
+      System.halt(1)
+    end)
   end
 
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
@@ -68,6 +64,22 @@ defmodule SymphonyElixir.CLI do
     else
       {:error, "Workflow file not found: #{expanded_path}"}
     end
+  end
+
+  @doc false
+  @spec main_result_for_test([String.t()], deps(), (-> term())) :: :ok | {:error, String.t()} | term()
+  def main_result_for_test(args, deps \\ runtime_deps(), wait_fun \\ fn -> :ok end) do
+    run_main(args, deps, wait_fun, fn message -> {:error, message} end)
+  end
+
+  @doc false
+  @spec wait_for_shutdown_result_for_test(GenServer.name() | pid(), (pid() -> term()) | nil) ::
+          {:ok, :normal} | {:error, term()}
+  def wait_for_shutdown_result_for_test(
+        supervisor \\ SymphonyElixir.Supervisor,
+        on_monitor \\ nil
+      ) do
+    wait_for_shutdown_result(supervisor, on_monitor)
   end
 
   @spec usage_message() :: String.t()
@@ -169,23 +181,48 @@ defmodule SymphonyElixir.CLI do
     :ok
   end
 
+  defp run_main(args, deps, wait_fun, error_handler)
+       when is_list(args) and is_map(deps) and is_function(wait_fun, 0) and is_function(error_handler, 1) do
+    case evaluate(args, deps) do
+      :ok -> wait_fun.()
+      {:error, message} -> error_handler.(message)
+    end
+  end
+
   @spec wait_for_shutdown() :: no_return()
   defp wait_for_shutdown do
-    case Process.whereis(SymphonyElixir.Supervisor) do
-      nil ->
+    case wait_for_shutdown_result(SymphonyElixir.Supervisor, nil) do
+      {:error, :not_running} ->
         IO.puts(:stderr, "Symphony supervisor is not running")
         System.halt(1)
 
+      {:ok, :normal} ->
+        System.halt(0)
+
+      {:error, _reason} ->
+        System.halt(1)
+    end
+  end
+
+  defp wait_for_shutdown_result(supervisor, on_monitor) do
+    case supervisor_pid(supervisor) do
+      nil ->
+        {:error, :not_running}
+
       pid ->
         ref = Process.monitor(pid)
+        if is_function(on_monitor, 1), do: on_monitor.(pid)
 
         receive do
           {:DOWN, ^ref, :process, ^pid, reason} ->
             case reason do
-              :normal -> System.halt(0)
-              _ -> System.halt(1)
+              :normal -> {:ok, :normal}
+              _ -> {:error, reason}
             end
         end
     end
   end
+
+  defp supervisor_pid(supervisor) when is_pid(supervisor), do: supervisor
+  defp supervisor_pid(supervisor), do: Process.whereis(supervisor)
 end

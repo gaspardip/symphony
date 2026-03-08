@@ -44,6 +44,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     initial_state = :sys.get_state(pid)
     started_at = DateTime.utc_now()
+    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -125,6 +126,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -191,7 +193,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(snapshot_entry.runtime_seconds)
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
-    completed_state = :sys.get_state(pid)
+    completed_state = :sys.get_state(pid, 15_000)
 
     assert completed_state.codex_totals.input_tokens == 12
     assert completed_state.codex_totals.output_tokens == 4
@@ -223,6 +225,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -298,6 +301,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -411,6 +415,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -492,6 +497,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -580,6 +586,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -654,6 +661,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
+    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -920,6 +928,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
     initial_state = :sys.get_state(pid)
+    claim_issue_lease!(issue_id, "MT-STALL", initial_state.lease_owner)
 
     running_entry = %{
       pid: worker_pid,
@@ -1553,6 +1562,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
+  end
+
+  defp claim_issue_lease!(issue_id, identifier, owner) do
+    assert :ok = SymphonyElixir.LeaseManager.acquire(issue_id, identifier, owner)
+
+    on_exit(fn ->
+      SymphonyElixir.LeaseManager.release(issue_id)
+    end)
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do

@@ -23,6 +23,14 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @attachment_create_mutation """
+  mutation SymphonyAttachmentCreate($issueId: String!, $title: String!, $url: String!) {
+    attachmentCreate(input: {issueId: $issueId, title: $title, url: $url}) {
+      success
+    }
+  }
+  """
+
   @state_lookup_query """
   query SymphonyResolveStateId($issueId: String!, $stateName: String!) {
     issue(id: $issueId) {
@@ -45,6 +53,10 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
+
+  @spec fetch_issue_by_identifier(String.t()) :: {:ok, term() | nil} | {:error, term()}
+  def fetch_issue_by_identifier(issue_identifier),
+    do: client_module().fetch_issue_by_identifier(issue_identifier)
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
@@ -70,6 +82,24 @@ defmodule SymphonyElixir.Linear.Adapter do
       false -> {:error, :issue_update_failed}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :issue_update_failed}
+    end
+  end
+
+  @spec attach_link(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def attach_link(issue_id, title, url)
+      when is_binary(issue_id) and is_binary(title) and is_binary(url) do
+    with {:ok, response} <-
+           client_module().graphql(@attachment_create_mutation, %{
+             issueId: issue_id,
+             title: title,
+             url: url
+           }),
+         true <- get_in(response, ["data", "attachmentCreate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :attachment_create_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :attachment_create_failed}
     end
   end
 

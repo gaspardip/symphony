@@ -642,6 +642,25 @@ defmodule SymphonyElixir.StatusDashboard do
   @spec tps_graph_for_test([{integer(), integer()}], integer(), integer()) :: String.t()
   def tps_graph_for_test(samples, now_ms, current_tokens), do: tps_graph(samples, now_ms, current_tokens)
 
+  @doc false
+  def helper_for_test(:dashboard_url_host, [host]), do: dashboard_url_host(host)
+  def helper_for_test(:terminal_columns_from_env, []), do: terminal_columns_from_env()
+  def helper_for_test(:format_cell, [value, width]), do: format_cell(value, width)
+  def helper_for_test(:format_cell, [value, width, align]), do: format_cell(value, width, align)
+  def helper_for_test(:truncate_plain, [value, width]), do: truncate_plain(value, width)
+  def helper_for_test(:compact_session_id, [value]), do: compact_session_id(value)
+  def helper_for_test(:group_thousands, [value]), do: group_thousands(value)
+  def helper_for_test(:format_rate_limits_summary, [value]), do: format_rate_limits_summary(value)
+  def helper_for_test(:format_rate_limit_bucket_summary, [value]), do: format_rate_limit_bucket_summary(value)
+  def helper_for_test(:format_reason, [value]), do: format_reason(value)
+  def helper_for_test(:normalize_command, [value]), do: normalize_command(value)
+  def helper_for_test(:inline_text, [value]), do: inline_text(value)
+  def helper_for_test(:parse_integer, [value]), do: parse_integer(value)
+  def helper_for_test(:map_path, [data, path]), do: map_path(data, path)
+  def helper_for_test(:alternate_key, [key]), do: alternate_key(key)
+  def helper_for_test(:truncate, [value, max]), do: truncate(value, max)
+  def helper_for_test(:dashboard_enabled, []), do: dashboard_enabled?()
+
   defp format_retry_rows(retrying) do
     if retrying == [] do
       ["│  " <> colorize("No queued retries", @ansi_gray)]

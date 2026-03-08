@@ -1,0 +1,21 @@
+version: 1
+base_branch: main
+preflight:
+  command:
+    - ./scripts/symphony-preflight.sh
+validation:
+  command:
+    - ./scripts/symphony-validate.sh
+smoke:
+  command:
+    - ./scripts/symphony-smoke.sh
+post_merge:
+  command:
+    - ./scripts/symphony-post-merge.sh
+artifacts:
+  command:
+    - ./scripts/symphony-artifacts.sh
+pull_request:
+  required_checks:
+    - make-all
+    - pr-description-lint

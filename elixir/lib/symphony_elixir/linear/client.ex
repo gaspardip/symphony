@@ -95,6 +95,47 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @query_by_identifier """
+  query SymphonyLinearIssueByIdentifier($projectSlug: String!, $identifier: String!, $relationFirst: Int!) {
+    issues(filter: {project: {slugId: {eq: $projectSlug}}, identifier: {eq: $identifier}}, first: 1) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state {
+          name
+        }
+        branchName
+        url
+        assignee {
+          id
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              state {
+                name
+              }
+            }
+          }
+        }
+        createdAt
+        updatedAt
+      }
+    }
+  }
+  """
+
   @viewer_query """
   query SymphonyLinearViewer {
     viewer {
@@ -158,6 +199,34 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @spec fetch_issue_by_identifier(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_identifier(issue_identifier) when is_binary(issue_identifier) do
+    identifier = String.trim(issue_identifier)
+    project_slug = Config.linear_project_slug()
+
+    cond do
+      identifier == "" ->
+        {:ok, nil}
+
+      is_nil(Config.linear_api_token()) ->
+        {:error, :missing_linear_api_token}
+
+      is_nil(project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        with {:ok, body} <-
+               graphql(@query_by_identifier, %{
+                 projectSlug: project_slug,
+                 identifier: identifier,
+                 relationFirst: @issue_page_size
+               }),
+             {:ok, issues} <- decode_linear_response(body, nil) do
+          {:ok, List.first(issues)}
+        end
+    end
+  end
+
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
@@ -217,6 +286,13 @@ defmodule SymphonyElixir.Linear.Client do
     |> Enum.reduce([], &prepend_page_issues/2)
     |> finalize_paginated_issues()
   end
+
+  @doc false
+  def helper_for_test(:build_assignee_filter, [assignee]), do: build_assignee_filter(assignee)
+  def helper_for_test(:assigned_to_worker, [assignee, assignee_filter]), do: assigned_to_worker?(assignee, assignee_filter)
+  def helper_for_test(:truncate_error_body, [body]), do: truncate_error_body(body)
+  def helper_for_test(:normalize_assignee_match_value, [value]), do: normalize_assignee_match_value(value)
+  def helper_for_test(:graphql_headers, []), do: graphql_headers()
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
     do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])

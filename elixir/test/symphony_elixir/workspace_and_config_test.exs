@@ -37,6 +37,54 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "config validation rejects invalid dogfood runner harnesses on startup" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dogfood-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace_root, ".symphony"))
+
+      File.write!(
+        Path.join(workspace_root, ".symphony/harness.yml"),
+        """
+        base_branch: main
+        preflight:
+          command:
+            - ./scripts/preflight.sh
+        validation:
+          command:
+            - ./scripts/validate.sh
+        smoke:
+          command:
+            - ./scripts/smoke.sh
+        post_merge:
+          command:
+            - ./scripts/post-merge.sh
+        artifacts:
+          command:
+            - ./scripts/artifacts.sh
+        pull_request:
+          required_checks:
+            - validate
+        """
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_required_labels: ["dogfood:symphony"]
+      )
+
+      File.cd!(workspace_root, fn ->
+        assert {:error, :missing_harness_version} = Config.validate!()
+      end)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
@@ -331,6 +379,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     issue = Client.normalize_issue_for_test(raw_issue, "user-1")
 
     refute issue.assigned_to_worker
+  end
+
+  test "linear client helper seams cover assignee and header fallback branches" do
+    previous_token = System.get_env("LINEAR_API_KEY")
+
+    on_exit(fn ->
+      if is_nil(previous_token) do
+        System.delete_env("LINEAR_API_KEY")
+      else
+        System.put_env("LINEAR_API_KEY", previous_token)
+      end
+    end)
+
+    System.delete_env("LINEAR_API_KEY")
+
+    assert Client.helper_for_test(:build_assignee_filter, ["   "]) == {:ok, nil}
+    assert match?({:error, _}, Client.helper_for_test(:build_assignee_filter, ["me"]))
+    assert Client.helper_for_test(:assigned_to_worker, [%{}, %{match_values: MapSet.new(["user-1"])}]) == false
+    assert Client.helper_for_test(:assigned_to_worker, [nil, :invalid]) == false
+    assert Client.helper_for_test(:truncate_error_body, [String.duplicate("a", 1_050)]) =~ "...<truncated>"
+    assert Client.helper_for_test(:normalize_assignee_match_value, [nil]) == nil
+    assert {:ok, _headers} = Client.helper_for_test(:graphql_headers, [])
   end
 
   test "linear client pagination merge helper preserves issue ordering" do
@@ -648,6 +718,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_approval_policy: nil,
       codex_thread_sandbox: nil,
       codex_turn_sandbox_policy: nil,
+      codex_runtime_profile_codex_home: nil,
+      codex_runtime_profile_inherit_env: nil,
+      codex_runtime_profile_env_allowlist: nil,
       codex_turn_timeout_ms: nil,
       codex_read_timeout_ms: nil,
       codex_stall_timeout_ms: nil,
@@ -671,6 +744,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
 
     assert Config.codex_thread_sandbox() == "workspace-write"
+    assert Config.codex_runtime_profile() == %{codex_home: nil, inherit_env: true, env_allowlist: []}
 
     assert Config.codex_turn_sandbox_policy() == %{
              "type" => "workspaceWrite",
@@ -688,11 +762,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
     assert Config.codex_command() == "codex app-server --model gpt-5.3-codex"
 
+    codex_home_env_var = "SYMP_CODEX_HOME_#{System.unique_integer([:positive])}"
+    previous_codex_home = System.get_env(codex_home_env_var)
+    codex_home = Path.join(System.tmp_dir!(), "codex-home-config")
+    System.put_env(codex_home_env_var, codex_home)
+
+    on_exit(fn -> restore_env(codex_home_env_var, previous_codex_home) end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
+      codex_runtime_profile_codex_home: "$#{codex_home_env_var}",
+      codex_runtime_profile_inherit_env: false,
+      codex_runtime_profile_env_allowlist: ["HOME", "PATH", "GH_TOKEN"],
       codex_approval_policy: "on-request",
       codex_thread_sandbox: "workspace-write",
       codex_turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["/tmp/workspace", "/tmp/cache"]}
     )
+
+    assert Config.codex_runtime_profile() == %{
+             codex_home: Path.expand(codex_home),
+             inherit_env: false,
+             env_allowlist: ["HOME", "PATH", "GH_TOKEN"]
+           }
 
     assert Config.codex_approval_policy() == "on-request"
     assert Config.codex_thread_sandbox() == "workspace-write"

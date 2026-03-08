@@ -134,6 +134,7 @@ defmodule SymphonyElixir.AppServerTest do
       File.write!(codex_binary, """
       #!/bin/sh
       count=0
+      responded=0
       while IFS= read -r _line; do
         count=$((count + 1))
 
@@ -283,19 +284,17 @@ defmodule SymphonyElixir.AppServerTest do
                    |> Jason.decode!()
 
                  payload["id"] == 2 and
-                   case get_in(payload, ["params", "dynamicTools"]) do
-                     [
-                       %{
-                         "description" => description,
-                         "inputSchema" => %{"required" => ["query"]},
-                         "name" => "linear_graphql"
-                       }
-                     ] ->
+                   Enum.any?(get_in(payload, ["params", "dynamicTools"]) || [], fn
+                     %{
+                       "description" => description,
+                       "inputSchema" => %{"required" => ["query"]},
+                       "name" => "linear_graphql"
+                     } ->
                        description =~ "Linear"
 
                      _ ->
                        false
-                   end
+                   end)
                else
                  false
                end
@@ -1051,6 +1050,89 @@ defmodule SymphonyElixir.AppServerTest do
         end)
 
       assert log =~ "Codex turn stream output: warning: this is stderr noise"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server can launch Codex with an isolated runtime profile" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-runtime-profile-#{System.unique_integer([:positive])}"
+      )
+
+    previous_keep = System.get_env("KEEP_ME")
+    previous_drop = System.get_env("DROP_ME")
+
+    on_exit(fn ->
+      restore_env("KEEP_ME", previous_keep)
+      restore_env("DROP_ME", previous_drop)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-90")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-runtime-profile.trace")
+      codex_home = Path.join(test_root, "codex-home")
+
+      System.put_env("KEEP_ME", "retained")
+      System.put_env("DROP_ME", "filtered")
+
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="#{trace_file}"
+      printf 'KEEP_ME=%s\\n' "${KEEP_ME-}" > "$trace_file"
+      printf 'DROP_ME=%s\\n' "${DROP_ME-}" >> "$trace_file"
+      printf 'CODEX_HOME=%s\\n' "${CODEX_HOME-}" >> "$trace_file"
+
+      while IFS= read -r _line; do
+        case "$_line" in
+          *'"id":1'*)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          *'"id":2'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-90"}}}'
+            ;;
+          *'"id":3'*)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-90"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+
+      exit 0
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_runtime_profile_codex_home: codex_home,
+        codex_runtime_profile_inherit_env: false,
+        codex_runtime_profile_env_allowlist: ["PATH", "KEEP_ME"]
+      )
+
+      issue = %Issue{
+        id: "issue-runtime-profile",
+        identifier: "MT-90",
+        title: "Isolated runtime profile",
+        description: "Ensure Codex launch environment is trimmed",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-90",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Use isolated runtime", issue)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "KEEP_ME=retained"
+      assert trace =~ "DROP_ME="
+      assert trace =~ "CODEX_HOME=#{codex_home}"
     after
       File.rm_rf(test_root)
     end

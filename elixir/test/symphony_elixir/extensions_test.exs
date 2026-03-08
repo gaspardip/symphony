@@ -340,66 +340,71 @@ defmodule SymphonyElixir.ExtensionsTest do
     conn = get(build_conn(), "/api/v1/state")
     state_payload = json_response(conn, 200)
 
-    assert state_payload == %{
-             "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
-             "running" => [
-               %{
-                 "issue_id" => "issue-http",
-                 "issue_identifier" => "MT-HTTP",
-                 "state" => "In Progress",
-                 "session_id" => "thread-http",
-                 "turn_count" => 7,
-                 "last_event" => "notification",
-                 "last_message" => "rendered",
-                 "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
-                 "last_event_at" => nil,
-                 "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-               }
-             ],
-             "retrying" => [
-               %{
-                 "issue_id" => "issue-retry",
-                 "issue_identifier" => "MT-RETRY",
-                 "attempt" => 2,
-                 "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
-                 "error" => "boom"
-               }
-             ],
-             "codex_totals" => %{
-               "input_tokens" => 4,
-               "output_tokens" => 8,
-               "total_tokens" => 12,
-               "seconds_running" => 42.5
-             },
-             "rate_limits" => %{"primary" => %{"remaining" => 11}}
+    assert state_payload["generated_at"]
+    assert state_payload["counts"]["running"] == 1
+    assert state_payload["counts"]["retrying"] == 1
+    assert state_payload["counts"]["paused"] == 0
+    assert state_payload["counts"]["queue"] == 0
+
+    assert state_payload["codex_totals"] == %{
+             "input_tokens" => 4,
+             "output_tokens" => 8,
+             "total_tokens" => 12,
+             "seconds_running" => 42.5
            }
+
+    assert state_payload["rate_limits"] == %{"primary" => %{"remaining" => 11}}
+
+    assert [
+             %{
+               "issue_id" => "issue-http",
+               "issue_identifier" => "MT-HTTP",
+               "state" => "In Progress",
+               "session_id" => "thread-http",
+               "turn_count" => 7,
+               "last_event" => "notification",
+               "last_message" => "rendered",
+               "started_at" => _started_at,
+               "last_event_at" => nil,
+               "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
+             }
+           ] = state_payload["running"]
+
+    assert [
+             %{
+               "issue_id" => "issue-retry",
+               "issue_identifier" => "MT-RETRY",
+               "attempt" => 2,
+               "due_at" => _due_at,
+               "error" => "boom"
+             }
+           ] = state_payload["retrying"]
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)
 
-    assert issue_payload == %{
-             "issue_identifier" => "MT-HTTP",
-             "issue_id" => "issue-http",
-             "status" => "running",
-             "workspace" => %{"path" => Path.join(Config.workspace_root(), "MT-HTTP")},
-             "attempts" => %{"restart_count" => 0, "current_retry_attempt" => 0},
-             "running" => %{
-               "session_id" => "thread-http",
-               "turn_count" => 7,
-               "state" => "In Progress",
-               "started_at" => issue_payload["running"]["started_at"],
-               "last_event" => "notification",
-               "last_message" => "rendered",
-               "last_event_at" => nil,
-               "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
-             },
-             "retry" => nil,
-             "logs" => %{"codex_session_logs" => []},
-             "recent_events" => [],
-             "last_error" => nil,
-             "tracked" => %{}
-           }
+    assert issue_payload["issue_identifier"] == "MT-HTTP"
+    assert issue_payload["issue_id"] == "issue-http"
+    assert issue_payload["status"] == "running"
+    assert issue_payload["workspace"] == %{"path" => Path.join(Config.workspace_root(), "MT-HTTP")}
+    assert issue_payload["attempts"] == %{"restart_count" => 0, "current_retry_attempt" => 0}
+    assert issue_payload["retry"] == nil
+    assert issue_payload["logs"] == %{"codex_session_logs" => []}
+    assert issue_payload["recent_events"] == []
+    assert issue_payload["last_error"] == nil
+    assert issue_payload["tracked"] == %{}
+    assert issue_payload["paused"] == nil
+    assert issue_payload["queue"] == nil
+    assert issue_payload["running"]["session_id"] == "thread-http"
+    assert issue_payload["running"]["turn_count"] == 7
+    assert issue_payload["running"]["state"] == "In Progress"
+    assert issue_payload["running"]["last_event"] == "notification"
+    assert issue_payload["running"]["last_message"] == "rendered"
+    assert issue_payload["running"]["last_event_at"] == nil
+    assert issue_payload["running"]["tokens"]["input_tokens"] == 4
+    assert issue_payload["running"]["tokens"]["output_tokens"] == 8
+    assert issue_payload["running"]["tokens"]["total_tokens"] == 12
+    assert issue_payload["running"]["workspace"]["checkout?"] == false
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
 
@@ -416,6 +421,134 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
              json_response(conn, 202)
+  end
+
+  test "phoenix observability api exposes policy override controls and state" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-policy-api",
+      identifier: "MT-POLICY",
+      title: "Policy control",
+      description: "Policy test",
+      state: "Human Review",
+      labels: ["ops"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :PolicyApiOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    set_payload =
+      post(build_conn(), "/api/v1/MT-POLICY/actions/set_policy_class", %{
+        "policy_class" => "never_automerge"
+      })
+      |> json_response(200)
+
+    assert set_payload["ok"] == true
+    assert set_payload["action"] == "set_policy_class"
+    assert set_payload["policy_class"] == "never_automerge"
+    assert set_payload["policy_source"] == "override"
+    assert is_binary(set_payload["ledger_event_id"])
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert is_map(state_payload["counts"])
+
+    approve_payload =
+      post(build_conn(), "/api/v1/MT-POLICY/actions/approve_for_merge", %{})
+      |> json_response(200)
+
+    assert approve_payload["ok"] == false
+    assert approve_payload["action"] == "approve_for_merge"
+    assert approve_payload["error"] == "policy forbids automerge"
+
+    clear_payload =
+      post(build_conn(), "/api/v1/MT-POLICY/actions/clear_policy_override", %{})
+      |> json_response(200)
+
+    assert clear_payload["ok"] == true
+    assert clear_payload["action"] == "clear_policy_override"
+    assert clear_payload["policy_class"] == nil
+    assert clear_payload["policy_source"] == "label_or_default"
+    assert is_binary(clear_payload["ledger_event_id"])
+
+    cleared_state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert is_map(cleared_state_payload["counts"])
+  end
+
+  test "phoenix observability api exposes runner canary lifecycle and history" do
+    snapshot =
+      static_snapshot()
+      |> Map.put(:runner, %{
+        instance_name: "dogfood-runner",
+        current_version_sha: "abc123456789",
+        promoted_release_sha: "abc123456789",
+        previous_release_sha: "def987654321",
+        runner_mode: "canary_failed",
+        runner_health: "invalid",
+        runner_health_rule_id: "runner.current_mismatch",
+        runner_health_summary: "Runner metadata does not match the current symlink target.",
+        dispatch_enabled: false,
+        canary_required_labels: ["canary:symphony"],
+        effective_required_labels: ["dogfood:symphony", "canary:symphony"],
+        rollback_recommended: true,
+        rollback_target_exists: true,
+        canary_result: "fail",
+        canary_note: "Regression detected during canary.",
+        canary_evidence: %{
+          issues: ["CLZ-11"],
+          prs: ["https://github.com/gaspardip/symphony/pull/11"]
+        },
+        release_manifest: %{
+          "commit_sha" => "abc123456789",
+          "promoted_ref" => "gaspar/autonomous-pipeline"
+        },
+        history: [
+          %{
+            "event_type" => "runner.canary.recorded",
+            "summary" => "Recorded canary failure for the current runner.",
+            "at" => "2026-03-07T05:00:00Z",
+            "metadata" => %{"canary_note" => "Regression detected during canary."}
+          }
+        ]
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RunnerLifecycleOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert state_payload["runner"]["runner_mode"] == "canary_failed"
+    assert state_payload["runner"]["previous_release_sha"] == "def987654321"
+    assert state_payload["runner"]["dispatch_enabled"] == false
+    assert state_payload["runner"]["runner_health_rule_id"] == "runner.current_mismatch"
+    assert state_payload["runner"]["rollback_recommended"] == true
+    assert state_payload["runner"]["rollback_target_exists"] == true
+    assert state_payload["runner"]["effective_required_labels"] == ["dogfood:symphony", "canary:symphony"]
+    assert state_payload["runner"]["canary_evidence"]["issues"] == ["CLZ-11"]
+    assert state_payload["runner"]["release_manifest"]["promoted_ref"] == "gaspar/autonomous-pipeline"
+
+    assert Enum.any?(state_payload["activity"], fn entry ->
+             entry["source"] == "runner" and entry["event"] == "runner.canary.recorded" and
+               String.contains?(entry["message"], "Regression detected during canary")
+           end)
   end
 
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
@@ -439,11 +572,16 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
 
-    assert state_payload ==
-             %{
-               "generated_at" => state_payload["generated_at"],
-               "error" => %{"code" => "snapshot_unavailable", "message" => "Snapshot unavailable"}
-             }
+    assert state_payload["generated_at"]
+    assert state_payload["error"] == %{"code" => "snapshot_unavailable", "message" => "Snapshot unavailable"}
+
+    assert state_payload["counts"] == %{
+             "running" => 0,
+             "retrying" => 0,
+             "paused" => 0,
+             "queue" => 0,
+             "skipped" => 0
+           }
 
     assert json_response(post(build_conn(), "/api/v1/refresh", %{}), 503) ==
              %{
@@ -461,11 +599,16 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     timeout_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
 
-    assert timeout_payload ==
-             %{
-               "generated_at" => timeout_payload["generated_at"],
-               "error" => %{"code" => "snapshot_timeout", "message" => "Snapshot timed out"}
-             }
+    assert timeout_payload["generated_at"]
+    assert timeout_payload["error"] == %{"code" => "snapshot_timeout", "message" => "Snapshot timed out"}
+
+    assert timeout_payload["counts"] == %{
+             "running" => 0,
+             "retrying" => 0,
+             "paused" => 0,
+             "queue" => 0,
+             "skipped" => 0
+           }
   end
 
   test "dashboard bootstraps liveview from embedded static assets" do
@@ -537,11 +680,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Runtime"
     assert html =~ "Live"
     assert html =~ "Offline"
-    assert html =~ "Copy ID"
-    assert html =~ "Codex update"
+    assert html =~ "Refresh now"
+    assert html =~ "Running agents"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
-    refute html =~ "Refresh now"
     refute html =~ "Transport"
     assert html =~ "status-badge-live"
     assert html =~ "status-badge-offline"
@@ -632,7 +774,8 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+    assert response.body["counts"]["running"] == 1
+    assert response.body["counts"]["retrying"] == 1
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200

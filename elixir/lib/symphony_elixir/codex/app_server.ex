@@ -26,7 +26,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace) do
+    with {:ok, session} <- start_session(workspace, opts) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -35,10 +35,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  @spec start_session(Path.t()) :: {:ok, session()} | {:error, term()}
-  def start_session(workspace) do
+  @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
+  def start_session(workspace, opts \\ []) do
     with :ok <- validate_workspace_cwd(workspace),
-         {:ok, port} <- start_port(workspace) do
+         {:ok, port} <- start_port(workspace, opts) do
       metadata = port_metadata(port)
       expanded_workspace = Path.expand(workspace)
 
@@ -159,12 +159,21 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace) do
+  defp start_port(workspace, opts) do
     executable = System.find_executable("bash")
+    env_executable = System.find_executable("env") || "env"
 
     if is_nil(executable) do
       {:error, :bash_not_found}
     else
+      command =
+        launch_command(
+          Keyword.get(opts, :codex_command, Config.codex_command()),
+          executable,
+          env_executable,
+          Config.codex_runtime_profile()
+        )
+
       port =
         Port.open(
           {:spawn_executable, String.to_charlist(executable)},
@@ -172,7 +181,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.codex_command())],
+            args: [~c"-lc", String.to_charlist(command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -218,6 +227,70 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp session_policies(workspace) do
     Config.codex_runtime_settings(workspace)
+  end
+
+  defp launch_command(command, _bash_executable, _env_executable, %{inherit_env: true, codex_home: nil})
+       when is_binary(command) do
+    command
+  end
+
+  defp launch_command(command, bash_executable, env_executable, runtime_profile)
+       when is_binary(command) do
+    codex_home = Map.get(runtime_profile, :codex_home)
+    inherit_env = Map.get(runtime_profile, :inherit_env, true)
+    env_allowlist = Map.get(runtime_profile, :env_allowlist, [])
+
+    env_assignments =
+      env_allowlist
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+      |> Enum.reduce([], fn env_name, acc ->
+        case System.get_env(env_name) do
+          nil -> acc
+          value -> ["#{env_name}=#{shell_escape(value)}" | acc]
+        end
+      end)
+      |> then(fn assignments ->
+        if is_binary(codex_home) and byte_size(String.trim(codex_home)) > 0 do
+          ["CODEX_HOME=#{shell_escape(codex_home)}" | assignments]
+        else
+          assignments
+        end
+      end)
+      |> Enum.reverse()
+
+    cond do
+      inherit_env ->
+        case codex_home do
+          value when is_binary(value) ->
+            trimmed = String.trim(value)
+
+            if trimmed == "" do
+              command
+            else
+              "export CODEX_HOME=#{shell_escape(trimmed)}; exec #{command}"
+            end
+
+          _ ->
+            command
+        end
+
+      true ->
+        "exec " <>
+          env_executable <>
+          " -i " <>
+          Enum.join(env_assignments, " ") <>
+          " " <>
+          shell_escape(bash_executable) <>
+          " -lc " <>
+          shell_escape(command)
+    end
+  end
+
+  defp shell_escape(value) when is_binary(value) do
+    escaped = String.replace(value, "'", "'\"'\"'")
+    "'#{escaped}'"
   end
 
   defp do_start_session(port, workspace, session_policies) do
@@ -895,6 +968,9 @@ defmodule SymphonyElixir.Codex.AppServer do
         rescue
           ArgumentError ->
             :ok
+        catch
+          :exit, _reason ->
+            :ok
         end
     end
   end
@@ -945,7 +1021,16 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp send_message(port, message) do
     line = Jason.encode!(message) <> "\n"
-    Port.command(port, line)
+
+    try do
+      Port.command(port, line)
+    rescue
+      ArgumentError ->
+        :ok
+    catch
+      :exit, _reason ->
+        :ok
+    end
   end
 
   defp needs_input?(method, payload)
@@ -982,4 +1067,34 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp needs_input_field?(_payload), do: false
+
+  @doc false
+  def helper_for_test(:port_metadata, [port]), do: port_metadata(port)
+
+  def helper_for_test(:launch_command, [command, bash_executable, env_executable, runtime_profile]),
+    do: launch_command(command, bash_executable, env_executable, runtime_profile)
+
+  def helper_for_test(:tool_request_user_input_approval_answers, [params]),
+    do: tool_request_user_input_approval_answers(params)
+
+  def helper_for_test(:tool_request_user_input_unavailable_answers, [params]),
+    do: tool_request_user_input_unavailable_answers(params)
+
+  def helper_for_test(:tool_request_user_input_approval_answer, [question]),
+    do: tool_request_user_input_approval_answer(question)
+
+  def helper_for_test(:tool_request_user_input_approval_option_label, [options]),
+    do: tool_request_user_input_approval_option_label(options)
+
+  def helper_for_test(:tool_request_user_input_option_label, [option]),
+    do: tool_request_user_input_option_label(option)
+
+  def helper_for_test(:tool_call_name, [params]), do: tool_call_name(params)
+  def helper_for_test(:tool_call_arguments, [params]), do: tool_call_arguments(params)
+  def helper_for_test(:maybe_set_usage, [metadata, payload]), do: maybe_set_usage(metadata, payload)
+  def helper_for_test(:needs_input, [method, payload]), do: needs_input?(method, payload)
+  def helper_for_test(:stop_port, [port]), do: stop_port(port)
+  def helper_for_test(:shell_escape, [value]), do: shell_escape(value)
+  def helper_for_test(:log_stream_output, [stream_label, data]),
+    do: log_non_json_stream_line(data, stream_label)
 end

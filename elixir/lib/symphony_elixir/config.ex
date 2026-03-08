@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias NimbleOptions
-  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.{IssuePolicy, RepoHarness, Workflow}
 
   @default_active_states ["Todo", "In Progress"]
   @default_terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
@@ -24,14 +24,30 @@ defmodule SymphonyElixir.Config do
   """
   @default_poll_interval_ms 30_000
   @default_workspace_root Path.join(System.tmp_dir!(), "symphony_workspaces")
+  @default_runner_install_root Path.join(System.user_home!(), ".local/share/symphony-runner")
+  @default_runner_instance_name "default"
   @default_hook_timeout_ms 60_000
   @default_max_concurrent_agents 10
-  @default_agent_max_turns 20
+  @default_agent_max_turns 3
   @default_max_retry_backoff_ms 300_000
   @default_codex_command "codex app-server"
   @default_codex_turn_timeout_ms 3_600_000
   @default_codex_read_timeout_ms 5_000
   @default_codex_stall_timeout_ms 300_000
+  @default_policy_require_checkout true
+  @default_policy_require_pr_before_review true
+  @default_policy_require_validation true
+  @default_policy_require_verifier true
+  @default_policy_retry_validation_failures_within_run true
+  @default_policy_max_validation_attempts_per_run 2
+  @default_policy_publish_required true
+  @default_policy_post_merge_verification_required true
+  @default_policy_automerge_on_green true
+  @default_policy_default_issue_class "fully_autonomous"
+  @default_policy_stop_on_noop_turn true
+  @default_policy_max_noop_turns 1
+  @default_policy_per_turn_input_budget 150_000
+  @default_policy_per_issue_total_budget 500_000
   @default_codex_approval_policy %{
     "reject" => %{
       "sandbox_approval" => true,
@@ -54,6 +70,10 @@ defmodule SymphonyElixir.Config do
                                  api_key: [type: {:or, [:string, nil]}, default: nil],
                                  project_slug: [type: {:or, [:string, nil]}, default: nil],
                                  assignee: [type: {:or, [:string, nil]}, default: nil],
+                                 required_labels: [
+                                   type: {:list, :string},
+                                   default: []
+                                 ],
                                  active_states: [
                                    type: {:list, :string},
                                    default: @default_active_states
@@ -76,6 +96,20 @@ defmodule SymphonyElixir.Config do
                                default: %{},
                                keys: [
                                  root: [type: {:or, [:string, nil]}, default: @default_workspace_root]
+                               ]
+                             ],
+                             runner: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 install_root: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_runner_install_root
+                                 ],
+                                 instance_name: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_runner_instance_name
+                                 ]
                                ]
                              ],
                              agent: [
@@ -105,6 +139,15 @@ defmodule SymphonyElixir.Config do
                                default: %{},
                                keys: [
                                  command: [type: :string, default: @default_codex_command],
+                                 runtime_profile: [
+                                   type: :map,
+                                   default: %{},
+                                   keys: [
+                                     codex_home: [type: {:or, [:string, nil]}, default: nil],
+                                     inherit_env: [type: :boolean, default: true],
+                                     env_allowlist: [type: {:list, :string}, default: []]
+                                   ]
+                                 ],
                                  turn_timeout_ms: [
                                    type: :integer,
                                    default: @default_codex_turn_timeout_ms
@@ -116,6 +159,78 @@ defmodule SymphonyElixir.Config do
                                  stall_timeout_ms: [
                                    type: :integer,
                                    default: @default_codex_stall_timeout_ms
+                                 ]
+                               ]
+                             ],
+                             policy: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 require_checkout: [
+                                   type: :boolean,
+                                   default: @default_policy_require_checkout
+                                 ],
+                                 require_pr_before_review: [
+                                   type: :boolean,
+                                   default: @default_policy_require_pr_before_review
+                                 ],
+                                 require_validation: [
+                                   type: :boolean,
+                                   default: @default_policy_require_validation
+                                 ],
+                                 require_verifier: [
+                                   type: :boolean,
+                                   default: @default_policy_require_verifier
+                                 ],
+                                 retry_validation_failures_within_run: [
+                                   type: :boolean,
+                                   default: @default_policy_retry_validation_failures_within_run
+                                 ],
+                                 max_validation_attempts_per_run: [
+                                   type: :pos_integer,
+                                   default: @default_policy_max_validation_attempts_per_run
+                                 ],
+                                 publish_required: [
+                                   type: :boolean,
+                                   default: @default_policy_publish_required
+                                 ],
+                                 post_merge_verification_required: [
+                                   type: :boolean,
+                                   default: @default_policy_post_merge_verification_required
+                                 ],
+                                 automerge_on_green: [
+                                   type: :boolean,
+                                   default: @default_policy_automerge_on_green
+                                 ],
+                                 default_issue_class: [
+                                   type: :string,
+                                   default: @default_policy_default_issue_class
+                                 ],
+                                 stop_on_noop_turn: [
+                                   type: :boolean,
+                                   default: @default_policy_stop_on_noop_turn
+                                 ],
+                                 max_noop_turns: [
+                                   type: :pos_integer,
+                                   default: @default_policy_max_noop_turns
+                                 ],
+                                 token_budget: [
+                                   type: :map,
+                                   default: %{},
+                                   keys: [
+                                     per_turn_input: [
+                                       type: {:or, [:non_neg_integer, nil]},
+                                       default: @default_policy_per_turn_input_budget
+                                     ],
+                                     per_issue_total: [
+                                       type: {:or, [:non_neg_integer, nil]},
+                                       default: @default_policy_per_issue_total_budget
+                                     ],
+                                     per_issue_total_output: [
+                                       type: {:or, [:non_neg_integer, nil]},
+                                       default: nil
+                                     ]
+                                   ]
                                  ]
                                ]
                              ],
@@ -160,10 +275,38 @@ defmodule SymphonyElixir.Config do
 
   @type workflow_payload :: Workflow.loaded_workflow()
   @type tracker_kind :: String.t() | nil
+  @type runner_settings :: %{
+          install_root: String.t() | nil,
+          instance_name: String.t() | nil
+        }
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map()
+        }
+  @type codex_runtime_profile_settings :: %{
+          codex_home: String.t() | nil,
+          inherit_env: boolean(),
+          env_allowlist: [String.t()]
+        }
+  @type policy_settings :: %{
+          require_checkout: boolean(),
+          require_pr_before_review: boolean(),
+          require_validation: boolean(),
+          require_verifier: boolean(),
+          retry_validation_failures_within_run: boolean(),
+          max_validation_attempts_per_run: pos_integer(),
+          publish_required: boolean(),
+          post_merge_verification_required: boolean(),
+          automerge_on_green: boolean(),
+          default_issue_class: String.t(),
+          stop_on_noop_turn: boolean(),
+          max_noop_turns: pos_integer(),
+          token_budget: %{
+            per_turn_input: non_neg_integer() | nil,
+            per_issue_total: non_neg_integer() | nil,
+            per_issue_total_output: non_neg_integer() | nil
+          }
         }
   @type workspace_hooks :: %{
           after_create: String.t() | nil,
@@ -209,6 +352,11 @@ defmodule SymphonyElixir.Config do
     |> normalize_secret_value()
   end
 
+  @spec linear_required_labels() :: [String.t()]
+  def linear_required_labels do
+    get_in(validated_workflow_options(), [:tracker, :required_labels]) || []
+  end
+
   @spec linear_active_states() :: [String.t()]
   def linear_active_states do
     get_in(validated_workflow_options(), [:tracker, :active_states])
@@ -229,6 +377,38 @@ defmodule SymphonyElixir.Config do
     validated_workflow_options()
     |> get_in([:workspace, :root])
     |> resolve_path_value(@default_workspace_root)
+  end
+
+  @spec runner() :: runner_settings()
+  def runner do
+    %{
+      install_root: runner_install_root(),
+      instance_name: runner_instance_name()
+    }
+  end
+
+  @spec runner_install_root() :: Path.t()
+  def runner_install_root do
+    validated_workflow_options()
+    |> get_in([:runner, :install_root])
+    |> resolve_path_value(@default_runner_install_root)
+  end
+
+  @spec runner_instance_name() :: String.t()
+  def runner_instance_name do
+    validated_workflow_options()
+    |> get_in([:runner, :instance_name])
+    |> resolve_env_value(System.get_env("SYMPHONY_INSTANCE_NAME"))
+    |> case do
+      value when is_binary(value) ->
+        case String.trim(value) do
+          "" -> @default_runner_instance_name
+          trimmed -> trimmed
+        end
+
+      _ ->
+        @default_runner_instance_name
+    end
   end
 
   @spec workspace_hooks() :: workspace_hooks()
@@ -278,6 +458,24 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:codex, :command])
   end
 
+  @spec codex_runtime_profile() :: codex_runtime_profile_settings()
+  def codex_runtime_profile do
+    runtime_profile = get_in(validated_workflow_options(), [:codex, :runtime_profile]) || %{}
+
+    %{
+      codex_home:
+        runtime_profile
+        |> Map.get(:codex_home)
+        |> resolve_path_value(nil),
+      inherit_env:
+        case Map.get(runtime_profile, :inherit_env) do
+          value when is_boolean(value) -> value
+          _ -> true
+        end,
+      env_allowlist: Map.get(runtime_profile, :env_allowlist) || []
+    }
+  end
+
   @spec codex_turn_timeout_ms() :: pos_integer()
   def codex_turn_timeout_ms do
     get_in(validated_workflow_options(), [:codex, :turn_timeout_ms])
@@ -317,6 +515,92 @@ defmodule SymphonyElixir.Config do
     validated_workflow_options()
     |> get_in([:codex, :stall_timeout_ms])
     |> max(0)
+  end
+
+  @spec policy_settings() :: policy_settings()
+  def policy_settings do
+    get_in(validated_workflow_options(), [:policy])
+  end
+
+  @spec policy_require_checkout?() :: boolean()
+  def policy_require_checkout? do
+    get_in(validated_workflow_options(), [:policy, :require_checkout])
+  end
+
+  @spec policy_require_pr_before_review?() :: boolean()
+  def policy_require_pr_before_review? do
+    get_in(validated_workflow_options(), [:policy, :require_pr_before_review])
+  end
+
+  @spec policy_require_validation?() :: boolean()
+  def policy_require_validation? do
+    get_in(validated_workflow_options(), [:policy, :require_validation])
+  end
+
+  @spec policy_require_verifier?() :: boolean()
+  def policy_require_verifier? do
+    get_in(validated_workflow_options(), [:policy, :require_verifier])
+  end
+
+  @spec policy_retry_validation_failures_within_run?() :: boolean()
+  def policy_retry_validation_failures_within_run? do
+    get_in(validated_workflow_options(), [:policy, :retry_validation_failures_within_run])
+  end
+
+  @spec policy_max_validation_attempts_per_run() :: pos_integer()
+  def policy_max_validation_attempts_per_run do
+    get_in(validated_workflow_options(), [:policy, :max_validation_attempts_per_run])
+  end
+
+  @spec policy_publish_required?() :: boolean()
+  def policy_publish_required? do
+    get_in(validated_workflow_options(), [:policy, :publish_required])
+  end
+
+  @spec policy_post_merge_verification_required?() :: boolean()
+  def policy_post_merge_verification_required? do
+    get_in(validated_workflow_options(), [:policy, :post_merge_verification_required])
+  end
+
+  @spec policy_automerge_on_green?() :: boolean()
+  def policy_automerge_on_green? do
+    get_in(validated_workflow_options(), [:policy, :automerge_on_green])
+  end
+
+  @spec policy_default_issue_class() :: String.t()
+  def policy_default_issue_class do
+    get_in(validated_workflow_options(), [:policy, :default_issue_class]) ||
+      @default_policy_default_issue_class
+  end
+
+  @spec policy_stop_on_noop_turn?() :: boolean()
+  def policy_stop_on_noop_turn? do
+    get_in(validated_workflow_options(), [:policy, :stop_on_noop_turn])
+  end
+
+  @spec policy_max_noop_turns() :: pos_integer()
+  def policy_max_noop_turns do
+    get_in(validated_workflow_options(), [:policy, :max_noop_turns])
+  end
+
+  @spec policy_token_budget() :: map()
+  def policy_token_budget do
+    get_in(validated_workflow_options(), [:policy, :token_budget])
+  end
+
+  @spec policy_per_turn_input_budget() :: non_neg_integer() | nil
+  def policy_per_turn_input_budget do
+    get_in(validated_workflow_options(), [:policy, :token_budget, :per_turn_input])
+  end
+
+  @spec policy_per_issue_total_budget() :: non_neg_integer() | nil
+  def policy_per_issue_total_budget do
+    get_in(validated_workflow_options(), [:policy, :token_budget, :per_issue_total])
+  end
+
+  @spec policy_per_issue_total_output_budget() :: non_neg_integer() | nil
+  def policy_per_issue_total_output_budget do
+    get_in(validated_workflow_options(), [:policy, :token_budget, :per_issue_total_output])
   end
 
   @spec workflow_prompt() :: String.t()
@@ -367,8 +651,10 @@ defmodule SymphonyElixir.Config do
          :ok <- require_tracker_kind(),
          :ok <- require_linear_token(),
          :ok <- require_linear_project(),
-         :ok <- require_valid_codex_runtime_settings() do
-      require_codex_command()
+         :ok <- require_valid_policy_defaults(),
+         :ok <- require_valid_codex_runtime_settings(),
+         :ok <- require_valid_runner_harness() do
+      :ok
     end
   end
 
@@ -423,19 +709,23 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp require_codex_command do
-    if byte_size(String.trim(codex_command())) > 0 do
-      :ok
-    else
-      {:error, :missing_codex_command}
-    end
-  end
-
   defp require_valid_codex_runtime_settings do
     case codex_runtime_settings() do
       {:ok, _settings} -> :ok
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp require_valid_policy_defaults do
+    if IssuePolicy.normalize_class(policy_default_issue_class()) do
+      :ok
+    else
+      {:error, {:invalid_policy_default_issue_class, policy_default_issue_class()}}
+    end
+  end
+
+  defp require_valid_runner_harness do
+    RepoHarness.validate_runner_checkout(linear_required_labels())
   end
 
   defp validated_workflow_options do
@@ -449,8 +739,10 @@ defmodule SymphonyElixir.Config do
       tracker: extract_tracker_options(section_map(config, "tracker")),
       polling: extract_polling_options(section_map(config, "polling")),
       workspace: extract_workspace_options(section_map(config, "workspace")),
+      runner: extract_runner_options(section_map(config, "runner")),
       agent: extract_agent_options(section_map(config, "agent")),
       codex: extract_codex_options(section_map(config, "codex")),
+      policy: extract_policy_options(section_map(config, "policy")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       observability: extract_observability_options(section_map(config, "observability")),
       server: extract_server_options(section_map(config, "server"))
@@ -463,6 +755,8 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:endpoint, scalar_string_value(Map.get(section, "endpoint")))
     |> put_if_present(:api_key, binary_value(Map.get(section, "api_key"), allow_empty: true))
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
+    |> put_if_present(:assignee, scalar_string_value(Map.get(section, "assignee")))
+    |> put_if_present(:required_labels, csv_value(Map.get(section, "required_labels")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
   end
@@ -475,6 +769,12 @@ defmodule SymphonyElixir.Config do
   defp extract_workspace_options(section) do
     %{}
     |> put_if_present(:root, binary_value(Map.get(section, "root")))
+  end
+
+  defp extract_runner_options(section) do
+    %{}
+    |> put_if_present(:install_root, binary_value(Map.get(section, "install_root")))
+    |> put_if_present(:instance_name, scalar_string_value(Map.get(section, "instance_name")))
   end
 
   defp extract_agent_options(section) do
@@ -491,9 +791,48 @@ defmodule SymphonyElixir.Config do
   defp extract_codex_options(section) do
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
+    |> put_if_present(:runtime_profile, runtime_profile_value(Map.get(section, "runtime_profile")))
     |> put_if_present(:turn_timeout_ms, integer_value(Map.get(section, "turn_timeout_ms")))
     |> put_if_present(:read_timeout_ms, integer_value(Map.get(section, "read_timeout_ms")))
     |> put_if_present(:stall_timeout_ms, integer_value(Map.get(section, "stall_timeout_ms")))
+  end
+
+  defp runtime_profile_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(:codex_home, binary_value(Map.get(section, "codex_home")))
+    |> put_if_present(:inherit_env, boolean_value(Map.get(section, "inherit_env")))
+    |> put_if_present(:env_allowlist, csv_value(Map.get(section, "env_allowlist")))
+  end
+
+  defp runtime_profile_value(_value), do: :omit
+
+  defp extract_policy_options(section) do
+    %{}
+    |> put_if_present(:require_checkout, boolean_value(Map.get(section, "require_checkout")))
+    |> put_if_present(
+      :require_pr_before_review,
+      boolean_value(Map.get(section, "require_pr_before_review"))
+    )
+    |> put_if_present(:require_validation, boolean_value(Map.get(section, "require_validation")))
+    |> put_if_present(:require_verifier, boolean_value(Map.get(section, "require_verifier")))
+    |> put_if_present(
+      :retry_validation_failures_within_run,
+      boolean_value(Map.get(section, "retry_validation_failures_within_run"))
+    )
+    |> put_if_present(
+      :max_validation_attempts_per_run,
+      positive_integer_value(Map.get(section, "max_validation_attempts_per_run"))
+    )
+    |> put_if_present(:publish_required, boolean_value(Map.get(section, "publish_required")))
+    |> put_if_present(
+      :post_merge_verification_required,
+      boolean_value(Map.get(section, "post_merge_verification_required"))
+    )
+    |> put_if_present(:automerge_on_green, boolean_value(Map.get(section, "automerge_on_green")))
+    |> put_if_present(:default_issue_class, scalar_string_value(Map.get(section, "default_issue_class")))
+    |> put_if_present(:stop_on_noop_turn, boolean_value(Map.get(section, "stop_on_noop_turn")))
+    |> put_if_present(:max_noop_turns, positive_integer_value(Map.get(section, "max_noop_turns")))
+    |> put_if_present(:token_budget, policy_token_budget_value(Map.get(section, "token_budget")))
   end
 
   defp extract_hooks_options(section) do
@@ -517,6 +856,18 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:port, non_negative_integer_value(Map.get(section, "port")))
     |> put_if_present(:host, scalar_string_value(Map.get(section, "host")))
   end
+
+  defp policy_token_budget_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(:per_turn_input, non_negative_integer_value(Map.get(section, "per_turn_input")))
+    |> put_if_present(:per_issue_total, non_negative_integer_value(Map.get(section, "per_issue_total")))
+    |> put_if_present(
+      :per_issue_total_output,
+      non_negative_integer_value(Map.get(section, "per_issue_total_output"))
+    )
+  end
+
+  defp policy_token_budget_value(_value), do: :omit
 
   defp section_map(config, key) do
     case Map.get(config, key) do

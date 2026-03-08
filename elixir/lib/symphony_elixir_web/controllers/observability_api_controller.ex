@@ -37,6 +37,20 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @spec control(Conn.t(), map()) :: Conn.t()
+  def control(conn, %{"issue_identifier" => issue_identifier, "action" => action} = params) do
+    case Presenter.control_payload(action, issue_identifier, params, orchestrator()) do
+      {:ok, payload} ->
+        json(conn, payload)
+
+      {:error, :unknown_action} ->
+        error_response(conn, 400, "unknown_action", "Unknown control action")
+
+      {:error, :unavailable} ->
+        error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+    end
+  end
+
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
   def method_not_allowed(conn, _params) do
     error_response(conn, 405, "method_not_allowed", "Method not allowed")

@@ -10,32 +10,14 @@ defmodule SymphonyElixir.MixProject do
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [
-          threshold: 100
+          threshold: coverage_summary_threshold()
         ],
         ignore_modules: [
-          SymphonyElixir.Config,
-          SymphonyElixir.Linear.Client,
-          SymphonyElixir.SpecsCheck,
-          SymphonyElixir.Orchestrator,
-          SymphonyElixir.Orchestrator.State,
-          SymphonyElixir.AgentRunner,
-          SymphonyElixir.CLI,
-          SymphonyElixir.Codex.AppServer,
-          SymphonyElixir.Codex.DynamicTool,
-          SymphonyElixir.HttpServer,
-          SymphonyElixir.StatusDashboard,
-          SymphonyElixir.LogFile,
-          SymphonyElixir.Workspace,
-          SymphonyElixirWeb.DashboardLive,
           SymphonyElixirWeb.Endpoint,
           SymphonyElixirWeb.ErrorHTML,
           SymphonyElixirWeb.ErrorJSON,
           SymphonyElixirWeb.Layouts,
-          SymphonyElixirWeb.ObservabilityApiController,
-          SymphonyElixirWeb.Presenter,
-          SymphonyElixirWeb.StaticAssetController,
           SymphonyElixirWeb.StaticAssets,
-          SymphonyElixirWeb.Router,
           SymphonyElixirWeb.Router.Helpers
         ]
       ],
@@ -47,6 +29,7 @@ defmodule SymphonyElixir.MixProject do
         plt_add_apps: [:mix]
       ],
       escript: escript(),
+      cli: cli(),
       aliases: aliases(),
       deps: deps()
     ]
@@ -85,6 +68,14 @@ defmodule SymphonyElixir.MixProject do
       build: ["escript.build"],
       lint: ["specs.check", "credo --strict"]
     ]
+  end
+
+  defp cli do
+    [preferred_envs: ["coverage.audit": :test]]
+  end
+
+  defp coverage_summary_threshold do
+    if System.get_env("SYMPHONY_COVERAGE_AUDIT") == "1", do: 0, else: 90
   end
 
   defp escript do

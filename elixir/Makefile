@@ -24,7 +24,7 @@ lint:
 	$(MIX) lint
 
 coverage:
-	$(MIX) test --cover
+	$(MIX) coverage.audit
 
 test:
 	$(MIX) test
