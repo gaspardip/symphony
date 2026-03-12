@@ -686,10 +686,13 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
 
         cond do
           String.contains?(payload["query"], "query SymphonyLinearIssueByIdentifier") ->
+            assert payload["variables"]["teamKey"] == "MT"
+            assert payload["variables"]["number"] == 9.0
+
             %{
               "data" => %{
                 "issues" => %{
-                  "nodes" => [linear_issue_payload("issue-9", "MT-LINEAR-9", "worker-9")]
+                  "nodes" => [linear_issue_payload("issue-9", "MT-9", "worker-9")]
                 }
               }
             }
@@ -706,7 +709,8 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
       tracker_project_slug: "project"
     )
 
-    assert {:ok, %Issue{identifier: "MT-LINEAR-9"}} = Client.fetch_issue_by_identifier("MT-LINEAR-9")
+    assert {:ok, %Issue{identifier: "MT-9"}} = Client.fetch_issue_by_identifier("MT-9")
+    assert {:error, :invalid_linear_issue_identifier} = Client.fetch_issue_by_identifier("bad-identifier")
 
     missing_viewer_endpoint =
       start_linear_server!(fn _body ->
@@ -789,7 +793,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:error, {:linear_graphql_errors, [%{"message" => "linear denied"}]}} =
-             Client.fetch_issue_by_identifier("MT-LINEAR-ERR")
+             Client.fetch_issue_by_identifier("MT-999")
 
     unknown_payload_endpoint =
       start_linear_server!(fn _body ->
@@ -803,7 +807,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
       tracker_project_slug: "project"
     )
 
-    assert {:error, :linear_unknown_payload} = Client.fetch_issue_by_identifier("MT-LINEAR-UNKNOWN")
+    assert {:error, :linear_unknown_payload} = Client.fetch_issue_by_identifier("MT-1000")
   end
 
   test "linear client fetch_candidate_issues surfaces missing end cursors through the public API" do

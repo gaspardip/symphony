@@ -96,8 +96,8 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query_by_identifier """
-  query SymphonyLinearIssueByIdentifier($projectSlug: String!, $identifier: String!, $relationFirst: Int!) {
-    issues(filter: {project: {slugId: {eq: $projectSlug}}, identifier: {eq: $identifier}}, first: 1) {
+  query SymphonyLinearIssueByIdentifier($projectSlug: String!, $teamKey: String!, $number: Float!, $relationFirst: Int!) {
+    issues(filter: {project: {slugId: {eq: $projectSlug}}, team: {key: {eq: $teamKey}}, number: {eq: $number}}, first: 1) {
       nodes {
         id
         identifier
@@ -215,10 +215,12 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, :missing_linear_project_slug}
 
       true ->
-        with {:ok, body} <-
+        with {:ok, team_key, issue_number} <- parse_issue_identifier(identifier),
+             {:ok, body} <-
                graphql(@query_by_identifier, %{
                  projectSlug: project_slug,
-                 identifier: identifier,
+                 teamKey: team_key,
+                 number: issue_number,
                  relationFirst: @issue_page_size
                }),
              {:ok, issues} <- decode_linear_response(body, nil) do
@@ -362,6 +364,16 @@ defmodule SymphonyElixir.Linear.Client do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp parse_issue_identifier(identifier) when is_binary(identifier) do
+    case Regex.run(~r/^([A-Za-z][A-Za-z0-9_]*)-(\d+)$/, identifier) do
+      [_, team_key, issue_number] ->
+        {:ok, String.upcase(team_key), String.to_integer(issue_number) * 1.0}
+
+      _ ->
+        {:error, :invalid_linear_issue_identifier}
     end
   end
 
