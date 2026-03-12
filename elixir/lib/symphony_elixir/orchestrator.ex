@@ -1036,20 +1036,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec reconcile_stalled_running_issues_for_test(State.t()) :: State.t()
   def reconcile_stalled_running_issues_for_test(%State{} = state) do
     reconcile_stalled_running_issues(state)
   end
 
   @doc false
+  @spec stall_elapsed_ms_for_test(map(), DateTime.t() | integer() | nil) :: integer() | nil
   def stall_elapsed_ms_for_test(running_entry, now), do: stall_elapsed_ms(running_entry, now)
 
   @doc false
+  @spec last_activity_timestamp_for_test(map()) :: DateTime.t() | integer() | nil
   def last_activity_timestamp_for_test(running_entry), do: last_activity_timestamp(running_entry)
 
   @doc false
+  @spec terminate_task_for_test(pid() | term()) :: :ok
   def terminate_task_for_test(pid), do: terminate_task(pid)
 
   @doc false
+  @spec partition_issues_by_label_gate_for_test([Issue.t()], term()) :: term()
   def partition_issues_by_label_gate_for_test(issues, %State{} = state) do
     partition_issues_by_label_gate(issues, state)
   end
@@ -1060,12 +1065,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec skipped_issue_entry_for_test(term(), atom(), term()) :: map()
   def skipped_issue_entry_for_test(issue, reason, state), do: skipped_issue_entry(issue, reason, state)
 
   @doc false
+  @spec choose_issues_for_test([Issue.t()], State.t()) :: {[Issue.t()], [Issue.t()]}
   def choose_issues_for_test(issues, %State{} = state), do: choose_issues(issues, state)
 
   @doc false
+  @spec choose_issues_for_test([Issue.t()], State.t(), (Issue.t(), State.t() -> term())) :: {[Issue.t()], [Issue.t()]}
   def choose_issues_for_test(issues, %State{} = state, dispatch_fun) when is_function(dispatch_fun, 2) do
     choose_issues(issues, state, dispatch_fun)
   end
@@ -1080,29 +1088,37 @@ defmodule SymphonyElixir.Orchestrator do
   def should_dispatch_issue_for_test(_issue, _state), do: false
 
   @doc false
+  @spec state_slots_available_for_test(term(), list()) :: non_neg_integer()
   def state_slots_available_for_test(issue, running), do: state_slots_available?(issue, running)
 
   @doc false
+  @spec running_issue_count_for_state_for_test(list(), term()) :: non_neg_integer()
   def running_issue_count_for_state_for_test(running, issue_state),
     do: running_issue_count_for_state(running, issue_state)
 
   @doc false
+  @spec issue_routable_to_worker_for_test(term()) :: boolean()
   def issue_routable_to_worker_for_test(issue), do: issue_routable_to_worker?(issue)
 
   @doc false
+  @spec issue_labels_for_test(term()) :: [String.t()]
   def issue_labels_for_test(issue), do: issue_labels(issue)
 
   @doc false
+  @spec issue_matches_required_labels_for_test(term()) :: boolean()
   def issue_matches_required_labels_for_test(issue), do: issue_matches_required_labels?(issue)
 
   @doc false
+  @spec label_gate_status_for_test(term()) :: atom()
   def label_gate_status_for_test(issue), do: label_gate_status(issue)
 
   @doc false
+  @spec terminal_issue_state_for_test(term(), MapSet.t(String.t()) | [String.t()]) :: boolean()
   def terminal_issue_state_for_test(state_name, terminal_states),
     do: terminal_issue_state?(state_name, terminal_states)
 
   @doc false
+  @spec todo_issue_blocked_by_non_terminal_for_test(term(), MapSet.t(String.t()) | [String.t()]) :: boolean()
   def todo_issue_blocked_by_non_terminal_for_test(issue, terminal_states),
     do: todo_issue_blocked_by_non_terminal?(issue, terminal_states)
 
@@ -1115,19 +1131,24 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec revalidate_issue_passthrough_for_test(Issue.t()) ::
+          {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
   def revalidate_issue_passthrough_for_test(issue) do
     revalidate_issue_for_dispatch(issue, fn _issue_ids -> :unused end, terminal_state_set())
   end
 
   @doc false
+  @spec dispatch_issue_for_test(State.t(), Issue.t()) :: term()
   def dispatch_issue_for_test(state, issue), do: dispatch_issue_for_test(state, issue, [])
 
   @doc false
+  @spec dispatch_runtime_issue_for_test(State.t(), Issue.t(), term()) :: term()
   def dispatch_runtime_issue_for_test(%State{} = state, %Issue{} = issue, attempt \\ nil) do
     dispatch_runtime_issue(state, issue, attempt)
   end
 
   @doc false
+  @spec dispatch_runtime_issue_for_test(State.t(), Issue.t(), term(), keyword()) :: term()
   def dispatch_runtime_issue_for_test(%State{} = state, %Issue{} = issue, attempt, opts)
       when is_list(opts) do
     active_dispatch_fun = Keyword.get(opts, :active_dispatch_fun, &dispatch_issue/3)
@@ -1137,30 +1158,36 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec normalize_dispatch_stage_for_test(Issue.t()) :: String.t()
   def normalize_dispatch_stage_for_test(%Issue{} = issue) do
     normalize_dispatch_stage(issue)
   end
 
   @doc false
+  @spec maybe_resume_blocked_issue_for_test(State.t(), Issue.t()) :: State.t()
   def maybe_resume_blocked_issue_for_test(%State{} = state, %Issue{} = issue) do
     maybe_resume_blocked_issue(state, issue)
   end
 
   @doc false
+  @spec dispatch_issue_default_for_test(State.t(), Issue.t(), term()) :: term()
   def dispatch_issue_default_for_test(%State{} = state, %Issue{} = issue, attempt \\ nil) do
     dispatch_issue(state, issue, attempt)
   end
 
   @doc false
+  @spec dispatch_issue_private_head_for_test(State.t(), term(), term()) :: term()
   def dispatch_issue_private_head_for_test(%State{} = state, issue, attempt) do
     dispatch_issue(state, issue, attempt)
   end
 
   @doc false
+  @spec dispatch_issue_private_head_for_test(State.t(), term()) :: term()
   def dispatch_issue_private_head_for_test(%State{} = state, issue) do
     dispatch_issue(state, issue)
   end
 
+  @spec dispatch_issue_for_test(State.t(), Issue.t(), keyword()) :: term()
   def dispatch_issue_for_test(%State{} = state, %Issue{} = issue, []) do
     dispatch_issue(state, issue, nil)
   end
@@ -1174,11 +1201,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec do_dispatch_issue_for_test(State.t(), Issue.t(), term()) :: term()
   def do_dispatch_issue_for_test(%State{} = state, %Issue{} = issue, attempt \\ nil) do
     do_dispatch_issue(state, issue, attempt)
   end
 
   @doc false
+  @spec do_dispatch_issue_for_test(State.t(), Issue.t(), term(), keyword()) :: term()
   def do_dispatch_issue_for_test(%State{} = state, %Issue{} = issue, attempt, opts)
       when is_list(opts) do
     acquire_fun = Keyword.get(opts, :acquire_fun, &LeaseManager.acquire/3)
@@ -1188,6 +1217,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec do_spawn_issue_worker_for_test(State.t(), Issue.t(), term(), pid() | atom(), keyword()) :: term()
   def do_spawn_issue_worker_for_test(%State{} = state, %Issue{} = issue, attempt, recipient, opts \\ [])
       when is_list(opts) do
     start_child_fun = Keyword.get(opts, :start_child_fun, &Task.Supervisor.start_child/2)
@@ -1195,11 +1225,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec do_spawn_issue_worker_default_for_test(State.t(), Issue.t(), term(), pid() | atom()) :: term()
   def do_spawn_issue_worker_default_for_test(%State{} = state, %Issue{} = issue, attempt, recipient) do
     do_spawn_issue_worker(state, issue, attempt, recipient)
   end
 
   @doc false
+  @spec do_spawn_passive_worker_for_test(State.t(), Issue.t(), term(), pid() | atom(), keyword()) :: term()
   def do_spawn_passive_worker_for_test(%State{} = state, %Issue{} = issue, attempt, recipient, opts \\ [])
       when is_list(opts) do
     start_child_fun = Keyword.get(opts, :start_child_fun, &Task.Supervisor.start_child/2)
@@ -1207,10 +1239,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec continuation_metadata_for_running_entry_for_test(map()) :: map()
   def continuation_metadata_for_running_entry_for_test(running_entry),
     do: continuation_metadata_for_running_entry(running_entry)
 
   @doc false
+  @spec dispatch_passive_issue_for_test(State.t(), Issue.t(), keyword()) :: term()
   def dispatch_passive_issue_for_test(%State{} = state, %Issue{} = issue, opts \\ []) when is_list(opts) do
     attempt = Keyword.get(opts, :attempt)
     acquire_fun = Keyword.get(opts, :acquire_fun, &LeaseManager.acquire/3)
@@ -1219,17 +1253,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec passive_delay_ms_for_await_checks_for_test(map()) :: non_neg_integer()
   def passive_delay_ms_for_await_checks_for_test(run_state) when is_map(run_state) do
     passive_delay_ms_for_await_checks(run_state)
   end
 
   @doc false
+  @spec schedule_issue_retry_for_test(State.t(), String.t(), non_neg_integer() | nil, map()) :: State.t()
   def schedule_issue_retry_for_test(%State{} = state, issue_id, attempt, metadata)
       when is_binary(issue_id) and is_map(metadata) do
     schedule_issue_retry(state, issue_id, attempt, metadata)
   end
 
   @doc false
+  @spec handle_retry_issue_for_test(State.t(), String.t(), non_neg_integer() | nil, map(), term()) :: State.t()
   def handle_retry_issue_for_test(%State{} = state, issue_id, attempt, metadata, issues_result) do
     handle_retry_issue(
       state,
@@ -1242,6 +1279,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec handle_retry_issue_for_test(State.t(), String.t(), non_neg_integer() | nil, map(), term(), term()) :: State.t()
   def handle_retry_issue_for_test(
         %State{} = state,
         issue_id,
@@ -1261,6 +1299,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec handle_retry_issue_lookup_for_test(term(), State.t(), String.t(), non_neg_integer() | nil, map()) :: State.t()
   def handle_retry_issue_lookup_for_test(issue, %State{} = state, issue_id, attempt, metadata) do
     handle_retry_issue_lookup(issue, state, issue_id, attempt, metadata)
   end
@@ -1281,9 +1320,11 @@ defmodule SymphonyElixir.Orchestrator do
     sort_issues_for_dispatch(issues, %State{})
   end
 
+  @spec manual_issue_refresh_state_for_test(State.t()) :: State.t()
   def manual_issue_refresh_state_for_test(%State{} = state), do: maybe_schedule_manual_issue_refresh(state)
 
   @doc false
+  @spec process_candidate_issues_for_test(State.t(), [Issue.t()]) :: State.t()
   def process_candidate_issues_for_test(%State{} = state, issues) when is_list(issues) do
     process_candidate_issues(state, issues)
   end

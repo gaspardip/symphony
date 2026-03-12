@@ -68,9 +68,11 @@ defmodule SymphonyElixir.TrackerEventInbox do
       {:error, {:tracker_event_inbox_failed, error}}
   end
 
+  @spec pending_events() :: [stored_event()]
   @spec pending_events(pos_integer()) :: [stored_event()]
   def pending_events(limit \\ 100)
 
+  @spec pending_events(pos_integer()) :: [stored_event()]
   def pending_events(limit) when is_integer(limit) and limit > 0 do
     state = load_state()
 

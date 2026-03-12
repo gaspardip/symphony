@@ -1269,6 +1269,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp needs_input_field?(_payload), do: false
 
   @doc false
+  @spec helper_for_test(atom(), list()) :: term()
   def helper_for_test(:port_metadata, [port]), do: port_metadata(port)
 
   def helper_for_test(:launch_command, [command, bash_executable, env_executable, runtime_profile]),

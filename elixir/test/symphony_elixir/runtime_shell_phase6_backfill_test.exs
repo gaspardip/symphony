@@ -391,8 +391,18 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
       spawn(fn ->
-        Process.sleep(200)
-        Supervisor.stop(SymphonyElixir.Supervisor, :shutdown)
+        wait_for_supervisor = fn wait_for_supervisor ->
+          case Process.whereis(SymphonyElixir.Supervisor) do
+            pid when is_pid(pid) ->
+              Supervisor.stop(pid, :shutdown)
+
+            _ ->
+              Process.sleep(50)
+              wait_for_supervisor.(wait_for_supervisor)
+          end
+        end
+
+        wait_for_supervisor.(wait_for_supervisor)
       end)
 
       SymphonyElixir.CLI.main([#{inspect(@ack_flag)}, #{inspect(workflow_path)}])

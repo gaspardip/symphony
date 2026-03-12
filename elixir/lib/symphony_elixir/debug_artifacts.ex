@@ -38,26 +38,30 @@ defmodule SymphonyElixir.DebugArtifacts do
         metadata: metadata
       }
 
-      :ok = File.mkdir_p(directory)
-      :ok = File.write(payload_path, :zlib.gzip(bounded.data))
-      :ok = File.write(manifest_path, Jason.encode!(manifest))
-
-      {:ok,
-       %{
-         artifact_id: artifact_id,
-         kind: kind,
-         path: payload_path,
-         manifest_path: manifest_path,
-         sha256: sha256,
-         bytes: byte_size(bounded.data),
-         truncated: bounded.truncated?
-       }}
+      with :ok <- File.mkdir_p(directory),
+           {:ok, encoded_manifest} <- Jason.encode(manifest),
+           :ok <- File.write(payload_path, :zlib.gzip(bounded.data)),
+           :ok <- File.write(manifest_path, encoded_manifest) do
+        {:ok,
+         %{
+           artifact_id: artifact_id,
+           kind: kind,
+           path: payload_path,
+           manifest_path: manifest_path,
+           sha256: sha256,
+           bytes: byte_size(bounded.data),
+           truncated: bounded.truncated?
+         }}
+      else
+        error -> normalize_store_error(error)
+      end
     else
       {:error, :disabled}
     end
   end
 
-  @spec store_failure(String.t(), iodata() | map(), map()) :: {:ok, artifact_ref()} | {:error, term()}
+  @spec store_failure(String.t(), iodata() | map(), map()) ::
+          {:ok, artifact_ref()} | {:error, term()}
   def store_failure(kind, payload, metadata \\ %{}) when is_binary(kind) and is_map(metadata) do
     if Config.observability_debug_capture_on_failure?() do
       store(kind, payload, metadata)
@@ -78,6 +82,8 @@ defmodule SymphonyElixir.DebugArtifacts do
 
   defp serialize_payload(payload), do: inspect(payload, pretty: true, limit: :infinity)
 
+  defp normalize_store_error({:error, reason}), do: {:error, reason}
+
   defp bound_content(data) when is_binary(data) do
     max_bytes = Config.observability_debug_artifact_max_bytes()
     tail_bytes = min(Config.observability_debug_artifact_tail_bytes(), max_bytes)
@@ -91,7 +97,12 @@ defmodule SymphonyElixir.DebugArtifacts do
       bounded = prefix <> suffix
 
       %{
-        data: binary_part(bounded, max(byte_size(bounded) - max_bytes, 0), min(byte_size(bounded), max_bytes)),
+        data:
+          binary_part(
+            bounded,
+            max(byte_size(bounded) - max_bytes, 0),
+            min(byte_size(bounded), max_bytes)
+          ),
         truncated?: true
       }
     end

@@ -12,6 +12,7 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Config
       alias SymphonyElixir.HttpServer
       alias SymphonyElixir.Linear.Client
+      alias SymphonyElixir.LogFile
       alias SymphonyElixir.Linear.Issue
       alias SymphonyElixir.Orchestrator
       alias SymphonyElixir.PromptBuilder
@@ -25,10 +26,16 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0
+        ]
 
       setup do
         previous_path = System.get_env("PATH")
+        previous_log_file = Application.get_env(:symphony_elixir, :log_file)
         SymphonyElixir.TestSupport.set_preferred_git_path!()
 
         workflow_root =
@@ -37,20 +44,39 @@ defmodule SymphonyElixir.TestSupport do
             "symphony-elixir-workflow-#{System.unique_integer([:positive])}"
           )
 
+        log_root =
+          Path.join(
+            System.tmp_dir!(),
+            "symphony-elixir-logs-#{System.unique_integer([:positive])}"
+          )
+
         File.mkdir_p!(workflow_root)
+        File.mkdir_p!(log_root)
+        Application.put_env(:symphony_elixir, :log_file, LogFile.default_log_file(log_root))
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+
+        if Process.whereis(SymphonyElixir.WorkflowStore),
+          do: SymphonyElixir.WorkflowStore.force_reload()
+
         stop_default_http_server()
 
         on_exit(fn ->
           restore_env("PATH", previous_path)
+
+          SymphonyElixir.TestSupport.restore_app_env(
+            :symphony_elixir,
+            :log_file,
+            previous_log_file
+          )
+
           Application.delete_env(:symphony_elixir, :workflow_file_path)
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
           File.rm_rf(workflow_root)
+          File.rm_rf(log_root)
         end)
 
         :ok
@@ -75,6 +101,8 @@ defmodule SymphonyElixir.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+  def restore_app_env(app, key, nil), do: Application.delete_env(app, key)
+  def restore_app_env(app, key, value), do: Application.put_env(app, key, value)
 
   def set_preferred_git_path! do
     case preferred_git_bin_dir() do
@@ -166,7 +194,9 @@ defmodule SymphonyElixir.TestSupport do
           codex_runtime_profile_env_allowlist: [],
           codex_reasoning_stages: nil,
           codex_reasoning_providers: nil,
-          codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
+          codex_approval_policy: %{
+            reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}
+          },
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
           codex_turn_timeout_ms: 3_600_000,
@@ -249,7 +279,10 @@ defmodule SymphonyElixir.TestSupport do
     codex_command = Keyword.get(config, :codex_command)
     codex_runtime_profile_codex_home = Keyword.get(config, :codex_runtime_profile_codex_home)
     codex_runtime_profile_inherit_env = Keyword.get(config, :codex_runtime_profile_inherit_env)
-    codex_runtime_profile_env_allowlist = Keyword.get(config, :codex_runtime_profile_env_allowlist)
+
+    codex_runtime_profile_env_allowlist =
+      Keyword.get(config, :codex_runtime_profile_env_allowlist)
+
     codex_reasoning_stages = Keyword.get(config, :codex_reasoning_stages)
     codex_reasoning_providers = Keyword.get(config, :codex_reasoning_providers)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
@@ -262,10 +295,18 @@ defmodule SymphonyElixir.TestSupport do
     policy_require_pr_before_review = Keyword.get(config, :policy_require_pr_before_review)
     policy_require_validation = Keyword.get(config, :policy_require_validation)
     policy_require_verifier = Keyword.get(config, :policy_require_verifier)
-    policy_retry_validation_failures_within_run = Keyword.get(config, :policy_retry_validation_failures_within_run)
-    policy_max_validation_attempts_per_run = Keyword.get(config, :policy_max_validation_attempts_per_run)
+
+    policy_retry_validation_failures_within_run =
+      Keyword.get(config, :policy_retry_validation_failures_within_run)
+
+    policy_max_validation_attempts_per_run =
+      Keyword.get(config, :policy_max_validation_attempts_per_run)
+
     policy_publish_required = Keyword.get(config, :policy_publish_required)
-    policy_post_merge_verification_required = Keyword.get(config, :policy_post_merge_verification_required)
+
+    policy_post_merge_verification_required =
+      Keyword.get(config, :policy_post_merge_verification_required)
+
     policy_automerge_on_green = Keyword.get(config, :policy_automerge_on_green)
     policy_default_issue_class = Keyword.get(config, :policy_default_issue_class)
     policy_stop_on_noop_turn = Keyword.get(config, :policy_stop_on_noop_turn)
@@ -283,11 +324,21 @@ defmodule SymphonyElixir.TestSupport do
     observability_metrics_path = Keyword.get(config, :observability_metrics_path)
     observability_tracing_enabled = Keyword.get(config, :observability_tracing_enabled)
     observability_structured_logs = Keyword.get(config, :observability_structured_logs)
-    observability_debug_artifacts_enabled = Keyword.get(config, :observability_debug_artifacts_enabled)
-    observability_debug_capture_on_failure = Keyword.get(config, :observability_debug_capture_on_failure)
+
+    observability_debug_artifacts_enabled =
+      Keyword.get(config, :observability_debug_artifacts_enabled)
+
+    observability_debug_capture_on_failure =
+      Keyword.get(config, :observability_debug_capture_on_failure)
+
     observability_debug_artifact_root = Keyword.get(config, :observability_debug_artifact_root)
-    observability_debug_artifact_max_bytes = Keyword.get(config, :observability_debug_artifact_max_bytes)
-    observability_debug_artifact_tail_bytes = Keyword.get(config, :observability_debug_artifact_tail_bytes)
+
+    observability_debug_artifact_max_bytes =
+      Keyword.get(config, :observability_debug_artifact_max_bytes)
+
+    observability_debug_artifact_tail_bytes =
+      Keyword.get(config, :observability_debug_artifact_tail_bytes)
+
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
@@ -360,7 +411,13 @@ defmodule SymphonyElixir.TestSupport do
           policy_max_noop_turns,
           policy_token_budget
         ),
-        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        hooks_yaml(
+          hook_after_create,
+          hook_before_run,
+          hook_after_run,
+          hook_before_remove,
+          hook_timeout_ms
+        ),
         observability_yaml(
           observability_enabled,
           observability_refresh_ms,
@@ -384,10 +441,6 @@ defmodule SymphonyElixir.TestSupport do
     Enum.join(sections, "\n") <> "\n"
   end
 
-  defp yaml_value(value) when is_binary(value) do
-    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
-  end
-
   defp policy_packs_yaml(packs) when packs in [%{}, nil], do: nil
 
   defp policy_packs_yaml(packs) when is_map(packs) do
@@ -405,6 +458,10 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp portfolio_yaml(instances), do: "portfolio: #{yaml_value(instances)}"
+
+  defp yaml_value(value) when is_binary(value) do
+    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+  end
 
   defp yaml_value(value) when is_integer(value), do: to_string(value)
   defp yaml_value(true), do: "true"
@@ -470,9 +527,16 @@ defmodule SymphonyElixir.TestSupport do
     end)
   end
 
-  defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
+  defp hooks_yaml(nil, nil, nil, nil, timeout_ms),
+    do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 
-  defp hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, timeout_ms) do
+  defp hooks_yaml(
+         hook_after_create,
+         hook_before_run,
+         hook_after_run,
+         hook_before_remove,
+         timeout_ms
+       ) do
     [
       "hooks:",
       "  timeout_ms: #{yaml_value(timeout_ms)}",

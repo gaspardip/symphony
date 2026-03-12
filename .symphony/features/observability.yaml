@@ -5,6 +5,8 @@ summary: Telemetry, traces, metrics, structured logs, and bounded debug replay f
 source_paths:
   - docs/OBSERVABILITY_IMPLEMENTATION_PLAN.md
   - ops/observability
+  - elixir/lib/symphony_elixir/coverage_audit.ex
+  - elixir/lib/symphony_elixir/debug_artifacts.ex
   - elixir/lib/symphony_elixir/log_file.ex
   - elixir/lib/symphony_elixir/http_server.ex
   - elixir/lib/symphony_elixir_web/router.ex

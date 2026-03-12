@@ -336,6 +336,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     manual_store_root = Path.join(workspace_root, "manual-store")
 
+    File.rm_rf(workspace_root)
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       workspace_root: workspace_root,

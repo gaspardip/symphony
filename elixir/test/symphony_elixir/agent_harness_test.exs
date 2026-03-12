@@ -38,7 +38,12 @@ defmodule SymphonyElixir.AgentHarnessTest do
     File.write!(code_path, "defmodule Sample do\nend\n")
 
     feature_path = Path.join(workspace, ".symphony/features/runtime-core.yaml")
-    feature_payload = File.read!(feature_path) |> String.replace("last_updated_by_issue: seed", "last_updated_by_issue: SYM-101")
+
+    feature_payload =
+      feature_path
+      |> File.read!()
+      |> String.replace(~r/last_updated_by_issue:\s+\S+/, "last_updated_by_issue: SYM-101")
+
     File.write!(feature_path, feature_payload)
     File.write!(progress_path, File.read!(progress_path) <> "\n- Recorded publish evidence.\n")
 

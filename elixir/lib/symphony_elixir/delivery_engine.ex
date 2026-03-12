@@ -70,58 +70,74 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   @doc false
+  @spec fetch_turn_result_for_test(term()) :: term()
   def fetch_turn_result_for_test(issue), do: fetch_turn_result(issue)
 
   @doc false
+  @spec execute_tool_for_test(term(), term(), term(), keyword()) :: term()
   def execute_tool_for_test(issue, tool, arguments, opts \\ []) do
     tool_executor(issue, opts).(tool, arguments)
   end
 
   @doc false
+  @spec implementation_turn_error_summary_for_test(term()) :: term()
   def implementation_turn_error_summary_for_test(reason), do: implementation_turn_error_summary(reason)
 
   @doc false
+  @spec retryable_implementation_error_for_test(term()) :: boolean()
   def retryable_implementation_error_for_test(reason), do: retryable_implementation_error?(reason)
 
   @doc false
+  @spec non_retryable_implementation_error_for_test(term()) :: boolean()
   def non_retryable_implementation_error_for_test(reason), do: non_retryable_implementation_error?(reason)
 
   @doc false
+  @spec implementation_error_code_for_test(term()) :: term()
   def implementation_error_code_for_test(reason), do: implementation_error_code(reason)
 
   @doc false
+  @spec maybe_move_issue_for_test(term(), term()) :: term()
   def maybe_move_issue_for_test(issue, target_state), do: maybe_move_issue(issue, target_state)
 
   @doc false
+  @spec codex_message_handler_for_test(pid() | nil, term()) :: term()
   def codex_message_handler_for_test(recipient, issue), do: codex_message_handler(recipient, issue)
 
   @doc false
+  @spec normalize_state_for_test(term()) :: term()
   def normalize_state_for_test(state), do: normalize_state(state)
 
   @doc false
+  @spec active_issue_state_for_test(term()) :: boolean()
   def active_issue_state_for_test(state_name), do: active_issue_state?(state_name)
 
   @doc false
+  @spec branch_has_publishable_changes_for_test(Path.t(), map(), keyword()) :: term()
   def branch_has_publishable_changes_for_test(workspace, state, opts \\ []) do
     branch_has_publishable_changes?(workspace, state, opts)
   end
 
   @doc false
+  @spec normalize_pr_state_for_test(term()) :: term()
   def normalize_pr_state_for_test(pr_state), do: normalize_pr_state(pr_state)
 
   @doc false
+  @spec maybe_sync_policy_override_for_test(map(), Path.t(), keyword()) :: map()
   def maybe_sync_policy_override_for_test(state, workspace, opts) do
     maybe_sync_policy_override(state, workspace, opts)
   end
 
   @doc false
+  @spec detail_summary_for_test(term(), term()) :: term()
   def detail_summary_for_test(code, detail), do: detail_summary(code, detail)
 
   @doc false
+  @spec human_review_summary_for_test(term()) :: String.t()
   def human_review_summary_for_test(code),
     do: approval_gate_summary(code, WorkflowProfile.approval_gate_state("review_required"))
 
   @doc false
+  @spec implement_prompt_for_test(term(), map(), keyword(), non_neg_integer(), pos_integer()) :: String.t()
   def implement_prompt_for_test(issue, state, opts, turn_number, max_turns),
     do:
       implement_prompt(
@@ -139,14 +155,17 @@ defmodule SymphonyElixir.DeliveryEngine do
       )
 
   @doc false
+  @spec ensure_turn_progress_for_test(term(), term(), term()) :: term()
   def ensure_turn_progress_for_test(turn_result, before_snapshot, after_snapshot),
     do: ensure_turn_progress(turn_result, before_snapshot, after_snapshot)
 
   @doc false
+  @spec implement_next_stage_for_test(term(), term(), term()) :: term()
   def implement_next_stage_for_test(turn_result, before_snapshot, after_snapshot),
     do: implement_next_stage(turn_result, before_snapshot, after_snapshot)
 
   @doc false
+  @spec handle_checkout_error_for_test(Path.t(), term(), term()) :: term()
   def handle_checkout_error_for_test(workspace, issue, reason),
     do: handle_checkout_error(workspace, issue, reason)
 

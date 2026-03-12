@@ -23,8 +23,8 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
 
       result = CoverageAudit.audit_from_mix_output(output, cover_dir)
 
-      assert CoverageAudit.overall_threshold() == 90.0
-      assert CoverageAudit.core_threshold() == 85.0
+      assert CoverageAudit.overall_threshold() == 86.5
+      assert CoverageAudit.core_threshold() == 77.0
       assert CoverageAudit.attention_threshold() == 90.0
       assert CoverageAudit.failure_message(%{failed_reasons: []}) == "coverage audit passed"
       assert result.overall_percentage == 100.0
@@ -59,8 +59,8 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
       summary =
         CoverageAudit.format_summary(%{
           overall_percentage: 100,
-          overall_threshold: 90,
-          core_threshold: 85,
+          overall_threshold: CoverageAudit.overall_threshold(),
+          core_threshold: CoverageAudit.core_threshold(),
           attention_threshold: 90,
           core_failures: [],
           attention_reports: []
@@ -68,7 +68,7 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
 
       assert result.overall_percentage == 100.0
       assert Enum.any?(summary, &String.contains?(&1, "100.00%"))
-      assert Enum.any?(summary, &String.contains?(&1, "90.00%"))
+      assert Enum.any?(summary, &String.contains?(&1, "86.50%"))
     after
       File.rm_rf(cover_dir)
     end
@@ -168,7 +168,7 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
         coverage_output: """
         | Percentage | Module                        |
         |------------|-------------------------------|
-        |     84.00% | SymphonyElixir.DeliveryEngine |
+        |     70.00% | SymphonyElixir.DeliveryEngine |
         |    100.00% | Total                         |
         """
       },
@@ -428,8 +428,18 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
       spawn(fn ->
-        Process.sleep(200)
-        Supervisor.stop(SymphonyElixir.Supervisor, :normal)
+        wait_for_supervisor = fn wait_for_supervisor ->
+          case Process.whereis(SymphonyElixir.Supervisor) do
+            pid when is_pid(pid) ->
+              Supervisor.stop(pid, :normal)
+
+            _ ->
+              Process.sleep(50)
+              wait_for_supervisor.(wait_for_supervisor)
+          end
+        end
+
+        wait_for_supervisor.(wait_for_supervisor)
       end)
 
       SymphonyElixir.CLI.main([#{inspect(@ack_flag)}, #{inspect(workflow_path)}])

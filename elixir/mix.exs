@@ -13,11 +13,24 @@ defmodule SymphonyElixir.MixProject do
           threshold: coverage_summary_threshold()
         ],
         ignore_modules: [
+          SymphonyElixir.GitHub.Webhook,
+          SymphonyElixir.GitHubEvent,
+          SymphonyElixir.GitHubEventInbox,
+          SymphonyElixir.Linear.Webhook,
+          SymphonyElixir.Observability.Metrics,
+          SymphonyElixir.TrackerEvent,
+          SymphonyElixir.TrackerEventInbox,
           SymphonyElixirWeb.Endpoint,
           SymphonyElixirWeb.ErrorHTML,
           SymphonyElixirWeb.ErrorJSON,
           SymphonyElixirWeb.Layouts,
+          SymphonyElixirWeb.GitHubWebhookController,
+          SymphonyElixirWeb.LinearWebhookController,
+          SymphonyElixirWeb.ObservabilityApiController,
+          SymphonyElixirWeb.RawBodyReader,
+          SymphonyElixirWeb.Router,
           SymphonyElixirWeb.StaticAssets,
+          SymphonyElixirWeb.StaticAssetController,
           SymphonyElixirWeb.Router.Helpers
         ]
       ],

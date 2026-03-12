@@ -485,6 +485,14 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
              "The issue has conflicting policy labels."
   end
 
+  test "detail_summary_for_test covers missing pull requests and risk review summaries" do
+    assert DeliveryEngine.detail_summary_for_test(:publish_missing_pr, "ignored") ==
+             "No PR is attached for the current branch."
+
+    assert DeliveryEngine.human_review_summary_for_test(:risk_review_required) ==
+             "High-risk contractor work requires Human Review before merge."
+  end
+
   test "human_review_summary_for_test falls back to the generic summary" do
     assert DeliveryEngine.human_review_summary_for_test(:other) == "Waiting in Human Review."
   end

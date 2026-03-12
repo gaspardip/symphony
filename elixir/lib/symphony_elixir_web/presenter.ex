@@ -2454,6 +2454,7 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   @doc false
+  @spec helper_for_test(atom(), list()) :: term()
   def helper_for_test(:issue_status, [running, retry, paused, queue, tracked_issue, run_state]),
     do: issue_status(running, retry, paused, queue, tracked_issue, run_state)
 

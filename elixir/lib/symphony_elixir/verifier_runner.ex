@@ -312,6 +312,7 @@ defmodule SymphonyElixir.VerifierRunner do
   end
 
   @doc false
+  @spec format_command_output_excerpt(term()) :: String.t()
   def format_command_output_excerpt(output) do
     output = to_string(output || "")
 
