@@ -1,0 +1,70 @@
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  loki:
+    image: grafana/loki:3.2.1
+    command:
+      - -config.file=/etc/loki/config.yml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml:ro
+      - loki-data:/loki
+
+  promtail:
+    image: grafana/promtail:3.2.1
+    command:
+      - -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+      - ../../log:/var/log/symphony:ro
+    depends_on:
+      - loki
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    command:
+      - -config.file=/etc/tempo/config.yml
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./tempo/config.yml:/etc/tempo/config.yml:ro
+      - tempo-data:/tmp/tempo
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+
+volumes:
+  grafana-data:
+  loki-data:
+  prometheus-data:
+  tempo-data:

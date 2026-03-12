@@ -11,5 +11,4 @@ acceptance_signals:
   - Auto-heal and block reasons are visible in operator payloads
 dependencies:
   - harness
-last_updated_by_issue: seed
-
+last_updated_by_issue: CLZ-22

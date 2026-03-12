@@ -21,11 +21,23 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Created `CLZ-22` in the Symphony Linear project for tracker-backed self-host work.
 - Created an isolated git worktree on `codex/clz-22-observability` to avoid the dirty `main` worktree.
 - Reviewed `docs/OBSERVABILITY_IMPLEMENTATION_PLAN.md`, `.symphony/harness.yml`, runtime entrypoints, and current logging/state-transition code to identify integration seams.
+- Landed commit `2458ae5` to add the runtime observability foundation, including telemetry schema wiring, OpenTelemetry setup, Prometheus metrics export, structured JSON logs, and bounded debug artifact capture.
+- Added stage, token, tracker, proof, PR/review, git, and run-state instrumentation across the Elixir runtime, plus an exposed `/metrics` endpoint and coverage in `test/symphony_elixir/observability_test.exs`.
+- Drafted the repo-owned local observability stack under `ops/observability/` and aligned the implementation plan with the self-hosted Docker Compose rollout.
+- Validated the Docker Compose stack structure with `docker compose -f ops/observability/docker-compose.yml config`.
+- Ran the harness preflight successfully and confirmed the smoke suite passes (`143 tests, 0 failures`).
+- Full validation is currently blocked by pre-existing `mix lint` / `specs.check` failures on the branch base, including missing `@spec` declarations in files outside the observability change set.
 
 ## Evidence
 - Linear issue: `CLZ-22`
 - Worktree: `/Users/gaspar/src/symphony-clz-22`
 - Branch: `codex/clz-22-observability`
+- Runtime foundation commit: `2458ae5`
+- Local stack assets: `ops/observability/docker-compose.yml` and Grafana/Prometheus/Loki/Promtail/Tempo configs
+- Compose validation: `docker compose -f ops/observability/docker-compose.yml config`
+- Preflight: `./scripts/symphony-preflight.sh` exited `0`
+- Smoke: `./scripts/symphony-smoke.sh` exited `0` with `143 tests, 0 failures`
+- Validation blocker: `./scripts/symphony-validate.sh` reaches `mix lint` and fails on existing `specs.check` missing `@spec` declarations
 
 ## Next Step
-Add the observability core modules and dependency wiring, then instrument stage and tracker/runtime lifecycle events before wiring the metrics endpoint and local Compose stack.
+Commit the self-hosted ops/docs slice, decide whether to keep the mechanical repo formatting sweep as a separate change, and publish the branch with the existing `specs.check` lint debt called out explicitly.
