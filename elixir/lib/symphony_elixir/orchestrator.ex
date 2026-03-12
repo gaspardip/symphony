@@ -1094,6 +1094,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  def maybe_resume_blocked_issue_for_test(%State{} = state, %Issue{} = issue) do
+    maybe_resume_blocked_issue(state, issue)
+  end
+
+  @doc false
   def dispatch_issue_default_for_test(%State{} = state, %Issue{} = issue, attempt \\ nil) do
     dispatch_issue(state, issue, attempt)
   end
@@ -3172,7 +3177,22 @@ defmodule SymphonyElixir.Orchestrator do
       {state, refreshed_issue || %{issue | state: resume_state}}
     else
       _ ->
-        {state, issue}
+        case IssueSource.update_issue_state(issue, "Todo") do
+          :ok ->
+            case IssueSource.refresh_issue(%{issue | state: "Todo"}) do
+              {:ok, %Issue{state: @blocked_state}} ->
+                {state, %{issue | state: "Todo"}}
+
+              {:ok, %Issue{} = refreshed_issue} ->
+                {state, refreshed_issue}
+
+              _ ->
+                {state, %{issue | state: "Todo"}}
+            end
+
+          _ ->
+            {state, issue}
+        end
     end
   end
 

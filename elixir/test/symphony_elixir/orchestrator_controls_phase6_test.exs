@@ -293,6 +293,39 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert reset_payload.override_rank == nil
   end
 
+  test "retry_now moves blocked tracker issue without workspace back to Todo for redispatch" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-retry-blocked-no-workspace",
+      identifier: "MT-RETRY-BLOCKED-NO-WS",
+      title: "Retry blocked without workspace",
+      description: "Should reset to Todo when no resumable workspace exists",
+      state: "Blocked",
+      labels: ["policy:fully-autonomous"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    issue_id = issue.id
+    orchestrator_name = Module.concat(__MODULE__, :RetryBlockedNoWorkspaceOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    workspace = SymphonyElixir.Workspace.path_for_issue(issue.identifier)
+    File.rm_rf(workspace)
+
+    {_, resumed_issue} =
+      Orchestrator.maybe_resume_blocked_issue_for_test(:sys.get_state(pid), issue)
+
+    assert resumed_issue.id == issue_id
+    assert resumed_issue.state == "Todo"
+  end
+
   test "review thread lifecycle controls update persisted manual thread state" do
     workspace_root =
       Path.join(
@@ -384,10 +417,11 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
   end
 
   test "post review drafts posts approved inline replies when policy allows" do
+    unique_suffix = System.unique_integer([:positive])
     workspace_root =
       Path.join(
         System.tmp_dir!(),
-        "orchestrator-post-review-drafts-#{System.unique_integer([:positive])}"
+        "orchestrator-post-review-drafts-#{unique_suffix}"
       )
 
     manual_store_root = Path.join(workspace_root, "manual-store")
@@ -404,8 +438,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     {:ok, issue} =
       SymphonyElixir.ManualIssueStore.submit(%{
-        "id" => "review-post",
-        "identifier" => "MT-REVIEW-POST",
+        "id" => "review-post-#{unique_suffix}",
+        "identifier" => "MT-REVIEW-POST-#{unique_suffix}",
         "title" => "Post approved review drafts",
         "description" => "Exercise posting approved review drafts",
         "acceptance_criteria" => ["Post approved inline review replies"],
