@@ -73,7 +73,7 @@ defmodule SymphonyElixir.RunInspector do
 
     check_rollup = required_checks_rollup(harness, pr_data.check_statuses)
 
-    status_text = git_data.status_text
+    status_text = filter_runtime_status_entries(git_data.status_text)
 
     %Snapshot{
       workspace: workspace,
@@ -160,6 +160,21 @@ defmodule SymphonyElixir.RunInspector do
         checks -> checks
       end
 
+    required_checks_rollup(required, check_statuses)
+  end
+
+  @spec required_checks_rollup([String.t()], list()) :: %{
+          state: :passed | :missing | :pending | :failed | :cancelled,
+          required: [String.t()],
+          missing: [String.t()],
+          pending: [String.t()],
+          failed: [String.t()],
+          cancelled: [String.t()]
+        }
+  def required_checks_rollup(required, check_statuses)
+      when is_list(required) and is_list(check_statuses) do
+    required = Enum.reject(required, &(&1 in [nil, ""]))
+
     states =
       Enum.map(required, fn required_check ->
         matching_entries = Enum.filter(check_statuses, &(Map.get(&1, :name) == required_check))
@@ -211,6 +226,31 @@ defmodule SymphonyElixir.RunInspector do
     run_harness_command(workspace, harness && harness.post_merge_command, opts)
   end
 
+  @spec run_deploy_preview(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
+  def run_deploy_preview(workspace, harness, opts \\ []) do
+    run_harness_command(workspace, harness && harness.deploy_preview_command, opts)
+  end
+
+  @spec run_deploy_production(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
+  def run_deploy_production(workspace, harness, opts \\ []) do
+    run_harness_command(workspace, harness && harness.deploy_production_command, opts)
+  end
+
+  @spec run_post_deploy_verify(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
+  def run_post_deploy_verify(workspace, harness, opts \\ []) do
+    run_harness_command(workspace, harness && harness.post_deploy_verify_command, opts)
+  end
+
+  @spec run_deploy_rollback(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
+  def run_deploy_rollback(workspace, harness, opts \\ []) do
+    run_harness_command(workspace, harness && harness.deploy_rollback_command, opts)
+  end
+
+  @spec run_shell_command(Path.t(), String.t() | nil, keyword()) :: command_result()
+  def run_shell_command(workspace, command, opts \\ []) do
+    run_harness_command(workspace, command, opts)
+  end
+
   @spec changed_paths(Path.t(), keyword()) :: [String.t()]
   def changed_paths(workspace, opts \\ []) when is_binary(workspace) do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
@@ -221,6 +261,7 @@ defmodule SymphonyElixir.RunInspector do
         |> to_string()
         |> String.split(~r/\r?\n/, trim: true)
         |> Enum.map(&status_path/1)
+        |> Enum.reject(&runtime_artifact_path?/1)
         |> Enum.reject(&is_nil/1)
         |> Enum.uniq()
 
@@ -347,6 +388,20 @@ defmodule SymphonyElixir.RunInspector do
     |> blank_to_nil()
   end
 
+  defp filter_runtime_status_entries(nil), do: nil
+
+  defp filter_runtime_status_entries(status_text) do
+    status_text
+    |> String.split(~r/\r?\n/, trim: true)
+    |> Enum.reject(fn line ->
+      line
+      |> status_path()
+      |> runtime_artifact_path?()
+    end)
+    |> Enum.join("\n")
+    |> blank_to_nil()
+  end
+
   defp normalize_check_conclusion(nil), do: nil
 
   defp normalize_check_conclusion(conclusion) do
@@ -460,5 +515,12 @@ defmodule SymphonyElixir.RunInspector do
 
   defp default_shell_runner(workspace, command, opts) do
     System.cmd("sh", ["-lc", command], Keyword.merge([cd: workspace], opts))
+  end
+
+  defp runtime_artifact_path?(nil), do: false
+
+  defp runtime_artifact_path?(path) do
+    normalized = path |> to_string() |> String.trim()
+    normalized == ".symphony" or String.starts_with?(normalized, ".symphony/")
   end
 end

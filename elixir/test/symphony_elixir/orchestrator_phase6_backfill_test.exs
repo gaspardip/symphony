@@ -614,7 +614,19 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     end)
 
     state = :sys.get_state(pid)
-    assert Orchestrator.reconcile_issue_states_for_test([issue], state) == state
+
+    assert Orchestrator.reconcile_issue_states_for_test([issue], state) ==
+             %{
+               state
+               | issue_routing_cache: %{
+                   issue.id => %{
+                     state: issue.state,
+                     assignee_id: issue.assignee_id,
+                     labels: [],
+                     updated_at: issue.updated_at
+                   }
+                 }
+             }
   end
 
   test "reconcile_issue_states_for_test stops running issues that lose the required label gate" do

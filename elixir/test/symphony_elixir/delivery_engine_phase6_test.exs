@@ -17,6 +17,9 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.FakeGitHubClient do
   end
 
   @impl true
+  def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
+
+  @impl true
   def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
 end
 
@@ -34,6 +37,9 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.FakeMergeFailureGitHubClient d
 
   @impl true
   def merge_pull_request(_workspace, _opts), do: {:error, :merge_failed}
+
+  @impl true
+  def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
 
   @impl true
   def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
@@ -572,6 +578,31 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
 
+  test "await_checks bypasses codex bootstrap for passive polling" do
+    {workspace, issue} = git_stage_workspace!("await-passive-no-codex")
+
+    RunStateStore.transition(workspace, "await_checks", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      pr_url: "https://github.com/example/repo/pull/30"
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: "/definitely/missing/codex"
+    )
+
+    assert :ok =
+             DeliveryEngine.run(workspace, issue, nil,
+               command_runner: &pending_merge_command_runner/3
+             )
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "await_checks"
+    assert state.last_required_checks_state == "pending"
+  end
+
   test "await_checks blocks when required checks are cancelled" do
     {workspace, issue} = git_stage_workspace!("await-cancelled")
     issue_id = issue.id
@@ -703,6 +734,51 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert get_in(state, [:last_merge, :status]) == "merged"
   end
 
+  test "await_checks defers automerge until the next allowed merge window" do
+    {workspace, issue} = git_stage_workspace!("await-merge-window")
+    now = DateTime.utc_now()
+    window_day = Date.day_of_week(Date.add(DateTime.to_date(now), 1))
+    start_hour = 9
+    end_hour = 10
+
+    RunStateStore.transition(workspace, "await_checks", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      pr_url: "https://github.com/example/repo/pull/115",
+      effective_policy_class: "fully_autonomous",
+      policy_pack: %{
+        name: "client_safe",
+        default_issue_class: "review_required",
+        allowed_policy_classes: ["fully_autonomous", "review_required", "never_automerge"],
+        merge_window: %{
+          timezone: "Etc/UTC",
+          days: [window_day],
+          start_hour: start_hour,
+          end_hour: end_hour
+        }
+      }
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("await-merge-window"),
+      policy_post_merge_verification_required: false,
+      policy_automerge_on_green: true
+    )
+
+    assert :ok =
+             DeliveryEngine.run(workspace, issue, nil,
+               command_runner: &ready_merge_command_runner/3
+             )
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "await_checks"
+    assert state.last_rule_id == "policy.merge_window_wait"
+    assert is_map(state.merge_window_wait)
+    assert is_binary(Map.get(state.merge_window_wait, :next_allowed_at))
+  end
+
   test "await_checks routes an already merged PR through post_merge to done" do
     {workspace, issue} = git_stage_workspace!("await-merged")
     issue_id = issue.id
@@ -759,6 +835,33 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert get_in(state, [:last_merge, :status]) == "already_merged"
   end
 
+  test "merge and post_merge bypass codex bootstrap for passive completion" do
+    {workspace, issue} = git_stage_workspace!("merge-passive-no-codex")
+    issue_id = issue.id
+
+    RunStateStore.transition(workspace, "merge", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      pr_url: "https://github.com/example/repo/pull/31"
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: "/definitely/missing/codex",
+      policy_post_merge_verification_required: false
+    )
+
+    assert {:done, %Issue{id: ^issue_id}} =
+             DeliveryEngine.run(workspace, issue, nil,
+               command_runner: &already_merged_command_runner/3
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "done"
+  end
+
   test "await_checks holds a ready PR for review when automerge is disabled" do
     {workspace, issue} = git_stage_workspace!("await-review-hold")
     issue_id = issue.id
@@ -784,6 +887,39 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.last_rule_id == "policy.review_required"
+  end
+
+  test "await_checks advances a review_required issue after operator approval" do
+    {workspace, issue} = git_stage_workspace!("await-review-approved")
+    issue_id = issue.id
+    approved_issue = %{issue | labels: ["policy:review-required"]}
+
+    RunStateStore.transition(workspace, "await_checks", %{
+      issue_id: approved_issue.id,
+      issue_identifier: approved_issue.identifier,
+      pr_url: "https://github.com/example/repo/pull/17",
+      review_approved: true
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("await-review-approved"),
+      policy_post_merge_verification_required: false,
+      policy_automerge_on_green: true
+    )
+
+    assert {:done, %Issue{id: ^issue_id}} =
+             DeliveryEngine.run(workspace, approved_issue, nil,
+               command_runner: &ready_merge_command_runner/3,
+               github_client: SymphonyElixir.DeliveryEnginePhase6Test.FakeGitHubClient,
+               github_client_opts: [merge_url: "https://github.com/example/repo/pull/17"]
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert Enum.any?(state.stage_history, &(&1.stage == "merge"))
+    assert get_in(state, [:last_merge, :status]) == "merged"
   end
 
   test "post_merge verification failures move the issue to Rework" do
@@ -1075,7 +1211,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp already_merged_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"def456\n", 0}
   defp already_merged_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
   defp already_merged_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
-  defp already_merged_command_runner("git", ["checkout", "main"], _opts), do: {"", 0}
+  defp already_merged_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
   defp already_merged_command_runner("git", ["reset", "--hard", "origin/main"], _opts), do: {"", 0}
 
   defp already_merged_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do
@@ -1102,7 +1238,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp post_merge_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"ghi789\n", 0}
   defp post_merge_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
   defp post_merge_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
-  defp post_merge_command_runner("git", ["checkout", "main"], _opts), do: {"", 0}
+  defp post_merge_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
   defp post_merge_command_runner("git", ["reset", "--hard", "origin/main"], _opts), do: {"", 0}
   defp post_merge_command_runner(command, args, opts), do: System.cmd(command, args, opts)
 
@@ -1163,7 +1299,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp ready_merge_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"stu901\n", 0}
   defp ready_merge_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
   defp ready_merge_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
-  defp ready_merge_command_runner("git", ["checkout", "main"], _opts), do: {"", 0}
+  defp ready_merge_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
   defp ready_merge_command_runner("git", ["reset", "--hard", "origin/main"], _opts), do: {"", 0}
 
   defp ready_merge_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do

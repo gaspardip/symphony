@@ -4,11 +4,12 @@ defmodule SymphonyElixir.Config do
   """
 
   alias NimbleOptions
-  alias SymphonyElixir.{IssuePolicy, RepoHarness, Workflow}
+  alias SymphonyElixir.{IssuePolicy, PolicyPack, RepoHarness, RunnerRuntime, Workflow}
 
   @default_active_states ["Todo", "In Progress"]
   @default_terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   @default_linear_endpoint "https://api.linear.app/graphql"
+  @default_linear_handoff_mode "assignee"
   @default_prompt_template """
   You are working on a Linear issue.
 
@@ -22,15 +23,31 @@ defmodule SymphonyElixir.Config do
   No description provided.
   {% endif %}
   """
-  @default_poll_interval_ms 30_000
+  @default_poll_interval_ms 600_000
+  @default_healing_poll_interval_ms 1_800_000
   @default_workspace_root Path.join(System.tmp_dir!(), "symphony_workspaces")
   @default_runner_install_root Path.join(System.user_home!(), ".local/share/symphony-runner")
   @default_runner_instance_name "default"
+  @default_author_profile_path Path.join([System.get_env("CODEX_HOME") || Path.join(System.user_home!(), ".codex"), "symphony", "author_profile.json"])
+  @default_credential_registry_path Path.join([System.get_env("CODEX_HOME") || Path.join(System.user_home!(), ".codex"), "symphony", "credential_registry.json"])
   @default_hook_timeout_ms 60_000
   @default_max_concurrent_agents 10
   @default_agent_max_turns 3
   @default_max_retry_backoff_ms 300_000
   @default_codex_command "codex app-server"
+  @default_reasoning_stages %{
+    implement: "balanced",
+    verify: "deep",
+    verifier: "rigorous"
+  }
+  @default_provider_reasoning_maps %{
+    "codex" => %{
+      "minimal" => "low",
+      "balanced" => "medium",
+      "deep" => "high",
+      "rigorous" => "xhigh"
+    }
+  }
   @default_codex_turn_timeout_ms 3_600_000
   @default_codex_read_timeout_ms 5_000
   @default_codex_stall_timeout_ms 300_000
@@ -44,10 +61,16 @@ defmodule SymphonyElixir.Config do
   @default_policy_post_merge_verification_required true
   @default_policy_automerge_on_green true
   @default_policy_default_issue_class "fully_autonomous"
+  @default_company_policy_pack "private_autopilot"
+  @default_company_mode "private_autopilot"
   @default_policy_stop_on_noop_turn true
   @default_policy_max_noop_turns 1
   @default_policy_per_turn_input_budget 150_000
   @default_policy_per_issue_total_budget 500_000
+  @default_policy_implement_per_turn_input_soft_budget 60_000
+  @default_policy_implement_per_turn_input_hard_budget 120_000
+  @default_policy_verify_per_turn_input_soft_budget 40_000
+  @default_policy_verify_per_turn_input_hard_budget 80_000
   @default_codex_approval_policy %{
     "reject" => %{
       "sandbox_approval" => true,
@@ -56,6 +79,7 @@ defmodule SymphonyElixir.Config do
     }
   }
   @default_codex_thread_sandbox "workspace-write"
+  @default_manual_enabled true
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000
   @default_observability_render_interval_ms 16
@@ -68,8 +92,13 @@ defmodule SymphonyElixir.Config do
                                  kind: [type: {:or, [:string, nil]}, default: nil],
                                  endpoint: [type: :string, default: @default_linear_endpoint],
                                  api_key: [type: {:or, [:string, nil]}, default: nil],
+                                 webhook_secret: [type: {:or, [:string, nil]}, default: nil],
                                  project_slug: [type: {:or, [:string, nil]}, default: nil],
                                  assignee: [type: {:or, [:string, nil]}, default: nil],
+                                 handoff_mode: [
+                                   type: :string,
+                                   default: @default_linear_handoff_mode
+                                 ],
                                  required_labels: [
                                    type: {:list, :string},
                                    default: []
@@ -88,7 +117,15 @@ defmodule SymphonyElixir.Config do
                                type: :map,
                                default: %{},
                                keys: [
-                                 interval_ms: [type: :integer, default: @default_poll_interval_ms]
+                                 interval_ms: [type: :integer, default: @default_poll_interval_ms],
+                                 discovery_interval_ms: [
+                                   type: :integer,
+                                   default: @default_poll_interval_ms
+                                 ],
+                                 healing_interval_ms: [
+                                   type: :integer,
+                                   default: @default_healing_poll_interval_ms
+                                 ]
                                ]
                              ],
                              workspace: [
@@ -96,6 +133,14 @@ defmodule SymphonyElixir.Config do
                                default: %{},
                                keys: [
                                  root: [type: {:or, [:string, nil]}, default: @default_workspace_root]
+                               ]
+                             ],
+                             manual: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 enabled: [type: :boolean, default: @default_manual_enabled],
+                                 store_root: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
                              runner: [
@@ -109,6 +154,10 @@ defmodule SymphonyElixir.Config do
                                  instance_name: [
                                    type: {:or, [:string, nil]},
                                    default: @default_runner_instance_name
+                                 ],
+                                 self_host_project: [
+                                   type: :boolean,
+                                   default: false
                                  ]
                                ]
                              ],
@@ -147,6 +196,10 @@ defmodule SymphonyElixir.Config do
                                      inherit_env: [type: :boolean, default: true],
                                      env_allowlist: [type: {:list, :string}, default: []]
                                    ]
+                                 ],
+                                 reasoning: [
+                                   type: :map,
+                                   default: %{}
                                  ],
                                  turn_timeout_ms: [
                                    type: :integer,
@@ -229,10 +282,94 @@ defmodule SymphonyElixir.Config do
                                      per_issue_total_output: [
                                        type: {:or, [:non_neg_integer, nil]},
                                        default: nil
+                                     ],
+                                     stages: [
+                                       type: :map,
+                                       default: %{},
+                                       keys: [
+                                         implement: [
+                                           type: :map,
+                                           default: %{},
+                                           keys: [
+                                             per_turn_input_soft: [
+                                               type: {:or, [:non_neg_integer, nil]},
+                                               default:
+                                                 @default_policy_implement_per_turn_input_soft_budget
+                                             ],
+                                             per_turn_input_hard: [
+                                               type: {:or, [:non_neg_integer, nil]},
+                                               default:
+                                                 @default_policy_implement_per_turn_input_hard_budget
+                                             ]
+                                           ]
+                                         ],
+                                         verify: [
+                                           type: :map,
+                                           default: %{},
+                                           keys: [
+                                             per_turn_input_soft: [
+                                               type: {:or, [:non_neg_integer, nil]},
+                                               default:
+                                                 @default_policy_verify_per_turn_input_soft_budget
+                                             ],
+                                             per_turn_input_hard: [
+                                               type: {:or, [:non_neg_integer, nil]},
+                                               default:
+                                                 @default_policy_verify_per_turn_input_hard_budget
+                                             ]
+                                           ]
+                                         ]
+                                       ]
                                      ]
                                    ]
                                  ]
                                ]
+                             ],
+                             profiles: [
+                               type: :map,
+                               default: %{}
+                             ],
+                             company: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 name: [
+                                   type: :string,
+                                   default: ""
+                                 ],
+                                 repo_url: [
+                                   type: :string,
+                                   default: ""
+                                 ],
+                                 internal_project_name: [
+                                   type: {:or, [:string, nil]},
+                                   default: nil
+                                 ],
+                                 internal_project_url: [
+                                   type: {:or, [:string, nil]},
+                                   default: nil
+                                 ],
+                                 mode: [
+                                   type: {:or, [:string, nil]},
+                                   default: nil
+                                 ],
+                                 policy_pack: [
+                                   type: :string,
+                                   default: @default_company_policy_pack
+                                 ],
+                                 author_profile_path: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_author_profile_path
+                                 ],
+                                 credential_registry_path: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_credential_registry_path
+                                 ]
+                               ]
+                             ],
+                             policy_packs: [
+                               type: :map,
+                               default: %{}
                              ],
                              hooks: [
                                type: :map,
@@ -263,6 +400,13 @@ defmodule SymphonyElixir.Config do
                                  ]
                                ]
                              ],
+                             portfolio: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 instances: [type: {:list, :map}, default: []]
+                               ]
+                             ],
                              server: [
                                type: :map,
                                default: %{},
@@ -279,6 +423,10 @@ defmodule SymphonyElixir.Config do
           install_root: String.t() | nil,
           instance_name: String.t() | nil
         }
+  @type manual_settings :: %{
+          enabled: boolean(),
+          store_root: String.t()
+        }
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
           thread_sandbox: String.t(),
@@ -289,6 +437,7 @@ defmodule SymphonyElixir.Config do
           inherit_env: boolean(),
           env_allowlist: [String.t()]
         }
+  @type reasoning_tier :: String.t()
   @type policy_settings :: %{
           require_checkout: boolean(),
           require_pr_before_review: boolean(),
@@ -305,7 +454,44 @@ defmodule SymphonyElixir.Config do
           token_budget: %{
             per_turn_input: non_neg_integer() | nil,
             per_issue_total: non_neg_integer() | nil,
-            per_issue_total_output: non_neg_integer() | nil
+            per_issue_total_output: non_neg_integer() | nil,
+            stages: %{
+              implement: %{
+                per_turn_input_soft: non_neg_integer() | nil,
+                per_turn_input_hard: non_neg_integer() | nil
+              },
+              verify: %{
+                per_turn_input_soft: non_neg_integer() | nil,
+                per_turn_input_hard: non_neg_integer() | nil
+              }
+            }
+          }
+        }
+  @type workflow_profile_settings :: %{
+          optional(atom()) => %{
+            merge_mode: String.t() | atom(),
+            approval_gate_state: String.t(),
+            deploy_approval_gate_state: String.t(),
+            post_merge_verification_required: boolean(),
+            preview_deploy_mode: String.t() | atom(),
+            production_deploy_mode: String.t() | atom(),
+            post_deploy_verification_required: boolean(),
+            max_turns_override: pos_integer() | nil
+          }
+        }
+  @type policy_pack_settings :: %{
+          optional(atom()) => %{
+            description: String.t() | nil,
+            default_issue_class: String.t(),
+            allowed_policy_classes: [String.t()],
+            required_any_issue_labels: [String.t()],
+            forbidden_issue_labels: [String.t()],
+            approval_gate_state: String.t() | nil,
+            preview_deploy_mode: String.t() | atom() | nil,
+            production_deploy_mode: String.t() | atom() | nil,
+            deploy_approval_gate_state: String.t() | nil,
+            merge_window: map() | nil,
+            production_deploy_window: map() | nil
           }
         }
   @type workspace_hooks :: %{
@@ -344,6 +530,20 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:tracker, :project_slug])
   end
 
+  @spec linear_webhook_secret() :: String.t() | nil
+  def linear_webhook_secret do
+    validated_workflow_options()
+    |> get_in([:tracker, :webhook_secret])
+    |> resolve_env_value(System.get_env("LINEAR_WEBHOOK_SECRET"))
+    |> normalize_secret_value()
+  end
+
+  @spec github_webhook_secret() :: String.t() | nil
+  def github_webhook_secret do
+    System.get_env("GITHUB_WEBHOOK_SECRET")
+    |> normalize_secret_value()
+  end
+
   @spec linear_assignee() :: String.t() | nil
   def linear_assignee do
     validated_workflow_options()
@@ -355,6 +555,13 @@ defmodule SymphonyElixir.Config do
   @spec linear_required_labels() :: [String.t()]
   def linear_required_labels do
     get_in(validated_workflow_options(), [:tracker, :required_labels]) || []
+  end
+
+  @spec tracker_handoff_mode() :: String.t()
+  def tracker_handoff_mode do
+    validated_workflow_options()
+    |> get_in([:tracker, :handoff_mode])
+    |> normalize_handoff_mode()
   end
 
   @spec linear_active_states() :: [String.t()]
@@ -369,7 +576,20 @@ defmodule SymphonyElixir.Config do
 
   @spec poll_interval_ms() :: pos_integer()
   def poll_interval_ms do
-    get_in(validated_workflow_options(), [:polling, :interval_ms])
+    discovery_poll_interval_ms()
+  end
+
+  @spec discovery_poll_interval_ms() :: pos_integer()
+  def discovery_poll_interval_ms do
+    options = validated_workflow_options()
+
+    get_in(options, [:polling, :discovery_interval_ms]) ||
+      get_in(options, [:polling, :interval_ms])
+  end
+
+  @spec healing_poll_interval_ms() :: pos_integer()
+  def healing_poll_interval_ms do
+    get_in(validated_workflow_options(), [:polling, :healing_interval_ms])
   end
 
   @spec workspace_root() :: Path.t()
@@ -379,11 +599,35 @@ defmodule SymphonyElixir.Config do
     |> resolve_path_value(@default_workspace_root)
   end
 
+  @spec manual() :: manual_settings()
+  def manual do
+    %{
+      enabled: manual_enabled?(),
+      store_root: manual_store_root()
+    }
+  end
+
+  @spec manual_enabled?() :: boolean()
+  def manual_enabled? do
+    case get_in(validated_workflow_options(), [:manual, :enabled]) do
+      value when is_boolean(value) -> value
+      _ -> @default_manual_enabled
+    end
+  end
+
+  @spec manual_store_root() :: Path.t()
+  def manual_store_root do
+    validated_workflow_options()
+    |> get_in([:manual, :store_root])
+    |> resolve_path_value(default_manual_store_root())
+  end
+
   @spec runner() :: runner_settings()
   def runner do
     %{
       install_root: runner_install_root(),
-      instance_name: runner_instance_name()
+      instance_name: runner_instance_name(),
+      self_host_project: runner_self_host_project?()
     }
   end
 
@@ -408,6 +652,14 @@ defmodule SymphonyElixir.Config do
 
       _ ->
         @default_runner_instance_name
+    end
+  end
+
+  @spec runner_self_host_project?() :: boolean()
+  def runner_self_host_project? do
+    case get_in(validated_workflow_options(), [:runner, :self_host_project]) do
+      value when is_boolean(value) -> value
+      _ -> false
     end
   end
 
@@ -475,6 +727,34 @@ defmodule SymphonyElixir.Config do
       env_allowlist: Map.get(runtime_profile, :env_allowlist) || []
     }
   end
+
+  @spec reasoning_tier_for_stage(String.t() | atom()) :: reasoning_tier()
+  def reasoning_tier_for_stage(stage) when is_binary(stage) do
+    reasoning_stages()
+    |> Map.get(String.to_existing_atom(stage))
+  rescue
+    ArgumentError -> @default_reasoning_stages[:implement]
+  end
+
+  def reasoning_tier_for_stage(stage) when is_atom(stage) do
+    Map.get(reasoning_stages(), stage, @default_reasoning_stages[:implement])
+  end
+
+  @spec provider_reasoning_value(String.t() | atom(), String.t() | atom()) :: String.t() | nil
+  def provider_reasoning_value(provider, stage) do
+    provider_key =
+      case provider do
+        value when is_atom(value) -> Atom.to_string(value)
+        value -> to_string(value)
+      end
+
+    tier = reasoning_tier_for_stage(stage)
+    mapping = provider_reasoning_map(provider_key)
+    Map.get(mapping, tier)
+  end
+
+  @spec codex_turn_effort(String.t() | atom()) :: String.t() | nil
+  def codex_turn_effort(stage), do: provider_reasoning_value("codex", stage)
 
   @spec codex_turn_timeout_ms() :: pos_integer()
   def codex_turn_timeout_ms do
@@ -573,6 +853,87 @@ defmodule SymphonyElixir.Config do
       @default_policy_default_issue_class
   end
 
+  @spec policy_pack_name() :: String.t()
+  def policy_pack_name do
+    get_in(validated_workflow_options(), [:company, :policy_pack]) ||
+      get_in(validated_workflow_options(), [:company, :mode]) ||
+      @default_company_policy_pack
+  end
+
+  @spec company_mode() :: String.t()
+  def company_mode do
+    explicit_mode =
+      validated_workflow_options()
+      |> get_in([:company, :mode])
+      |> empty_string_to_nil()
+
+    case explicit_mode do
+      value when is_binary(value) ->
+        value
+
+      _ ->
+        PolicyPack.resolve(policy_pack_name()).operating_mode || @default_company_mode
+    end
+  end
+
+  @spec company_name() :: String.t() | nil
+  def company_name do
+    validated_workflow_options()
+    |> get_in([:company, :name])
+    |> scalar_string_value()
+    |> empty_string_to_nil()
+  end
+
+  @spec company_repo_url() :: String.t() | nil
+  def company_repo_url do
+    validated_workflow_options()
+    |> get_in([:company, :repo_url])
+    |> scalar_string_value()
+    |> empty_string_to_nil()
+  end
+
+  @spec company_internal_project_name() :: String.t() | nil
+  def company_internal_project_name do
+    validated_workflow_options()
+    |> get_in([:company, :internal_project_name])
+    |> scalar_string_value()
+    |> empty_string_to_nil()
+  end
+
+  @spec company_internal_project_url() :: String.t() | nil
+  def company_internal_project_url do
+    validated_workflow_options()
+    |> get_in([:company, :internal_project_url])
+    |> scalar_string_value()
+    |> empty_string_to_nil()
+  end
+
+  @spec author_profile_path() :: String.t() | nil
+  def author_profile_path do
+    validated_workflow_options()
+    |> get_in([:company, :author_profile_path])
+    |> scalar_string_value()
+    |> empty_string_to_nil()
+  end
+
+  @spec credential_registry_path() :: String.t() | nil
+  def credential_registry_path do
+    validated_workflow_options()
+    |> get_in([:company, :credential_registry_path])
+    |> scalar_string_value()
+    |> empty_string_to_nil()
+  end
+
+  @spec portfolio_instances() :: [map()]
+  def portfolio_instances do
+    get_in(validated_workflow_options(), [:portfolio, :instances]) || []
+  end
+
+  @spec policy_packs() :: policy_pack_settings()
+  def policy_packs do
+    get_in(validated_workflow_options(), [:policy_packs]) || %{}
+  end
+
   @spec policy_stop_on_noop_turn?() :: boolean()
   def policy_stop_on_noop_turn? do
     get_in(validated_workflow_options(), [:policy, :stop_on_noop_turn])
@@ -588,6 +949,11 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:policy, :token_budget])
   end
 
+  @spec workflow_profiles() :: workflow_profile_settings()
+  def workflow_profiles do
+    get_in(validated_workflow_options(), [:profiles]) || %{}
+  end
+
   @spec policy_per_turn_input_budget() :: non_neg_integer() | nil
   def policy_per_turn_input_budget do
     get_in(validated_workflow_options(), [:policy, :token_budget, :per_turn_input])
@@ -601,6 +967,18 @@ defmodule SymphonyElixir.Config do
   @spec policy_per_issue_total_output_budget() :: non_neg_integer() | nil
   def policy_per_issue_total_output_budget do
     get_in(validated_workflow_options(), [:policy, :token_budget, :per_issue_total_output])
+  end
+
+  @spec policy_stage_token_budget(String.t() | atom()) :: map()
+  def policy_stage_token_budget(stage) when is_binary(stage) do
+    validated_workflow_options()
+    |> get_in([:policy, :token_budget, :stages, String.to_existing_atom(stage)])
+  rescue
+    ArgumentError -> %{}
+  end
+
+  def policy_stage_token_budget(stage) when is_atom(stage) do
+    get_in(validated_workflow_options(), [:policy, :token_budget, :stages, stage]) || %{}
   end
 
   @spec workflow_prompt() :: String.t()
@@ -651,7 +1029,9 @@ defmodule SymphonyElixir.Config do
          :ok <- require_tracker_kind(),
          :ok <- require_linear_token(),
          :ok <- require_linear_project(),
+         :ok <- require_valid_handoff_mode(),
          :ok <- require_valid_policy_defaults(),
+         :ok <- require_valid_policy_pack(),
          :ok <- require_valid_codex_runtime_settings(),
          :ok <- require_valid_runner_harness() do
       :ok
@@ -716,6 +1096,13 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  defp require_valid_runner_harness do
+    case RepoHarness.validate_runner_checkout(runner_self_host_project?(), RunnerRuntime.current_checkout_root()) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp require_valid_policy_defaults do
     if IssuePolicy.normalize_class(policy_default_issue_class()) do
       :ok
@@ -724,8 +1111,40 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp require_valid_runner_harness do
-    RepoHarness.validate_runner_checkout(linear_required_labels())
+  defp require_valid_policy_pack do
+    case PolicyPack.normalize_name(policy_pack_name()) do
+      nil ->
+        {:error, {:invalid_policy_pack, policy_pack_name()}}
+
+      _ ->
+        pack = PolicyPack.resolve(policy_pack_name())
+
+        cond do
+          pack.default_issue_class not in pack.allowed_policy_classes ->
+            {:error, {:invalid_policy_pack_default_issue_class, policy_pack_name(), pack.default_issue_class}}
+
+          Enum.empty?(pack.allowed_policy_classes) ->
+            {:error, {:invalid_policy_pack_allowed_policy_classes, policy_pack_name()}}
+
+          invalid_issue_labels?(pack.required_any_issue_labels) ->
+            {:error, {:invalid_policy_pack_required_issue_labels, policy_pack_name()}}
+
+          invalid_issue_labels?(pack.forbidden_issue_labels) ->
+            {:error, {:invalid_policy_pack_forbidden_issue_labels, policy_pack_name()}}
+
+          true ->
+            :ok
+        end
+    end
+  end
+
+  defp require_valid_handoff_mode do
+    case tracker_handoff_mode() do
+      "assignee" -> :ok
+      "labels" -> :ok
+      "hybrid" -> :ok
+      other -> {:error, {:invalid_tracker_handoff_mode, other}}
+    end
   end
 
   defp validated_workflow_options do
@@ -739,12 +1158,17 @@ defmodule SymphonyElixir.Config do
       tracker: extract_tracker_options(section_map(config, "tracker")),
       polling: extract_polling_options(section_map(config, "polling")),
       workspace: extract_workspace_options(section_map(config, "workspace")),
+      manual: extract_manual_options(section_map(config, "manual")),
       runner: extract_runner_options(section_map(config, "runner")),
       agent: extract_agent_options(section_map(config, "agent")),
       codex: extract_codex_options(section_map(config, "codex")),
       policy: extract_policy_options(section_map(config, "policy")),
+      profiles: extract_profiles_options(section_map(config, "profiles")),
+      company: extract_company_options(section_map(config, "company")),
+      policy_packs: extract_policy_packs_options(section_map(config, "policy_packs")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       observability: extract_observability_options(section_map(config, "observability")),
+      portfolio: extract_portfolio_options(section_map(config, "portfolio")),
       server: extract_server_options(section_map(config, "server"))
     }
   end
@@ -754,8 +1178,10 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:kind, normalize_tracker_kind(scalar_string_value(Map.get(section, "kind"))))
     |> put_if_present(:endpoint, scalar_string_value(Map.get(section, "endpoint")))
     |> put_if_present(:api_key, binary_value(Map.get(section, "api_key"), allow_empty: true))
+    |> put_if_present(:webhook_secret, binary_value(Map.get(section, "webhook_secret"), allow_empty: true))
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
     |> put_if_present(:assignee, scalar_string_value(Map.get(section, "assignee")))
+    |> put_if_present(:handoff_mode, scalar_string_value(Map.get(section, "handoff_mode")))
     |> put_if_present(:required_labels, csv_value(Map.get(section, "required_labels")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
@@ -764,6 +1190,11 @@ defmodule SymphonyElixir.Config do
   defp extract_polling_options(section) do
     %{}
     |> put_if_present(:interval_ms, integer_value(Map.get(section, "interval_ms")))
+    |> put_if_present(
+      :discovery_interval_ms,
+      integer_value(Map.get(section, "discovery_interval_ms"))
+    )
+    |> put_if_present(:healing_interval_ms, integer_value(Map.get(section, "healing_interval_ms")))
   end
 
   defp extract_workspace_options(section) do
@@ -771,10 +1202,217 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:root, binary_value(Map.get(section, "root")))
   end
 
+  defp extract_profiles_options(section) when is_map(section) do
+    section
+    |> Enum.map(fn {name, profile} ->
+      {normalize_profile_name(name), extract_profile_options(profile)}
+    end)
+    |> Enum.reject(fn {name, _profile} -> is_nil(name) end)
+    |> Map.new()
+  end
+
+  defp extract_profiles_options(_section), do: %{}
+
+  defp extract_company_options(section) when is_map(section) do
+    %{}
+    |> put_if_present(:name, scalar_string_value(Map.get(section, "name")))
+    |> put_if_present(:repo_url, scalar_string_value(Map.get(section, "repo_url")))
+    |> put_if_present(
+      :internal_project_name,
+      scalar_string_value(Map.get(section, "internal_project_name"))
+    )
+    |> put_if_present(
+      :internal_project_url,
+      scalar_string_value(Map.get(section, "internal_project_url"))
+    )
+    |> put_if_present(:mode, scalar_string_value(Map.get(section, "mode")))
+    |> put_if_present(:policy_pack, scalar_string_value(Map.get(section, "policy_pack")))
+    |> put_if_present(:author_profile_path, scalar_string_value(Map.get(section, "author_profile_path")))
+    |> put_if_present(
+      :credential_registry_path,
+      scalar_string_value(Map.get(section, "credential_registry_path"))
+    )
+  end
+
+  defp extract_company_options(_section), do: %{}
+
+  defp extract_portfolio_options(section) when is_map(section) do
+    %{}
+    |> put_if_present(:instances, extract_portfolio_instances(Map.get(section, "instances")))
+  end
+
+  defp extract_portfolio_options(_section), do: %{}
+
+  defp extract_portfolio_instances(instances) when is_list(instances) do
+    instances
+    |> Enum.map(fn
+      %{} = entry ->
+        %{}
+        |> put_if_present(:name, scalar_string_value(Map.get(entry, "name")))
+        |> put_if_present(:url, scalar_string_value(Map.get(entry, "url")))
+
+      _ ->
+        %{}
+    end)
+    |> Enum.reject(&(map_size(&1) == 0))
+  end
+
+  defp extract_portfolio_instances(_instances), do: []
+
+  defp extract_policy_packs_options(section) when is_map(section) do
+    section
+    |> Enum.reduce(%{}, fn {pack_name, value}, acc ->
+      key =
+        pack_name
+        |> scalar_string_value()
+        |> PolicyPack.normalize_name()
+
+      entry =
+        %{}
+        |> put_if_present(:description, scalar_string_value(Map.get(value, "description")))
+        |> put_if_present(:operating_mode, scalar_string_value(Map.get(value, "operating_mode")))
+        |> put_if_present(:default_issue_class, scalar_string_value(Map.get(value, "default_issue_class")))
+        |> put_if_present(:allowed_policy_classes, csv_value(Map.get(value, "allowed_policy_classes")))
+        |> put_if_present(:required_any_issue_labels, csv_value(Map.get(value, "required_any_issue_labels")))
+        |> put_if_present(:forbidden_issue_labels, csv_value(Map.get(value, "forbidden_issue_labels")))
+        |> put_if_present(
+          :tracker_mutation_mode,
+          scalar_string_value(Map.get(value, "tracker_mutation_mode"))
+        )
+        |> put_if_present(:pr_posting_mode, scalar_string_value(Map.get(value, "pr_posting_mode")))
+        |> put_if_present(
+          :thread_resolution_mode,
+          scalar_string_value(Map.get(value, "thread_resolution_mode"))
+        )
+        |> put_if_present(
+          :external_comment_mode,
+          scalar_string_value(Map.get(value, "external_comment_mode"))
+        )
+        |> put_if_present(:draft_first_required, scalar_boolean_value(Map.get(value, "draft_first_required")))
+        |> put_if_present(
+          :confidence_language,
+          scalar_string_value(Map.get(value, "confidence_language"))
+        )
+        |> put_if_present(
+          :allowed_external_channels,
+          csv_value(Map.get(value, "allowed_external_channels"))
+        )
+        |> put_if_present(:preview_deploy_allowed, scalar_boolean_value(Map.get(value, "preview_deploy_allowed")))
+        |> put_if_present(
+          :production_deploy_allowed,
+          scalar_boolean_value(Map.get(value, "production_deploy_allowed"))
+        )
+        |> put_if_present(
+          :max_concurrent_runs_per_company,
+          scalar_integer_value(Map.get(value, "max_concurrent_runs_per_company"))
+        )
+        |> put_if_present(
+          :max_merges_per_day_per_repo,
+          scalar_integer_value(Map.get(value, "max_merges_per_day_per_repo"))
+        )
+        |> put_if_present(:repo_frozen, scalar_boolean_value(Map.get(value, "repo_frozen")))
+        |> put_if_present(:company_frozen, scalar_boolean_value(Map.get(value, "company_frozen")))
+        |> put_if_present(:approval_gate_state, scalar_string_value(Map.get(value, "approval_gate_state")))
+        |> put_if_present(:preview_deploy_mode, scalar_string_value(Map.get(value, "preview_deploy_mode")))
+        |> put_if_present(:production_deploy_mode, scalar_string_value(Map.get(value, "production_deploy_mode")))
+        |> put_if_present(:deploy_approval_gate_state, scalar_string_value(Map.get(value, "deploy_approval_gate_state")))
+        |> put_if_present(:merge_window, extract_merge_window_options(Map.get(value, "merge_window")))
+        |> put_if_present(
+          :production_deploy_window,
+          extract_merge_window_options(Map.get(value, "production_deploy_window"))
+        )
+
+      if is_nil(key) or map_size(entry) == 0 do
+        acc
+      else
+        Map.put(acc, key, entry)
+      end
+    end)
+  end
+
+  defp extract_policy_packs_options(_section), do: %{}
+
+  defp extract_merge_window_options(section) when is_map(section) do
+    %{}
+    |> put_if_present(:timezone, scalar_string_value(Map.get(section, "timezone")))
+    |> put_if_present(:days, csv_value(Map.get(section, "days")))
+    |> put_if_present(:start_hour, integer_value(Map.get(section, "start_hour")))
+    |> put_if_present(:end_hour, integer_value(Map.get(section, "end_hour")))
+  end
+
+  defp extract_merge_window_options(_section), do: nil
+
+  defp invalid_issue_labels?(labels) when is_list(labels) do
+    Enum.any?(labels, fn
+      label when is_binary(label) -> String.trim(label) == ""
+      _ -> true
+    end)
+  end
+
+  defp invalid_issue_labels?(_labels), do: false
+
+  defp extract_profile_options(section) when is_map(section) do
+    %{}
+    |> put_if_present(:merge_mode, scalar_string_value(Map.get(section, "merge_mode")))
+    |> put_if_present(
+      :approval_gate_state,
+      scalar_string_value(Map.get(section, "approval_gate_state"))
+    )
+    |> put_if_present(
+      :deploy_approval_gate_state,
+      scalar_string_value(Map.get(section, "deploy_approval_gate_state"))
+    )
+    |> put_if_present(
+      :post_merge_verification_required,
+      boolean_value(Map.get(section, "post_merge_verification_required"))
+    )
+    |> put_if_present(:preview_deploy_mode, scalar_string_value(Map.get(section, "preview_deploy_mode")))
+    |> put_if_present(:production_deploy_mode, scalar_string_value(Map.get(section, "production_deploy_mode")))
+    |> put_if_present(
+      :post_deploy_verification_required,
+      boolean_value(Map.get(section, "post_deploy_verification_required"))
+    )
+    |> put_if_present(:max_turns_override, integer_value(Map.get(section, "max_turns_override")))
+  end
+
+  defp extract_profile_options(_section), do: %{}
+
+  defp normalize_profile_name(name) when is_binary(name) do
+    case name |> String.trim() |> String.downcase() |> String.replace("-", "_") do
+      "fully_autonomous" -> :fully_autonomous
+      "review_required" -> :review_required
+      "never_automerge" -> :never_automerge
+      _ -> nil
+    end
+  end
+
+  defp normalize_profile_name(name) when is_atom(name), do: normalize_profile_name(Atom.to_string(name))
+  defp normalize_profile_name(_name), do: nil
+
+  defp extract_manual_options(section) do
+    %{}
+    |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
+    |> put_if_present(:store_root, binary_value(Map.get(section, "store_root")))
+  end
+
   defp extract_runner_options(section) do
     %{}
     |> put_if_present(:install_root, binary_value(Map.get(section, "install_root")))
     |> put_if_present(:instance_name, scalar_string_value(Map.get(section, "instance_name")))
+  end
+
+  defp default_manual_store_root do
+    case Application.get_env(:symphony_elixir, :log_file) do
+      value when is_binary(value) ->
+        value
+        |> Path.expand()
+        |> Path.dirname()
+        |> Path.dirname()
+        |> Path.join("manual_issues")
+
+      _ ->
+        Path.join(File.cwd!(), "manual_issues")
+    end
   end
 
   defp extract_agent_options(section) do
@@ -792,6 +1430,7 @@ defmodule SymphonyElixir.Config do
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:runtime_profile, runtime_profile_value(Map.get(section, "runtime_profile")))
+    |> put_if_present(:reasoning, reasoning_settings_value(Map.get(section, "reasoning")))
     |> put_if_present(:turn_timeout_ms, integer_value(Map.get(section, "turn_timeout_ms")))
     |> put_if_present(:read_timeout_ms, integer_value(Map.get(section, "read_timeout_ms")))
     |> put_if_present(:stall_timeout_ms, integer_value(Map.get(section, "stall_timeout_ms")))
@@ -805,6 +1444,56 @@ defmodule SymphonyElixir.Config do
   end
 
   defp runtime_profile_value(_value), do: :omit
+
+  defp reasoning_settings_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(:stages, reasoning_stage_overrides_value(Map.get(section, "stages")))
+    |> put_if_present(:providers, reasoning_provider_overrides_value(Map.get(section, "providers")))
+  end
+
+  defp reasoning_settings_value(_value), do: :omit
+
+  defp reasoning_stage_overrides_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(:implement, scalar_string_value(Map.get(section, "implement")))
+    |> put_if_present(:verify, scalar_string_value(Map.get(section, "verify")))
+    |> put_if_present(:verifier, scalar_string_value(Map.get(section, "verifier")))
+  end
+
+  defp reasoning_stage_overrides_value(_value), do: :omit
+
+  defp reasoning_provider_overrides_value(section) when is_map(section) do
+    section
+    |> Enum.reduce(%{}, fn {provider, value}, acc ->
+      case reasoning_provider_override_value(value) do
+        :omit -> acc
+        normalized -> Map.put(acc, to_string(provider), normalized)
+      end
+    end)
+    |> empty_map_to_omit()
+  end
+
+  defp reasoning_provider_overrides_value(_value), do: :omit
+
+  defp reasoning_provider_override_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(:reasoning_map, reasoning_map_value(Map.get(section, "reasoning_map")))
+  end
+
+  defp reasoning_provider_override_value(_value), do: :omit
+
+  defp reasoning_map_value(section) when is_map(section) do
+    section
+    |> Enum.reduce(%{}, fn {tier, value}, acc ->
+      case scalar_string_value(value) do
+        :omit -> acc
+        normalized -> Map.put(acc, to_string(tier), normalized)
+      end
+    end)
+    |> empty_map_to_omit()
+  end
+
+  defp reasoning_map_value(_value), do: :omit
 
   defp extract_policy_options(section) do
     %{}
@@ -865,9 +1554,53 @@ defmodule SymphonyElixir.Config do
       :per_issue_total_output,
       non_negative_integer_value(Map.get(section, "per_issue_total_output"))
     )
+    |> put_if_present(:stages, policy_stage_token_budget_stages_value(Map.get(section, "stages")))
   end
 
   defp policy_token_budget_value(_value), do: :omit
+
+  defp policy_stage_token_budget_stages_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(:implement, policy_stage_token_budget_stage_value(Map.get(section, "implement")))
+    |> put_if_present(:verify, policy_stage_token_budget_stage_value(Map.get(section, "verify")))
+  end
+
+  defp policy_stage_token_budget_stages_value(_value), do: :omit
+
+  defp policy_stage_token_budget_stage_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(
+      :per_turn_input_soft,
+      non_negative_integer_value(Map.get(section, "per_turn_input_soft"))
+    )
+    |> put_if_present(
+      :per_turn_input_hard,
+      non_negative_integer_value(Map.get(section, "per_turn_input_hard"))
+    )
+  end
+
+  defp policy_stage_token_budget_stage_value(_value), do: :omit
+
+  defp reasoning_stages do
+    overrides = get_in(validated_workflow_options(), [:codex, :reasoning, :stages]) || %{}
+
+    @default_reasoning_stages
+    |> Map.merge(overrides)
+  end
+
+  defp provider_reasoning_map(provider_key) do
+    default_mapping = Map.get(@default_provider_reasoning_maps, provider_key, %{})
+
+    overrides =
+      validated_workflow_options()
+      |> get_in([:codex, :reasoning, :providers, provider_key, :reasoning_map])
+      |> case do
+        value when is_map(value) -> value
+        _ -> %{}
+      end
+
+    Map.merge(default_mapping, overrides)
+  end
 
   defp section_map(config, key) do
     case Map.get(config, key) do
@@ -879,6 +1612,9 @@ defmodule SymphonyElixir.Config do
   defp put_if_present(map, _key, :omit), do: map
   defp put_if_present(map, key, value), do: Map.put(map, key, value)
 
+  defp empty_map_to_omit(%{} = map) when map_size(map) == 0, do: :omit
+  defp empty_map_to_omit(map), do: map
+
   defp scalar_string_value(nil), do: :omit
   defp scalar_string_value(value) when is_binary(value), do: String.trim(value)
   defp scalar_string_value(value) when is_boolean(value), do: to_string(value)
@@ -886,6 +1622,33 @@ defmodule SymphonyElixir.Config do
   defp scalar_string_value(value) when is_float(value), do: to_string(value)
   defp scalar_string_value(value) when is_atom(value), do: Atom.to_string(value)
   defp scalar_string_value(_value), do: :omit
+
+  defp scalar_boolean_value(value) when value in [true, false], do: value
+
+  defp scalar_boolean_value(value) when is_binary(value) do
+    case String.trim(String.downcase(value)) do
+      "true" -> true
+      "false" -> false
+      _ -> :omit
+    end
+  end
+
+  defp scalar_boolean_value(_value), do: :omit
+
+  defp scalar_integer_value(value) when is_integer(value), do: value
+
+  defp scalar_integer_value(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {integer, ""} -> integer
+      _ -> :omit
+    end
+  end
+
+  defp scalar_integer_value(_value), do: :omit
+
+  defp empty_string_to_nil(""), do: nil
+  defp empty_string_to_nil(:omit), do: nil
+  defp empty_string_to_nil(value), do: value
 
   defp binary_value(value, opts \\ [])
 
@@ -1142,6 +1905,15 @@ defmodule SymphonyElixir.Config do
   end
 
   defp normalize_tracker_kind(_kind), do: nil
+
+  defp normalize_handoff_mode(mode) when is_binary(mode) do
+    case mode |> String.trim() |> String.downcase() do
+      "" -> @default_linear_handoff_mode
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_handoff_mode(_mode), do: @default_linear_handoff_mode
 
   defp workflow_config do
     case current_workflow() do

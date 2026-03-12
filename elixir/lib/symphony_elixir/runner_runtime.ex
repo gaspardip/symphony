@@ -9,7 +9,6 @@ defmodule SymphonyElixir.RunnerRuntime do
   @history_file "history.jsonl"
   @manifest_file "manifest.json"
   @current_link "current"
-  @dogfood_label "dogfood:symphony"
   @default_canary_label "canary:symphony"
   @default_runner_mode "stable"
   @default_history_limit 20
@@ -181,12 +180,17 @@ defmodule SymphonyElixir.RunnerRuntime do
       |> List.wrap()
       |> normalize_labels()
 
-    if runner_mode(metadata) == "canary_active" do
+    cond do
+      Config.runner_self_host_project?() ->
+        workflow_labels
+
+      runner_mode(metadata) == "canary_active" ->
       workflow_labels
       |> Kernel.++(canary_required_labels(metadata))
       |> normalize_labels()
-    else
-      workflow_labels
+
+      true ->
+        workflow_labels
     end
   end
 
@@ -349,10 +353,14 @@ defmodule SymphonyElixir.RunnerRuntime do
   end
 
   defp runner_validation_required?(required_labels) do
-    required_labels
-    |> List.wrap()
-    |> normalize_labels()
-    |> Enum.member?(@dogfood_label)
+    if Config.runner_self_host_project?() do
+      true
+    else
+      required_labels
+      |> List.wrap()
+      |> normalize_labels()
+      |> Enum.member?("dogfood:symphony")
+    end
   end
 
   defp current_link_path(install_root) when is_binary(install_root) do

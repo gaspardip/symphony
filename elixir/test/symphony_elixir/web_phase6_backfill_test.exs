@@ -68,9 +68,48 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     end
   end
 
+  defmodule ReviewFeedbackGitHubClient do
+    @behaviour SymphonyElixir.GitHubClient
+
+    @impl true
+    def existing_pull_request(_workspace, _opts), do: {:error, :missing_pr}
+
+    @impl true
+    def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+      do: {:error, :unsupported}
+
+    @impl true
+    def merge_pull_request(_workspace, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def review_feedback(_workspace, _opts) do
+      {:ok,
+       %{
+         pr_url: "https://github.com/example/repo/pull/99",
+         review_decision: "CHANGES_REQUESTED",
+         reviews: [
+           %{id: 101, body: "Please cover the empty state too.", state: "CHANGES_REQUESTED", author: "reviewer"}
+         ],
+         comments: [
+           %{id: 102, body: "nit: keep the copy consistent", path: "lib/example.ex", line: 12, author: "reviewer"}
+         ]
+       }}
+    end
+
+    @impl true
+    def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+    @impl true
+    def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+  end
+
   setup do
     endpoint_config = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
     previous_log_file = Application.get_env(:symphony_elixir, :log_file)
+    previous_pr_watcher_github_client = Application.get_env(:symphony_elixir, :pr_watcher_github_client)
     log_root = Path.join(System.tmp_dir!(), "symphony-elixir-web-#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(log_root)
@@ -83,6 +122,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
         Application.delete_env(:symphony_elixir, :log_file)
       else
         Application.put_env(:symphony_elixir, :log_file, previous_log_file)
+      end
+
+      if is_nil(previous_pr_watcher_github_client) do
+        Application.delete_env(:symphony_elixir, :pr_watcher_github_client)
+      else
+        Application.put_env(:symphony_elixir, :pr_watcher_github_client, previous_pr_watcher_github_client)
       end
 
       File.rm_rf(log_root)
@@ -139,7 +184,14 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
   end
 
   test "presenter issue payload falls back to tracked issue and persisted run state" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_name: "Client Boundary",
+      company_internal_project_name: "Symphony Internal",
+      company_internal_project_url: "https://linear.app/internal/project/symphony",
+      company_mode: "client_safe",
+      company_policy_pack: "client_safe"
+    )
 
     issue = %Issue{
       id: "issue-web-fallback",
@@ -155,6 +207,19 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     File.mkdir_p!(workspace)
 
     long_output = String.duplicate("validation output ", 30)
+    compatibility_report = %{
+      compatible: false,
+      failing_checks: ["behavioral_proof"],
+      checks: [
+        %{
+          id: "behavioral_proof",
+          required: true,
+          status: "failed",
+          summary: "Behavioral proof missing.",
+          details: "The harness must declare `verification.behavioral_proof`."
+        }
+      ]
+    }
 
     assert {:ok, _state} =
              RunStateStore.transition(workspace, "blocked", %{
@@ -162,11 +227,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                issue_identifier: issue.identifier,
                last_rule_id: "policy.review_required",
                last_failure_class: "policy",
+               last_decision_summary: "Blocked due to policy.review_required.",
                next_human_action: "Ask for human review.",
                last_decision: %{
                  status: "failed",
                  command: "./scripts/validate.sh",
-                 output: long_output
+                 output: long_output,
+                 metadata: %{
+                   compatibility_report: compatibility_report
+                 }
                }
              })
 
@@ -180,6 +249,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.issue_identifier == issue.identifier
     assert payload.issue_id == issue.id
     assert payload.status == "Human Review"
+    assert payload.company.name == "Client Boundary"
+    assert payload.company.mode == "client_safe"
+    assert payload.company.policy_pack == "client_safe"
     assert payload.running == nil
     assert payload.retry == nil
     assert payload.paused == nil
@@ -188,9 +260,20 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.last_rule_id == "policy.review_required"
     assert payload.last_failure_class == "policy"
     assert payload.next_human_action == "Ask for human review."
+    assert payload.policy_class == "review_required"
+    assert payload.workflow_profile.name == "review_required"
+    assert payload.workflow_profile.approval_gate_kind == "client_approval"
+    assert payload.workflow_profile.merge_mode == :review_gate
+    assert payload.operator_summary.current_stage == "blocked"
+    assert payload.operator_summary.human_action_required == "Ask for human review."
+    assert payload.runtime_health.proof.compatibility_report_present
+    assert payload.runtime_health.intake.company_mode == "client_safe"
+    assert payload.runtime_health.summary == "Blocked due to policy.review_required."
     assert payload.last_decision.status == "failed"
     assert payload.last_decision.command == "./scripts/validate.sh"
     assert String.ends_with?(payload.last_decision.output, "…")
+    assert payload.compatibility_report == compatibility_report
+    assert payload.last_decision.compatibility_report == compatibility_report
   end
 
   test "presenter refresh and control payloads normalize timestamps and unexpected results" do
@@ -261,6 +344,402 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              }
   end
 
+  test "delivery report summarizes completed work in client-readable form" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_name: "Client Boundary",
+      company_mode: "client_safe",
+      company_policy_pack: "client_safe"
+    )
+
+    issue = %Issue{
+      id: "issue-report-1",
+      identifier: "MT-REPORT-1",
+      title: "Delivery report item",
+      description: "Tracked delivery",
+      state: "Done"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(Config.workspace_root(), issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "done", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: "tracker",
+               effective_policy_class: "review_required",
+               last_decision_summary: "Autonomously finalized after merge completed.",
+               last_validation: %{status: "passed"},
+               last_verifier: %{status: "passed"},
+               last_merge: %{url: "https://github.com/example/repo/pull/12"},
+               last_post_merge: %{status: "passed"}
+             })
+
+    RunLedger.record("merge.completed", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      stage: "merge",
+      actor_type: "runtime",
+      summary: "Merged PR.",
+      metadata: %{url: "https://github.com/example/repo/pull/12"}
+    })
+
+    RunLedger.record("post_merge.completed", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      stage: "post_merge",
+      actor_type: "runtime",
+      summary: "Post-merge verification passed."
+    })
+
+    orchestrator_name = Module.concat(__MODULE__, :DeliveryReportOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    payload = json_response(get(build_conn(), "/api/v1/reports/delivery"), 200)
+
+    assert payload["company"]["name"] == "Client Boundary"
+    assert payload["company"]["mode"] == "client_safe"
+    assert payload["summary"]["recent_deliveries"] >= 1
+
+    report_item =
+      Enum.find(payload["deliveries"], fn delivery ->
+        delivery["issue_identifier"] == issue.identifier
+      end)
+
+    assert report_item["title"] == "Delivery report item"
+    assert report_item["status"] == "Done"
+    assert report_item["workflow_profile"]["name"] == "review_required"
+    assert report_item["evidence"]["pr_url"] == "https://github.com/example/repo/pull/12"
+    assert report_item["evidence"]["validation_status"] == "passed"
+    assert report_item["evidence"]["verifier_status"] == "passed"
+    assert report_item["proof"]["validation_status"] == "passed"
+    assert report_item["proof"]["verifier_status"] == "passed"
+    assert report_item["review_feedback"]["watcher_mode"] == "draft_only"
+    assert report_item["review_feedback"]["thread_state_counts"] == %{}
+    assert report_item["traceability"]["pr_url"] == "https://github.com/example/repo/pull/12"
+    assert report_item["summary"]["why_here"] =~ "Autonomously finalized"
+    assert report_item["explanation"]["ready_reason"] =~ "Autonomously completed"
+    assert report_item["explanation"]["proof_used"]["behavioral"] == "unknown"
+    assert report_item["explanation"]["proof_used"]["validation_status"] == "passed"
+    assert report_item["explanation"]["approval_used"]["review_required"] == true
+    assert report_item["explanation"]["still_needs_human_input"] == nil
+    assert report_item["explanation"]["review_follow_up"] == "No tracked PR review feedback."
+  end
+
+  test "issue payload exposes traceability links for internal and external references" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_name: "Client Boundary",
+      company_internal_project_name: "Symphony Internal",
+      company_internal_project_url: "https://linear.app/internal/project/symphony",
+      company_mode: "client_safe",
+      company_policy_pack: "client_safe"
+    )
+
+    issue = %Issue{
+      id: "issue-traceability-1",
+      identifier: "MT-TRACE-1",
+      title: "Traceability issue",
+      description: "Tracked issue",
+      state: "Human Review",
+      url: "https://linear.app/client/issue/MT-TRACE-1",
+      internal_identifier: "SYM-TRACE-1",
+      internal_url: "https://linear.app/internal/issue/SYM-TRACE-1"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(Config.workspace_root(), issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "human_review", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: "tracker",
+               last_merge: %{url: "https://github.com/example/repo/pull/77"}
+             })
+
+    orchestrator_name = Module.concat(__MODULE__, :TraceabilityIssueOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    payload = json_response(get(build_conn(), "/api/v1/MT-TRACE-1"), 200)
+
+    assert payload["traceability"]["source_issue_url"] == "https://linear.app/client/issue/MT-TRACE-1"
+    assert payload["traceability"]["pr_url"] == "https://github.com/example/repo/pull/77"
+    assert payload["traceability"]["internal_issue"]["identifier"] == "SYM-TRACE-1"
+    assert payload["traceability"]["internal_issue"]["url"] == "https://linear.app/internal/issue/SYM-TRACE-1"
+    assert payload["traceability"]["internal_project"]["name"] == "Symphony Internal"
+    assert payload["traceability"]["internal_project"]["url"] == "https://linear.app/internal/project/symphony"
+  end
+
+  test "issue payload derives PR URL from review feedback history when persisted threads are cached" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_name: "Client Boundary",
+      company_mode: "client_safe",
+      company_policy_pack: "client_safe"
+    )
+
+    issue = %Issue{
+      id: "issue-traceability-review-1",
+      identifier: "MT-TRACE-REVIEW-1",
+      title: "Review feedback traceability",
+      description: "Tracked review feedback",
+      state: "Human Review"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(Config.workspace_root(), issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "human_review", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: "tracker",
+               review_threads: %{
+                 "comment:1" => %{
+                   "draft_state" => "drafted",
+                   "draft_reply" => "Will address.",
+                   "resolution_recommendation" => "keep_open_until_confirmed"
+                 }
+               },
+               last_decision_summary: "New PR review feedback detected on https://github.com/example/repo/pull/88."
+             })
+
+    RunLedger.record("review.feedback_detected", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      stage: "human_review",
+      actor_type: "runtime",
+      summary: "Detected PR review feedback.",
+      details: "New PR review feedback detected on https://github.com/example/repo/pull/88."
+    })
+
+    orchestrator_name = Module.concat(__MODULE__, :TraceabilityReviewIssueOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    payload = json_response(get(build_conn(), "/api/v1/MT-TRACE-REVIEW-1"), 200)
+
+    assert payload["traceability"]["pr_url"] == "https://github.com/example/repo/pull/88"
+    assert payload["pr_watcher"]["review_feedback"]["status"] == "cached"
+    assert payload["pr_watcher"]["review_feedback"]["pr_url"] == "https://github.com/example/repo/pull/88"
+  end
+
+  test "issue payload derives traceability pr_url from posted review thread replies when summaries are absent" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_name: "Client Boundary",
+      company_mode: "private_autopilot",
+      company_policy_pack: "private_autopilot"
+    )
+
+    issue = %Issue{
+      id: "issue-traceability-review-2",
+      identifier: "MT-TRACE-REVIEW-2",
+      title: "Review feedback traceability from threads",
+      description: "Tracked review feedback",
+      state: "Human Review"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(Config.workspace_root(), issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "human_review", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: "manual",
+               review_threads: %{
+                 "comment:1" => %{
+                   "draft_state" => "posted",
+                   "draft_reply" => "Already handled.",
+                   "posted_reply_url" => "https://github.com/example/repo/pull/91#discussion_r1"
+                 }
+               }
+             })
+
+    orchestrator_name = Module.concat(__MODULE__, :TraceabilityReviewIssueFromThreadsOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    payload = json_response(get(build_conn(), "/api/v1/MT-TRACE-REVIEW-2"), 200)
+
+    assert payload["traceability"]["pr_url"] == "https://github.com/example/repo/pull/91"
+    assert payload["pr_watcher"]["review_feedback"]["pr_url"] == "https://github.com/example/repo/pull/91"
+  end
+
+  test "delivery report includes review thread state counts and follow-up summary" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_name: "Client Boundary",
+      company_mode: "private_autopilot",
+      company_policy_pack: "private_autopilot"
+    )
+
+    issue = %Issue{
+      id: "issue-delivery-review-report-1",
+      identifier: "MT-DELIVERY-REVIEW-1",
+      title: "Delivery review report item",
+      description: "Tracked issue",
+      state: "Human Review"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(Config.workspace_root(), issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "human_review", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: "manual",
+               review_threads: %{
+                 "comment:1" => %{
+                   "draft_state" => "approved_to_post",
+                   "draft_reply" => "Looks good to post.",
+                   "posted_reply_url" => "https://github.com/example/repo/pull/90#discussion_r1"
+                 },
+                 "comment:2" => %{
+                   "draft_state" => "posted",
+                   "draft_reply" => "Already posted.",
+                   "posted_reply_url" => "https://github.com/example/repo/pull/90#discussion_r2"
+                 }
+               },
+               last_merge: %{url: "https://github.com/example/repo/pull/90"},
+               last_decision_summary: "New PR review feedback detected on https://github.com/example/repo/pull/90."
+             })
+
+    RunLedger.record("review.feedback_detected", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      stage: "human_review",
+      actor_type: "runtime",
+      summary: "Detected PR review feedback.",
+      details: "New PR review feedback detected on https://github.com/example/repo/pull/90."
+    })
+
+    RunLedger.record("merge.completed", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      stage: "merge",
+      actor_type: "runtime",
+      summary: "Merged PR.",
+      metadata: %{url: "https://github.com/example/repo/pull/90"}
+    })
+
+    orchestrator_name = Module.concat(__MODULE__, :DeliveryReviewReportOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    payload = json_response(get(build_conn(), "/api/v1/reports/delivery"), 200)
+
+    report_item =
+      Enum.find(payload["deliveries"], fn delivery ->
+        delivery["issue_identifier"] == issue.identifier
+      end)
+
+    assert report_item["review_feedback"]["thread_state_counts"] == %{
+             "approved_to_post" => 1,
+             "posted" => 1
+           }
+
+    assert report_item["explanation"]["review_follow_up"] == "1 review thread(s) approved to post."
+    assert report_item["traceability"]["pr_url"] == "https://github.com/example/repo/pull/90"
+  end
+
+  test "portfolio endpoint aggregates configured Symphony instances" do
+    previous_fetcher = Application.get_env(:symphony_elixir, :portfolio_fetcher)
+
+    Application.put_env(:symphony_elixir, :portfolio_fetcher, fn
+      "http://runner-a.test" ->
+        {:ok,
+         %{
+           "company" => %{"name" => "Alpha", "mode" => "private_autopilot"},
+           "counts" => %{"running" => 1, "retrying" => 0, "paused" => 0, "queue" => 2, "skipped" => 0},
+           "triage" => %{"summary" => %{"attention_now" => 1}}
+         }}
+
+      "http://runner-b.test" ->
+        {:ok,
+         %{
+           "company" => %{"name" => "Beta", "mode" => "client_safe"},
+           "counts" => %{"running" => 0, "retrying" => 1, "paused" => 0, "queue" => 1, "skipped" => 1},
+           "triage" => %{"summary" => %{"attention_now" => 2}}
+         }}
+    end)
+
+    on_exit(fn ->
+      if is_nil(previous_fetcher) do
+        Application.delete_env(:symphony_elixir, :portfolio_fetcher)
+      else
+        Application.put_env(:symphony_elixir, :portfolio_fetcher, previous_fetcher)
+      end
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      portfolio_instances: [
+        %{"name" => "Alpha Runner", "url" => "http://runner-a.test"},
+        %{"name" => "Beta Runner", "url" => "http://runner-b.test"}
+      ]
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :PortfolioOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
+    )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    payload = json_response(get(build_conn(), "/api/v1/portfolio"), 200)
+
+    assert payload["totals"]["instances"] == 2
+    assert payload["totals"]["healthy_instances"] == 2
+    assert payload["totals"]["running"] == 1
+    assert payload["totals"]["attention_now"] == 3
+
+    assert Enum.any?(payload["instances"], fn instance ->
+             instance["name"] == "Alpha Runner" and instance["company"]["name"] == "Alpha"
+           end)
+
+    assert Enum.any?(payload["instances"], fn instance ->
+             instance["name"] == "Beta Runner" and instance["company"]["mode"] == "client_safe"
+           end)
+  end
+
   test "status dashboard notify_update is harmless without a server and disabled dashboards ignore refreshes" do
     missing_dashboard = Module.concat(__MODULE__, :MissingDashboard)
     assert :ok = StatusDashboard.notify_update(missing_dashboard)
@@ -316,6 +795,10 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert html =~ "Harness invalid"
     assert html =~ "Human Review blocked without PR"
     assert html =~ "No PR to merge"
+    assert html =~ "Preview deploy"
+    assert html =~ "Production deploy"
+    assert html =~ "Post-deploy verify"
+    assert html =~ "Deploy approval"
     assert html =~ "MT-QUEUE"
 
     assert :ok = BackfillOrchestrator.put_refresh(orchestrator_name, %{queued: true, requested_at: ~U[2026-03-07 16:05:00Z]})
@@ -376,6 +859,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert state_payload.counts == %{running: 1, retrying: 1, paused: 1, queue: 1, skipped: 1}
     assert state_payload.priority_overrides == %{"MT-QUEUE" => 7}
     assert state_payload.policy_overrides == %{"MT-QUEUE" => "review_required"}
+    assert state_payload.polling.dispatch_mode == "manual_only_degraded"
+    assert state_payload.polling.tracker_reads_paused == true
+    assert state_payload.polling.manual_dispatch_enabled == true
+    assert state_payload.polling.dispatch_summary =~ "manual issues continue to dispatch"
+    assert state_payload.pr_watcher.enabled == true
+    assert state_payload.pr_watcher.mode == "draft_first"
+    assert state_payload.triage.summary.attention_now >= 3
+    assert state_payload.triage.summary.autonomous_now == 0
+    assert state_payload.triage.summary.recently_finished == 0
 
     [running] = state_payload.running
     assert running.last_message == "turn completed (completed) (in 11, out 4, total 15)"
@@ -396,16 +888,23 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert retrying.issue_identifier == "MT-RETRY"
     assert retrying.priority_override == 4
     assert is_binary(retrying.due_at)
+    assert retrying.operator_summary.automatic_next == "Issue is waiting for the retry window to expire."
 
     [paused] = state_payload.paused
     assert paused.resume_state == "in_progress"
+    assert paused.operator_summary.human_action_required == "Resume the issue when work should continue."
 
     [skipped] = state_payload.skipped
     assert skipped.reason == "missing labels"
+    assert skipped.operator_summary.why_here == "Skipped"
 
     [queue] = state_payload.queue
     assert queue.label_gate_eligible == false
     assert queue.rank == 7
+    assert queue.operator_summary.why_here == "Queued"
+    assert queue.operator_summary.automatic_next == "Wait for the required operator action before dispatch."
+    assert Enum.any?(state_payload.triage.attention_now, &(&1.issue_identifier == "MT-PAUSED"))
+    assert Enum.any?(state_payload.triage.attention_now, &(&1.issue_identifier == "MT-SKIP"))
 
     assert {:ok, paused_payload} = Presenter.issue_payload("MT-PAUSED", orchestrator_name, 50)
     assert paused_payload.status == "paused"
@@ -496,6 +995,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     assert {:ok, %{action: "hold_for_human_review"}} =
              Presenter.control_payload("hold_for_human_review", "MT-ACTION", %{}, orchestrator_name)
+
+    assert {:ok, %{action: "hold_for_human_review"}} =
+             Presenter.control_payload("hold_for_approval", "MT-ACTION", %{}, orchestrator_name)
 
     assert {:ok, %{action: "retry_now"}} =
              Presenter.control_payload("retry_now", "MT-ACTION", %{}, orchestrator_name)
@@ -639,6 +1141,10 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert html =~ "Missing dogfood label"
     assert html =~ "Policy review_required"
     assert html =~ "operator override"
+    assert html =~ "Passive runtime"
+    assert html =~ "Review approved"
+    assert html =~ "Token pressure high"
+    assert html =~ "Review approval"
 
     queue_html =
       render_click(view, "control", %{
@@ -690,6 +1196,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert running.publish.last_verifier.status == "passed"
     assert running.publish.last_verifier.output == "456"
     assert running.publish.last_post_merge.output == "789"
+    assert running.publish.last_deploy_preview.output == "preview ok"
+    assert running.publish.last_deploy_production.output == "production ok"
+    assert running.publish.deploy_approved == true
     assert running.publish.last_verifier_verdict == "safe"
     assert running.publish.acceptance_summary == "all green"
     assert running.publish.merge_sha == "abc123"
@@ -698,14 +1207,85 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert running.policy.token_budget.per_turn_input.tone == "good"
     assert running.policy.token_budget.per_issue_total.tone == "good"
     assert running.policy.token_budget.per_issue_total_output.tone == "muted"
+    assert running.harness.deploy_preview_command == "./scripts/deploy-preview.sh"
+    assert running.harness.deploy_production_command == "./scripts/deploy-production.sh"
+    assert running.harness.deploy_rollback_command == "./scripts/deploy-rollback.sh"
+    assert running.harness.post_deploy_verify_command == "./scripts/post-deploy-verify.sh"
+    assert running.runtime_health.passive_stage.deploy_approved == true
+    assert running.runtime_health.pr_watcher.mode == "draft_first"
+    assert running.runtime_health.pr_watcher.posting_allowed == true
+    assert running.runtime_health.deploy.preview_status == :passed
+    assert running.runtime_health.deploy.production_status == :passed
+    assert running.runtime_health.deploy.post_deploy_status == :passed
+    assert running.runtime_health.risk.change_type
+    assert running.runtime_health.risk.risk_level
+    assert running.runtime_health.proof.proof_class
+    assert running.operator_summary.risk_level
+    assert running.operator_summary.proof_class
+    assert running.operator_summary.pr_watcher.mode == "draft_first"
+
+    workspace = Path.join(Config.workspace_root(), "MT-GREEN")
+    File.rm_rf!(workspace)
+    File.mkdir_p!(workspace)
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, ReviewFeedbackGitHubClient)
 
     assert {:ok, issue_payload} = Presenter.issue_payload("MT-GREEN", orchestrator_name, 50)
     assert issue_payload.status == "running"
+    assert issue_payload.pr_watcher.mode == "draft_first"
+    assert issue_payload.pr_watcher.review_feedback.status == "ok"
+    assert issue_payload.pr_watcher.review_feedback.pending_drafts_count == 2
+    assert Enum.any?(issue_payload.pr_watcher.review_feedback.items, &(&1.kind == :review))
+    assert Enum.any?(issue_payload.pr_watcher.review_feedback.items, &(&1.kind == :comment))
+    assert issue_payload.review_thread_states == %{}
     assert issue_payload.issue_id == "issue-green"
     assert issue_payload.running.issue_identifier == "MT-GREEN"
     assert issue_payload.attempts.restart_count == 0
     assert issue_payload.attempts.current_retry_attempt == 0
     assert issue_payload.recent_events == []
+  end
+
+  test "issue payload hydrates persisted review thread state into review feedback drafts" do
+    orchestrator_name = Module.concat(__MODULE__, :PresenterReviewThreadStateOrchestrator)
+    review_running =
+      green_running_entry()
+      |> Map.put(:identifier, "MT-REVIEWSTATE")
+      |> Map.put(:issue_id, "issue-reviewstate")
+      |> Map.put(:workspace, "/tmp/MT-REVIEWSTATE")
+
+    start_supervised!(
+      {BackfillOrchestrator,
+       name: orchestrator_name,
+       test_pid: self(),
+       snapshot: %{base_snapshot() | running: [review_running]}}
+    )
+
+    workspace = Path.join(Config.workspace_root(), "MT-REVIEWSTATE")
+    File.mkdir_p!(workspace)
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, ReviewFeedbackGitHubClient)
+
+    {:ok, _state} =
+      RunStateStore.transition(workspace, "publish", %{
+        issue_id: "issue-reviewstate",
+        issue_identifier: "MT-REVIEWSTATE",
+        issue_source: "tracker",
+        review_threads: %{
+          "review:101" => %{
+            "draft_state" => "approved_to_post",
+            "draft_reply" => "Ready to send.",
+            "resolution_recommendation" => "resolve_after_change"
+          }
+        }
+      })
+
+    assert {:ok, issue_payload} = Presenter.issue_payload("MT-REVIEWSTATE", orchestrator_name, 50)
+
+    review_item =
+      Enum.find(issue_payload.pr_watcher.review_feedback.items, &(&1.thread_key == "review:101"))
+
+    assert issue_payload.review_thread_states["review:101"]["draft_state"] == "approved_to_post"
+    assert review_item.draft_state == "approved_to_post"
+    assert review_item.draft_reply == "Ready to send."
+    assert review_item.resolution_recommendation == "resolve_after_change"
   end
 
   test "presenter tracked fallback without state and integer reprioritization succeed" do
@@ -760,6 +1340,108 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-CONTROL", 5}}
   end
 
+  test "issue payload keeps harness and publish detail for waiting deploy-approval issues" do
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-deploy-waiting-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace_root)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    issue_identifier = "MT-DEPLOY-WAIT"
+    workspace = Path.join(workspace_root, issue_identifier)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    File.write!(
+      Path.join(workspace, ".symphony/harness.yml"),
+      """
+      version: 1
+      base_branch: main
+      preflight:
+        command: ./scripts/preflight.sh
+      validation:
+        command: ./scripts/validate.sh
+      smoke:
+        command: ./scripts/smoke.sh
+      post_merge:
+        command: ./scripts/post-merge.sh
+      artifacts:
+        command: ./scripts/artifacts.sh
+      deploy:
+        preview:
+          command: ./scripts/deploy-preview.sh
+        production:
+          command: ./scripts/deploy-production.sh
+        post_deploy_verify:
+          command: ./scripts/post-deploy-verify.sh
+        rollback:
+          command: ./scripts/deploy-rollback.sh
+      pull_request:
+        required_checks:
+          - validate
+      """
+    )
+
+    {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "Deploy Approval", %{
+               issue_id: "issue-deploy-wait",
+               issue_identifier: issue_identifier,
+               issue_source: "manual",
+               policy_class: "fully_autonomous",
+               last_deploy_preview: %{status: "passed", output: "preview ok"},
+               last_post_deploy_verify: %{status: "passed", output: "post deploy ok"},
+               deploy_approved: false,
+               merge_sha: "abc123",
+               stop_reason: "deploy approval required"
+             })
+
+    orchestrator_name = Module.concat(__MODULE__, :DeployWaitingIssueOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()}
+    )
+
+    assert {:ok, payload} = Presenter.issue_payload(issue_identifier, orchestrator_name, 50)
+    assert payload.status == "Deploy Approval"
+    assert payload.harness.deploy_production_command == "./scripts/deploy-production.sh"
+    assert payload.harness.post_deploy_verify_command == "./scripts/post-deploy-verify.sh"
+    assert payload.publish.last_deploy_preview.output == "preview ok"
+    assert payload.publish.last_post_deploy_verify.output == "post deploy ok"
+    assert payload.publish.deploy_approved == false
+  end
+
+  test "presenter state payload tolerates queue error entries" do
+    orchestrator_name = Module.concat(__MODULE__, :PresenterQueueErrorOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator,
+       name: orchestrator_name,
+       test_pid: self(),
+       snapshot:
+         empty_snapshot()
+         |> Map.put(:queue, [
+           %{
+             error: "{:linear_api_status, 400, %{body: %{errors: [%{message: \"rate limited\"}]}}}"
+           }
+         ])}
+    )
+
+    state_payload = Presenter.state_payload(orchestrator_name, 50)
+
+    assert state_payload.counts == %{running: 0, retrying: 0, paused: 0, queue: 1, skipped: 0}
+    assert [%{error: error, issue_id: nil, issue_identifier: nil}] = state_payload.queue
+    assert error =~ "linear_api_status"
+
+    assert {:error, :issue_not_found} = Presenter.issue_payload("MT-NONE", orchestrator_name, 50)
+  end
+
   test "presenter state payload covers review gate matrix and ledger derived activity messages" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
@@ -809,6 +1491,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert await_checks.policy.pr_gate.label == "PR attached"
     assert await_checks.policy.merge_gate.label == "Awaiting required checks"
     assert await_checks.review.missing_required_checks == ["test"]
+    assert await_checks.runtime_mode.label == "Passive runtime"
+    assert await_checks.review_approved == true
+    assert await_checks.token_pressure == "high"
+    assert await_checks.status_summary.tone == "warn"
+    assert await_checks.status_summary.automatic_next == "Merge the PR without starting another agent turn."
+    assert await_checks.policy.next_human_action == "No human action is required unless the passive runtime reports a failure."
     assert await_checks.last_decision.verdict == "needs_review"
     assert await_checks.last_decision.rule_id == "policy.await_checks"
     assert await_checks.last_decision.failure_class == "checks"
@@ -816,10 +1504,129 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert await_checks.last_decision.ledger_event_id == "evt-await"
     assert Enum.any?(await_checks.recent_activity, &(&1.message == "target state review"))
 
+    merge_window =
+      await_checks
+      |> Map.put(:stage, "await_checks")
+      |> Map.put(:merge_window_wait, %{
+        next_allowed_at: "2026-03-16T09:00:00Z",
+        timezone: "Etc/UTC"
+      })
+      |> Map.put(:review_approved, false)
+      |> Map.put(:token_pressure, nil)
+      |> Map.put(:ready_for_merge, true)
+
+    merge_window_summary =
+      Presenter.helper_for_test(:status_summary_payload, [merge_window, merge_window.review])
+
+    assert merge_window_summary.automatic_next ==
+             "Wait for the next allowed merge window before automerge continues."
+
+    assert merge_window_summary.summary =~
+             "Automerge is deferred until 2026-03-16T09:00:00Z"
+
+    merge_window_health =
+      Presenter.helper_for_test(
+        :runtime_health_summary,
+        [
+          merge_window,
+          %{checkout?: true, git?: true},
+          %{error: nil},
+          merge_window.review
+        ]
+      )
+
+    assert merge_window_health =~
+             "Automerge is deferred until 2026-03-16T09:00:00Z"
+
     assert {:ok, review_payload} = Presenter.issue_payload("MT-REVIEW-PR", orchestrator_name, 50)
     assert review_payload.status == "running"
     assert review_payload.running.review.pr_url == "https://example.com/pr/review"
     assert review_payload.recent_events == review_pr.recent_activity
+  end
+
+  test "decision history and ledger helpers expose repair and finalization messages clearly" do
+    repair_entry = %{
+      "event_type" => "runtime.repaired",
+      "summary" => "Recovered from a workspace without a valid Git checkout.",
+      "metadata" => %{"repair_stage" => "checkout"}
+    }
+
+    post_merge_entry = %{
+      "event_type" => "post_merge.completed",
+      "summary" => "Post-merge verification passed."
+    }
+
+    merge_entry = %{
+      "event_type" => "merge.completed",
+      "summary" => "Merged pull request #9."
+    }
+
+    assert Presenter.helper_for_test(:ledger_message, [repair_entry]) ==
+             "auto-healed to checkout: Recovered from a workspace without a valid Git checkout."
+
+    assert Presenter.helper_for_test(:ledger_message, [post_merge_entry]) ==
+             "Post-merge verification passed."
+
+    assert Presenter.helper_for_test(:ledger_message, [merge_entry]) ==
+             "Merged pull request #9."
+
+    assert Presenter.helper_for_test(:ledger_activity_tone, ["runtime.repaired"]) == "good"
+    assert Presenter.helper_for_test(:ledger_activity_tone, ["post_merge.completed"]) == "good"
+  end
+
+  test "done issue payload explains autonomous finalization from run state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-web-done-summary-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: workspace_root
+      )
+
+      issue_identifier = "MT-DONE-SUMMARY"
+      workspace = Path.join(workspace_root, issue_identifier)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+      :ok =
+        RunStateStore.save(workspace, %{
+          issue_id: "manual:mt-done-summary",
+          issue_identifier: issue_identifier,
+          issue_source: :manual,
+          stage: "done",
+          last_merge: %{
+            status: :merged,
+            url: "https://example.com/pr/42"
+          },
+          last_post_merge: %{
+            status: :passed
+          }
+        })
+
+      orchestrator_name = Module.concat(__MODULE__, :DoneSummaryOrchestrator)
+
+      start_supervised!(
+        {BackfillOrchestrator,
+         name: orchestrator_name,
+         test_pid: self(),
+         snapshot: base_snapshot()}
+      )
+
+      assert {:ok, payload} = Presenter.issue_payload(issue_identifier, orchestrator_name, 50)
+      assert payload.status == "done"
+      assert payload.operator_summary.current_stage == "done"
+
+      assert payload.operator_summary.why_here ==
+               "Autonomously finalized after merge and post-merge verification passed (https://example.com/pr/42)."
+
+      assert payload.operator_summary.automatic_next == "No further runtime action is required."
+      assert payload.runtime_health.summary == payload.operator_summary.why_here
+    after
+      File.rm_rf(workspace_root)
+    end
   end
 
   test "status dashboard helper formatters cover unavailable rendering, dedupe, urls, and codex messages" do
@@ -1043,7 +1850,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
         secondary: %{remaining: 3, limit: 5},
         credits: %{has_credits: true, balance: 12.5}
       },
-      polling: %{poll_interval_ms: 1_000, next_poll_in_ms: 0, checking?: true},
+      polling: %{
+        poll_interval_ms: 1_000,
+        next_poll_in_ms: 0,
+        checking?: true,
+        dispatch_mode: "manual_only_degraded",
+        dispatch_summary: "Tracker reads are paused due to rate limiting; manual issues continue to dispatch.",
+        tracker_reads_paused: true,
+        manual_dispatch_enabled: true
+      },
       runner: %{
         instance_name: "test-runner",
         runner_mode: "stable",
@@ -1231,6 +2046,10 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       validation_command: nil,
       smoke_command: "./scripts/smoke.sh",
       post_merge_command: "./scripts/post-merge.sh",
+      deploy_preview_command: "./scripts/deploy-preview.sh",
+      deploy_production_command: "./scripts/deploy-production.sh",
+      deploy_rollback_command: "./scripts/deploy-rollback.sh",
+      post_deploy_verify_command: "./scripts/post-deploy-verify.sh",
       required_checks: ["build", "lint"],
       publish_required_checks: [],
       ci_required_checks: [],
@@ -1245,12 +2064,16 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       labels: ["bug"],
       required_labels: ["dogfood"],
       label_gate_eligible: false,
+      deploy_approved: true,
       last_rule_id: "policy.review_required",
       last_failure_class: "policy",
       last_decision_summary: "Need review",
       next_human_action: "Attach a PR.",
       last_ledger_event_id: "evt-run",
-      last_decision: %{status: "failed", command: "mix test", output: String.duplicate("x", 260)}
+      last_decision: %{status: "failed", command: "mix test", output: String.duplicate("x", 260)},
+      last_deploy_preview: %{status: "passed", command: "./scripts/deploy-preview.sh", output: "preview ok"},
+      last_deploy_production: %{status: "passed", command: "./scripts/deploy-production.sh", output: "production ok"},
+      last_post_deploy_verify: %{status: "passed", command: "./scripts/post-deploy-verify.sh", output: "post deploy ok"}
     }
   end
 
@@ -1367,6 +2190,10 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       validation_command: "./scripts/validate.sh",
       smoke_command: "./scripts/smoke.sh",
       post_merge_command: "./scripts/post-merge.sh",
+      deploy_preview_command: "./scripts/deploy-preview.sh",
+      deploy_production_command: "./scripts/deploy-production.sh",
+      deploy_rollback_command: "./scripts/deploy-rollback.sh",
+      post_deploy_verify_command: "./scripts/post-deploy-verify.sh",
       required_checks: ["build"],
       publish_required_checks: ["ci"],
       ci_required_checks: ["ci"],
@@ -1392,6 +2219,10 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_verifier_verdict: "safe",
       acceptance_summary: "all green",
       last_post_merge: %{status: "done", output: 789},
+      last_deploy_preview: %{status: "passed", output: "preview ok"},
+      last_deploy_production: %{status: "passed", output: "production ok"},
+      last_post_deploy_verify: %{status: "passed", output: "post deploy ok"},
+      deploy_approved: true,
       merge_sha: "abc123",
       stop_reason: "merged",
       last_decision: nil
@@ -1522,6 +2353,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       identifier: "MT-AWAIT-CHECKS",
       state: "In Progress",
       stage: "merge",
+      passive?: true,
+      review_approved: true,
+      token_pressure: "high",
       session_id: "thread-await-checks",
       turn_count: 2,
       codex_app_server_pid: "4343",

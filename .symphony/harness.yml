@@ -1,5 +1,44 @@
 version: 1
 base_branch: main
+agent_harness:
+  scope: self_host_only
+  initializer:
+    enabled: true
+    max_turns: 1
+    refresh: missing
+  knowledge:
+    root: .symphony/knowledge
+    required_files:
+      - product.md
+      - architecture.md
+      - codebase-map.md
+      - delivery-loop.md
+      - testing-and-ops.md
+  progress:
+    root: .symphony/progress
+    pattern: "{{ issue.identifier }}.md"
+    required_sections:
+      - Goal
+      - Acceptance
+      - Plan
+      - Work Log
+      - Evidence
+      - Next Step
+  features:
+    root: .symphony/features
+    format: yaml
+    required_fields:
+      - id
+      - title
+      - status
+      - summary
+      - source_paths
+      - acceptance_signals
+      - dependencies
+      - last_updated_by_issue
+  publish_gate:
+    require_progress: true
+    require_feature_update_on_code_change: true
 preflight:
   command:
     - ./scripts/symphony-preflight.sh

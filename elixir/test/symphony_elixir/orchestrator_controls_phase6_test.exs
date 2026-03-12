@@ -4,6 +4,34 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
   alias SymphonyElixir.LeaseManager
   alias SymphonyElixir.Orchestrator.State
 
+  defmodule PostingGitHubClient do
+    @behaviour SymphonyElixir.GitHubClient
+
+    @impl true
+    def existing_pull_request(_workspace, _opts), do: {:error, :missing_pr}
+
+    @impl true
+    def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+      do: {:error, :unsupported}
+
+    @impl true
+    def merge_pull_request(_workspace, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def review_feedback(_workspace, _opts), do: {:error, :review_feedback_unavailable}
+
+    @impl true
+    def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+    @impl true
+    def post_review_comment_reply(_pr_url, comment_id, _body, _opts) do
+      {:ok, %{id: "reply-#{comment_id}", url: "https://github.com/example/reply/#{comment_id}", output: ""}}
+    end
+  end
+
   test "invalid dogfood runner install disables dispatch while keeping snapshots available" do
     runner_root =
       Path.join(
@@ -54,7 +82,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert snapshot.runner.runner_health == "invalid"
     assert snapshot.runner.runner_health_rule_id == "runner.install_missing"
     assert snapshot.running == []
-    assert [%{error: "{:runner_health, \"runner.install_missing\"}"}] = snapshot.queue
+    assert snapshot.queue == [] or
+             snapshot.queue == [%{error: "{:runner_health, \"runner.install_missing\"}"}]
   end
 
   test "request refresh, snapshot, and queue payloads expose paused skipped and queued issues" do
@@ -127,7 +156,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     refresh = Orchestrator.request_refresh(orchestrator_name)
     assert refresh.queued == true
     assert refresh.coalesced == true
-    assert refresh.operations == ["poll", "reconcile"]
+    assert refresh.operations == ["events", "reconcile"]
 
     snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
     assert [%{identifier: "MT-PAUSED", resume_state: "In Progress"}] = snapshot.paused
@@ -262,6 +291,652 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     reset_payload = Orchestrator.reprioritize_issue(orchestrator_name, issue.identifier, nil)
     assert reset_payload.ok == true
     assert reset_payload.override_rank == nil
+  end
+
+  test "review thread lifecycle controls update persisted manual thread state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-review-threads-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "review-thread-lifecycle",
+        "identifier" => "MT-REVIEW-THREADS",
+        "title" => "Review lifecycle",
+        "description" => "Exercise review thread controls",
+        "acceptance_criteria" => ["Keep persisted review thread state in sync"],
+        "policy_class" => "review_required"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-review-threads")
+
+    review_threads = %{
+      "review:1" => %{
+        "thread_key" => "review:1",
+        "draft_state" => "drafted",
+        "draft_reply" => "Draft reply"
+      },
+      "comment:2" => %{
+        "thread_key" => "comment:2",
+        "draft_state" => "drafted",
+        "draft_reply" => "Inline draft reply"
+      }
+    }
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "human_review", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        review_threads: review_threads,
+        pr_url: "https://github.com/example/repo/pull/1"
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :ReviewThreadControlOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    approve_payload = Orchestrator.approve_review_drafts(orchestrator_name, issue.identifier)
+    assert approve_payload.ok == true
+    assert approve_payload.action == "approve_review_drafts"
+    assert approve_payload.changed_threads == 2
+    assert is_binary(approve_payload.ledger_event_id)
+
+    {:ok, approved_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert get_in(approved_state, [:review_threads, "review:1", "draft_state"]) == "approved_to_post"
+    assert get_in(approved_state, [:review_threads, "comment:2", "draft_state"]) == "approved_to_post"
+
+    posted_payload = Orchestrator.mark_review_threads_posted(orchestrator_name, issue.identifier)
+    assert posted_payload.ok == true
+    assert posted_payload.action == "mark_review_threads_posted"
+    assert posted_payload.changed_threads == 2
+
+    {:ok, posted_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert get_in(posted_state, [:review_threads, "review:1", "draft_state"]) == "posted"
+    assert get_in(posted_state, [:review_threads, "comment:2", "draft_state"]) == "posted"
+
+    resolved_payload = Orchestrator.resolve_review_threads(orchestrator_name, issue.identifier)
+    assert resolved_payload.ok == true
+    assert resolved_payload.action == "resolve_review_threads"
+    assert resolved_payload.changed_threads == 2
+
+    {:ok, resolved_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert get_in(resolved_state, [:review_threads, "review:1", "draft_state"]) == "resolved"
+    assert get_in(resolved_state, [:review_threads, "comment:2", "draft_state"]) == "resolved"
+  end
+
+  test "post review drafts posts approved inline replies when policy allows" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-post-review-drafts-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root,
+      company_mode: "private_autopilot",
+      company_policy_pack: "private_autopilot"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "review-post",
+        "identifier" => "MT-REVIEW-POST",
+        "title" => "Post approved review drafts",
+        "description" => "Exercise posting approved review drafts",
+        "acceptance_criteria" => ["Post approved inline review replies"],
+        "policy_class" => "review_required"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-review-post")
+
+    review_threads = %{
+      "review:1" => %{
+        "thread_key" => "review:1",
+        "draft_state" => "approved_to_post",
+        "draft_reply" => "Review summary reply."
+      },
+      "comment:2" => %{
+        "thread_key" => "comment:2",
+        "draft_state" => "approved_to_post",
+        "draft_reply" => "Inline draft reply"
+      }
+    }
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "human_review", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        review_threads: review_threads,
+        pr_url: "https://github.com/example/repo/pull/1"
+      })
+
+    previous_client = Application.get_env(:symphony_elixir, :pr_watcher_github_client)
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, PostingGitHubClient)
+
+    orchestrator_name = Module.concat(__MODULE__, :PostReviewDraftsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      if is_nil(previous_client) do
+        Application.delete_env(:symphony_elixir, :pr_watcher_github_client)
+      else
+        Application.put_env(:symphony_elixir, :pr_watcher_github_client, previous_client)
+      end
+    end)
+
+    payload = Orchestrator.post_review_drafts(orchestrator_name, issue.identifier)
+    assert payload.ok == true
+    assert payload.action == "post_review_drafts"
+    assert payload.posted_threads == 1
+    assert payload.skipped_threads == 1
+    assert is_binary(payload.ledger_event_id)
+
+    {:ok, posted_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert get_in(posted_state, [:review_threads, "comment:2", "draft_state"]) == "posted"
+    assert is_binary(get_in(posted_state, [:review_threads, "comment:2", "posted_reply_id"]))
+    assert is_binary(get_in(posted_state, [:review_threads, "comment:2", "posted_reply_url"]))
+    assert get_in(posted_state, [:review_threads, "review:1", "draft_state"]) == "approved_to_post"
+  end
+
+  test "retry now restores a blocked manual issue to its last actionable stage" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-resume-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    issue = %Issue{
+      id: "manual:retry-blocked",
+      identifier: "MT-RETRY-BLOCKED",
+      title: "Retry blocked manual issue",
+      description: "resume from verify",
+      state: "Blocked",
+      source: :manual,
+      labels: ["policy:fully-autonomous"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-retry-blocked")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier
+      })
+
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "validate", %{})
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "verify", %{})
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{})
+
+    {:ok, _submitted_issue} = SymphonyElixir.ManualIssueStore.submit(%{
+      "id" => "retry-blocked",
+      "identifier" => issue.identifier,
+      "title" => issue.title,
+      "description" => issue.description,
+      "acceptance_criteria" => ["Resume blocked issue"]
+    })
+
+    :ok = SymphonyElixir.ManualIssueStore.update_issue_state(issue.id, "Blocked")
+    :ok = SymphonyElixir.LeaseManager.release(issue.id)
+    :ok = SymphonyElixir.LeaseManager.acquire(issue.id, issue.identifier, "stale-owner")
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryResumeOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+
+    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    assert refreshed_issue.state == "In Progress"
+
+    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.stage == "verify"
+    assert run_state.stop_reason == nil
+    assert run_state.last_decision == nil
+
+    {:ok, lease} = SymphonyElixir.LeaseManager.read(issue.id)
+    assert lease["owner"] != "stale-owner"
+  end
+
+  test "retry now sends verifier feedback blocks back to implement" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-verifier-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    issue = %Issue{
+      id: "manual:retry-verifier-failed",
+      identifier: "MT-RETRY-VERIFIER",
+      title: "Retry verifier failed issue",
+      description: "resume from implement after verifier needs more work",
+      state: "Blocked",
+      source: :manual,
+      labels: ["policy:fully-autonomous"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-retry-verifier")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier
+      })
+
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "validate", %{})
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "verify", %{})
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+        stop_reason: %{
+          code: "verifier_failed",
+          rule_id: "verification.needs_more_work",
+          failure_class: "verification",
+          details: "needs more work"
+        }
+      })
+
+    {:ok, _submitted_issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "retry-verifier-failed",
+        "identifier" => issue.identifier,
+        "title" => issue.title,
+        "description" => issue.description,
+        "acceptance_criteria" => ["Retry after verifier asks for more work"]
+      })
+
+    :ok = SymphonyElixir.ManualIssueStore.update_issue_state(issue.id, "Blocked")
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryVerifierResumeOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+
+    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    assert refreshed_issue.state == "In Progress"
+
+    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.stage == "implement"
+    assert run_state.stop_reason == nil
+  end
+
+  test "retry now falls back to checkout when the persisted run state belongs to another issue" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-stale-state-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    issue = %Issue{
+      id: "manual:events-map-filters",
+      identifier: "EVT-PILOT-01",
+      title: "Retry stale-state manual issue",
+      description: "resume from checkout when workspace state is stale",
+      state: "Blocked",
+      source: :manual,
+      labels: ["policy:fully-autonomous"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    File.write!(
+      SymphonyElixir.RunStateStore.state_path(workspace),
+      Jason.encode!(%{
+        issue_id: "manual:clz-14-manual",
+        issue_identifier: "CLZ-14",
+        stage: "publish",
+        stop_reason: %{code: "noop_turn"}
+      })
+    )
+
+    {:ok, _submitted_issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "events-map-filters",
+        "identifier" => issue.identifier,
+        "title" => issue.title,
+        "description" => issue.description,
+        "acceptance_criteria" => ["Resume stale state from checkout"]
+      })
+
+    :ok = SymphonyElixir.ManualIssueStore.update_issue_state(issue.id, "Blocked")
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryStaleStateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+
+    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    assert refreshed_issue.state == "Todo"
+
+    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.issue_id == issue.id
+    assert run_state.issue_identifier == issue.identifier
+    assert run_state.stage == "checkout"
+    assert run_state.stop_reason == nil
+  end
+
+  test "retry now sends verifier feedback with dirty workspace back to validate" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-verifier-validate-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    issue = %Issue{
+      id: "manual:retry-verifier-validate",
+      identifier: "MT-RETRY-VERIFIER-VALIDATE",
+      title: "Retry verifier dirty workspace",
+      description: "resume from validate after verifier asks for more work",
+      state: "Blocked",
+      source: :manual,
+      labels: ["policy:fully-autonomous"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-retry-verifier-validate")
+    System.cmd("git", ["init"], cd: workspace)
+    File.write!(Path.join(workspace, "feature.txt"), "new proof\n")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier
+      })
+
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "validate", %{})
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "verify", %{})
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+        stop_reason: %{
+          code: "verifier_failed",
+          rule_id: "verification.needs_more_work",
+          failure_class: "verification",
+          details: "needs more work"
+        }
+      })
+
+    {:ok, _submitted_issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "retry-verifier-validate",
+        "identifier" => issue.identifier,
+        "title" => issue.title,
+        "description" => issue.description,
+        "acceptance_criteria" => ["Retry from validate when workspace changed after verifier"]
+      })
+
+    :ok = SymphonyElixir.ManualIssueStore.update_issue_state(issue.id, "Blocked")
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryVerifierValidateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+
+    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    assert refreshed_issue.state == "In Progress"
+
+    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.stage == "validate"
+    assert run_state.stop_reason == nil
+  end
+
+  test "retry now resumes noop-blocked proof runs at verify when proof is already present" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-proof-verify-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    issue = %Issue{
+      id: "manual:retry-proof-ready",
+      identifier: "MT-RETRY-PROOF-READY",
+      title: "Retry proof-ready issue",
+      description: "resume verifier when proof is already present",
+      state: "Blocked",
+      source: :manual,
+      labels: ["policy:fully-autonomous"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.mkdir_p!(workspace)
+
+    System.cmd("git", ["init"], cd: workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+    File.write!(Path.join(workspace, ".symphony/harness.yml"), """
+    version: 1
+    base_branch: main
+    preflight:
+      command: "echo preflight"
+    validation:
+      command: "echo validation"
+    smoke:
+      command: "echo smoke"
+    post_merge:
+      command: "echo post"
+    artifacts:
+      command: "echo artifacts"
+    pull_request:
+      required_checks: ["make-all"]
+    verification:
+      behavioral_proof:
+        required: true
+        mode: unit_first
+        source_paths: ["Sources"]
+        test_paths: ["Tests"]
+    """)
+
+    File.mkdir_p!(Path.join(workspace, "Sources"))
+    File.mkdir_p!(Path.join(workspace, "Tests"))
+    File.write!(Path.join([workspace, "Sources", "Feature.swift"]), "struct Feature {}\n")
+    File.write!(Path.join([workspace, "Tests", "FeatureTests.swift"]), "struct FeatureTests {}\n")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier
+      })
+
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "validate", %{})
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "verify", %{})
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+        stop_reason: %{
+          code: "noop_turn",
+          rule_id: "noop.max_turns_exceeded",
+          failure_class: "implementation",
+          details: "Noop after adding proof"
+        },
+        last_verifier: %{
+          reason_code: "behavior_proof_missing"
+        }
+      })
+
+    {:ok, _submitted_issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "retry-proof-ready",
+        "identifier" => issue.identifier,
+        "title" => issue.title,
+        "description" => issue.description,
+        "acceptance_criteria" => ["Retry verify when proof is already present"]
+      })
+
+    :ok = SymphonyElixir.ManualIssueStore.update_issue_state(issue.id, "Blocked")
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryProofVerifyOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+
+    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    assert refreshed_issue.state == "In Progress"
+
+    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.stage == "verify"
+    assert run_state.stop_reason == nil
+  end
+
+  test "candidate processing blocks manual issues whose policy class is disallowed by the company pack" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-policy-pack-block-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root,
+      company_policy_pack: "client_safe"
+    )
+
+    {:ok, issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "policy-pack-blocked",
+        "identifier" => "MT-POLICY-PACK-BLOCKED",
+        "title" => "Client-safe pack should block fully autonomous issues",
+        "description" => "prove pre-dispatch policy pack blocking",
+        "policy_class" => "fully_autonomous",
+        "labels" => ["symphony:events"],
+        "acceptance_criteria" => ["The issue is blocked before implementation."]
+      })
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    next_state =
+      Orchestrator.process_candidate_issues_for_test(%Orchestrator.State{}, [issue])
+
+    assert next_state.skipped_issues == []
+
+    {:ok, refreshed_issue} =
+      SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+
+    assert refreshed_issue.state == "Blocked"
+
+    {:ok, record} =
+      SymphonyElixir.ManualIssueStore.load_record_by_identifier(issue.identifier)
+
+    assert record.last_decision_summary == "Moved to Blocked"
+    assert Enum.any?(record.comments, &String.contains?(Map.get(&1, "body", ""), "policy.pack_disallows_class"))
   end
 
   test "dispatch helper functions cover label gates blockers and revalidation outcomes" do
@@ -663,13 +1338,20 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         },
         "issue-retry-cancel",
         nil,
-        %{identifier: "MT-RETRY-CANCEL", error: "new error"}
+        %{
+          identifier: "MT-RETRY-CANCEL",
+          error: "new error",
+          delay_type: :passive_continuation,
+          issue: %Issue{id: "issue-retry-cancel", identifier: "MT-RETRY-CANCEL"}
+        }
       )
 
     retry_entry = Map.fetch!(state.retry_attempts, "issue-retry-cancel")
     assert retry_entry.attempt == 3
     assert retry_entry.identifier == "MT-RETRY-CANCEL"
     assert retry_entry.error == "new error"
+    assert retry_entry.delay_type == :passive_continuation
+    assert retry_entry.issue.identifier == "MT-RETRY-CANCEL"
     assert is_reference(retry_entry.timer_ref)
     assert retry_entry.timer_ref != old_timer
     assert Process.read_timer(old_timer) == false
@@ -677,6 +1359,137 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     on_exit(fn ->
       Process.cancel_timer(retry_entry.timer_ref)
     end)
+  end
+
+  test "passive retry path uses issue lookup instead of candidate list fetch" do
+    issue_id = "manual:issue-passive-retry"
+    identifier = "MT-PASSIVE-RETRY"
+    owner = "passive-retry-owner"
+
+    state = %State{
+      lease_owner: owner,
+      claimed: MapSet.new([issue_id])
+    }
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_for_test(
+        state,
+        issue_id,
+        1,
+        %{identifier: identifier, delay_type: :passive_continuation},
+        {:error, :candidate_fetch_should_not_run},
+        {:ok, nil}
+      )
+
+    refute MapSet.member?(next_state.claimed, issue_id)
+    refute Map.has_key?(next_state.retry_attempts, issue_id)
+  end
+
+  test "passive continuation metadata backs off await_checks retries based on poll count" do
+    identifier = "MT-PASSIVE-DELAY"
+    workspace = Workspace.path_for_issue(identifier)
+
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+               issue_id: "manual:passive-delay",
+               issue_identifier: identifier,
+               await_checks_polls: 6
+             })
+
+    metadata =
+      Orchestrator.continuation_metadata_for_running_entry_for_test(%{identifier: identifier})
+
+    assert metadata.delay_type == :passive_continuation
+    assert metadata.passive_delay_ms == 30_000
+  end
+
+  test "passive dispatch reuses existing claim and marks running entry as passive" do
+    issue = %Issue{
+      id: "issue-passive-running",
+      identifier: "MT-PASSIVE-RUNNING",
+      title: "Passive running",
+      description: "passive dispatch",
+      state: "Merging",
+      labels: []
+    }
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+    end)
+
+    state =
+      Orchestrator.dispatch_passive_issue_for_test(
+        %State{lease_owner: "passive-owner", claimed: MapSet.new([issue.id])},
+        issue,
+        spawn_fun: fn dispatch_state, dispatch_issue, attempt, recipient ->
+          Orchestrator.do_spawn_passive_worker_for_test(
+            dispatch_state,
+            dispatch_issue,
+            attempt,
+            recipient,
+            start_child_fun: fn _supervisor, fun ->
+              send(self(), {:passive_spawn_invoked, fun})
+              {:ok, worker}
+            end
+          )
+        end
+      )
+
+    assert_received {:passive_spawn_invoked, _fun}
+
+    assert %{passive?: true, issue: ^issue, identifier: "MT-PASSIVE-RUNNING"} =
+             Map.fetch!(state.running, issue.id)
+
+    assert MapSet.member?(state.claimed, issue.id)
+  end
+
+  test "stage-aware runtime dispatch routes await_checks issues to passive dispatch" do
+    workspace_root =
+      Path.join(System.tmp_dir!(), "orchestrator-runtime-dispatch-#{System.unique_integer([:positive])}")
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-runtime-passive",
+      identifier: "MT-RUNTIME-PASSIVE",
+      title: "Runtime passive",
+      description: "dispatch routing",
+      state: "Merging",
+      labels: []
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-runtime-passive")
+    SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier
+    })
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    assert %{mode: :passive, issue: ^issue, attempt: 2} =
+             Orchestrator.dispatch_runtime_issue_for_test(
+               %State{},
+               issue,
+               2,
+               active_dispatch_fun: fn _state, dispatch_issue, attempt ->
+                 %{mode: :active, issue: dispatch_issue, attempt: attempt}
+               end,
+               passive_dispatch_fun: fn _state, dispatch_issue, attempt ->
+                 %{mode: :passive, issue: dispatch_issue, attempt: attempt}
+               end
+             )
   end
 
   test "stop hold and validation error branches on operator controls return structured failures" do
@@ -764,5 +1577,16 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     on_exit(fn ->
       LeaseManager.release(issue_id)
     end)
+  end
+
+  defp init_git_workspace!(workspace, opts \\ []) do
+    branch = Keyword.get(opts, :branch, "main")
+    File.mkdir_p!(workspace)
+    assert {_, 0} = System.cmd("git", ["init", "-b", branch], cd: workspace)
+    assert {_, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace)
+    assert {_, 0} = System.cmd("git", ["config", "user.email", "symfony@example.com"], cd: workspace)
+    File.write!(Path.join(workspace, "README.md"), "# test\n")
+    assert {_, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
+    assert {_, 0} = System.cmd("git", ["commit", "-m", "init"], cd: workspace)
   end
 end

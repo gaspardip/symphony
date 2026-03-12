@@ -3,10 +3,8 @@ defmodule SymphonyElixir.PullRequestManager do
   Owns PR publication, attachment, and merge operations for delivery runs.
   """
 
-  alias SymphonyElixir.GitHubCLIClient
-  alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.RunInspector
-  alias SymphonyElixir.Tracker
+  alias SymphonyElixir.{AuthorProfile, CredentialRegistry, GitHubCLIClient, PolicyPack}
+  alias SymphonyElixir.{IssueSource, Linear.Issue, RunInspector}
 
   @spec ensure_pull_request(Path.t(), Issue.t() | map(), map(), keyword()) ::
           {:ok, %{url: String.t(), state: String.t() | nil, body_validation: map()}} | {:error, term()}
@@ -17,7 +15,9 @@ defmodule SymphonyElixir.PullRequestManager do
     github_client = github_client(opts)
     github_opts = github_client_opts(opts)
 
-    with {:ok, validation} <- validate_pr_body(workspace, body, opts),
+    with :ok <- ensure_pr_posting_allowed(opts),
+         :ok <- ensure_credential_scope("github", "pr_write", opts),
+         {:ok, validation} <- validate_pr_body(workspace, body, opts),
          {:ok, pr} <-
            create_or_update_pull_request(
              workspace,
@@ -37,7 +37,10 @@ defmodule SymphonyElixir.PullRequestManager do
   @spec merge_pull_request(Path.t(), keyword()) ::
           {:ok, %{merged: boolean(), url: String.t() | nil, output: String.t(), status: atom()}} | {:error, term()}
   def merge_pull_request(workspace, opts \\ []) when is_binary(workspace) do
-    github_client(opts).merge_pull_request(workspace, github_client_opts(opts))
+    with :ok <- ensure_pr_posting_allowed(opts),
+         :ok <- ensure_credential_scope("github", "merge", opts) do
+      github_client(opts).merge_pull_request(workspace, github_client_opts(opts))
+    end
   end
 
   @spec existing_pull_request(Path.t(), keyword()) ::
@@ -86,7 +89,7 @@ defmodule SymphonyElixir.PullRequestManager do
   defp attach_issue_link(%Issue{id: issue_id} = issue, url, opts) when is_binary(issue_id) and is_binary(url) do
     title = Keyword.get(opts, :attachment_title, "GitHub PR: #{issue_identifier(issue)}")
 
-    case Tracker.attach_link(issue_id, title, url) do
+    case IssueSource.attach_link(issue, title, url) do
       :ok -> :ok
       {:error, _reason} -> :ok
     end
@@ -147,6 +150,7 @@ defmodule SymphonyElixir.PullRequestManager do
   end
 
   defp symphony_pr_body(issue, run_state, summary) do
+    profile = AuthorProfile.load()
     validation = Map.get(run_state, :last_validation, %{}) |> Map.get(:status, "not-run")
     verifier = Map.get(run_state, :last_verifier, %{}) |> Map.get(:status, "not-run")
     stage = Map.get(run_state, :stage, "publish")
@@ -158,7 +162,7 @@ defmodule SymphonyElixir.PullRequestManager do
 
     #### TL;DR
 
-    #{truncate_line(summary, 120)}
+    #{AuthorProfile.summarize(summary, :pr)}
 
     #### Summary
 
@@ -176,9 +180,11 @@ defmodule SymphonyElixir.PullRequestManager do
     - [x] Validation #{validation}; verifier #{verifier}
     """
     |> String.trim()
+    |> maybe_apply_pr_tone(profile)
   end
 
   defp generic_pr_body(issue, run_state, summary) do
+    profile = AuthorProfile.load()
     validation = Map.get(run_state, :last_validation, %{}) |> Map.get(:status, "not-run")
     verifier = Map.get(run_state, :last_verifier, %{}) |> Map.get(:status, "not-run")
 
@@ -186,11 +192,35 @@ defmodule SymphonyElixir.PullRequestManager do
     Automated PR for #{issue_identifier(issue)}.
 
     Issue: #{issue_url(issue) || "n/a"}
-    Summary: #{summary}
+    Summary: #{AuthorProfile.summarize(summary, :pr)}
     Validation: #{validation}
     Verifier: #{verifier}
     """
     |> String.trim()
+    |> maybe_apply_pr_tone(profile)
+  end
+
+  defp maybe_apply_pr_tone(body, %{pr_tone: "clear"}), do: body
+  defp maybe_apply_pr_tone(body, _profile), do: body
+
+  defp ensure_pr_posting_allowed(opts) do
+    pack = PolicyPack.resolve(Keyword.get(opts, :policy_pack))
+
+    if PolicyPack.pr_posting_allowed?(pack) do
+      :ok
+    else
+      {:error, {:pr_posting_forbidden, PolicyPack.name_string(pack)}}
+    end
+  end
+
+  defp ensure_credential_scope(provider, operation, opts) do
+    CredentialRegistry.allow?(
+      provider,
+      operation,
+      policy_pack: Keyword.get(opts, :policy_pack),
+      company_name: Keyword.get(opts, :company_name),
+      repo_url: Keyword.get(opts, :repo_url)
+    )
   end
 
   defp truncate_line(text, max_length) when is_binary(text) do

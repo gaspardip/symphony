@@ -170,7 +170,7 @@ defmodule SymphonyElixir.Phase6RuntimeCoverageBackfillTest do
 
     reset_runner = fn
       "git", ["fetch", "origin", "--prune", "main"], _opts -> {"", 0}
-      "git", ["checkout", "main"], _opts -> {"", 0}
+      "git", ["checkout", "-f", "main"], _opts -> {"", 0}
       "git", ["reset", "--hard", "origin/main"], _opts -> {"", 0}
       command, args, _opts -> raise "unexpected git call: #{command} #{inspect(args)}"
     end
@@ -196,6 +196,15 @@ defmodule SymphonyElixir.Phase6RuntimeCoverageBackfillTest do
                RunStateStore.update(workspace, &Map.put(&1, :validation_attempts, 2))
 
       assert updated_state.validation_attempts == 2
+
+      assert {:ok, same_stage_state} =
+               RunStateStore.transition(workspace, "verify", %{last_decision_summary: "polled"})
+
+      assert same_stage_state.last_decision_summary == "polled"
+      assert same_stage_state.stage_transition_counts == %{verify: 1}
+      assert length(same_stage_state.stage_history) == 1
+      assert same_stage_state.last_ledger_event_id == state.last_ledger_event_id
+
       assert :ok = RunStateStore.delete(workspace)
     end)
 

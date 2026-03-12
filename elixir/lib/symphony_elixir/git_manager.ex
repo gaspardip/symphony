@@ -3,7 +3,8 @@ defmodule SymphonyElixir.GitManager do
   Owns branch preparation, commits, pushes, and base-branch resets for delivery runs.
   """
 
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.{AuthorProfile, Linear.Issue}
+  alias SymphonyElixir.RunStateStore
 
   @spec prepare_issue_branch(Path.t(), Issue.t() | map(), map() | nil, keyword()) ::
           {:ok, %{branch: String.t(), base_branch: String.t()}} | {:error, term()}
@@ -50,11 +51,20 @@ defmodule SymphonyElixir.GitManager do
   def reset_to_base(workspace, harness, opts \\ []) when is_binary(workspace) do
     base_branch = harness_base_branch(harness)
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
+    preserved_state = preserve_runtime_state(workspace)
+    remove_runtime_state_from_worktree(preserved_state)
 
-    with :ok <- ensure_git_checkout(workspace),
-         :ok <- git_ok(command_runner, workspace, ["fetch", "origin", "--prune", base_branch]),
-         :ok <- git_ok(command_runner, workspace, ["checkout", base_branch]) do
-      git_ok(command_runner, workspace, ["reset", "--hard", "origin/#{base_branch}"])
+    result =
+      with :ok <- ensure_git_checkout(workspace),
+           :ok <- git_ok(command_runner, workspace, ["fetch", "origin", "--prune", base_branch]),
+           :ok <- git_ok(command_runner, workspace, ["checkout", "-f", base_branch]),
+           :ok <- git_ok(command_runner, workspace, ["reset", "--hard", "origin/#{base_branch}"]) do
+        :ok
+      end
+
+    case restore_runtime_state(workspace, preserved_state) do
+      :ok -> result
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -101,23 +111,75 @@ defmodule SymphonyElixir.GitManager do
   end
 
   defp git_output(command_runner, workspace, args) do
-    case command_runner.("git", args, cd: workspace, stderr_to_stdout: true) do
+    case run_git_command(command_runner, workspace, args) do
       {output, 0} -> {:ok, output |> to_string() |> String.trim()}
       {output, status} -> {:error, {:git_failed, Enum.join(args, " "), status, output}}
     end
   end
 
   defp git_ok(command_runner, workspace, args) do
-    case command_runner.("git", args, cd: workspace, stderr_to_stdout: true) do
+    case run_git_command(command_runner, workspace, args) do
       {_output, 0} -> :ok
       {output, status} -> {:error, {:git_failed, Enum.join(args, " "), status, output}}
     end
   end
 
+  defp run_git_command(command_runner, workspace, args) do
+    case command_runner.("git", args, cd: workspace, stderr_to_stdout: true) do
+      {_output, status} = result when status == 0 ->
+        result
+
+      {output, _status} = result ->
+        case maybe_recover_stale_index_lock(workspace, output) do
+          :recovered -> command_runner.("git", args, cd: workspace, stderr_to_stdout: true)
+          :no_recovery -> result
+        end
+    end
+  end
+
+  defp maybe_recover_stale_index_lock(workspace, output) do
+    output_text = to_string(output)
+    lock_path = Path.join([workspace, ".git", "index.lock"])
+
+    cond do
+      not String.contains?(output_text, "index.lock") ->
+        :no_recovery
+
+      not File.exists?(lock_path) ->
+        :no_recovery
+
+      true ->
+        File.rm(lock_path)
+        :recovered
+    end
+  end
+
+  defp preserve_runtime_state(workspace) do
+    path = RunStateStore.state_path(workspace)
+
+    if File.exists?(path) do
+      %{path: path, contents: File.read!(path)}
+    else
+      nil
+    end
+  end
+
+  defp remove_runtime_state_from_worktree(nil), do: :ok
+
+  defp remove_runtime_state_from_worktree(%{path: path}) do
+    File.rm(path)
+    :ok
+  end
+
+  defp restore_runtime_state(_workspace, nil), do: :ok
+
+  defp restore_runtime_state(_workspace, %{path: path, contents: contents}) do
+    :ok = File.mkdir_p(Path.dirname(path))
+    File.write(path, contents)
+  end
+
   defp commit_message(issue, summary) do
-    identifier = Map.get(issue, :identifier) || Map.get(issue, "identifier") || "issue"
-    title = sanitized_summary(summary)
-    "#{identifier}: #{title}"
+    AuthorProfile.commit_message(issue, sanitized_summary(summary))
   end
 
   defp sanitized_summary(summary) do

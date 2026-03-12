@@ -9,8 +9,10 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   alias SymphonyElixir.RepoHarness
   alias SymphonyElixir.RunInspector
   alias SymphonyElixir.RunPolicy
+  alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.VerifierResult
   alias SymphonyElixir.VerifierRunner
+  alias SymphonyElixir.Workspace
 
   test "run policy blocks preflight failures before promotion" do
     workspace = temp_workspace!("preflight-failure")
@@ -57,6 +59,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       artifacts:
         command:
           - ./scripts/artifacts.sh
+      verification:
+        behavioral_proof:
+          required: true
+          mode: unit_first
+          source_paths:
+            - Sources
+          test_paths:
+            - Tests
       pull_request: {}
       """
     )
@@ -96,6 +106,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       artifacts:
         command:
           - ./scripts/artifacts.sh
+      verification:
+        behavioral_proof:
+          required: true
+          mode: unit_first
+          source_paths:
+            - Sources
+          test_paths:
+            - Tests
       pull_request:
         required_checks:
           - ci / validate
@@ -135,6 +153,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       artifacts:
         command:
           - ./scripts/artifacts.sh
+      verification:
+        behavioral_proof:
+          required: true
+          mode: unit_first
+          source_paths:
+            - Sources
+          test_paths:
+            - Tests
       pull_request:
         required_checks:
           - ci / validate
@@ -175,6 +201,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       artifacts:
         command:
           - ./scripts/artifacts.sh
+      verification:
+        behavioral_proof:
+          required: true
+          mode: unit_first
+          source_paths:
+            - Sources
+          test_paths:
+            - Tests
       pull_request:
         required_checks:
           - ci / validate
@@ -286,13 +320,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   end
 
   test "run policy stops when promoting a todo issue fails in the tracker" do
-    workspace = temp_workspace!("promotion-failure")
+    workspace = git_workspace!("promotion-failure")
     issue = %Issue{id: "issue-promotion-failure", identifier: "MT-916", state: "Todo"}
 
     configure_linear_tracker_failure!()
-    init_checkout!(workspace)
     write_script!(workspace, "scripts/preflight.sh", "echo preflight ok\nexit 0\n")
     write_valid_harness!(workspace)
+    write_behavioral_proof!(workspace)
 
     capture_log(fn ->
       assert {:stop, %RunPolicy.Violation{code: :preflight_failed, details: details}} =
@@ -450,6 +484,79 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     refute_receive {:memory_tracker_comment, "issue-budget-ok", _body}
     refute_receive {:memory_tracker_state_update, "issue-budget-ok", _state}
+  end
+
+  test "run policy uses stage-specific hard per-turn budgets when present" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 1_000_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        }
+      }
+    )
+
+    issue = %Issue{id: "issue-stage-budget", identifier: "MT-914A", state: "In Progress"}
+
+    assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded, details: details}} =
+             RunPolicy.maybe_stop_for_token_budget(issue, %{
+               stage: "implement",
+               codex_input_tokens: 130_000,
+               codex_output_tokens: 0,
+               codex_total_tokens: 130_000,
+               turn_started_input_tokens: 0
+             })
+
+    assert details == "Budget per_turn_input exceeded with observed value 130000."
+  end
+
+  test "run policy records soft token pressure for stage-aware budgets" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 1_000_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-stage-soft-budget-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-soft-budget", identifier: "MT-914C", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert :ok =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 stage: "implement",
+                 codex_input_tokens: 65_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 65_000,
+                 turn_started_input_tokens: 0
+               })
+
+      assert %{resume_context: %{token_pressure: "high"}} = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
   end
 
   test "run policy ignores malformed token budget values" do
@@ -725,6 +832,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result =
       VerifierRunner.verify(workspace, issue, %{}, inspection,
@@ -754,6 +862,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result =
       VerifierRunner.verify(workspace, issue, %{}, inspection,
@@ -773,6 +882,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result =
       VerifierRunner.verify(workspace, issue, %{}, inspection,
@@ -800,6 +910,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     )
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
 
@@ -830,6 +941,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     )
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
 
@@ -851,6 +963,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     )
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
 
@@ -873,6 +986,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     )
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
 
@@ -895,6 +1009,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     )
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result =
       VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection,
@@ -912,7 +1027,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     assert result.risky_areas == [":unexpected_payload"]
   end
 
-  test "verifier runner accepts map issues on the default app-server path and preserves configured reasoning effort flags" do
+  test "verifier runner accepts map issues on the default app-server path and normalizes reasoning config for verifier runs" do
     test_root = temp_workspace!("verifier-app-server-map-issue")
     workspace_root = Path.join(test_root, "workspaces")
     workspace = git_workspace_in_root!(workspace_root, "MT-937")
@@ -929,16 +1044,24 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
-      codex_command: "#{codex_binary} --model_reasoning_effort=high app-server"
+      codex_command: "#{codex_binary} --config model_reasoning_effort=high app-server"
     )
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
+    write_behavioral_proof!(workspace)
 
     result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
 
     assert result.verdict == "pass"
     assert result.summary == "Ready to ship"
     assert "Verifier evidence" in result.evidence
+
+    argv = File.read!(Path.join(test_root, "fake-codex-argv.txt"))
+    input = File.read!(Path.join(test_root, "fake-codex-input.txt"))
+
+    assert argv =~ "--config model_reasoning_effort=high app-server"
+    assert input =~ "\"method\":\"turn/start\""
+    assert input =~ "\"effort\":\"xhigh\""
   end
 
   test "verifier runner delegates post-merge verification to the harness command" do
@@ -987,6 +1110,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     end
 
     @impl true
+    def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
+
+    @impl true
     def persist_pr_url(workspace, branch, url, opts) do
       send(opts[:test_pid], {:persist_pr_url, workspace, branch, url})
       :ok
@@ -1027,7 +1153,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   end
 
   defp init_checkout!(workspace) do
-    File.mkdir_p!(Path.join(workspace, ".git"))
+    System.cmd("git", ["init", "-b", "main"], cd: workspace)
+    System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
+    System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
+    File.write!(Path.join(workspace, ".gitkeep"), "initial\n")
+    System.cmd("git", ["add", ".gitkeep"], cd: workspace)
+    System.cmd("git", ["commit", "-m", "initial"], cd: workspace)
     File.mkdir_p!(Path.join(workspace, ".symphony"))
     :ok
   end
@@ -1053,6 +1184,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       artifacts:
         command:
           - ./scripts/artifacts.sh
+      verification:
+        behavioral_proof:
+          required: true
+          mode: unit_first
+          source_paths:
+            - Sources
+          test_paths:
+            - Tests
       pull_request:
         required_checks:
           - ci / validate
@@ -1070,6 +1209,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, "#!/usr/bin/env bash\n" <> contents)
     File.chmod!(path, 0o755)
+    path
+  end
+
+  defp write_behavioral_proof!(workspace) do
+    path = Path.join(workspace, "Tests/VerifierProofTests.swift")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "import XCTest\n\nfinal class VerifierProofTests: XCTestCase {}\n")
     path
   end
 
@@ -1112,6 +1258,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
   defp write_fake_verifier_codex!(root, mode) do
     path = Path.join(root, "fake-codex")
+    argv_path = Path.join(root, "fake-codex-argv.txt")
+    input_path = Path.join(root, "fake-codex-input.txt")
 
     tool_event =
       case mode do
@@ -1191,7 +1339,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     script = """
     #!/bin/sh
+    printf '%s\\n' "$*" > "#{argv_path}"
     while IFS= read -r line; do
+      printf '%s\\n' "$line" >> "#{input_path}"
       case "$line" in
         *'"id":1'*)
           printf '%s\\n' '#{sh_escape(Jason.encode!(%{"id" => 1, "result" => %{}}))}'

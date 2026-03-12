@@ -30,6 +30,7 @@ defmodule SymphonyElixir.RuleCatalogTest do
     :missing_turn_result,
     :invalid_turn_result,
     :verifier_failed,
+    :behavior_proof_missing,
     :verifier_blocked,
     :unsafe_to_merge,
     :publish_failed,

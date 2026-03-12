@@ -127,7 +127,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
                     %{event: :turn_ended_with_error, reason: {:turn_failed, %{"reason" => "verifier failed"}}}}
   end
 
-  test "app server emits malformed and other_message events before completing a turn" do
+  test "app server ignores non-json stream noise and still emits other_message before completing a turn" do
     test_root = temp_dir("app-server-malformed")
     workspace_root = Path.join(test_root, "workspaces")
     workspace = Path.join(workspace_root, "MT-AS-MALFORMED")
@@ -146,10 +146,32 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
                on_message: fn message -> send(parent, {:app_server_message, message}) end
              )
 
-    assert_receive {:app_server_message, %{event: :malformed, payload: "warn: noisy line"}}
-
     assert_receive {:app_server_message,
                     %{event: :other_message, payload: %{"note" => "keep-going"}, usage: %{"input_tokens" => 1}}}
+
+    refute_receive {:app_server_message, %{event: :malformed, payload: "warn: noisy line"}}
+  end
+
+  test "app server still emits malformed for json-shaped undecodable payloads" do
+    test_root = temp_dir("app-server-malformed-json")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-AS-MALFORMED-JSON")
+    codex_binary = write_fake_codex!(test_root, :json_shaped_malformed)
+    parent = self()
+
+    File.mkdir_p!(workspace)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server"
+    )
+
+    assert {:ok, %{result: :turn_completed}} =
+             AppServer.run(workspace, "malformed json stream", sample_issue("MT-AS-MALFORMED-JSON"),
+               on_message: fn message -> send(parent, {:app_server_message, message}) end
+             )
+
+    assert_receive {:app_server_message, %{event: :malformed, payload: "{\"note\":\"broken\""}}
   end
 
   test "app server surfaces invalid thread payloads as startup failures" do
@@ -723,7 +745,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
       tracker_active_states: ["Todo"]
     )
 
-    assert {:error, {:linear_api_status, 503}} = Client.fetch_candidate_issues()
+    assert {:error, {:linear_api_status, 503, %{retry_after_ms: nil}}} = Client.fetch_candidate_issues()
   end
 
   test "linear client fetch_candidate_issues surfaces poll graphql errors after viewer resolution" do
@@ -830,7 +852,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     assert {"Authorization", "token"} in headers
     assert {"Content-Type", "application/json"} in headers
 
-    assert {:error, {:linear_api_status, 429}} =
+    assert {:error, {:linear_api_status, 429, %{retry_after_ms: nil}}} =
              Client.graphql("query Viewer { viewer { id } }", %{},
                operation_name: "   ",
                request_fun: fn payload, _headers ->
@@ -841,7 +863,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
 
     assert_received {:blank_operation_payload, %{"query" => "query Viewer { viewer { id } }", "variables" => %{}}}
 
-    assert {:error, {:linear_api_status, 500}} =
+    assert {:error, {:linear_api_status, 500, %{retry_after_ms: nil}}} =
              Client.graphql("query Viewer { viewer { id } }", %{},
                operation_name: "StateLookup",
                request_fun: fn _payload, _headers ->
@@ -1199,6 +1221,31 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
           done
           """
 
+        :json_shaped_malformed ->
+          """
+          #!/bin/sh
+          count=0
+          while IFS= read -r _line; do
+            count=$((count + 1))
+            case "$count" in
+              1)
+                printf '%s\\n' '{"id":1,"result":{}}'
+                ;;
+              2)
+                printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-malformed-json"}}}'
+                ;;
+              3)
+                printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-malformed-json"}}}'
+                ;;
+              4)
+                printf '%s\\n' '{"note":"broken"'
+                printf '%s\\n' '{"method":"turn/completed"}'
+                exit 0
+                ;;
+            esac
+          done
+          """
+
         :invalid_thread_payload ->
           """
           #!/bin/sh
@@ -1310,6 +1357,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
                 ;;
               3)
                 printf '%s\\n' '{"id":3,"usage":{"input_tokens":1}}'
+                sleep 0.1
                 exit 0
                 ;;
             esac

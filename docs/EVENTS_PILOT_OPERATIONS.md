@@ -7,21 +7,31 @@ This runbook covers the first end-to-end pilot of the runtime-owned Symphony for
 
 - One Linear project: `Events`
 - Project slugId: `fb8998440d1d`
-- Two routing lanes:
-  - `events-simple`: fully autonomous, auto-merge on green
-  - `events-complex`: publish and verify, then stop at `Human Review`
-- Ticket routing labels:
+- Long-term handoff model:
+  - assign the issue to the configured Symphony Linear account
+  - move it into `Todo`
+  - optionally add a `policy:*` label
+- Default routing label:
   - `symphony:events`
-  - `lane:simple`
-  - `lane:complex`
 - Optional policy labels:
   - `policy:fully-autonomous`
   - `policy:review-required`
   - `policy:never-automerge`
 
+Current default queue:
+
+- `events`: assignee-first queue, uses policy labels for review behavior
+
+Legacy pilot/debug queues still exist:
+
+- `events-simple`
+- `events-complex`
+
 Current status:
 
 - all required routing and policy labels have been created in Linear for the `CYLIZE` team
+- preferred and current default target is `tracker.handoff_mode: assignee`
+- legacy lane routing remains available only for the split pilot/debug queues
 
 ## Required Linear Workflow
 
@@ -30,7 +40,7 @@ Current `CYLIZE` team states already present:
 - `Backlog`
 - `Todo`
 - `In Progress`
-- `Human Review`
+- `Client Approval`
 - `Rework`
 - `Merging`
 - `Done`
@@ -54,7 +64,7 @@ Symphony active states for the pilot:
 
 Waiting states:
 
-- `Human Review`
+- `Client Approval`
 - `Blocked`
 
 ## Current Compatibility Findings
@@ -73,7 +83,25 @@ bundle:
 - validation action: `build-for-testing`
 - required GitHub check: `validate`
 
-## Lane Launchers
+## Default Queue
+
+Default assignee-first queue:
+
+```bash
+cd /Users/gaspar/src/symphony-local
+./run-symphony-events.sh --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
+Default queue:
+
+- port `4045`
+- workspace root `/Users/gaspar/code/symphony-workspaces-events`
+- logs root `/Users/gaspar/.local/state/symphony-events`
+- handoff mode `assignee`
+- required label `symphony:events`
+- optional `policy:*` labels control autonomy level
+
+## Legacy Lane Launchers
 
 Simple lane:
 
@@ -108,8 +136,13 @@ A ticket is linked to Symphony only if all are true:
 
 - it is in the `Events` Linear project
 - it is in an active Symphony state
-- it has `symphony:events`
-- it has exactly one lane label: `lane:simple` or `lane:complex`
+- it is assigned to the configured Symphony Linear account
+
+Legacy split-queue compatibility rule:
+
+- use `tracker.handoff_mode: hybrid`
+- keep `symphony:events`
+- keep exactly one lane label: `lane:simple` or `lane:complex`
 
 Write pilot tickets with:
 
@@ -119,7 +152,8 @@ Write pilot tickets with:
 - optional `Validation`
 - optional out-of-scope note
 
-Use `lane:simple` only for deterministic, repo-local work. Avoid permissions-heavy tickets like
+Prefer the default assignee-first queue. Only use `lane:simple` or `lane:complex` when you
+explicitly want to exercise the old split pilot queues. Avoid permissions-heavy tickets like
 location/calendar/notifications for the first autonomous proof.
 
 ## Legacy Reset-Clean Inventory
@@ -145,6 +179,7 @@ Reset-clean rule for the pilot:
 - archive the old workspaces out of the active workspace root
 - move the issues out of waiting states before requeueing them
 - only add lane labels when the ticket is ready for a fresh run
+- after the webhook-first intake rollout, prefer assignment plus policy labels over new lane usage
 
 ## Operator Actions During The Pilot
 
@@ -160,7 +195,7 @@ Use these runtime controls only:
 
 Complex lane normal path:
 
-- `Todo -> In Progress -> Merging -> Human Review`
+- `Todo -> In Progress -> Merging -> Client Approval`
 - then `approve_for_merge`
 - then Symphony completes merge and post-merge verification
 

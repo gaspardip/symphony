@@ -124,15 +124,31 @@ defmodule SymphonyElixir.TestSupport do
           tracker_kind: "linear",
           tracker_endpoint: "https://api.linear.app/graphql",
           tracker_api_token: "token",
+          tracker_webhook_secret: nil,
           tracker_project_slug: "project",
           tracker_assignee: nil,
+          tracker_handoff_mode: "assignee",
           tracker_required_labels: [],
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
-          poll_interval_ms: 30_000,
+          poll_interval_ms: 600_000,
+          healing_poll_interval_ms: 1_800_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+          manual_enabled: true,
+          manual_store_root: nil,
           runner_install_root: Path.join(System.tmp_dir!(), "symphony-runner"),
           runner_instance_name: "test-runner",
+          runner_self_host_project: false,
+          company_name: nil,
+          company_repo_url: nil,
+          company_internal_project_name: nil,
+          company_internal_project_url: nil,
+          company_mode: nil,
+          company_policy_pack: "private_autopilot",
+          company_author_profile_path: nil,
+          company_credential_registry_path: nil,
+          portfolio_instances: [],
+          policy_packs: %{},
           max_concurrent_agents: 10,
           max_turns: 3,
           max_retry_backoff_ms: 300_000,
@@ -141,6 +157,8 @@ defmodule SymphonyElixir.TestSupport do
           codex_runtime_profile_codex_home: nil,
           codex_runtime_profile_inherit_env: true,
           codex_runtime_profile_env_allowlist: [],
+          codex_reasoning_stages: nil,
+          codex_reasoning_providers: nil,
           codex_approval_policy: %{reject: %{sandbox_approval: true, rules: true, mcp_elicitations: true}},
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
@@ -182,15 +200,31 @@ defmodule SymphonyElixir.TestSupport do
     tracker_kind = Keyword.get(config, :tracker_kind)
     tracker_endpoint = Keyword.get(config, :tracker_endpoint)
     tracker_api_token = Keyword.get(config, :tracker_api_token)
+    tracker_webhook_secret = Keyword.get(config, :tracker_webhook_secret)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
+    tracker_handoff_mode = Keyword.get(config, :tracker_handoff_mode)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
+    healing_poll_interval_ms = Keyword.get(config, :healing_poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
+    manual_enabled = Keyword.get(config, :manual_enabled)
+    manual_store_root = Keyword.get(config, :manual_store_root)
     runner_install_root = Keyword.get(config, :runner_install_root)
     runner_instance_name = Keyword.get(config, :runner_instance_name)
+    runner_self_host_project = Keyword.get(config, :runner_self_host_project)
+    company_name = Keyword.get(config, :company_name)
+    company_repo_url = Keyword.get(config, :company_repo_url)
+    company_internal_project_name = Keyword.get(config, :company_internal_project_name)
+    company_internal_project_url = Keyword.get(config, :company_internal_project_url)
+    company_mode = Keyword.get(config, :company_mode)
+    company_policy_pack = Keyword.get(config, :company_policy_pack)
+    company_author_profile_path = Keyword.get(config, :company_author_profile_path)
+    company_credential_registry_path = Keyword.get(config, :company_credential_registry_path)
+    portfolio_instances = Keyword.get(config, :portfolio_instances)
+    policy_packs = Keyword.get(config, :policy_packs)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
@@ -199,6 +233,8 @@ defmodule SymphonyElixir.TestSupport do
     codex_runtime_profile_codex_home = Keyword.get(config, :codex_runtime_profile_codex_home)
     codex_runtime_profile_inherit_env = Keyword.get(config, :codex_runtime_profile_inherit_env)
     codex_runtime_profile_env_allowlist = Keyword.get(config, :codex_runtime_profile_env_allowlist)
+    codex_reasoning_stages = Keyword.get(config, :codex_reasoning_stages)
+    codex_reasoning_providers = Keyword.get(config, :codex_reasoning_providers)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
     codex_turn_sandbox_policy = Keyword.get(config, :codex_turn_sandbox_policy)
@@ -237,18 +273,37 @@ defmodule SymphonyElixir.TestSupport do
         "  kind: #{yaml_value(tracker_kind)}",
         "  endpoint: #{yaml_value(tracker_endpoint)}",
         "  api_key: #{yaml_value(tracker_api_token)}",
+        "  webhook_secret: #{yaml_value(tracker_webhook_secret)}",
         "  project_slug: #{yaml_value(tracker_project_slug)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
+        "  handoff_mode: #{yaml_value(tracker_handoff_mode)}",
         "  required_labels: #{yaml_value(tracker_required_labels)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
+        "  discovery_interval_ms: #{yaml_value(poll_interval_ms)}",
+        "  healing_interval_ms: #{yaml_value(healing_poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
+        "manual:",
+        "  enabled: #{yaml_value(manual_enabled)}",
+        "  store_root: #{yaml_value(manual_store_root)}",
         "runner:",
         "  install_root: #{yaml_value(runner_install_root)}",
         "  instance_name: #{yaml_value(runner_instance_name)}",
+        "  self_host_project: #{yaml_value(runner_self_host_project)}",
+        "company:",
+        "  name: #{yaml_value(company_name)}",
+        "  repo_url: #{yaml_value(company_repo_url)}",
+        "  internal_project_name: #{yaml_value(company_internal_project_name)}",
+        "  internal_project_url: #{yaml_value(company_internal_project_url)}",
+        "  mode: #{yaml_value(company_mode)}",
+        "  policy_pack: #{yaml_value(company_policy_pack)}",
+        "  author_profile_path: #{yaml_value(company_author_profile_path)}",
+        "  credential_registry_path: #{yaml_value(company_credential_registry_path)}",
+        portfolio_yaml(portfolio_instances),
+        policy_packs_yaml(policy_packs),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  max_turns: #{yaml_value(max_turns)}",
@@ -257,6 +312,7 @@ defmodule SymphonyElixir.TestSupport do
         "codex:",
         "  command: #{yaml_value(codex_command)}",
         "  runtime_profile: #{yaml_value(%{codex_home: codex_runtime_profile_codex_home, inherit_env: codex_runtime_profile_inherit_env, env_allowlist: codex_runtime_profile_env_allowlist})}",
+        "  reasoning: #{yaml_value(%{stages: codex_reasoning_stages, providers: codex_reasoning_providers})}",
         "  approval_policy: #{yaml_value(codex_approval_policy)}",
         "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
         "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
@@ -293,6 +349,24 @@ defmodule SymphonyElixir.TestSupport do
     "\"" <> String.replace(value, "\"", "\\\"") <> "\""
   end
 
+  defp policy_packs_yaml(packs) when packs in [%{}, nil], do: nil
+
+  defp portfolio_yaml(instances) when instances in [[], nil], do: nil
+
+  defp portfolio_yaml(instances) when is_list(instances) do
+    ["portfolio:" | yaml_key_value_lines("instances", instances, 2)]
+    |> Enum.join("\n")
+  end
+
+  defp portfolio_yaml(instances), do: "portfolio: #{yaml_value(instances)}"
+
+  defp policy_packs_yaml(packs) when is_map(packs) do
+    ["policy_packs:" | yaml_object_lines(packs, 2)]
+    |> Enum.join("\n")
+  end
+
+  defp policy_packs_yaml(packs), do: "policy_packs: #{yaml_value(packs)}"
+
   defp yaml_value(value) when is_integer(value), do: to_string(value)
   defp yaml_value(true), do: "true"
   defp yaml_value(false), do: "false"
@@ -310,6 +384,52 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp yaml_object_lines(map, indent) when is_map(map) do
+    map
+    |> Enum.flat_map(fn {key, value} ->
+      yaml_key_value_lines(to_string(key), value, indent)
+    end)
+  end
+
+  defp yaml_key_value_lines(key, value, indent) when is_map(value) do
+    prefix = String.duplicate(" ", indent)
+    ["#{prefix}#{key}:" | yaml_object_lines(value, indent + 2)]
+  end
+
+  defp yaml_key_value_lines(key, values, indent) when is_list(values) do
+    prefix = String.duplicate(" ", indent)
+
+    case values do
+      [] ->
+        ["#{prefix}#{key}: []"]
+
+      [head | _] when is_map(head) ->
+        ["#{prefix}#{key}:" | yaml_list_of_objects_lines(values, indent + 2)]
+
+      _ ->
+        ["#{prefix}#{key}: [#{Enum.map_join(values, ", ", &yaml_value/1)}]"]
+    end
+  end
+
+  defp yaml_key_value_lines(key, value, indent) do
+    prefix = String.duplicate(" ", indent)
+    ["#{prefix}#{key}: #{yaml_value(value)}"]
+  end
+
+  defp yaml_list_of_objects_lines(values, indent) do
+    Enum.flat_map(values, fn value ->
+      prefix = String.duplicate(" ", indent)
+
+      case value do
+        %{} = map ->
+          ["#{prefix}-" | yaml_object_lines(map, indent + 2)]
+
+        other ->
+          ["#{prefix}- #{yaml_value(other)}"]
+      end
+    end)
+  end
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

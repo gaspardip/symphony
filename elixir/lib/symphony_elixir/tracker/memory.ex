@@ -44,6 +44,19 @@ defmodule SymphonyElixir.Tracker.Memory do
      end)}
   end
 
+  @spec fetch_issue_by_id(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_id(issue_id) when is_binary(issue_id) do
+    {:ok,
+     Enum.find(issue_entries(), fn
+       %Issue{id: ^issue_id} -> true
+       _ -> false
+     end)}
+  end
+
+  @spec decode_webhook([{binary(), binary()}], binary()) ::
+          {:ok, [map()]} | {:ignore, term()} | {:error, term()}
+  def decode_webhook(_headers, _raw_body), do: {:error, :unsupported_webhook}
+
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
     send_event({:memory_tracker_comment, issue_id, body})

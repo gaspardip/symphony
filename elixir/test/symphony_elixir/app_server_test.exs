@@ -1137,4 +1137,357 @@ defmodule SymphonyElixir.AppServerTest do
       File.rm_rf(test_root)
     end
   end
+
+  test "app server includes explicit turn effort when provided" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-turn-effort-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-91")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "turn-input.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      while IFS= read -r line; do
+        printf '%s\\n' "$line" >> "#{trace_file}"
+        case "$line" in
+          *'"id":1'*)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          *'"id":2'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-91"}}}'
+            ;;
+          *'"id":3'*)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-91"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-turn-effort",
+        identifier: "MT-91",
+        title: "Turn effort",
+        description: "Check explicit turn effort wiring"
+      }
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Use deep effort", issue, effort: "high")
+
+      trace = File.read!(trace_file)
+      assert trace =~ "\"method\":\"turn/start\""
+      assert trace =~ "\"effort\":\"high\""
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server fails implement turns that exceed the command output budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-command-budget-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-90")
+      codex_binary = Path.join(test_root, "fake-codex")
+      parent = self()
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-90"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-90"}}}'
+            printf '%s\\n' '{"method":"item/commandExecution/outputDelta","params":{"itemId":"cmd-1","outputDelta":"12345678901"}}'
+            sleep 1
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-command-budget",
+        identifier: "MT-90",
+        title: "Budget guard",
+        description: "Stop oversized command output",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-90",
+        labels: ["backend"]
+      }
+
+      assert {:error,
+              {:turn_failed,
+               %{reason: "implementation.command_output_budget_exceeded", scope: "per_command"}}} =
+               AppServer.run(workspace, "Handle command output budget", issue,
+                 stage: "implement",
+                 command_output_budget: %{per_command_bytes: 10, per_turn_bytes: 100, max_command_count: 12},
+                 on_message: fn message -> send(parent, {:app_server_message, message}) end
+               )
+
+      assert_receive {:app_server_message,
+                      %{event: :turn_ended_with_error,
+                        reason:
+                          {:turn_failed,
+                           %{reason: "implementation.command_output_budget_exceeded", scope: "per_command"}}}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server fails implement turns that invoke stage-owned commands" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-stage-command-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-91")
+      codex_binary = Path.join(test_root, "fake-codex")
+      parent = self()
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-91"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-91"}}}'
+            printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"xcodebuild test","cwd":"/tmp","reason":"verify"}}'
+            sleep 1
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-stage-command",
+        identifier: "MT-91",
+        title: "Stage guard",
+        description: "Stop stage-owned commands in implement",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-91",
+        labels: ["backend"]
+      }
+
+      assert {:error,
+              {:turn_failed,
+               %{reason: "implementation.stage_command_violation", command: "xcodebuild test"}}} =
+               AppServer.run(workspace, "Handle stage command violation", issue,
+                 stage: "implement",
+                 forbidden_commands: ["xcodebuild", "./scripts/symphony-validate.sh"],
+                 on_message: fn message -> send(parent, {:app_server_message, message}) end
+               )
+
+      assert_receive {:app_server_message,
+                      %{event: :turn_ended_with_error,
+                        reason:
+                          {:turn_failed,
+                           %{reason: "implementation.stage_command_violation", command: "xcodebuild test"}}}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server fails implement turns that attempt broad repo reads" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-broad-read-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-92")
+      codex_binary = Path.join(test_root, "fake-codex")
+      parent = self()
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-92"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-92"}}}'
+            printf '%s\\n' '{"id":100,"method":"item/commandExecution/requestApproval","params":{"command":"rg --files .","cwd":"/tmp","reason":"inspect"}}'
+            sleep 1
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-broad-read",
+        identifier: "MT-92",
+        title: "Broad read guard",
+        description: "Stop repo-wide inventory in implement",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-92",
+        labels: ["backend"]
+      }
+
+      assert {:error,
+              {:turn_failed,
+               %{reason: "implementation.broad_read_violation", command: "rg --files ."}}} =
+               AppServer.run(workspace, "Handle broad read violation", issue,
+                 stage: "implement",
+                 on_message: fn message -> send(parent, {:app_server_message, message}) end
+               )
+
+      assert_receive {:app_server_message,
+                      %{event: :turn_ended_with_error,
+                        reason:
+                          {:turn_failed,
+                           %{reason: "implementation.broad_read_violation", command: "rg --files ."}}}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server fails implement turns that exceed the command count budget" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-command-count-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-93")
+      codex_binary = Path.join(test_root, "fake-codex")
+      parent = self()
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-93"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-93"}}}'
+            printf '%s\\n' '{"id":101,"method":"item/commandExecution/requestApproval","params":{"command":"git status --short","cwd":"/tmp","reason":"inspect"}}'
+            sleep 1
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-command-count",
+        identifier: "MT-93",
+        title: "Command count guard",
+        description: "Stop too many commands in implement",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-93",
+        labels: ["backend"]
+      }
+
+      assert {:error,
+              {:turn_failed,
+               %{reason: "implementation.command_count_exceeded", count: 1}}} =
+               AppServer.run(workspace, "Handle command count limit", issue,
+                 stage: "implement",
+                 command_output_budget: %{per_command_bytes: 10_000, per_turn_bytes: 100_000, max_command_count: 0},
+                 on_message: fn message -> send(parent, {:app_server_message, message}) end
+               )
+
+      assert_receive {:app_server_message,
+                      %{event: :turn_ended_with_error,
+                        reason:
+                          {:turn_failed,
+                           %{reason: "implementation.command_count_exceeded", count: 1}}}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
 end

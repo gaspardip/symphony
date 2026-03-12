@@ -349,6 +349,70 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
              RuleCatalog.human_action(:policy_review_required)
   end
 
+  test "snapshot queue tolerates nil last_decision in persisted run state" do
+    workspace_root = unique_workspace_root!("queue-nil-last-decision")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    queued_issue = %Issue{
+      id: "issue-queue-budget",
+      identifier: "MT-QUEUE-BUDGET",
+      title: "Queue after budget stop",
+      description: "blocked by budget",
+      priority: 1,
+      state: "Todo",
+      labels: []
+    }
+
+    workspace = Path.join(workspace_root, queued_issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn run_state ->
+               Map.merge(run_state, %{
+                 issue_id: queued_issue.id,
+                 issue_identifier: queued_issue.identifier,
+                 last_rule_id: RuleCatalog.rule_id(:budget_per_turn_input_exceeded),
+                 last_failure_class: RuleCatalog.failure_class(:budget_per_turn_input_exceeded),
+                 last_decision_summary: "The run exceeded a configured token budget and was stopped.",
+                 next_human_action: RuleCatalog.human_action(:budget_per_turn_input_exceeded),
+                 last_decision: nil
+               })
+             end)
+
+    orchestrator_name = Module.concat(__MODULE__, :QueueSnapshotNilDecisionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      %{state | last_candidate_issues: [queued_issue]}
+    end)
+
+    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+
+    assert [
+             %{
+               issue_identifier: "MT-QUEUE-BUDGET",
+               last_rule_id: last_rule_id,
+               last_failure_class: last_failure_class,
+               last_decision_summary: "The run exceeded a configured token budget and was stopped.",
+               next_human_action: next_human_action
+             }
+           ] = snapshot.queue
+
+    assert is_binary(last_rule_id)
+    assert is_binary(last_failure_class)
+    assert is_binary(next_human_action)
+  end
+
   test "public control wrappers return unavailable when the orchestrator server is missing" do
     missing_server = Module.concat(__MODULE__, :MissingOrchestrator)
 

@@ -117,6 +117,52 @@ defmodule SymphonyElixir.PullRequestManagerTest do
              PullRequestManager.merge_pull_request(workspace, gh_runner: gh_runner)
   end
 
+  test "ensure_pull_request respects policy-pack PR posting restrictions" do
+    workspace = Path.join(System.tmp_dir!(), "symphony-pr-forbidden-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue = %Issue{id: "issue-pr-forbidden", identifier: "MT-903", title: "Shadow mode PR restriction"}
+    run_state = %{branch: "gaspar/test-pr-forbidden", base_branch: "main"}
+
+    assert {:error, {:pr_posting_forbidden, "client_safe_shadow"}} =
+             PullRequestManager.ensure_pull_request(
+               workspace,
+               issue,
+               run_state,
+               policy_pack: :client_safe
+             )
+  end
+
+  test "merge_pull_request respects credential scope" do
+    registry_path =
+      Path.join(System.tmp_dir!(), "symphony-pr-registry-#{System.unique_integer([:positive])}.json")
+
+    File.write!(
+      registry_path,
+      Jason.encode!(%{
+        "companies" => %{
+          "Client A" => %{
+            "providers" => %{
+              "github" => %{"forbidden_operations" => ["merge"]}
+            }
+          }
+        }
+      })
+    )
+
+    on_exit(fn -> File.rm(registry_path) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      company_name: "Client A",
+      company_credential_registry_path: registry_path
+    )
+
+    assert {:error, {:credential_scope_forbidden, "github", "merge"}} =
+             PullRequestManager.merge_pull_request("/tmp/symphony-pr-scope")
+  end
+
   defmodule FakeGitHubClient do
     @behaviour SymphonyElixir.GitHubClient
 
@@ -142,6 +188,9 @@ defmodule SymphonyElixir.PullRequestManagerTest do
     def merge_pull_request(_workspace, _opts) do
       raise "merge should not be called in this test"
     end
+
+    @impl true
+    def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
 
     @impl true
     def persist_pr_url(workspace, branch, url, opts) do

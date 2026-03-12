@@ -26,6 +26,9 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test.FakeGitHubClient do
   def merge_pull_request(_workspace, _opts), do: raise("merge should not be called in this test")
 
   @impl true
+  def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
+
+  @impl true
   def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
 end
 
@@ -70,6 +73,50 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
             evidence: [],
             raw_output: "needs more work",
             acceptance: %{summary: "Verifier summary"}
+          }
+        end
+      )
+
+    assert result in [{:stop, :verifier_failed}, {:stop, :noop_turn}, {:stop, :behavior_proof_missing}]
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert Enum.any?(state.stage_history, &(&1.stage == "implement"))
+    assert state.last_verifier_verdict == "needs_more_work"
+  end
+
+  test "verify stage gives one retry for missing behavioral proof" do
+    {workspace, issue} = verify_workspace!("verify-behavior-proof-retry")
+
+    RunStateStore.transition(workspace, "verify", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      max_turns: 0,
+      codex_command: fake_codex_binary!("verify-behavior-proof-retry"),
+      policy_publish_required: false,
+      policy_retry_validation_failures_within_run: true,
+      policy_max_validation_attempts_per_run: 3
+    )
+
+    result =
+      DeliveryEngine.run(workspace, issue, nil,
+        max_turns: 1,
+        issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+        verifier_runner: fn _workspace, _issue, _state, _inspection, _opts ->
+          %{
+            verdict: "needs_more_work",
+            reason_code: "behavior_proof_missing",
+            summary: "Add or update repo-owned behavioral proof before publish.",
+            acceptance_gaps: ["Add tests"],
+            risky_areas: [],
+            evidence: [],
+            raw_output: "missing proof",
+            acceptance: %{summary: "Verifier summary"},
+            behavioral_proof: %{required: true, satisfied: false, mode: "unit_first"}
           }
         end
       )
@@ -149,6 +196,88 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.stage == "blocked"
     assert state.last_rule_id == "verification.needs_more_work"
+  end
+
+  test "verify stage blocks repeated missing behavioral proof" do
+    {workspace, issue} = verify_workspace!("verify-behavior-proof-blocked")
+
+    RunStateStore.transition(workspace, "verify", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      verification_attempts: 1
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("verify-behavior-proof-blocked"),
+      policy_publish_required: false,
+      policy_retry_validation_failures_within_run: true,
+      policy_max_validation_attempts_per_run: 3
+    )
+
+    assert {:stop, :behavior_proof_missing} =
+             DeliveryEngine.run(workspace, issue, nil,
+               max_turns: 2,
+               verifier_runner: fn _workspace, _issue, _state, _inspection, _opts ->
+                 %{
+                   verdict: "needs_more_work",
+                   reason_code: "behavior_proof_missing",
+                   summary: "Add or update repo-owned behavioral proof before publish.",
+                   acceptance_gaps: ["Add tests"],
+                   risky_areas: [],
+                   evidence: [],
+                   raw_output: "missing proof",
+                   acceptance: %{summary: "Verifier summary"},
+                   behavioral_proof: %{required: true, satisfied: false, mode: "unit_first"}
+                 }
+               end
+             )
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert state.last_rule_id == "verification.behavior_proof_missing"
+  end
+
+  test "verify stage blocks repeated missing ui proof" do
+    {workspace, issue} = verify_workspace!("verify-ui-proof-blocked")
+
+    RunStateStore.transition(workspace, "verify", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      verification_attempts: 1
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("verify-ui-proof-blocked"),
+      policy_publish_required: false,
+      policy_retry_validation_failures_within_run: true,
+      policy_max_validation_attempts_per_run: 3
+    )
+
+    assert {:stop, :ui_proof_missing} =
+             DeliveryEngine.run(workspace, issue, nil,
+               max_turns: 2,
+               verifier_runner: fn _workspace, _issue, _state, _inspection, _opts ->
+                 %{
+                   verdict: "needs_more_work",
+                   reason_code: "ui_proof_missing",
+                   summary: "Add UI proof before publish.",
+                   acceptance_gaps: ["Add UI proof"],
+                   risky_areas: [],
+                   evidence: [],
+                   raw_output: "missing ui proof",
+                   acceptance: %{summary: "Verifier summary"},
+                   ui_proof: %{required: true, verify_required: true, verify_satisfied: false, mode: "local"}
+                 }
+               end
+             )
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert state.last_rule_id == "verification.ui_proof_missing"
   end
 
   test "verify stage blocks unknown verifier verdicts" do

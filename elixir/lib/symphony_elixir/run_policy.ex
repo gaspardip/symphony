@@ -7,17 +7,16 @@ defmodule SymphonyElixir.RunPolicy do
 
   require Logger
 
-  alias SymphonyElixir.{Config, RuleCatalog, RunInspector, RunLedger, RunStateStore, RunnerRuntime, Tracker}
+  alias SymphonyElixir.{Config, IssueSource, RepoCompatibility, RuleCatalog, RunInspector, RunLedger, RunStateStore, RunnerRuntime, WorkflowProfile, Workspace}
 
   defmodule Violation do
     @moduledoc false
 
-    defstruct [:code, :rule_id, :failure_class, :summary, :details, :human_action, :target_state]
+    defstruct [:code, :rule_id, :failure_class, :summary, :details, :human_action, :target_state, metadata: %{}]
   end
 
   @blocked_state "Blocked"
   @in_progress_state "In Progress"
-  @human_review_state "Human Review"
 
   @type violation :: %Violation{
           code: atom(),
@@ -43,17 +42,36 @@ defmodule SymphonyElixir.RunPolicy do
       Config.policy_require_validation?() and is_nil(inspection.harness) ->
         stop_issue(issue, missing_harness_violation(workspace), workspace)
 
+      repo_boundary_mismatch?(inspection.origin_url) ->
+        stop_issue(issue, repo_boundary_mismatch_violation(inspection.origin_url), workspace)
+
       true ->
-        case RunInspector.run_preflight(workspace, inspection.harness, opts) do
-          %{status: :failed, output: output} ->
-            stop_issue(issue, preflight_failed_violation(output), workspace)
+        case workload_violation(issue) do
+          nil ->
+            case RepoCompatibility.compatible?(workspace, opts) do
+              {:ok, true, _report} ->
+                run_preflight_or_promote(issue, workspace, inspection, opts)
 
-          %{status: :unavailable, output: output} ->
-            stop_issue(issue, preflight_failed_violation(output), workspace)
+              {:ok, false, report} ->
+                stop_issue(issue, repo_not_compatible_violation(report), workspace)
+            end
 
-          _ ->
-            promote_todo_issue(issue)
+          %Violation{} = violation ->
+            stop_issue(issue, violation, workspace)
         end
+    end
+  end
+
+  defp run_preflight_or_promote(issue, workspace, inspection, opts) do
+    case RunInspector.run_preflight(workspace, inspection.harness, opts) do
+      %{status: :failed, output: output} ->
+        stop_issue(issue, preflight_failed_violation(output), workspace)
+
+      %{status: :unavailable, output: output} ->
+        stop_issue(issue, preflight_failed_violation(output), workspace)
+
+      _ ->
+        promote_todo_issue(issue)
     end
   end
 
@@ -91,15 +109,18 @@ defmodule SymphonyElixir.RunPolicy do
   @spec maybe_stop_for_token_budget(map(), map()) :: :ok | {:stop, violation()}
   def maybe_stop_for_token_budget(issue, running_entry) do
     token_budget = Config.policy_token_budget()
+    stage_budget = current_stage_token_budget(issue, running_entry)
     input_total = Map.get(running_entry, :codex_input_tokens, 0)
     output_total = Map.get(running_entry, :codex_output_tokens, 0)
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
     turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
     current_turn_input = max(0, input_total - turn_started_input)
 
+    maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget)
+
     cond do
-      budget_exceeded?(token_budget[:per_turn_input], current_turn_input) ->
-      stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input))
+      budget_exceeded?(stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input], current_turn_input) ->
+        stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input))
 
       budget_exceeded?(token_budget[:per_issue_total], total_tokens) ->
         stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens))
@@ -112,14 +133,17 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp promote_todo_issue(%{id: issue_id, state: state})
+  defp promote_todo_issue(%{id: issue_id, state: state} = issue)
        when is_binary(issue_id) and is_binary(state) do
     if normalize_state(state) == normalize_state(@in_progress_state) do
       :ok
     else
       if normalize_state(state) == "todo" do
-        case Tracker.update_issue_state(issue_id, @in_progress_state) do
+        case IssueSource.update_issue_state(%{id: issue_id, source: Map.get(issue, :source)}, @in_progress_state) do
           :ok ->
+            :ok
+
+          {:error, {:tracker_mutation_forbidden, _pack}} ->
             :ok
 
           {:error, reason} ->
@@ -155,23 +179,69 @@ defmodule SymphonyElixir.RunPolicy do
     Config.policy_require_validation?() and
       (RunInspector.code_changed?(before_snapshot, after_snapshot) or
          not is_nil(after_snapshot.pr_url) or
-         human_review_state?(refreshed_issue))
+      approval_gate_state?(refreshed_issue))
   end
 
   defp require_pr_before_review_violation?(refreshed_issue, after_snapshot) do
     Config.policy_require_pr_before_review?() and
-      human_review_state?(refreshed_issue) and
+      approval_gate_state?(refreshed_issue) and
       is_nil(after_snapshot.pr_url)
   end
 
-  defp human_review_state?(%{state: state}) when is_binary(state) do
-    normalize_state(state) == normalize_state(@human_review_state)
-  end
+  defp approval_gate_state?(%{state: state}) when is_binary(state),
+    do: WorkflowProfile.approval_gate_state?(state, policy_pack: Config.policy_pack_name())
 
-  defp human_review_state?(_issue), do: false
+  defp approval_gate_state?(_issue), do: false
 
   defp noop_turn?(before_snapshot, after_snapshot) do
     not RunInspector.code_changed?(before_snapshot, after_snapshot) and is_nil(after_snapshot.pr_url)
+  end
+
+  defp workload_violation(issue) do
+    pack = SymphonyElixir.PolicyPack.resolve(Config.policy_pack_name())
+
+    cond do
+      pack.company_frozen ->
+        freeze_violation(
+          :company_frozen,
+          "Company policy pack `#{SymphonyElixir.PolicyPack.name_string(pack)}` is frozen for new autonomous work.",
+          "Disable the company freeze in the active policy pack before retrying this issue."
+        )
+
+      pack.repo_frozen ->
+        freeze_violation(
+          :repo_frozen,
+          "Repo policy pack `#{SymphonyElixir.PolicyPack.name_string(pack)}` is frozen for new autonomous work.",
+          "Disable the repo freeze in the active policy pack before retrying this issue."
+        )
+
+      true ->
+        case SymphonyElixir.PolicyPack.workload_label_status(pack, Map.get(issue, :labels, [])) do
+          :allowed ->
+            nil
+
+          {:missing_required_any, labels} ->
+            workload_restricted_violation(
+              "Issue does not match the active workload filter for #{SymphonyElixir.PolicyPack.name_string(pack)}.",
+              "Allowed workload labels: #{Enum.join(labels, ", ")}.",
+              "Add one of the allowed workload labels or switch the company policy pack."
+            )
+
+          {:forbidden_present, labels} ->
+            workload_restricted_violation(
+              "Issue is blocked by the active workload filter for #{SymphonyElixir.PolicyPack.name_string(pack)}.",
+              "Forbidden workload labels present: #{Enum.join(labels, ", ")}.",
+              "Remove the forbidden workload labels or switch the company policy pack."
+            )
+        end
+    end
+  end
+
+  defp repo_boundary_mismatch?(origin_url) do
+    expected = Config.company_repo_url()
+
+    is_binary(expected) and expected != "" and is_binary(origin_url) and
+      normalize_repo_url(expected) != normalize_repo_url(origin_url)
   end
 
   defp stop_issue(issue, %Violation{} = violation, workspace \\ nil) do
@@ -195,7 +265,8 @@ defmodule SymphonyElixir.RunPolicy do
       target_state: violation.target_state,
       metadata: %{
         code: Atom.to_string(violation.code),
-        human_action: violation.human_action
+        human_action: violation.human_action,
+        violation_metadata: violation.metadata
       }
     })
 
@@ -217,7 +288,8 @@ defmodule SymphonyElixir.RunPolicy do
             details: violation.details,
             human_action: violation.human_action,
             target_state: violation.target_state,
-            ledger_event_id: Map.get(ledger_event, :event_id)
+            ledger_event_id: Map.get(ledger_event, :event_id),
+            metadata: violation.metadata
           },
           last_rule_id: violation.rule_id,
           last_failure_class: violation.failure_class,
@@ -227,7 +299,7 @@ defmodule SymphonyElixir.RunPolicy do
     end
 
     if is_binary(issue_id) do
-      case Tracker.create_comment(issue_id, comment) do
+      case IssueSource.create_comment(issue, comment) do
         :ok ->
           :ok
 
@@ -235,7 +307,7 @@ defmodule SymphonyElixir.RunPolicy do
           Logger.warning("Failed to create policy comment for #{issue_identifier}: #{inspect(reason)}")
       end
 
-      case Tracker.update_issue_state(issue_id, violation.target_state) do
+      case IssueSource.update_issue_state(issue, violation.target_state) do
         :ok ->
           :ok
 
@@ -320,10 +392,42 @@ defmodule SymphonyElixir.RunPolicy do
     )
   end
 
+  defp repo_not_compatible_violation(report) do
+    failing =
+      report
+      |> Map.get(:checks, [])
+      |> Enum.filter(&(&1.required and &1.status == :failed))
+
+    details =
+      failing
+      |> Enum.map(fn check -> "#{check.id}: #{check.summary} #{check.details}" end)
+      |> Enum.join("\n")
+      |> case do
+        "" -> truncate_output(inspect(report))
+        value -> value
+      end
+
+    violation(:repo_not_compatible,
+      summary: "The repo failed Symphony compatibility checks before execution.",
+      details: details,
+      metadata: %{compatibility_report: report}
+    )
+  end
+
   defp runner_overlap_violation(workspace) do
     violation(:runner_overlap,
       summary: "The target workspace overlaps the protected Symphony runner install or current checkout.",
       details: "Workspace `#{workspace}` overlaps one of: #{Enum.join(RunnerRuntime.protected_paths(), ", ")}."
+    )
+  end
+
+  defp repo_boundary_mismatch_violation(origin_url) do
+    expected = Config.company_repo_url() || "unknown"
+
+    violation(:repo_boundary_mismatch,
+      summary: "The workspace checkout does not belong to the configured company/repo boundary.",
+      details: "Expected origin `#{expected}`, but found `#{origin_url || "unknown"}`.",
+      human_action: "Repair the checkout remote or discard the workspace so it points at the configured repo before retrying."
     )
   end
 
@@ -369,8 +473,90 @@ defmodule SymphonyElixir.RunPolicy do
     )
   end
 
+  defp workload_restricted_violation(summary, details, human_action) do
+    violation(:policy_workload_restricted,
+      summary: summary,
+      details: details,
+      human_action: human_action
+    )
+  end
+
+  defp freeze_violation(code, summary, details) do
+    violation(code,
+      summary: summary,
+      details: details
+    )
+  end
+
   defp budget_exceeded?(nil, _observed), do: false
   defp budget_exceeded?(budget, observed) when is_integer(budget), do: observed > budget
+
+  defp current_stage_token_budget(issue, running_entry) do
+    stage =
+      Map.get(running_entry, :stage) ||
+        current_stage(issue)
+
+    Config.policy_stage_token_budget(stage)
+  end
+
+  defp current_stage(issue) do
+    workspace = Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+
+    case RunStateStore.load_or_default(workspace, issue) do
+      %{stage: stage} when is_binary(stage) -> stage
+      _ -> nil
+    end
+  end
+
+  defp maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget) do
+    soft_budget = stage_budget[:per_turn_input_soft]
+
+    if budget_exceeded?(soft_budget, current_turn_input) do
+      workspace = Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+
+      case RunStateStore.load_or_default(workspace, issue) do
+        %{resume_context: %{"token_pressure" => "high"}} ->
+          :ok
+
+        %{resume_context: %{token_pressure: "high"}} ->
+          :ok
+
+        state when is_map(state) ->
+          resume_context =
+            state
+            |> Map.get(:resume_context, %{})
+            |> Enum.into(%{})
+            |> Map.put(:token_pressure, "high")
+
+          _ =
+            RunStateStore.transition(workspace, Map.get(state, :stage, "checkout"), %{
+              resume_context: resume_context
+            })
+
+          _ =
+            RunLedger.record("policy.decided", %{
+              issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+              issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
+              actor_type: "runtime",
+              actor_id: "run_policy",
+              summary: "Turn entered soft token pressure.",
+              details: "Observed implement/verify input tokens #{current_turn_input} above soft budget #{soft_budget}.",
+              metadata: %{
+                stage: Map.get(running_entry, :stage) || Map.get(state, :stage),
+                observed: current_turn_input,
+                soft_budget: soft_budget
+              }
+            })
+
+          :ok
+
+        _ ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
 
   defp normalize_state(state) when is_binary(state) do
     state
@@ -390,6 +576,19 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
+  defp normalize_repo_url(nil), do: nil
+
+  defp normalize_repo_url(url) when is_binary(url) do
+    url
+    |> String.trim()
+    |> String.trim_trailing(".git")
+    |> String.replace_prefix("git@", "")
+    |> String.replace(":", "/")
+    |> String.replace_prefix("https://", "")
+    |> String.replace_prefix("http://", "")
+    |> String.downcase()
+  end
+
   defp violation(code, attrs) do
     rule = RuleCatalog.rule(code)
 
@@ -400,7 +599,8 @@ defmodule SymphonyElixir.RunPolicy do
       summary: Keyword.fetch!(attrs, :summary),
       details: Keyword.fetch!(attrs, :details),
       human_action: Keyword.get(attrs, :human_action, rule.human_action),
-      target_state: Keyword.get(attrs, :target_state, @blocked_state)
+      target_state: Keyword.get(attrs, :target_state, @blocked_state),
+      metadata: Keyword.get(attrs, :metadata, %{})
     }
   end
 end

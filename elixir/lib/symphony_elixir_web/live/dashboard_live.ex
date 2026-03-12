@@ -187,6 +187,89 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <section class="section-card">
           <div class="section-header">
             <div>
+              <h2 class="section-title">Operator triage</h2>
+              <p class="section-copy">The shortest path to what needs attention, what is progressing autonomously, what is safe to ignore for now, and what just finished.</p>
+            </div>
+          </div>
+
+          <div class="run-body">
+            <section class="run-panel">
+              <p class="panel-label">Needs attention</p>
+              <p class="panel-copy"><%= @payload.triage.summary.attention_now %> issue(s) need operator attention now.</p>
+              <%= if @payload.triage.attention_now == [] do %>
+                <p class="empty-state">Nothing is blocked on you right now.</p>
+              <% else %>
+                <div class="activity-list">
+                  <div class="activity-row" :for={entry <- @payload.triage.attention_now}>
+                    <span class={tone_badge_class(entry.tone)}><%= entry.issue_identifier %></span>
+                    <div class="activity-copy">
+                      <p><%= entry.why_here %></p>
+                      <span class="muted"><%= entry.human_action_required || entry.automatic_next || "Inspect issue details." %></span>
+                    </div>
+                  </div>
+                </div>
+              <% end %>
+            </section>
+
+            <section class="run-panel">
+              <p class="panel-label">Running autonomously</p>
+              <p class="panel-copy"><%= @payload.triage.summary.autonomous_now %> issue(s) are actively progressing without operator input.</p>
+              <%= if @payload.triage.autonomous_now == [] do %>
+                <p class="empty-state">No fully autonomous work is active.</p>
+              <% else %>
+                <div class="activity-list">
+                  <div class="activity-row" :for={entry <- @payload.triage.autonomous_now}>
+                    <span class={tone_badge_class(entry.tone)}><%= entry.issue_identifier %></span>
+                    <div class="activity-copy">
+                      <p><%= entry.why_here %></p>
+                      <span class="muted"><%= entry.automatic_next || "Continue autonomously." %></span>
+                    </div>
+                  </div>
+                </div>
+              <% end %>
+            </section>
+
+            <section class="run-panel">
+              <p class="panel-label">Safe to ignore</p>
+              <p class="panel-copy"><%= @payload.triage.summary.waiting_safe %> issue(s) are waiting on runtime, checks, or backoff safely.</p>
+              <%= if @payload.triage.waiting_safe == [] do %>
+                <p class="empty-state">Nothing is in a passive wait state right now.</p>
+              <% else %>
+                <div class="activity-list">
+                  <div class="activity-row" :for={entry <- @payload.triage.waiting_safe}>
+                    <span class={tone_badge_class(entry.tone)}><%= entry.issue_identifier %></span>
+                    <div class="activity-copy">
+                      <p><%= entry.why_here %></p>
+                      <span class="muted"><%= entry.automatic_next || "Wait for runtime progress." %></span>
+                    </div>
+                  </div>
+                </div>
+              <% end %>
+            </section>
+
+            <section class="run-panel">
+              <p class="panel-label">Recently finished</p>
+              <p class="panel-copy"><%= @payload.triage.summary.recently_finished %> issue(s) finalized recently.</p>
+              <%= if @payload.triage.recently_finished == [] do %>
+                <p class="empty-state">No recent autonomous completions.</p>
+              <% else %>
+                <div class="activity-list">
+                  <div class="activity-row" :for={entry <- @payload.triage.recently_finished}>
+                    <span class={tone_badge_class(entry.tone)}><%= entry.issue_identifier %></span>
+                    <div class="activity-copy">
+                      <p><%= entry.why_here %></p>
+                      <span class="muted"><%= entry.automatic_next || "No immediate action is required." %></span>
+                    </div>
+                  </div>
+                </div>
+              <% end %>
+            </section>
+          </div>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
               <h2 class="section-title">Runner lifecycle</h2>
               <p class="section-copy">Stable runner version, canary scope, and rollback posture for the current install root.</p>
             </div>
@@ -377,6 +460,145 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <% end %>
         </section>
 
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Tracker intake</h2>
+              <p class="section-copy">Webhook-first intake health, inbox depth, and fallback polling posture for the current tracker instance.</p>
+            </div>
+          </div>
+
+          <div class="run-body">
+            <section class="run-panel">
+              <p class="panel-label">Webhook intake</p>
+              <div class="data-list">
+                <div class="data-row">
+                  <span class="data-key">Mode</span>
+                  <span class={tone_badge_class(if(Map.get(@payload.webhooks || %{}, :mode) == "webhook_first", do: "good", else: "muted"))}>
+                    <%= Map.get(@payload.webhooks || %{}, :mode, "polling_fallback") %>
+                  </span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Health</span>
+                  <span class={tone_badge_class(runner_health_tone(Map.get(@payload.webhooks || %{}, :health)))}>
+                    <%= Map.get(@payload.webhooks || %{}, :health, "unknown") %>
+                  </span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Last accepted</span>
+                  <span class="data-value mono"><%= Map.get(@payload.webhooks || %{}, :last_accepted_at) || "n/a" %></span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Last ignored</span>
+                  <span class="data-value mono"><%= Map.get(@payload.webhooks || %{}, :last_ignored_at) || "n/a" %></span>
+                </div>
+                <%= if present?(Map.get(@payload.webhooks || %{}, :last_ignored_rule_id)) do %>
+                  <div class="data-row">
+                    <span class="data-key">Ignore rule</span>
+                    <span class="data-value mono"><%= Map.get(@payload.webhooks || %{}, :last_ignored_rule_id) %></span>
+                  </div>
+                <% end %>
+                <%= if present?(Map.get(@payload.webhooks || %{}, :last_ignored_reason)) do %>
+                  <div class="data-row">
+                    <span class="data-key">Ignore reason</span>
+                    <span class="data-value"><%= Map.get(@payload.webhooks || %{}, :last_ignored_reason) %></span>
+                  </div>
+                <% end %>
+                <div class="data-row">
+                  <span class="data-key">Last rejected</span>
+                  <span class="data-value mono"><%= Map.get(@payload.webhooks || %{}, :last_rejected_at) || "n/a" %></span>
+                </div>
+                <%= if present?(Map.get(@payload.webhooks || %{}, :last_rejected_rule_id)) do %>
+                  <div class="data-row">
+                    <span class="data-key">Reject rule</span>
+                    <span class="data-value mono"><%= Map.get(@payload.webhooks || %{}, :last_rejected_rule_id) %></span>
+                  </div>
+                <% end %>
+                <%= if present?(Map.get(@payload.webhooks || %{}, :last_rejected_reason)) do %>
+                  <div class="data-row">
+                    <span class="data-key">Reject reason</span>
+                    <span class="data-value"><%= Map.get(@payload.webhooks || %{}, :last_rejected_reason) %></span>
+                  </div>
+                <% end %>
+              </div>
+            </section>
+
+            <section class="run-panel">
+              <p class="panel-label">Inbox and polling</p>
+              <div class="data-list">
+                <div class="data-row">
+                  <span class="data-key">Inbox depth</span>
+                  <span class="data-value mono"><%= format_int(Map.get(@payload.tracker_inbox || %{}, :depth)) %></span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Oldest pending</span>
+                  <span class="data-value mono"><%= Map.get(@payload.tracker_inbox || %{}, :oldest_pending_event_at) || "n/a" %></span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Last drained</span>
+                  <span class="data-value mono"><%= Map.get(@payload.tracker_inbox || %{}, :last_drained_at) || "n/a" %></span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Poll mode</span>
+                  <span class={tone_badge_class(if(Map.get(@payload.polling || %{}, :checking?), do: "warn", else: "muted"))}>
+                    <%= Map.get(@payload.polling || %{}, :mode) || "idle" %>
+                  </span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Dispatch mode</span>
+                  <span class={tone_badge_class(if(Map.get(@payload.polling || %{}, :dispatch_mode) == "manual_only_degraded", do: "warn", else: "good"))}>
+                    <%= Map.get(@payload.polling || %{}, :dispatch_mode) || "normal" %>
+                  </span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Tracker reads</span>
+                  <span class={tone_badge_class(if(Map.get(@payload.polling || %{}, :tracker_reads_paused), do: "warn", else: "good"))}>
+                    <%= if Map.get(@payload.polling || %{}, :tracker_reads_paused), do: "paused", else: "active" %>
+                  </span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Manual dispatch</span>
+                  <span class={tone_badge_class(if(Map.get(@payload.polling || %{}, :manual_dispatch_enabled), do: "good", else: "muted"))}>
+                    <%= if Map.get(@payload.polling || %{}, :manual_dispatch_enabled), do: "enabled", else: "disabled" %>
+                  </span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Next discovery</span>
+                  <span class="data-value mono"><%= format_millis(Map.get(@payload.polling || %{}, :next_poll_in_ms)) %></span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Next healing</span>
+                  <span class="data-value mono"><%= format_millis(Map.get(@payload.polling || %{}, :next_healing_poll_in_ms)) %></span>
+                </div>
+                <div class="data-row">
+                  <span class="data-key">Backoff</span>
+                  <span class={tone_badge_class(if(Map.get(@payload.polling || %{}, :backoff_active), do: "warn", else: "good"))}>
+                    <%= if Map.get(@payload.polling || %{}, :backoff_active), do: "active", else: "clear" %>
+                  </span>
+                </div>
+                <%= if present?(Map.get(@payload.polling || %{}, :backoff_rule_id)) do %>
+                  <div class="data-row">
+                    <span class="data-key">Backoff rule</span>
+                    <span class="data-value mono"><%= Map.get(@payload.polling || %{}, :backoff_rule_id) %></span>
+                  </div>
+                <% end %>
+                <%= if present?(Map.get(@payload.polling || %{}, :backoff_reason)) do %>
+                  <div class="data-row">
+                    <span class="data-key">Backoff reason</span>
+                    <span class="data-value"><%= Map.get(@payload.polling || %{}, :backoff_reason) %></span>
+                  </div>
+                <% end %>
+                <%= if present?(Map.get(@payload.polling || %{}, :dispatch_summary)) do %>
+                  <div class="data-row">
+                    <span class="data-key">Dispatch summary</span>
+                    <span class="data-value"><%= Map.get(@payload.polling || %{}, :dispatch_summary) %></span>
+                  </div>
+                <% end %>
+              </div>
+            </section>
+          </div>
+        </section>
+
         <section class="insight-grid">
           <section class="section-card section-card-accent section-card-main">
             <div class="section-header">
@@ -396,6 +618,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <div class="run-heading-row">
                         <span class={state_badge_class(entry.state)}><%= entry.state %></span>
                         <span class={tone_badge_class(stage_tone(entry.stage))}><%= entry.stage || "unknown stage" %></span>
+                        <span class={tone_badge_class(entry.runtime_mode.tone)}><%= entry.runtime_mode.label %></span>
+                        <%= if entry.review_approved do %>
+                          <span class={tone_badge_class("good")}>Review approved</span>
+                        <% end %>
+                        <%= if entry.token_pressure == "high" do %>
+                          <span class={tone_badge_class("warn")}>Token pressure high</span>
+                        <% end %>
                         <span class="run-eyebrow mono"><%= format_runtime_and_turns(entry.started_at, entry.turn_count, @now) %></span>
                       </div>
                       <h3 class="run-title"><%= entry.issue_identifier %></h3>
@@ -436,6 +665,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     </span>
                     <span class={tone_badge_class(if(entry.policy_source == "override", do: "warn", else: "info"))}>
                       Policy <%= entry.policy_class || "unknown" %> · <%= entry.policy_source || "n/a" %>
+                    </span>
+                    <span class={tone_badge_class("info")}>
+                      Profile <%= entry.workflow_profile.name %> · <%= entry.workflow_profile.merge_mode %>
+                    </span>
+                    <span class={tone_badge_class(entry.status_summary.tone)}>
+                      <%= entry.status_summary.summary %>
                     </span>
                   </div>
 
@@ -527,6 +762,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           <span class="data-key">Smoke</span>
                           <span class="data-value mono" title={entry.harness.smoke_command || "missing"}><%= truncate_middle(entry.harness.smoke_command || "missing", 52) %></span>
                         </div>
+                        <div class="data-row">
+                          <span class="data-key">Preview deploy</span>
+                          <span class="data-value mono" title={entry.harness.deploy_preview_command || "missing"}><%= truncate_middle(entry.harness.deploy_preview_command || "missing", 52) %></span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Production deploy</span>
+                          <span class="data-value mono" title={entry.harness.deploy_production_command || "missing"}><%= truncate_middle(entry.harness.deploy_production_command || "missing", 52) %></span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Post-deploy verify</span>
+                          <span class="data-value mono" title={entry.harness.post_deploy_verify_command || "missing"}><%= truncate_middle(entry.harness.post_deploy_verify_command || "missing", 52) %></span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Deploy rollback</span>
+                          <span class="data-value mono" title={entry.harness.deploy_rollback_command || "missing"}><%= truncate_middle(entry.harness.deploy_rollback_command || "missing", 52) %></span>
+                        </div>
                       </div>
                     </section>
 
@@ -554,6 +805,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <p class="panel-label">Decision</p>
                       <div class="data-list">
                         <div class="data-row">
+                          <span class="data-key">Runtime mode</span>
+                          <span class={tone_badge_class(entry.runtime_mode.tone)}><%= entry.runtime_mode.label %></span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Automatic next</span>
+                          <span class="data-value"><%= entry.status_summary.automatic_next %></span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Workflow profile</span>
+                          <span class="data-value">
+                            <%= entry.workflow_profile.name %> · merge <%= entry.workflow_profile.merge_mode %>
+                            <%= if entry.workflow_profile.max_turns_override do %>
+                              · max turns <%= entry.workflow_profile.max_turns_override %>
+                            <% end %>
+                          </span>
+                        </div>
+                        <div class="data-row">
                           <span class="data-key">Rule</span>
                           <span class="data-value mono"><%= entry.last_rule_id || "n/a" %></span>
                         </div>
@@ -575,8 +843,84 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     </section>
 
                     <section class="run-panel">
+                      <p class="panel-label">Runtime Health</p>
+                      <div class="data-list">
+                        <div class="data-row">
+                          <span class="data-key">Summary</span>
+                          <span class="data-value"><%= entry.runtime_health.summary %></span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Workspace</span>
+                          <span class="data-value">
+                            <%= if entry.runtime_health.workspace.checkout do %>
+                              checkout ok
+                            <% else %>
+                              checkout unknown
+                            <% end %>
+                            ·
+                            <%= if entry.runtime_health.workspace.git do %>
+                              git ok
+                            <% else %>
+                              git unknown
+                            <% end %>
+                            ·
+                            <%= if entry.runtime_health.workspace.dirty do %>
+                              dirty
+                            <% else %>
+                              clean
+                            <% end %>
+                          </span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Proof</span>
+                          <span class="data-value">
+                            validation <%= entry.runtime_health.proof.validation_status || "n/a" %>
+                            · verifier <%= entry.runtime_health.proof.verifier_status || "n/a" %>
+                          </span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Passive stage</span>
+                          <span class="data-value">
+                            <%= if entry.runtime_health.passive_stage.passive, do: "yes", else: "no" %>
+                            · waiting checks <%= if entry.runtime_health.passive_stage.waiting_on_checks, do: "yes", else: "no" %>
+                            · deploy approved <%= if entry.runtime_health.passive_stage.deploy_approved, do: "yes", else: "no" %>
+                          </span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Deploys</span>
+                          <span class="data-value">
+                            preview <%= entry.runtime_health.deploy.preview_status || "n/a" %>
+                            · production <%= entry.runtime_health.deploy.production_status || "n/a" %>
+                            · post-deploy <%= entry.runtime_health.deploy.post_deploy_status || "n/a" %>
+                          </span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Runner</span>
+                          <span class="data-value">
+                            merge ready <%= if entry.runtime_health.runner.ready_for_merge, do: "yes", else: "no" %>
+                            <%= if entry.runtime_health.runner.pr_url do %>
+                              · <a class="issue-link" href={entry.runtime_health.runner.pr_url} target="_blank">PR</a>
+                            <% end %>
+                          </span>
+                        </div>
+                      </div>
+                    </section>
+
+                    <section class="run-panel">
                       <p class="panel-label">Publish</p>
                       <div class="data-list">
+                        <div class="data-row">
+                          <span class="data-key">Review approval</span>
+                          <span class={tone_badge_class(if(entry.review_approved, do: "good", else: "muted"))}>
+                            <%= if entry.review_approved, do: "recorded", else: "not recorded" %>
+                          </span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Deploy approval</span>
+                          <span class={tone_badge_class(if(entry.publish.deploy_approved, do: "good", else: "muted"))}>
+                            <%= if entry.publish.deploy_approved, do: "recorded", else: "not recorded" %>
+                          </span>
+                        </div>
                         <div class="data-row">
                           <span class="data-key">PR body</span>
                           <span class={tone_badge_class(command_tone(entry.publish.pr_body_validation && entry.publish.pr_body_validation.status))}>
@@ -593,6 +937,24 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           <span class="data-key">Verifier</span>
                           <span class={tone_badge_class(command_tone(entry.publish.last_verifier && entry.publish.last_verifier.status))}>
                             <%= command_label(entry.publish.last_verifier, "not-run") %>
+                          </span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Preview deploy</span>
+                          <span class={tone_badge_class(command_tone(entry.publish.last_deploy_preview && entry.publish.last_deploy_preview.status))}>
+                            <%= command_label(entry.publish.last_deploy_preview, "not-run") %>
+                          </span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Production deploy</span>
+                          <span class={tone_badge_class(command_tone(entry.publish.last_deploy_production && entry.publish.last_deploy_production.status))}>
+                            <%= command_label(entry.publish.last_deploy_production, "not-run") %>
+                          </span>
+                        </div>
+                        <div class="data-row">
+                          <span class="data-key">Post-deploy verify</span>
+                          <span class={tone_badge_class(command_tone(entry.publish.last_post_deploy_verify && entry.publish.last_post_deploy_verify.status))}>
+                            <%= command_label(entry.publish.last_post_deploy_verify, "not-run") %>
                           </span>
                         </div>
                         <div class="data-row">
@@ -970,6 +1332,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp runner_health_tone("healthy"), do: "good"
   defp runner_health_tone("not_required"), do: "muted"
+  defp runner_health_tone("disabled"), do: "muted"
+  defp runner_health_tone("degraded"), do: "warn"
   defp runner_health_tone("invalid"), do: "danger"
   defp runner_health_tone(_status), do: "muted"
 

@@ -250,7 +250,17 @@ defmodule SymphonyElixir.ExtensionsTest do
         {:ok,
          %{
            "data" => %{
-             "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => "state-1"}]}}}
+             "issue" => %{
+               "team" => %{"id" => "team-1", "states" => %{"nodes" => [%{"id" => "state-1"}]}}
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{"id" => "team-1", "states" => %{"nodes" => [%{"id" => "state-1"}]}}
+             }
            }
          }},
         {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
@@ -258,8 +268,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     )
 
     assert :ok = Adapter.update_issue_state("issue-1", "Done")
-    assert_receive {:graphql_called, state_lookup_query, %{issueId: "issue-1", stateName: "Done"}}
+    assert_receive {:graphql_called, state_lookup_query, %{issueId: "issue-1", stateName: "__unused__"}}
     assert state_lookup_query =~ "states"
+    assert_receive {:graphql_called, _state_lookup_query, %{issueId: "issue-1", stateName: "Done"}}
 
     assert_receive {:graphql_called, update_issue_query, %{issueId: "issue-1", stateId: "state-1"}}
 
@@ -271,7 +282,17 @@ defmodule SymphonyElixir.ExtensionsTest do
         {:ok,
          %{
            "data" => %{
-             "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => "state-1"}]}}}
+             "issue" => %{
+               "team" => %{"id" => "team-1", "states" => %{"nodes" => [%{"id" => "state-1"}]}}
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{"id" => "team-1", "states" => %{"nodes" => [%{"id" => "state-1"}]}}
+             }
            }
          }},
         {:ok, %{"data" => %{"issueUpdate" => %{"success" => false}}}}
@@ -294,7 +315,17 @@ defmodule SymphonyElixir.ExtensionsTest do
         {:ok,
          %{
            "data" => %{
-             "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => "state-1"}]}}}
+             "issue" => %{
+               "team" => %{"id" => "team-1", "states" => %{"nodes" => [%{"id" => "state-1"}]}}
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{"id" => "team-1", "states" => %{"nodes" => [%{"id" => "state-1"}]}}
+             }
            }
          }},
         {:ok, %{"data" => %{}}}
@@ -309,7 +340,17 @@ defmodule SymphonyElixir.ExtensionsTest do
         {:ok,
          %{
            "data" => %{
-             "issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => "state-1"}]}}}
+             "issue" => %{
+               "team" => %{"id" => "team-1", "states" => %{"nodes" => [%{"id" => "state-1"}]}}
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "team" => %{"id" => "team-1", "states" => %{"nodes" => [%{"id" => "state-1"}]}}
+             }
            }
          }},
         :unexpected
@@ -354,6 +395,12 @@ defmodule SymphonyElixir.ExtensionsTest do
            }
 
     assert state_payload["rate_limits"] == %{"primary" => %{"remaining" => 11}}
+    assert state_payload["webhooks"]["health"] == "healthy"
+    assert state_payload["webhooks"]["mode"] == "webhook_first"
+    assert state_payload["tracker_inbox"]["depth"] == 2
+    assert state_payload["tracker_inbox"]["last_drained_at"] == "2026-03-08T06:10:00Z"
+    assert state_payload["polling"]["backoff_active"] == true
+    assert state_payload["polling"]["backoff_rule_id"] == "tracker.rate_limited"
 
     assert [
              %{
@@ -395,6 +442,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert issue_payload["tracked"] == %{}
     assert issue_payload["paused"] == nil
     assert issue_payload["queue"] == nil
+    assert issue_payload["webhooks"]["health"] == "healthy"
+    assert issue_payload["tracker_inbox"]["depth"] == 2
+    assert issue_payload["polling"]["backoff_active"] == true
     assert issue_payload["running"]["session_id"] == "thread-http"
     assert issue_payload["running"]["turn_count"] == 7
     assert issue_payload["running"]["state"] == "In Progress"
@@ -846,7 +896,37 @@ defmodule SymphonyElixir.ExtensionsTest do
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
-      rate_limits: %{"primary" => %{"remaining" => 11}}
+      rate_limits: %{"primary" => %{"remaining" => 11}},
+      webhooks: %{
+        health: "healthy",
+        mode: "webhook_first",
+        last_accepted_at: "2026-03-08T06:00:00Z",
+        last_rejected_at: nil,
+        last_rejected_reason: nil,
+        last_rejected_rule_id: nil
+      },
+      tracker_inbox: %{
+        depth: 2,
+        oldest_pending_event_at: "2026-03-08T05:58:00Z",
+        last_drained_at: "2026-03-08T06:10:00Z"
+      },
+      polling: %{
+        checking?: false,
+        mode: "idle",
+        dispatch_mode: "manual_only_degraded",
+        dispatch_summary: "Tracker reads are paused due to rate limiting; manual issues continue to dispatch.",
+        tracker_reads_paused: true,
+        manual_dispatch_enabled: true,
+        next_poll_in_ms: 120_000,
+        poll_interval_ms: 600_000,
+        discovery_interval_ms: 600_000,
+        healing_interval_ms: 1_800_000,
+        next_healing_poll_in_ms: 900_000,
+        backoff_active: true,
+        backoff_until_in_ms: 45_000,
+        backoff_reason: "Linear API rate limited",
+        backoff_rule_id: "tracker.rate_limited"
+      }
     }
   end
 

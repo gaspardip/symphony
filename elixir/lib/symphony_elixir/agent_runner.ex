@@ -13,9 +13,11 @@ defmodule SymphonyElixir.AgentRunner do
     case Workspace.create_for_issue(issue) do
       {:ok, workspace} ->
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue),
-               :ok <- RunPolicy.enforce_pre_run(issue, workspace),
-               :ok <- run_codex_turns(workspace, issue, codex_update_recipient, opts) do
+          Logger.info("Workspace ready for #{issue_context(issue)} workspace=#{workspace}")
+
+          with :ok <- log_step("before_run_hook", issue, fn -> Workspace.run_before_run_hook(workspace, issue) end),
+               :ok <- log_step("pre_run_policy", issue, fn -> RunPolicy.enforce_pre_run(issue, workspace) end),
+               :ok <- log_step("delivery_engine", issue, fn -> run_codex_turns(workspace, issue, codex_update_recipient, opts) end) do
             :ok
           else
             {:stop, reason} ->
@@ -41,6 +43,13 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts) do
     DeliveryEngine.run(workspace, issue, codex_update_recipient, opts)
+  end
+
+  defp log_step(step, issue, fun) when is_binary(step) and is_function(fun, 0) do
+    Logger.info("Starting #{step} for #{issue_context(issue)}")
+    result = fun.()
+    Logger.info("Finished #{step} for #{issue_context(issue)} result=#{inspect(result)}")
+    result
   end
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do

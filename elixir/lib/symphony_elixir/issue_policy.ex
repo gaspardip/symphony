@@ -72,29 +72,37 @@ defmodule SymphonyElixir.IssuePolicy do
   def resolve(issue, opts \\ []) do
     override = normalize_class(Keyword.get(opts, :override))
     default = normalize_class(Keyword.get(opts, :default)) || @fully_autonomous
+    allowed_classes = normalize_allowed_classes(Keyword.get(opts, :allowed_classes))
+    pack_name = Keyword.get(opts, :policy_pack)
     labels = policy_labels(issue)
     matched_classes = labels |> Enum.map(&Map.fetch!(@label_to_class, &1)) |> Enum.uniq()
 
     case matched_classes do
       [] ->
-        {:ok,
-         %{
-           class: override || default,
-           source: if(is_nil(override), do: :default, else: :override),
-           override: override,
-           label: nil,
-           labels: []
-         }}
+        maybe_validate_allowed_classes(
+          %{
+            class: override || default,
+            source: if(is_nil(override), do: :default, else: :override),
+            override: override,
+            label: nil,
+            labels: []
+          },
+          allowed_classes,
+          pack_name
+        )
 
       [label_class] ->
-        {:ok,
-         %{
-           class: override || label_class,
-           source: if(is_nil(override), do: :label, else: :override),
-           override: override,
-           label: Enum.at(labels, 0),
-           labels: labels
-         }}
+        maybe_validate_allowed_classes(
+          %{
+            class: override || label_class,
+            source: if(is_nil(override), do: :label, else: :override),
+            override: override,
+            label: Enum.at(labels, 0),
+            labels: labels
+          },
+          allowed_classes,
+          pack_name
+        )
 
       _multiple ->
         {:error,
@@ -127,5 +135,38 @@ defmodule SymphonyElixir.IssuePolicy do
     |> to_string()
     |> String.trim()
     |> String.downcase()
+  end
+
+  defp normalize_allowed_classes(value) when is_list(value) do
+    value
+    |> Enum.map(&normalize_class/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp normalize_allowed_classes(_value), do: []
+
+  defp maybe_validate_allowed_classes(resolution, [], _pack_name), do: {:ok, resolution}
+
+  defp maybe_validate_allowed_classes(%{class: class} = resolution, allowed_classes, pack_name) do
+    if class in allowed_classes do
+      {:ok, resolution}
+    else
+      class_string = class_to_string(class)
+      pack_label = pack_name |> to_string() |> String.replace("_", " ")
+
+      {:error,
+       %{
+         code: :policy_pack_disallows_class,
+         rule_id: RuleCatalog.rule_id(:policy_pack_disallows_class),
+         failure_class: RuleCatalog.failure_class(:policy_pack_disallows_class),
+         summary: "The current policy pack does not allow the requested policy class.",
+         human_action: RuleCatalog.human_action(:policy_pack_disallows_class),
+         labels: Map.get(resolution, :labels, []),
+         pack_name: pack_name,
+         requested_class: class_string,
+         details: "Policy pack `#{pack_label}` does not allow `#{class_string}`."
+       }}
+    end
   end
 end

@@ -760,6 +760,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator snapshot includes poll countdown and checking status" do
+    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 30_000)
+
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -785,11 +787,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{
              polling: %{
                checking?: false,
-               poll_interval_ms: 30_000,
+               poll_interval_ms: poll_interval_ms,
                next_poll_in_ms: due_in_ms
              }
            } = snapshot
 
+    assert poll_interval_ms == Config.poll_interval_ms()
     assert is_integer(due_in_ms)
     assert due_in_ms >= 0
     assert due_in_ms <= 4_000
@@ -903,9 +906,263 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert next_poll_in_ms <= 50
   end
 
+  test "orchestrator healing handlers update cycle state and rejection metadata" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      healing_poll_interval_ms: 50
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :HealingHandlersOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    state =
+      :sys.get_state(pid)
+      |> Map.put(:poll_check_in_progress, false)
+      |> Map.put(:current_poll_mode, nil)
+
+    assert {:noreply, healing_state} = Orchestrator.handle_info(:healing_tick, state)
+    assert healing_state.poll_check_in_progress == true
+    assert healing_state.current_poll_mode == :healing
+    assert healing_state.next_healing_poll_due_at_ms == nil
+
+    assert {:noreply, healed_state} = Orchestrator.handle_info(:run_healing_cycle, healing_state)
+    assert healed_state.poll_check_in_progress == false
+    assert healed_state.current_poll_mode == nil
+    assert is_integer(healed_state.next_healing_poll_due_at_ms)
+
+    accepted_at = ~U[2026-03-08 05:30:00Z]
+
+    assert {:noreply, webhook_state} =
+             Orchestrator.handle_info(
+               {:tracker_events_available, %{accepted_at: accepted_at, accepted: 1}},
+               state
+             )
+
+    assert webhook_state.webhook_last_accepted_at == accepted_at
+    assert webhook_state.poll_check_in_progress == true
+    assert webhook_state.current_poll_mode == :webhook
+
+    assert {:noreply, busy_webhook_state} =
+             Orchestrator.handle_info(
+               {:tracker_events_available, %{accepted_at: accepted_at, accepted: 1}},
+               %{state | poll_check_in_progress: true, current_poll_mode: :discovery}
+             )
+
+    assert busy_webhook_state.poll_check_in_progress == true
+    assert busy_webhook_state.current_poll_mode == :discovery
+    assert busy_webhook_state.webhook_last_accepted_at == accepted_at
+
+    assert {:noreply, rejected_state} =
+             Orchestrator.handle_info(
+               {:tracker_webhook_rejected,
+                %{reason: "invalid signature", rule_id: "webhook.signature_invalid"}},
+               state
+             )
+
+    assert rejected_state.webhook_last_rejected_reason == "invalid signature"
+    assert rejected_state.webhook_last_rejected_rule_id == "webhook.signature_invalid"
+
+    assert {:noreply, completed_webhook_state} =
+             Orchestrator.handle_info(
+               :run_webhook_cycle,
+               %{state | poll_check_in_progress: true, current_poll_mode: :webhook}
+             )
+
+    assert completed_webhook_state.poll_check_in_progress == false
+    assert completed_webhook_state.current_poll_mode == nil
+  end
+
+  test "orchestrator poll cycle short-circuits for runner health, tracker backoff, and invalid handoff mode" do
+    invalid_runner_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runner-poll-short-circuit-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-manual-backoff-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["dogfood:symphony"],
+      runner_install_root: invalid_runner_root,
+      manual_store_root: manual_store_root
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :PollShortCircuitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(invalid_runner_root)
+      File.rm_rf(manual_store_root)
+    end)
+
+    state =
+      :sys.get_state(pid)
+      |> Map.put(:poll_check_in_progress, true)
+      |> Map.put(:current_poll_mode, :discovery)
+
+    assert {:noreply, runner_blocked_state} = Orchestrator.handle_info(:run_poll_cycle, state)
+    assert runner_blocked_state.candidate_fetch_error == {:runner_health, "runner.install_missing"}
+    assert runner_blocked_state.skipped_issues == []
+    assert runner_blocked_state.last_candidate_issues == []
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      manual_store_root: manual_store_root
+    )
+
+    assert {:ok, _manual_issue} =
+             SymphonyElixir.ManualIssueStore.submit(%{
+               "id" => "backoff-manual",
+               "identifier" => "BACKOFF-MANUAL",
+               "title" => "Manual issue during tracker backoff",
+               "acceptance_criteria" => ["Remain dispatchable while tracker is rate-limited"],
+               "labels" => ["dogfood:symphony"]
+             })
+
+    backoff_state =
+      state
+      |> Map.put(:tracker_backoff_until_ms, System.monotonic_time(:millisecond) + 60_000)
+      |> Map.put(:tracker_backoff_rule_id, "tracker.rate_limited")
+      |> Map.put(:tracker_backoff_reason, "rate limited")
+      |> Map.put(:max_concurrent_agents, 0)
+
+    assert {:noreply, rate_limited_state} = Orchestrator.handle_info(:run_poll_cycle, backoff_state)
+    assert rate_limited_state.candidate_fetch_error == {:tracker_backoff, "tracker.rate_limited"}
+    assert Enum.any?(rate_limited_state.last_candidate_issues, &(&1.identifier == "BACKOFF-MANUAL"))
+
+    snapshot =
+      :sys.replace_state(pid, fn _ -> rate_limited_state end)
+      |> then(fn _ -> GenServer.call(pid, :snapshot) end)
+
+    assert snapshot.polling.dispatch_mode == "manual_only_degraded"
+    assert snapshot.polling.tracker_reads_paused == true
+    assert snapshot.polling.manual_dispatch_enabled == true
+    assert snapshot.polling.dispatch_summary =~ "manual issues continue to dispatch"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      manual_store_root: manual_store_root,
+      tracker_handoff_mode: "not-a-mode"
+    )
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, invalid_handoff_state} = Orchestrator.handle_info(:run_poll_cycle, state)
+        assert invalid_handoff_state.candidate_fetch_error == nil
+      end)
+
+    assert log =~ "Invalid tracker.handoff_mode"
+  end
+
+  test "orchestrator poll cycle records generic tracker config validation failures" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      policy_default_issue_class: "bogus"
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :GenericValidationFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    state =
+      :sys.get_state(pid)
+      |> Map.put(:poll_check_in_progress, true)
+      |> Map.put(:current_poll_mode, :discovery)
+
+    log =
+      capture_log(fn ->
+        assert {:noreply, next_state} = Orchestrator.handle_info(:run_poll_cycle, state)
+        assert next_state.candidate_fetch_error == {:invalid_policy_default_issue_class, "bogus"}
+        assert next_state.skipped_issues == []
+      end)
+
+    assert log =~ "Failed to fetch from tracker: {:invalid_policy_default_issue_class, \"bogus\"}"
+  end
+
+  test "orchestrator webhook cycle drains valid persisted tracker events and updates routing cache" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_concurrent_agents: 0
+    )
+
+    SymphonyElixir.TrackerEventInbox.reset()
+
+    issue = %Issue{
+      id: "issue-webhook-cycle",
+      identifier: "MT-WEBHOOK-CYCLE",
+      title: "Webhook cycle",
+      description: "Reconcile from event inbox",
+      state: "Todo",
+      assignee_id: "worker-1",
+      updated_at: ~U[2026-03-08 07:20:00Z]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    event = %SymphonyElixir.TrackerEvent{
+      provider: "linear",
+      event_id: "evt-webhook-cycle",
+      entity_type: "Issue",
+      entity_id: issue.id,
+      issue_identifier: issue.identifier,
+      project_slug: "project",
+      action: "update",
+      state_name: issue.state,
+      label_names: [],
+      assignee_id: issue.assignee_id,
+      updated_at: issue.updated_at,
+      raw: %{"type" => "Issue"}
+    }
+
+    assert {:ok, %{accepted: 1}} = SymphonyElixir.TrackerEventInbox.enqueue([event])
+
+    orchestrator_name = Module.concat(__MODULE__, :WebhookCycleOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      SymphonyElixir.TrackerEventInbox.reset()
+    end)
+
+    state =
+      :sys.get_state(pid)
+      |> Map.put(:poll_check_in_progress, true)
+      |> Map.put(:current_poll_mode, :webhook)
+
+    assert {:noreply, next_state} = Orchestrator.handle_info(:run_webhook_cycle, state)
+    assert next_state.poll_check_in_progress == false
+    assert next_state.current_poll_mode == nil
+    assert next_state.issue_routing_cache[issue.id].state == "Todo"
+    assert next_state.issue_routing_cache[issue.id].assignee_id == "worker-1"
+    assert SymphonyElixir.TrackerEventInbox.pending_events(10) == []
+  end
+
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_kind: "memory",
       codex_stall_timeout_ms: 1_000
     )
 
@@ -936,6 +1193,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       identifier: "MT-STALL",
       issue: %Issue{id: issue_id, identifier: "MT-STALL", state: "In Progress"},
       session_id: "thread-stall-turn-stall",
+      codex_app_server_pid: nil,
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
       last_codex_message: nil,
       last_codex_timestamp: stale_activity_at,
       last_codex_event: :notification,
@@ -949,11 +1210,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid)
+    _snapshot =
+      wait_for_snapshot(
+        pid,
+        fn
+          %{running: [], retrying: [%{issue_id: ^issue_id, attempt: 1}]} ->
+            true
 
-    refute Process.alive?(worker_pid)
-    refute Map.has_key?(state.running, issue_id)
+          _ ->
+            false
+        end,
+        1_000
+      )
+
+    state = :sys.get_state(pid)
 
     assert %{
              attempt: 1,

@@ -102,7 +102,7 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
       )
 
     try do
-      File.mkdir_p!(Path.join(workspace, ".git"))
+      init_git_workspace!(workspace)
       File.mkdir_p!(Path.join(workspace, ".symphony"))
       File.mkdir_p!(Path.join(workspace, "scripts"))
 
@@ -133,6 +133,14 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
         artifacts:
           command:
             - ./scripts/artifacts.sh
+        verification:
+          behavioral_proof:
+            required: true
+            mode: unit_first
+            source_paths:
+              - lib
+            test_paths:
+              - test
         pull_request:
           required_checks:
             - validate
@@ -142,6 +150,324 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
       assert :ok = RunPolicy.enforce_pre_run(issue, workspace)
       assert_receive {:memory_tracker_state_update, "issue-promote", "In Progress"}
       refute_receive {:memory_tracker_state_update, "issue-promote", "Blocked"}
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "pre-run policy blocks issues outside the active workload filter" do
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_policy_pack: "client_safe",
+      policy_packs: %{
+        client_safe: %{
+          default_issue_class: "review_required",
+          allowed_policy_classes: ["review_required", "never_automerge"],
+          required_any_issue_labels: ["scope:maintenance"]
+        }
+      }
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+    end)
+
+    issue = %Issue{
+      id: "issue-workload-blocked",
+      identifier: "MT-WL-01",
+      state: "Todo",
+      labels: ["symphony:events"]
+    }
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workload-blocked-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      init_git_workspace!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.mkdir_p!(Path.join(workspace, "scripts"))
+
+      File.write!(Path.join(workspace, "scripts/preflight.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      File.chmod!(Path.join(workspace, "scripts/preflight.sh"), 0o755)
+
+      File.write!(
+        Path.join(workspace, ".symphony/harness.yml"),
+        """
+        version: 1
+        base_branch: main
+        preflight:
+          command:
+            - ./scripts/preflight.sh
+        validation:
+          command:
+            - ./scripts/validate.sh
+        smoke:
+          command:
+            - ./scripts/smoke.sh
+        post_merge:
+          command:
+            - ./scripts/post-merge.sh
+        artifacts:
+          command:
+            - ./scripts/artifacts.sh
+        verification:
+          behavioral_proof:
+            required: true
+            mode: unit_first
+            source_paths:
+              - lib
+            test_paths:
+              - test
+        pull_request:
+          required_checks:
+            - validate
+        """
+      )
+
+      assert {:stop, %RunPolicy.Violation{code: :policy_workload_restricted, rule_id: "policy.workload_restricted"}} =
+               RunPolicy.enforce_pre_run(issue, workspace)
+
+      refute_receive {:memory_tracker_comment, "issue-workload-blocked", _body}
+      refute_receive {:memory_tracker_state_update, "issue-workload-blocked", "Blocked"}
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "pre-run policy allows issues that match the active workload filter" do
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_policy_pack: "client_safe",
+      policy_packs: %{
+        client_safe: %{
+          default_issue_class: "review_required",
+          allowed_policy_classes: ["review_required", "never_automerge"],
+          required_any_issue_labels: ["scope:maintenance"]
+        }
+      }
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+    end)
+
+    issue = %Issue{
+      id: "issue-workload-allowed",
+      identifier: "MT-WL-02",
+      state: "Todo",
+      labels: ["symphony:events", "scope:maintenance"]
+    }
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workload-allowed-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      init_git_workspace!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.mkdir_p!(Path.join(workspace, "scripts"))
+
+      File.write!(Path.join(workspace, "scripts/preflight.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      File.chmod!(Path.join(workspace, "scripts/preflight.sh"), 0o755)
+
+      File.write!(
+        Path.join(workspace, ".symphony/harness.yml"),
+        """
+        version: 1
+        base_branch: main
+        preflight:
+          command:
+            - ./scripts/preflight.sh
+        validation:
+          command:
+            - ./scripts/validate.sh
+        smoke:
+          command:
+            - ./scripts/smoke.sh
+        post_merge:
+          command:
+            - ./scripts/post-merge.sh
+        artifacts:
+          command:
+            - ./scripts/artifacts.sh
+        verification:
+          behavioral_proof:
+            required: true
+            mode: unit_first
+            source_paths:
+              - lib
+            test_paths:
+              - test
+        pull_request:
+          required_checks:
+            - validate
+        """
+      )
+
+      assert :ok = RunPolicy.enforce_pre_run(issue, workspace)
+      refute_receive {:memory_tracker_state_update, "issue-workload-allowed", "In Progress"}
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "pre-run policy blocks issues when the company policy pack is frozen" do
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_policy_pack: "client_safe",
+      policy_packs: %{
+        client_safe: %{
+          company_frozen: true
+        }
+      }
+    )
+
+    issue = %Issue{id: "issue-company-frozen", identifier: "MT-CF-01", state: "Todo"}
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-company-frozen-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      init_git_workspace!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.mkdir_p!(Path.join(workspace, "scripts"))
+
+      File.write!(Path.join(workspace, "scripts/preflight.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      File.chmod!(Path.join(workspace, "scripts/preflight.sh"), 0o755)
+
+      File.write!(
+        Path.join(workspace, ".symphony/harness.yml"),
+        """
+        version: 1
+        base_branch: main
+        preflight:
+          command:
+            - ./scripts/preflight.sh
+        validation:
+          command:
+            - ./scripts/validate.sh
+        smoke:
+          command:
+            - ./scripts/smoke.sh
+        post_merge:
+          command:
+            - ./scripts/post-merge.sh
+        artifacts:
+          command:
+            - ./scripts/artifacts.sh
+        verification:
+          behavioral_proof:
+            required: true
+            mode: unit_first
+            source_paths:
+              - lib
+            test_paths:
+              - test
+        pull_request:
+          required_checks:
+            - validate
+        """
+      )
+
+      assert {:stop, %RunPolicy.Violation{code: :company_frozen, rule_id: "policy.company_frozen"}} =
+               RunPolicy.enforce_pre_run(issue, workspace)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "pre-run policy blocks a checkout outside the configured company repo boundary" do
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_policy_pack: "client_safe",
+      company_name: "Client Boundary",
+      company_repo_url: "git@github.com:gaspardip/events.git"
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+    end)
+
+    issue = %Issue{
+      id: "issue-repo-boundary",
+      identifier: "MT-BND-01",
+      state: "Todo",
+      labels: ["symphony:events"]
+    }
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-repo-boundary-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      init_git_workspace!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.mkdir_p!(Path.join(workspace, "scripts"))
+
+      File.write!(Path.join(workspace, "scripts/preflight.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      File.chmod!(Path.join(workspace, "scripts/preflight.sh"), 0o755)
+
+      File.write!(
+        Path.join(workspace, ".symphony/harness.yml"),
+        """
+        version: 1
+        base_branch: main
+        preflight:
+          command:
+            - ./scripts/preflight.sh
+        validation:
+          command:
+            - ./scripts/validate.sh
+        smoke:
+          command:
+            - ./scripts/smoke.sh
+        post_merge:
+          command:
+            - ./scripts/post-merge.sh
+        artifacts:
+          command:
+            - ./scripts/artifacts.sh
+        verification:
+          behavioral_proof:
+            required: true
+            mode: unit_first
+            source_paths:
+              - lib
+            test_paths:
+              - test
+        pull_request:
+          required_checks:
+            - validate
+        """
+      )
+
+      System.cmd("git", ["-C", workspace, "remote", "add", "origin", "git@github.com:someone-else/other.git"])
+
+      assert {:stop, %RunPolicy.Violation{code: :repo_boundary_mismatch, rule_id: "checkout.repo_boundary_mismatch"}} =
+               RunPolicy.enforce_pre_run(issue, workspace)
+
+      refute_receive {:memory_tracker_comment, "issue-repo-boundary", _body}
+      refute_receive {:memory_tracker_state_update, "issue-repo-boundary", "Blocked"}
     after
       File.rm_rf(workspace)
     end
@@ -507,5 +833,19 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
     assert body =~ "Failure class: budget"
     assert body =~ "Unblock action:"
     assert_receive {:memory_tracker_state_update, "issue-token-budget", "Blocked"}
+  end
+
+  defp init_git_workspace!(workspace, branch \\ "main") do
+    File.mkdir_p!(workspace)
+    System.cmd("git", ["init", "-b", branch], cd: workspace, stderr_to_stdout: true)
+    File.write!(Path.join(workspace, ".gitkeep"), "ok\n")
+    System.cmd("git", ["add", ".gitkeep"], cd: workspace, stderr_to_stdout: true)
+
+    System.cmd(
+      "git",
+      ["-c", "user.name=Symphony Test", "-c", "user.email=symphony@example.com", "commit", "-m", "init"],
+      cd: workspace,
+      stderr_to_stdout: true
+    )
   end
 end

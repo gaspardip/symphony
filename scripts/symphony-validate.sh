@@ -5,4 +5,5 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cd "$ROOT_DIR/elixir"
 mise trust
+mise exec -- mix harness.check
 mise exec -- make all

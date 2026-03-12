@@ -13,6 +13,16 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     json(conn, Presenter.state_payload(orchestrator(), snapshot_timeout_ms()))
   end
 
+  @spec delivery_report(Conn.t(), map()) :: Conn.t()
+  def delivery_report(conn, _params) do
+    json(conn, Presenter.delivery_report_payload(orchestrator(), snapshot_timeout_ms()))
+  end
+
+  @spec portfolio(Conn.t(), map()) :: Conn.t()
+  def portfolio(conn, _params) do
+    json(conn, Presenter.portfolio_payload())
+  end
+
   @spec issue(Conn.t(), map()) :: Conn.t()
   def issue(conn, %{"issue_identifier" => issue_identifier}) do
     case Presenter.issue_payload(issue_identifier, orchestrator(), snapshot_timeout_ms()) do
@@ -34,6 +44,22 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
       {:error, :unavailable} ->
         error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+    end
+  end
+
+  @spec manual_run(Conn.t(), map()) :: Conn.t()
+  def manual_run(conn, params) when is_map(params) do
+    case SymphonyElixir.Orchestrator.submit_manual_issue(orchestrator(), params) do
+      :unavailable ->
+        error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+
+      %{ok: true} = payload ->
+        conn
+        |> put_status(202)
+        |> json(payload)
+
+      %{ok: false, error: error} ->
+        error_response(conn, 400, "manual_issue_rejected", to_string(error))
     end
   end
 

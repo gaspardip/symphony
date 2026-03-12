@@ -3,12 +3,14 @@ defmodule SymphonyElixir.VerifierRunner do
   Runs the hybrid publish gate: deterministic smoke first, then a read-only Codex verifier.
   """
 
+  alias SymphonyElixir.BehavioralProof
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.Config
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.RunInspector
+  alias SymphonyElixir.UiProof
   alias SymphonyElixir.VerifierResult
 
   @report_verifier_result_tool "report_verifier_result"
@@ -19,7 +21,7 @@ defmodule SymphonyElixir.VerifierRunner do
       when is_binary(workspace) and is_map(state) do
     smoke_result = RunInspector.run_smoke(workspace, inspection.harness, opts)
     acceptance = IssueAcceptance.from_issue(issue)
-    context = verification_context(workspace, state, acceptance, smoke_result, opts)
+    context = verification_context(workspace, inspection, state, acceptance, smoke_result, opts)
 
     case smoke_result.status do
       :unavailable ->
@@ -36,43 +38,52 @@ defmodule SymphonyElixir.VerifierRunner do
         )
 
       :passed ->
-        before_snapshot = RunInspector.inspect(workspace, opts)
-        verifier_session_runner = Keyword.get(opts, :verifier_session_runner, &run_verifier_session/4)
+        cond do
+          context.behavioral_proof.required? and not context.behavioral_proof.satisfied? ->
+            missing_behavioral_proof_result(context)
 
-        case verifier_session_runner.(workspace, issue, state, Keyword.put(opts, :verification_context, context)) do
-          {:ok, %VerifierResult{} = result} ->
-            after_snapshot = RunInspector.inspect(workspace, opts)
+          context.ui_proof.verify_required? and not context.ui_proof.verify_satisfied? ->
+            missing_ui_proof_result(context)
 
-            if RunInspector.code_changed?(before_snapshot, after_snapshot) do
-              blocked_result(
-                "The verifier mutated the workspace, which is forbidden for read-only verification.",
-                ["Verification must not change files, git state, or PR metadata."],
-                context
-              )
-            else
-              verifier_result_payload(result, context)
+          true ->
+            before_snapshot = RunInspector.inspect(workspace, opts)
+            verifier_session_runner = Keyword.get(opts, :verifier_session_runner, &run_verifier_session/4)
+
+            case verifier_session_runner.(workspace, issue, state, Keyword.put(opts, :verification_context, context)) do
+              {:ok, %VerifierResult{} = result} ->
+                after_snapshot = RunInspector.inspect(workspace, opts)
+
+                if RunInspector.code_changed?(before_snapshot, after_snapshot) do
+                  blocked_result(
+                    "The verifier mutated the workspace, which is forbidden for read-only verification.",
+                    ["Verification must not change files, git state, or PR metadata."],
+                    context
+                  )
+                else
+                  verifier_result_payload(result, context)
+                end
+
+              {:error, :missing_verifier_result} ->
+                blocked_result(
+                  "The verifier turn completed without reporting `report_verifier_result`.",
+                  ["Verifier tool result missing."],
+                  context
+                )
+
+              {:error, {:invalid_verifier_result, reason}} ->
+                blocked_result(
+                  "The verifier reported an invalid structured result.",
+                  [inspect(reason)],
+                  context
+                )
+
+              {:error, reason} ->
+                blocked_result(
+                  "The verifier session failed before producing a usable result.",
+                  [inspect(reason)],
+                  context
+                )
             end
-
-          {:error, :missing_verifier_result} ->
-            blocked_result(
-              "The verifier turn completed without reporting `report_verifier_result`.",
-              ["Verifier tool result missing."],
-              context
-            )
-
-          {:error, {:invalid_verifier_result, reason}} ->
-            blocked_result(
-              "The verifier reported an invalid structured result.",
-              [inspect(reason)],
-              context
-            )
-
-          {:error, reason} ->
-            blocked_result(
-              "The verifier session failed before producing a usable result.",
-              [inspect(reason)],
-              context
-            )
         end
     end
   end
@@ -88,7 +99,7 @@ defmodule SymphonyElixir.VerifierRunner do
     clear_verifier_result(issue)
 
     verifier_opts = [
-      codex_command: verifier_codex_command(),
+      effort: Config.codex_turn_effort("verifier"),
       on_message: Keyword.get(opts, :on_message, fn _message -> :ok end),
       tool_executor: verifier_tool_executor(issue),
       issue: issue
@@ -120,6 +131,7 @@ defmodule SymphonyElixir.VerifierRunner do
     changed_files = Map.get(context, :changed_files, [])
     diff_summary = Map.get(context, :diff_summary) || "No diff summary available."
     validation_output = get_in(state, [:last_validation, :output]) || "No validation output recorded."
+    content_evidence = Map.get(context, :content_evidence, [])
 
     """
     #{PromptBuilder.build_prompt(issue)}
@@ -146,11 +158,13 @@ defmodule SymphonyElixir.VerifierRunner do
     Git diff summary:
     #{diff_summary}
 
+    #{format_content_evidence(content_evidence)}
+
     Validation output excerpt:
-    #{String.slice(to_string(validation_output), 0, 2_000)}
+    #{format_command_output_excerpt(validation_output)}
 
     Smoke output excerpt:
-    #{String.slice(to_string(smoke_result.output || ""), 0, 2_000)}
+    #{format_command_output_excerpt(smoke_result.output || "")}
 
     Return one verifier verdict:
     - `pass` if the diff satisfies the issue and is safe to publish
@@ -161,13 +175,18 @@ defmodule SymphonyElixir.VerifierRunner do
     |> String.trim()
   end
 
-  defp verification_context(workspace, state, acceptance, smoke_result, opts) do
+  defp verification_context(workspace, inspection, state, acceptance, smoke_result, opts) do
+    changed_files = RunInspector.changed_paths(workspace, opts)
+
     %{
       acceptance: IssueAcceptance.to_prompt_map(acceptance),
-      changed_files: RunInspector.changed_paths(workspace, opts),
+      changed_files: changed_files,
       diff_summary: RunInspector.diff_summary(workspace, opts),
+      content_evidence: changed_file_content_evidence(workspace, changed_files),
       smoke_result: smoke_result,
-      validation_output: get_in(state, [:last_validation, :output])
+      validation_output: get_in(state, [:last_validation, :output]),
+      behavioral_proof: BehavioralProof.evaluate(workspace, inspection.harness, changed_files),
+      ui_proof: UiProof.evaluate(workspace, inspection.harness, changed_files, inspection, opts)
     }
   end
 
@@ -187,7 +206,9 @@ defmodule SymphonyElixir.VerifierRunner do
         |> Enum.reject(&(&1 in [nil, "Changed files: ", "Acceptance summary: "])),
       raw_output: result.raw_output,
       smoke: command_result_to_map(context.smoke_result),
-      acceptance: context.acceptance
+      acceptance: context.acceptance,
+      behavioral_proof: BehavioralProof.to_map(context.behavioral_proof),
+      ui_proof: UiProof.to_map(context.ui_proof)
     }
   end
 
@@ -200,7 +221,9 @@ defmodule SymphonyElixir.VerifierRunner do
       evidence: blocking_evidence(context),
       raw_output: summary,
       smoke: command_result_to_map(context.smoke_result),
-      acceptance: context.acceptance
+      acceptance: context.acceptance,
+      behavioral_proof: BehavioralProof.to_map(context.behavioral_proof),
+      ui_proof: UiProof.to_map(context.ui_proof)
     }
   end
 
@@ -213,7 +236,41 @@ defmodule SymphonyElixir.VerifierRunner do
       evidence: blocking_evidence(context),
       raw_output: String.slice(to_string(context.smoke_result.output || ""), 0, 2_000),
       smoke: command_result_to_map(context.smoke_result),
-      acceptance: context.acceptance
+      acceptance: context.acceptance,
+      behavioral_proof: BehavioralProof.to_map(context.behavioral_proof),
+      ui_proof: UiProof.to_map(context.ui_proof)
+    }
+  end
+
+  defp missing_behavioral_proof_result(context) do
+    %{
+      verdict: "needs_more_work",
+      summary: context.behavioral_proof.reason,
+      acceptance_gaps: ["Add or update repo-owned behavioral proof before publish."],
+      risky_areas: [],
+      evidence: blocking_evidence(context),
+      raw_output: context.behavioral_proof.reason,
+      reason_code: "behavior_proof_missing",
+      smoke: command_result_to_map(context.smoke_result),
+      acceptance: context.acceptance,
+      behavioral_proof: BehavioralProof.to_map(context.behavioral_proof),
+      ui_proof: UiProof.to_map(context.ui_proof)
+    }
+  end
+
+  defp missing_ui_proof_result(context) do
+    %{
+      verdict: "needs_more_work",
+      summary: context.ui_proof.reason,
+      acceptance_gaps: ["Add repo-owned UI proof before publish or merge."],
+      risky_areas: [],
+      evidence: blocking_evidence(context),
+      raw_output: context.ui_proof.reason,
+      reason_code: "ui_proof_missing",
+      smoke: command_result_to_map(context.smoke_result),
+      acceptance: context.acceptance,
+      behavioral_proof: BehavioralProof.to_map(context.behavioral_proof),
+      ui_proof: UiProof.to_map(context.ui_proof)
     }
   end
 
@@ -224,6 +281,32 @@ defmodule SymphonyElixir.VerifierRunner do
       "Changed files: #{Enum.join(context.changed_files, ", ")}"
     ]
     |> Enum.reject(&(&1 in [nil, "Changed files: ", "Acceptance summary: "]))
+  end
+
+  @doc false
+  def format_command_output_excerpt(output) do
+    output = to_string(output || "")
+
+    case String.length(output) do
+      0 ->
+        "No command output recorded."
+
+      length when length <= 2_400 ->
+        output
+
+      _ ->
+        head = String.slice(output, 0, 800)
+        tail = String.slice(output, -1_600, 1_600)
+
+        """
+        #{head}
+
+        ...
+
+        #{tail}
+        """
+        |> String.trim()
+    end
   end
 
   defp verifier_tool_executor(issue) do
@@ -279,24 +362,15 @@ defmodule SymphonyElixir.VerifierRunner do
   defp verifier_issue(issue) when is_map(issue) do
     %Issue{
       id: Map.get(issue, :id) || Map.get(issue, "id"),
+      external_id: Map.get(issue, :external_id) || Map.get(issue, "external_id"),
+      canonical_identifier:
+        Map.get(issue, :canonical_identifier) || Map.get(issue, "canonical_identifier") ||
+          Map.get(issue, :identifier) || Map.get(issue, "identifier"),
       identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
       title: Map.get(issue, :title) || Map.get(issue, "title"),
       description: Map.get(issue, :description) || Map.get(issue, "description")
     }
   end
-
-  defp verifier_codex_command do
-    command =
-      Config.codex_command()
-      |> String.replace(~r/--model_reasoning_effort(?:=|\s+)\S+/, "--model_reasoning_effort=medium")
-
-    if String.contains?(command, "--model_reasoning_effort") do
-      command
-    else
-      command <> " --model_reasoning_effort=medium"
-    end
-  end
-
   defp command_result_to_map(result) do
     %{
       status: result.status,
@@ -305,10 +379,103 @@ defmodule SymphonyElixir.VerifierRunner do
     }
   end
 
+  defp format_content_evidence([]), do: "Changed file content evidence:\n- none"
+
+  defp format_content_evidence(entries) do
+    rendered =
+      entries
+      |> Enum.map(fn %{path: path, excerpt: excerpt} ->
+        "- #{path}:\n#{indent_text(excerpt, 2)}"
+      end)
+      |> Enum.join("\n")
+
+    "Changed file content evidence:\n#{rendered}"
+  end
+
+  defp changed_file_content_evidence(workspace, changed_files) do
+    changed_files
+    |> Enum.filter(&doc_like_path?/1)
+    |> Enum.take(4)
+    |> Enum.map(&content_evidence_entry(workspace, &1))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp content_evidence_entry(workspace, path) do
+    file = Path.join(workspace, path)
+
+    cond do
+      not File.regular?(file) ->
+        nil
+
+      true ->
+        case File.read(file) do
+          {:ok, contents} ->
+            excerpt = doc_content_excerpt(contents)
+
+            if excerpt == "" do
+              nil
+            else
+              %{path: path, excerpt: excerpt}
+            end
+
+          _ ->
+            nil
+        end
+    end
+  end
+
+  defp doc_content_excerpt(contents) when is_binary(contents) do
+    trimmed = String.trim(contents)
+
+    cond do
+      trimmed == "" ->
+        ""
+
+      String.length(trimmed) <= 2_400 ->
+        trimmed
+
+      true ->
+        head = String.slice(trimmed, 0, 1_400)
+        tail = String.slice(trimmed, -800, 800)
+
+        """
+        #{String.trim(head)}
+
+        ...
+
+        #{String.trim(tail)}
+        """
+        |> String.trim()
+    end
+  end
+
+  defp doc_like_path?(path) when is_binary(path) do
+    downcased = String.downcase(path)
+
+    String.starts_with?(downcased, "docs/") or
+      String.starts_with?(downcased, ".github/") or
+      String.ends_with?(downcased, ".md") or
+      String.ends_with?(downcased, ".txt") or
+      String.ends_with?(downcased, ".json") or
+      String.ends_with?(downcased, ".yaml") or
+      String.ends_with?(downcased, ".yml") or
+      String.ends_with?(downcased, ".toml") or
+      String.ends_with?(downcased, ".sh") or
+      Path.basename(downcased) in ["readme", "readme.md", "changelog.md"]
+  end
+
   defp format_list([]), do: "    - none"
 
   defp format_list(items) do
     items
     |> Enum.map_join("\n", fn item -> "    - #{item}" end)
+  end
+
+  defp indent_text(text, spaces) do
+    prefix = String.duplicate(" ", spaces)
+
+    text
+    |> String.split("\n")
+    |> Enum.map_join("\n", &(prefix <> &1))
   end
 end
