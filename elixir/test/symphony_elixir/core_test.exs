@@ -707,7 +707,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = :sys.get_state(pid, 15_000)
 
     running_entry = %{
       pid: self(),
@@ -764,7 +764,7 @@ defmodule SymphonyElixir.CoreTest do
       pr_url: "https://github.com/example/repo/pull/42"
     })
 
-    initial_state = :sys.get_state(pid)
+    initial_state = :sys.get_state(pid, 15_000)
 
     running_entry = %{
       pid: self(),
@@ -783,7 +783,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = :sys.get_state(pid, 15_000)
 
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert_due_in_range(due_at_ms, -5_000, 5_100)
@@ -818,7 +818,7 @@ defmodule SymphonyElixir.CoreTest do
       issue_identifier: identifier
     })
 
-    initial_state = :sys.get_state(pid)
+    initial_state = :sys.get_state(pid, 15_000)
 
     running_entry = %{
       pid: self(),
@@ -837,7 +837,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = :sys.get_state(pid, 15_000)
 
     refute Map.has_key?(state.retry_attempts, issue_id)
     assert MapSet.member?(state.completed, issue_id)
@@ -855,7 +855,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = :sys.get_state(pid, 15_000)
 
     running_entry = %{
       pid: self(),
@@ -875,7 +875,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = :sys.get_state(pid, 15_000)
 
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
@@ -895,7 +895,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    initial_state = :sys.get_state(pid)
+    initial_state = :sys.get_state(pid, 15_000)
 
     running_entry = %{
       pid: self(),
@@ -914,7 +914,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = :sys.get_state(pid, 15_000)
 
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
