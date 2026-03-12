@@ -453,6 +453,13 @@ defmodule SymphonyElixir.TestSupport do
 
   defp policy_packs_yaml(packs), do: "policy_packs: #{yaml_value(packs)}"
 
+  defp policy_packs_yaml(packs) when is_map(packs) do
+    ["policy_packs:" | yaml_object_lines(packs, 2)]
+    |> Enum.join("\n")
+  end
+
+  defp policy_packs_yaml(packs), do: "policy_packs: #{yaml_value(packs)}"
+
   defp portfolio_yaml(instances) when instances in [[], nil], do: nil
 
   defp portfolio_yaml(instances) when is_list(instances) do
