@@ -1,5 +1,8 @@
 version: 1
-base_branch: main
+base_branch: gaspar/autonomous-pipeline
+
+project:
+  type: elixir-app
 agent_harness:
   scope: self_host_only
   initializer:
@@ -40,20 +43,73 @@ agent_harness:
     require_progress: true
     require_feature_update_on_code_change: true
 preflight:
+  description: Validate the local toolchain and repo bootstrap requirements for Symphony self-host runs.
   command:
     - ./scripts/symphony-preflight.sh
+  outputs:
+    format: text
+  success:
+    exit_code: 0
 validation:
+  description: Run the full deterministic self-host validation suite for Symphony.
   command:
     - ./scripts/symphony-validate.sh
+  outputs:
+    format: text
+  success:
+    exit_code: 0
 smoke:
+  description: Run the focused self-host smoke suite before publishing a PR.
   command:
     - ./scripts/symphony-smoke.sh
+  outputs:
+    format: text
+  success:
+    exit_code: 0
 post_merge:
+  description: Re-run the self-host smoke contract on the base branch after merge.
   command:
     - ./scripts/symphony-post-merge.sh
+  outputs:
+    format: text
+  success:
+    exit_code: 0
 artifacts:
+  description: Emit a JSON snapshot of the self-host harness and runtime contract.
   command:
     - ./scripts/symphony-artifacts.sh
+  outputs:
+    format: json
+  success:
+    exit_code: 0
+
+verification:
+  behavioral_proof:
+    required: true
+    mode: unit_first
+    source_paths:
+      - elixir/lib/
+      - scripts/
+      - ops/
+      - .symphony/
+      - AGENTS.md
+    test_paths:
+      - elixir/test/
+      - scripts/
+  ui_proof:
+    required: false
+    mode: local
+    source_paths: []
+    test_paths: []
+    artifact_paths: []
+
+ci:
+  provider: github-actions
+  workflow: .github/workflows/make-all.yml
+  env: {}
+  required_checks:
+    - make-all
+
 pull_request:
   required_checks:
     - make-all

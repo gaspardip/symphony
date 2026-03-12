@@ -481,8 +481,8 @@ record_canary() {
 
   local recorded_at metadata_payload history_metadata runner_mode rollback_recommended summary issues_json prs_json
   recorded_at="$(now_utc)"
-  issues_json="$(json_array "${issues[@]}")"
-  prs_json="$(json_array "${prs[@]}")"
+  issues_json="$(json_array "${issues[@]-}")"
+  prs_json="$(json_array "${prs[@]-}")"
 
   if [[ "$result" == "pass" ]]; then
     runner_mode="stable"
