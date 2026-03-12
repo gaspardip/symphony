@@ -1,0 +1,16 @@
+id: observability
+title: Runtime Observability
+status: active
+summary: Telemetry, traces, metrics, structured logs, and bounded debug replay for Symphony runtime behavior.
+source_paths:
+  - docs/OBSERVABILITY_IMPLEMENTATION_PLAN.md
+  - elixir/lib/symphony_elixir/log_file.ex
+  - elixir/lib/symphony_elixir/http_server.ex
+  - elixir/lib/symphony_elixir_web/router.ex
+acceptance_signals:
+  - Symphony emits stage, token, proof, review, and operator observability signals with stable metadata
+  - Operators can inspect metrics, traces, logs, and bounded debug artifacts from a local self-host stack
+dependencies:
+  - runtime-core
+  - dogfood
+last_updated_by_issue: CLZ-22

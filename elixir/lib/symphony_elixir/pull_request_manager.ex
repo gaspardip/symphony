@@ -3,44 +3,83 @@ defmodule SymphonyElixir.PullRequestManager do
   Owns PR publication, attachment, and merge operations for delivery runs.
   """
 
-  alias SymphonyElixir.{AuthorProfile, CredentialRegistry, GitHubCLIClient, PolicyPack}
+  alias SymphonyElixir.{AuthorProfile, CredentialRegistry, DebugArtifacts, GitHubCLIClient, Observability, PolicyPack}
   alias SymphonyElixir.{IssueSource, Linear.Issue, RunInspector}
 
   @spec ensure_pull_request(Path.t(), Issue.t() | map(), map(), keyword()) ::
           {:ok, %{url: String.t(), state: String.t() | nil, body_validation: map()}} | {:error, term()}
   def ensure_pull_request(workspace, issue, run_state, opts \\ []) when is_binary(workspace) do
-    summary = get_in(run_state, [:last_turn_result, :summary]) || "Automated delivery update"
-    title = "#{issue_identifier(issue)}: #{issue_title(issue)}"
-    body = pr_body(workspace, issue, run_state, summary)
-    github_client = github_client(opts)
-    github_opts = github_client_opts(opts)
+    metadata = pr_metadata(issue, run_state)
 
-    with :ok <- ensure_pr_posting_allowed(opts),
-         :ok <- ensure_credential_scope("github", "pr_write", opts),
-         {:ok, validation} <- validate_pr_body(workspace, body, opts),
-         {:ok, pr} <-
-           create_or_update_pull_request(
-             workspace,
-             run_state,
-             title,
-             body,
-             github_client,
-             github_opts,
-             opts
-           ) do
-      attach_issue_link(issue, pr.url, opts)
-      persist_pr_url(workspace, run_state, pr.url, github_client, github_opts)
-      {:ok, Map.put(pr, :body_validation, validation)}
-    end
+    Observability.with_span("symphony.pr.ensure", metadata, fn ->
+      summary = get_in(run_state, [:last_turn_result, :summary]) || "Automated delivery update"
+      title = "#{issue_identifier(issue)}: #{issue_title(issue)}"
+      body = pr_body(workspace, issue, run_state, summary)
+      github_client = github_client(opts)
+      github_opts = github_client_opts(opts)
+      start_time = System.monotonic_time()
+
+      Observability.emit([:symphony, :pr, :start], %{count: 1}, metadata)
+
+      result =
+        with :ok <- ensure_pr_posting_allowed(opts),
+             :ok <- ensure_credential_scope("github", "pr_write", opts),
+             {:ok, validation} <- validate_pr_body(workspace, body, metadata, opts),
+             {:ok, pr} <-
+               create_or_update_pull_request(
+                 workspace,
+                 run_state,
+                 title,
+                 body,
+                 github_client,
+                 github_opts,
+                 opts
+               ) do
+          attach_issue_link(issue, pr.url, opts)
+          persist_pr_url(workspace, run_state, pr.url, github_client, github_opts)
+          {:ok, Map.put(pr, :body_validation, validation)}
+        end
+
+      Observability.emit(
+        [:symphony, :pr, :stop],
+        %{count: 1, duration: System.monotonic_time() - start_time},
+        Map.put(metadata, :outcome, pr_outcome(result))
+      )
+
+      case result do
+        {:ok, _pr} = ok ->
+          Observability.emit([:symphony, :pr, :published], %{count: 1}, metadata)
+          ok
+
+        other ->
+          other
+      end
+    end)
   end
 
   @spec merge_pull_request(Path.t(), keyword()) ::
           {:ok, %{merged: boolean(), url: String.t() | nil, output: String.t(), status: atom()}} | {:error, term()}
   def merge_pull_request(workspace, opts \\ []) when is_binary(workspace) do
-    with :ok <- ensure_pr_posting_allowed(opts),
-         :ok <- ensure_credential_scope("github", "merge", opts) do
-      github_client(opts).merge_pull_request(workspace, github_client_opts(opts))
-    end
+    metadata = %{workspace: workspace, stage: "merge"}
+
+    Observability.with_span("symphony.pr.merge", metadata, fn ->
+      start_time = System.monotonic_time()
+      Observability.emit([:symphony, :merge, :attempted], %{count: 1}, metadata)
+
+      result =
+        with :ok <- ensure_pr_posting_allowed(opts),
+             :ok <- ensure_credential_scope("github", "merge", opts) do
+          github_client(opts).merge_pull_request(workspace, github_client_opts(opts))
+        end
+
+      Observability.emit(
+        [:symphony, :merge, :completed],
+        %{count: 1, duration: System.monotonic_time() - start_time},
+        Map.put(metadata, :outcome, pr_outcome(result))
+      )
+
+      result
+    end)
   end
 
   @spec existing_pull_request(Path.t(), keyword()) ::
@@ -103,7 +142,7 @@ defmodule SymphonyElixir.PullRequestManager do
     github_client.persist_pr_url(workspace, branch, url, github_opts)
   end
 
-  defp validate_pr_body(workspace, body, opts) do
+  defp validate_pr_body(workspace, body, metadata, opts) do
     if pr_body_check_available?(workspace) do
       with {:ok, body_file} <- write_body_file(body, opts) do
         try do
@@ -115,6 +154,7 @@ defmodule SymphonyElixir.PullRequestManager do
               {:ok, %{status: "passed", output: String.trim(output)}}
 
             {output, status} ->
+              store_pr_debug_artifact("pr_body_invalid", output, Map.put(metadata, :status, status))
               {:error, {:pr_body_invalid, status, output}}
           end
         after
@@ -256,4 +296,29 @@ defmodule SymphonyElixir.PullRequestManager do
 
   defp issue_url(%Issue{url: url}), do: url
   defp issue_url(issue), do: issue[:url] || issue["url"]
+
+  defp pr_metadata(issue, run_state) do
+    %{
+      issue_identifier: issue_identifier(issue),
+      stage: Map.get(run_state, :stage, "publish"),
+      policy_class: Map.get(run_state, :effective_policy_class),
+      workflow_profile: Map.get(run_state, :effective_policy_class)
+    }
+  end
+
+  defp pr_outcome({:ok, _value}), do: "ok"
+  defp pr_outcome(:ok), do: "ok"
+  defp pr_outcome({:error, _reason}), do: "error"
+  defp pr_outcome(_other), do: "other"
+
+  defp store_pr_debug_artifact(kind, output, metadata) do
+    case DebugArtifacts.store_failure(kind, output, metadata) do
+      {:ok, artifact_ref} ->
+        Observability.emit_debug_artifact_reference(kind, artifact_ref, metadata)
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
 end

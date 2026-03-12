@@ -20,6 +20,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.LeaseManager
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.ManualIssueStore
+  alias SymphonyElixir.Observability
   alias SymphonyElixir.PriorityEngine
   alias SymphonyElixir.PRWatcher
   alias SymphonyElixir.RuleCatalog
@@ -295,9 +296,7 @@ defmodule SymphonyElixir.Orchestrator do
               continuation = continuation_metadata_for_running_entry(running_entry)
               continuation_delay_type = Map.get(continuation, :delay_type, :continuation)
 
-              Logger.info(
-                "Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling #{continuation_delay_type} continuation check"
-              )
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling #{continuation_delay_type} continuation check")
 
               state = complete_issue(state, issue_id)
 
@@ -306,12 +305,17 @@ defmodule SymphonyElixir.Orchestrator do
                   state
 
                 delay_type ->
-                  schedule_issue_retry(state, issue_id, 1, %{
-                    identifier: running_entry.identifier,
-                    delay_type: delay_type,
-                    issue: running_entry.issue
-                  }
-                  |> Map.merge(Map.drop(continuation, [:delay_type])))
+                  schedule_issue_retry(
+                    state,
+                    issue_id,
+                    1,
+                    %{
+                      identifier: running_entry.identifier,
+                      delay_type: delay_type,
+                      issue: running_entry.issue
+                    }
+                    |> Map.merge(Map.drop(continuation, [:delay_type]))
+                  )
               end
 
             _ ->
@@ -342,6 +346,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        Observability.emit_token_delta(updated_running_entry, token_delta, update)
 
         state =
           state
@@ -730,9 +735,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:rate_limited, next_state}
 
       {%State{} = next_state, {:error, reason}} ->
-        Logger.warning(
-          "Failed to fetch tracker issue from webhook event issue_id=#{inspect(entity_id)} issue_identifier=#{inspect(event.issue_identifier)}: #{inspect(reason)}"
-        )
+        Logger.warning("Failed to fetch tracker issue from webhook event issue_id=#{inspect(entity_id)} issue_identifier=#{inspect(event.issue_identifier)}: #{inspect(reason)}")
 
         {:drop, next_state}
     end
@@ -822,6 +825,12 @@ defmodule SymphonyElixir.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     retry_after_ms = backoff_delay_ms(state, metadata)
 
+    Observability.emit_tracker_backoff(:entered, %{
+      reason: "Linear API rate limited",
+      rule_id: "tracker.rate_limited",
+      retry_after_ms: retry_after_ms
+    })
+
     %{
       state
       | tracker_backoff_until_ms: now_ms + retry_after_ms,
@@ -831,6 +840,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp clear_tracker_backoff(%State{} = state) do
+    if is_integer(state.tracker_backoff_until_ms) do
+      Observability.emit_tracker_backoff(:cleared, %{
+        reason: state.tracker_backoff_reason,
+        rule_id: state.tracker_backoff_rule_id
+      })
+    end
+
     %{
       state
       | tracker_backoff_until_ms: nil,
@@ -866,9 +882,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_note_tracker_backoff(%State{} = state, _mode) do
-    Logger.info(
-      "Tracker backoff active; degrading to manual-only dispatch until #{inspect(state.tracker_backoff_until_ms)}"
-    )
+    Logger.info("Tracker backoff active; degrading to manual-only dispatch until #{inspect(state.tracker_backoff_until_ms)}")
 
     state
   end
@@ -891,12 +905,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_webhook_accept(%State{} = state, attrs) do
     accepted_at = Map.get(attrs, :accepted_at) || DateTime.utc_now()
+    Observability.emit([:symphony, :intake, :tracker, :webhook, :accepted], %{count: 1}, %{accepted_at: accepted_at})
 
     %{state | webhook_last_accepted_at: accepted_at}
   end
 
   defp record_webhook_ignored(%State{} = state, attrs) do
     ignored_at = Map.get(attrs, :ignored_at) || DateTime.utc_now()
+    reason = Map.get(attrs, :reason)
+    rule_id = Map.get(attrs, :rule_id)
+
+    Observability.emit(
+      [:symphony, :intake, :tracker, :webhook, :ignored],
+      %{count: 1},
+      %{ignored_at: ignored_at, reason: reason, rule_id: rule_id}
+    )
 
     %{
       state
@@ -908,6 +931,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_webhook_rejection(%State{} = state, attrs) do
     rejected_at = Map.get(attrs, :rejected_at) || DateTime.utc_now()
+    reason = Map.get(attrs, :reason)
+    rule_id = Map.get(attrs, :rule_id)
+
+    Observability.emit(
+      [:symphony, :intake, :tracker, :webhook, :rejected],
+      %{count: 1},
+      %{rejected_at: rejected_at, reason: reason, rule_id: rule_id}
+    )
 
     %{
       state
@@ -919,11 +950,20 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_github_webhook_accept(%State{} = state, attrs) do
     accepted_at = Map.get(attrs, :accepted_at) || DateTime.utc_now()
+    Observability.emit([:symphony, :intake, :github, :webhook, :accepted], %{count: 1}, %{accepted_at: accepted_at})
     %{state | github_webhook_last_accepted_at: accepted_at}
   end
 
   defp record_github_webhook_ignored(%State{} = state, attrs) do
     ignored_at = Map.get(attrs, :ignored_at) || DateTime.utc_now()
+    reason = Map.get(attrs, :reason)
+    rule_id = Map.get(attrs, :rule_id)
+
+    Observability.emit(
+      [:symphony, :intake, :github, :webhook, :ignored],
+      %{count: 1},
+      %{ignored_at: ignored_at, reason: reason, rule_id: rule_id}
+    )
 
     %{
       state
@@ -935,6 +975,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_github_webhook_rejection(%State{} = state, attrs) do
     rejected_at = Map.get(attrs, :rejected_at) || DateTime.utc_now()
+    reason = Map.get(attrs, :reason)
+    rule_id = Map.get(attrs, :rule_id)
+
+    Observability.emit(
+      [:symphony, :intake, :github, :webhook, :rejected],
+      %{count: 1},
+      %{rejected_at: rejected_at, reason: reason, rule_id: rule_id}
+    )
 
     %{
       state
@@ -1963,14 +2011,18 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       state
       | retry_attempts:
-          Map.put(state.retry_attempts, issue_id, %{
-            attempt: next_attempt,
-            timer_ref: timer_ref,
-            due_at_ms: due_at_ms,
-            identifier: identifier,
-            error: error
-          }
-          |> Map.merge(Map.drop(metadata, [:identifier, :error])))
+          Map.put(
+            state.retry_attempts,
+            issue_id,
+            %{
+              attempt: next_attempt,
+              timer_ref: timer_ref,
+              due_at_ms: due_at_ms,
+              identifier: identifier,
+              error: error
+            }
+            |> Map.merge(Map.drop(metadata, [:identifier, :error]))
+          )
     }
   end
 
@@ -2125,12 +2177,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp release_issue_claim(%State{} = state, issue_id) do
     LeaseManager.release(issue_id, state.lease_owner)
+
     RunLedger.record("lease.released", %{
       issue_id: issue_id,
       actor_type: "system",
       actor_id: state.lease_owner,
       summary: "Lease released."
     })
+
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
@@ -2596,9 +2650,9 @@ defmodule SymphonyElixir.Orchestrator do
          last_rejected_reason: Map.get(state, :github_webhook_last_rejected_reason),
          last_rejected_rule_id: Map.get(state, :github_webhook_last_rejected_rule_id)
        },
-        tracker_inbox:
-          TrackerEventInbox.stats()
-          |> Map.put(:last_drained_at, datetime_to_iso8601(Map.get(state, :inbox_last_drained_at))),
+       tracker_inbox:
+         TrackerEventInbox.stats()
+         |> Map.put(:last_drained_at, datetime_to_iso8601(Map.get(state, :inbox_last_drained_at))),
        github_inbox:
          GitHubEventInbox.stats()
          |> Map.put(:last_drained_at, datetime_to_iso8601(Map.get(state, :github_inbox_last_drained_at))),
@@ -2890,6 +2944,7 @@ defmodule SymphonyElixir.Orchestrator do
         workspace_path = Path.join(Config.workspace_root(), entry.identifier || entry.issue_id || "issue")
         run_state = load_run_state(workspace_path, entry.issue)
         {policy_class, policy_source, policy_override} = policy_snapshot_values(entry.issue, state, run_state)
+
         {last_rule_id, last_failure_class, last_decision_summary, next_human_action} =
           queue_policy_reason(entry.issue, state, run_state)
 
@@ -2993,7 +3048,15 @@ defmodule SymphonyElixir.Orchestrator do
           last_ledger_event_id: Map.get(ledger_event, :event_id)
         })
 
-      {%{ok: true, action: "pause", issue_identifier: issue.identifier, state: @paused_state, policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "pause",
+         issue_identifier: issue.identifier,
+         state: @paused_state,
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
         {%{ok: false, action: "pause", issue_identifier: issue_identifier, error: inspect(reason)}, state}
@@ -3024,6 +3087,7 @@ defmodule SymphonyElixir.Orchestrator do
          :ok <- IssueSource.update_issue_state(paused_issue_ref(paused_entry), paused_entry.resume_state) do
       state = %{state | paused_issue_states: Map.delete(state.paused_issue_states, paused_entry.issue_id)}
       :ok = schedule_tick(0)
+
       ledger_event =
         RunLedger.record("operator.action", %{
           issue_id: paused_entry.issue_id,
@@ -3044,7 +3108,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp stop_issue_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
-         :ok <- IssueSource.create_comment(issue, "## Symphony operator stop\n\nRule ID: operator.stop\n\nFailure class: policy\n\nStopped by dashboard control.\n\nUnblock action: Move the issue back to an active state when it should run again."),
+         :ok <-
+           IssueSource.create_comment(
+             issue,
+             "## Symphony operator stop\n\nRule ID: operator.stop\n\nFailure class: policy\n\nStopped by dashboard control.\n\nUnblock action: Move the issue back to an active state when it should run again."
+           ),
          :ok <- IssueSource.update_issue_state(issue, @blocked_state) do
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state)
 
@@ -3069,7 +3137,15 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "stop", policy_source: policy_source}
         })
 
-      {%{ok: true, action: "stop", issue_identifier: issue.identifier, state: @blocked_state, policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "stop",
+         issue_identifier: issue.identifier,
+         state: @blocked_state,
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
         {%{ok: false, action: "stop", issue_identifier: issue_identifier, error: inspect(reason)}, state}
@@ -3102,7 +3178,15 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "hold_for_human_review", policy_source: policy_source, approval_gate_state: approval_gate_state}
         })
 
-      {%{ok: true, action: "hold_for_human_review", issue_identifier: issue.identifier, state: approval_gate_state, policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "hold_for_human_review",
+         issue_identifier: issue.identifier,
+         state: approval_gate_state,
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
         {%{ok: false, action: "hold_for_human_review", issue_identifier: issue_identifier, error: inspect(reason)}, state}
@@ -3377,7 +3461,15 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "approve_for_merge", policy_source: policy_source}
         })
 
-      {%{ok: true, action: "approve_for_merge", issue_identifier: issue.identifier, state: @merging_state, policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "approve_for_merge",
+         issue_identifier: issue.identifier,
+         state: @merging_state,
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       true ->
         {%{ok: false, action: "approve_for_merge", issue_identifier: issue_identifier, error: "policy forbids automerge"}, state}
@@ -3439,7 +3531,15 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "approve_for_deploy", policy_source: policy_source}
         })
 
-      {%{ok: true, action: "approve_for_deploy", issue_identifier: issue.identifier, state: "In Progress", policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "approve_for_deploy",
+         issue_identifier: issue.identifier,
+         state: "In Progress",
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
         {%{ok: false, action: "approve_for_deploy", issue_identifier: issue_identifier, error: inspect(reason)}, state}
@@ -3785,6 +3885,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp branch_mismatch_repair?(inspection, state, expected_branch) do
     stage = Map.get(state, :stage)
+
     inspection.git? and not inspection.dirty? and stage in ["implement", "validate", "verify", "publish"] and
       is_binary(expected_branch) and expected_branch != "" and inspection.branch != expected_branch and
       normalize_pr_state(inspection.pr_state) not in ["MERGED", "CLOSED"]
@@ -4528,6 +4629,7 @@ defmodule SymphonyElixir.Orchestrator do
     rule_id = Map.get(conflict, :rule_id) || RuleCatalog.rule_id(:policy_invalid_labels)
     failure_class = Map.get(conflict, :failure_class) || RuleCatalog.failure_class(:policy_invalid_labels)
     summary = Map.get(conflict, :summary) || "Invalid policy configuration detected on the issue."
+
     details =
       Map.get(conflict, :details) ||
         case Map.get(conflict, :labels) do

@@ -94,18 +94,24 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
-           {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
-           _child -> false
-         end) do
-      {SymphonyElixir.HttpServer, pid, _type, _modules} when is_pid(pid) ->
-        :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+    case Process.whereis(SymphonyElixir.Supervisor) do
+      pid when is_pid(pid) ->
+        case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+               {SymphonyElixir.HttpServer, _child_pid, _type, _modules} -> true
+               _child -> false
+             end) do
+          {SymphonyElixir.HttpServer, child_pid, _type, _modules} when is_pid(child_pid) ->
+            :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
 
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
+            if Process.alive?(child_pid) do
+              Process.exit(child_pid, :normal)
+            end
+
+            :ok
+
+          _ ->
+            :ok
         end
-
-        :ok
 
       _ ->
         :ok
@@ -191,6 +197,15 @@ defmodule SymphonyElixir.TestSupport do
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
+          observability_metrics_enabled: true,
+          observability_metrics_path: "/metrics",
+          observability_tracing_enabled: true,
+          observability_structured_logs: true,
+          observability_debug_artifacts_enabled: true,
+          observability_debug_capture_on_failure: true,
+          observability_debug_artifact_root: nil,
+          observability_debug_artifact_max_bytes: 262_144,
+          observability_debug_artifact_tail_bytes: 131_072,
           server_port: nil,
           server_host: nil,
           prompt: @workflow_prompt
@@ -264,6 +279,15 @@ defmodule SymphonyElixir.TestSupport do
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
+    observability_metrics_enabled = Keyword.get(config, :observability_metrics_enabled)
+    observability_metrics_path = Keyword.get(config, :observability_metrics_path)
+    observability_tracing_enabled = Keyword.get(config, :observability_tracing_enabled)
+    observability_structured_logs = Keyword.get(config, :observability_structured_logs)
+    observability_debug_artifacts_enabled = Keyword.get(config, :observability_debug_artifacts_enabled)
+    observability_debug_capture_on_failure = Keyword.get(config, :observability_debug_capture_on_failure)
+    observability_debug_artifact_root = Keyword.get(config, :observability_debug_artifact_root)
+    observability_debug_artifact_max_bytes = Keyword.get(config, :observability_debug_artifact_max_bytes)
+    observability_debug_artifact_tail_bytes = Keyword.get(config, :observability_debug_artifact_tail_bytes)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     prompt = Keyword.get(config, :prompt)
@@ -337,7 +361,20 @@ defmodule SymphonyElixir.TestSupport do
           policy_token_budget
         ),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
-        observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
+        observability_yaml(
+          observability_enabled,
+          observability_refresh_ms,
+          observability_render_interval_ms,
+          observability_metrics_enabled,
+          observability_metrics_path,
+          observability_tracing_enabled,
+          observability_structured_logs,
+          observability_debug_artifacts_enabled,
+          observability_debug_capture_on_failure,
+          observability_debug_artifact_root,
+          observability_debug_artifact_max_bytes,
+          observability_debug_artifact_tail_bytes
+        ),
         server_yaml(server_port, server_host),
         "---",
         prompt
@@ -353,6 +390,13 @@ defmodule SymphonyElixir.TestSupport do
 
   defp policy_packs_yaml(packs) when packs in [%{}, nil], do: nil
 
+  defp policy_packs_yaml(packs) when is_map(packs) do
+    ["policy_packs:" | yaml_object_lines(packs, 2)]
+    |> Enum.join("\n")
+  end
+
+  defp policy_packs_yaml(packs), do: "policy_packs: #{yaml_value(packs)}"
+
   defp portfolio_yaml(instances) when instances in [[], nil], do: nil
 
   defp portfolio_yaml(instances) when is_list(instances) do
@@ -361,13 +405,6 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp portfolio_yaml(instances), do: "portfolio: #{yaml_value(instances)}"
-
-  defp policy_packs_yaml(packs) when is_map(packs) do
-    ["policy_packs:" | yaml_object_lines(packs, 2)]
-    |> Enum.join("\n")
-  end
-
-  defp policy_packs_yaml(packs), do: "policy_packs: #{yaml_value(packs)}"
 
   defp yaml_value(value) when is_integer(value), do: to_string(value)
   defp yaml_value(true), do: "true"
@@ -448,12 +485,35 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
+  defp observability_yaml(
+         enabled,
+         refresh_ms,
+         render_interval_ms,
+         metrics_enabled,
+         metrics_path,
+         tracing_enabled,
+         structured_logs,
+         debug_artifacts_enabled,
+         debug_capture_on_failure,
+         debug_artifact_root,
+         debug_artifact_max_bytes,
+         debug_artifact_tail_bytes
+       ) do
     [
       "observability:",
       "  dashboard_enabled: #{yaml_value(enabled)}",
       "  refresh_ms: #{yaml_value(refresh_ms)}",
-      "  render_interval_ms: #{yaml_value(render_interval_ms)}"
+      "  render_interval_ms: #{yaml_value(render_interval_ms)}",
+      "  metrics_enabled: #{yaml_value(metrics_enabled)}",
+      "  metrics_path: #{yaml_value(metrics_path)}",
+      "  tracing_enabled: #{yaml_value(tracing_enabled)}",
+      "  structured_logs: #{yaml_value(structured_logs)}",
+      "  debug_artifacts:",
+      "    enabled: #{yaml_value(debug_artifacts_enabled)}",
+      "    capture_on_failure: #{yaml_value(debug_capture_on_failure)}",
+      "    root: #{yaml_value(debug_artifact_root)}",
+      "    max_bytes: #{yaml_value(debug_artifact_max_bytes)}",
+      "    tail_bytes: #{yaml_value(debug_artifact_tail_bytes)}"
     ]
     |> Enum.join("\n")
   end

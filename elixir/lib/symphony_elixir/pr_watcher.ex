@@ -8,7 +8,7 @@ defmodule SymphonyElixir.PRWatcher do
   pack.
   """
 
-  alias SymphonyElixir.{AuthorProfile, Config, CredentialRegistry, GitHubCLIClient, PolicyPack}
+  alias SymphonyElixir.{AuthorProfile, Config, CredentialRegistry, GitHubCLIClient, Observability, PolicyPack}
 
   @type t :: %{
           enabled: boolean(),
@@ -70,17 +70,30 @@ defmodule SymphonyElixir.PRWatcher do
       case review_feedback_for_source(github_client, workspace, pr_url, github_opts) do
         {:ok, feedback} ->
           items = build_feedback_items(feedback, thread_states)
+          review_count = Enum.count(items, &(&1.kind == :review))
+          comment_count = Enum.count(items, &(&1.kind == :comment))
+
+          Observability.emit([:symphony, :review, :feedback_detected], %{count: length(items)}, %{
+            pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
+            review_count: review_count,
+            comment_count: comment_count
+          })
 
           %{
             status: "ok",
             pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
-            review_decision:
-              Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
+            review_decision: Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
             pending_drafts_count: length(items),
             items: items
           }
 
         {:error, reason} ->
+          Observability.emit([:symphony, :review, :feedback_detected], %{count: 0}, %{
+            pr_url: pr_url,
+            outcome: "error",
+            reason: inspect(reason)
+          })
+
           cached_feedback(thread_states, pr_url, reason)
       end
     else
@@ -90,6 +103,7 @@ defmodule SymphonyElixir.PRWatcher do
 
   defp watcher_mode(_pack, false, false, "forbidden"), do: "disabled"
   defp watcher_mode(_pack, _pr_channel?, false, "draft_only"), do: "draft_only"
+
   defp watcher_mode(pack, _pr_channel?, true, _external_comment_mode) do
     if Map.get(pack, :draft_first_required, true), do: "draft_first", else: "active"
   end
@@ -155,8 +169,7 @@ defmodule SymphonyElixir.PRWatcher do
       submitted_at: nil,
       draft_state: Map.get(persisted, "draft_state", "drafted"),
       draft_reply: Map.get(persisted, "draft_reply"),
-      resolution_recommendation:
-        Map.get(persisted, "resolution_recommendation", "keep_open_until_confirmed")
+      resolution_recommendation: Map.get(persisted, "resolution_recommendation", "keep_open_until_confirmed")
     }
   end
 
@@ -179,8 +192,7 @@ defmodule SymphonyElixir.PRWatcher do
       submitted_at: Map.get(review, :submitted_at) || Map.get(review, "submitted_at"),
       draft_state: Map.get(persisted, "draft_state", "drafted"),
       draft_reply: Map.get(persisted, "draft_reply", draft_reply(body, state)),
-      resolution_recommendation:
-        Map.get(persisted, "resolution_recommendation", resolution_recommendation(body, state))
+      resolution_recommendation: Map.get(persisted, "resolution_recommendation", resolution_recommendation(body, state))
     }
   end
 
@@ -202,8 +214,7 @@ defmodule SymphonyElixir.PRWatcher do
       submitted_at: Map.get(comment, :created_at) || Map.get(comment, "created_at"),
       draft_state: Map.get(persisted, "draft_state", "drafted"),
       draft_reply: Map.get(persisted, "draft_reply", draft_reply(body, nil)),
-      resolution_recommendation:
-        Map.get(persisted, "resolution_recommendation", resolution_recommendation(body, nil))
+      resolution_recommendation: Map.get(persisted, "resolution_recommendation", resolution_recommendation(body, nil))
     }
   end
 
@@ -272,12 +283,12 @@ defmodule SymphonyElixir.PRWatcher do
 
   defp normalize_cached_pr_url(pr_url, thread_states) do
     normalize_pr_url(pr_url) ||
-      (thread_states
-       |> Enum.find_value(fn {_thread_key, state} ->
-         state
-         |> Map.get("posted_reply_url")
-         |> normalize_pr_url()
-       end))
+      thread_states
+      |> Enum.find_value(fn {_thread_key, state} ->
+        state
+        |> Map.get("posted_reply_url")
+        |> normalize_pr_url()
+      end)
   end
 
   defp normalize_pr_url(nil), do: nil

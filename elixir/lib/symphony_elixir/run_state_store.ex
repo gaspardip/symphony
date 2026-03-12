@@ -3,6 +3,7 @@ defmodule SymphonyElixir.RunStateStore do
   Persists per-workspace runtime state so runs can resume from explicit stages.
   """
 
+  alias SymphonyElixir.Observability
   alias SymphonyElixir.RunLedger
 
   @relative_dir ".symphony"
@@ -98,12 +99,27 @@ defmodule SymphonyElixir.RunStateStore do
               }
             })
 
+          Observability.emit(
+            [:symphony, :stage, :transition],
+            %{count: 1},
+            %{
+              issue_id: Map.get(state, :issue_id),
+              issue_identifier: Map.get(state, :issue_identifier),
+              issue_source: Map.get(state, :issue_source),
+              stage: stage,
+              policy_class: Map.get(state, :effective_policy_class),
+              stage_transition_count: get_in(state, [:stage_transition_counts, stage]),
+              stage_history_size: length(Map.get(state, :stage_history, []))
+            }
+          )
+
           persisted_state = Map.put(state, :last_ledger_event_id, Map.get(ledger_event, :event_id))
           :ok = save(workspace, persisted_state)
           {:ok, persisted_state}
         end
 
-      {:error, reason} -> {:error, reason}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
