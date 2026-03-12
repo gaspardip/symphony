@@ -256,8 +256,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert json_response(conn, 401)["error"]["code"] == "invalid_signature"
 
-    assert_receive {:tracker_webhook_rejected,
-                    %{rule_id: "webhook.signature_invalid", reason: "Linear webhook signature verification failed."}}
+    assert_receive {:tracker_webhook_rejected, %{rule_id: "webhook.signature_invalid", reason: "Linear webhook signature verification failed."}}
   end
 
   test "linear webhook controller records ignored non schedule-affecting issue events" do
@@ -292,8 +291,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
              "reason" => "non_schedule_affecting_event"
            }
 
-    assert_receive {:tracker_webhook_ignored,
-                    %{rule_id: "webhook.event_ignored", reason: "non_schedule_affecting_event"}}
+    assert_receive {:tracker_webhook_ignored, %{rule_id: "webhook.event_ignored", reason: "non_schedule_affecting_event"}}
   end
 
   test "linear webhook decoder parses millisecond timestamps and ignores non schedule-affecting updates" do

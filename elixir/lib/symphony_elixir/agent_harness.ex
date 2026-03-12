@@ -281,7 +281,9 @@ defmodule SymphonyElixir.AgentHarness do
     identifier = issue_identifier(issue)
 
     case normalize_string(identifier) do
-      nil -> {:error, :missing_issue_identifier}
+      nil ->
+        {:error, :missing_issue_identifier}
+
       value ->
         path =
           pattern
@@ -289,7 +291,7 @@ defmodule SymphonyElixir.AgentHarness do
           |> String.replace("{{issue.identifier}}", value)
 
         {:ok, Path.join(get_in(config, [:progress, :root]), path)}
-      end
+    end
   end
 
   defp harness_changed_paths(workspace) do

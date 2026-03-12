@@ -141,9 +141,11 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
     assert_received ^ref
 
     assert :ok =
-             GitHubCLIClient.persist_pr_url("/tmp/workspace", "", "", gh_runner: fn _command, _args, _opts ->
-               flunk("blank branch/url should not call git config")
-             end)
+             GitHubCLIClient.persist_pr_url("/tmp/workspace", "", "",
+               gh_runner: fn _command, _args, _opts ->
+                 flunk("blank branch/url should not call git config")
+               end
+             )
   end
 
   test "review_feedback loads reviews and inline comments from gh api" do
@@ -162,7 +164,8 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
                    {Jason.encode!([
                       %{"id" => 2, "body" => "nit: rename this", "path" => "lib/example.ex", "line" => 12, "created_at" => "2026-03-11T10:01:00Z", "user" => %{"login" => "reviewer"}}
                     ]), 0}
-               end)
+               end
+             )
 
     assert feedback.pr_url == "https://github.com/example/repo/pull/42"
     assert feedback.review_decision == "CHANGES_REQUESTED"
@@ -186,7 +189,8 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
                    {Jason.encode!([
                       %{"id" => 2, "body" => "nit: rename this", "path" => "lib/example.ex", "line" => 12, "created_at" => "2026-03-11T10:01:00Z", "user" => %{"login" => "reviewer"}}
                     ]), 0}
-               end)
+               end
+             )
 
     assert feedback.pr_url == "https://github.com/example/repo/pull/42"
     assert feedback.review_decision == "CHANGES_REQUESTED"

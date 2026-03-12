@@ -35,6 +35,7 @@ defmodule SymphonyElixir.CoverageAuditTest do
     summary = CoverageAudit.format_summary(result)
     assert Enum.any?(summary, &String.contains?(&1, "total coverage"))
     assert Enum.any?(summary, &String.contains?(&1, "SymphonyElixir.DeliveryEngine"))
+
     assert CoverageAudit.failure_message(result) ==
              "coverage audit failed: overall_coverage_below_threshold, core_module_below_threshold"
   end

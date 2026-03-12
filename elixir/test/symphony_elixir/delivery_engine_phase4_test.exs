@@ -32,9 +32,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase4Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &review_ready_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &review_ready_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
     assert_receive {:memory_tracker_comment, ^issue_id, body}
@@ -64,9 +62,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase4Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &review_ready_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &review_ready_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
     assert_receive {:memory_tracker_comment, ^issue_id, body}

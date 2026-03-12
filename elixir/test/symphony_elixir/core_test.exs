@@ -267,6 +267,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute SymphonyElixir.DeliveryEngine.retryable_implementation_error_for_test(reason)
     assert SymphonyElixir.DeliveryEngine.non_retryable_implementation_error_for_test(reason)
+
     assert SymphonyElixir.DeliveryEngine.implementation_error_code_for_test(reason) ==
              :command_output_budget_exceeded
   end
@@ -279,6 +280,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute SymphonyElixir.DeliveryEngine.retryable_implementation_error_for_test(reason)
     assert SymphonyElixir.DeliveryEngine.non_retryable_implementation_error_for_test(reason)
+
     assert SymphonyElixir.DeliveryEngine.implementation_error_code_for_test(reason) ==
              :command_count_exceeded
   end
@@ -291,6 +293,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute SymphonyElixir.DeliveryEngine.retryable_implementation_error_for_test(reason)
     assert SymphonyElixir.DeliveryEngine.non_retryable_implementation_error_for_test(reason)
+
     assert SymphonyElixir.DeliveryEngine.implementation_error_code_for_test(reason) ==
              :broad_read_violation
   end
@@ -303,6 +306,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute SymphonyElixir.DeliveryEngine.retryable_implementation_error_for_test(reason)
     assert SymphonyElixir.DeliveryEngine.non_retryable_implementation_error_for_test(reason)
+
     assert SymphonyElixir.DeliveryEngine.implementation_error_code_for_test(reason) ==
              :stage_command_violation
   end
@@ -1462,6 +1466,7 @@ defmodule SymphonyElixir.CoreTest do
       """)
 
       File.chmod!(codex_binary, 0o755)
+
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_after_create: "git clone #{template_repo} .",
@@ -1615,6 +1620,7 @@ defmodule SymphonyElixir.CoreTest do
       """)
 
       File.chmod!(codex_binary, 0o755)
+
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_after_create: "git clone #{template_repo} .",

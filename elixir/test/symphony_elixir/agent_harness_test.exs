@@ -76,10 +76,12 @@ defmodule SymphonyElixir.AgentHarnessTest do
 
     workspace = Path.join(root, "workspace")
     File.mkdir_p!(Path.join(workspace, ".symphony"))
+
     File.write!(
       Path.join(workspace, ".symphony/harness.yml"),
       File.read!(Path.join(repo_root, ".symphony/harness.yml"))
     )
+
     File.cp_r!(Path.join(repo_root, ".symphony/features"), Path.join(workspace, ".symphony/features"))
     File.mkdir_p!(Path.join(workspace, ".git"))
 

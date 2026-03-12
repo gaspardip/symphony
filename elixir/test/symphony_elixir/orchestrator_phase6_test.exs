@@ -38,8 +38,7 @@ defmodule SymphonyElixir.OrchestratorPhase6Test do
 
     send(
       pid,
-      {:codex_worker_update, "missing-issue",
-       %{event: :notification, payload: %{method: "noop"}, timestamp: DateTime.utc_now()}}
+      {:codex_worker_update, "missing-issue", %{event: :notification, payload: %{method: "noop"}, timestamp: DateTime.utc_now()}}
     )
 
     Process.sleep(20)

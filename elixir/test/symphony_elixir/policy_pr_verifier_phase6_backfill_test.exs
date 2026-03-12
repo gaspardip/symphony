@@ -256,16 +256,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     }
 
     assert {:stop, %RunPolicy.Violation{code: :validation_failed, details: details}} =
-             RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 0,
-               shell_runner: fn _workspace, "./scripts/validate.sh", _opts -> {nil, 1} end
-             )
+             RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 0, shell_runner: fn _workspace, "./scripts/validate.sh", _opts -> {nil, 1} end)
 
     assert details == "No additional output was captured."
 
     assert {:stop, %RunPolicy.Violation{code: :validation_failed, details: blank_details}} =
-             RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 0,
-               shell_runner: fn _workspace, "./scripts/validate.sh", _opts -> {"   \n", 1} end
-             )
+             RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 0, shell_runner: fn _workspace, "./scripts/validate.sh", _opts -> {"   \n", 1} end)
 
     assert blank_details == "No additional output was captured."
   end

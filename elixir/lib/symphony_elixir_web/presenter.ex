@@ -115,23 +115,28 @@ defmodule SymphonyElixirWeb.Presenter do
         running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
         retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
         paused = Enum.find(Map.get(snapshot, :paused, []), &(&1.identifier == issue_identifier))
+
         queue =
           Enum.find(Map.get(snapshot, :queue, []), fn entry ->
             Map.get(entry, :issue_identifier) == issue_identifier
           end)
+
         ledger_entries = RunLedger.recent_entries(100)
         ledger_by_issue = ledger_entries_by_issue(ledger_entries)
 
         case issue_payload_body(issue_identifier, running, retry, paused, queue, ledger_by_issue) do
-          nil -> {:error, :issue_not_found}
+          nil ->
+            {:error, :issue_not_found}
+
           payload ->
             workspace_path = get_in(payload, [:workspace, :path])
+
             pr_url =
               normalize_pr_url(
                 get_in(payload, [:review, :pr_url]) ||
-                get_in(payload, [:runner, :pr_url]) ||
-                delivery_pr_url_from_history(Map.get(payload, :decision_history, [])) ||
-                delivery_pr_url_from_summary(get_in(payload, [:operator_summary, :why_here]))
+                  get_in(payload, [:runner, :pr_url]) ||
+                  delivery_pr_url_from_history(Map.get(payload, :decision_history, [])) ||
+                  delivery_pr_url_from_summary(get_in(payload, [:operator_summary, :why_here]))
               )
 
             {:ok,
@@ -335,6 +340,7 @@ defmodule SymphonyElixirWeb.Presenter do
     workspace_path = Path.join(Config.workspace_root(), issue_identifier)
     run_state = load_issue_run_state(workspace_path)
     payload = issue_payload_body(issue_identifier, running, retry, paused, queue, ledger_by_issue)
+
     review_feedback =
       pr_watcher_payload(
         get_in(payload || %{}, [:company, :policy_pack]) ||
@@ -364,8 +370,7 @@ defmodule SymphonyElixirWeb.Presenter do
           merge_mode: normalize_atom_string(get_in(payload, [:workflow_profile, :merge_mode])),
           approval_gate_kind: get_in(payload, [:workflow_profile, :approval_gate_kind]),
           deploy_approval_gate_kind: get_in(payload, [:workflow_profile, :deploy_approval_gate_kind]),
-          production_deploy_mode:
-            normalize_atom_string(get_in(payload, [:workflow_profile, :production_deploy_mode]))
+          production_deploy_mode: normalize_atom_string(get_in(payload, [:workflow_profile, :production_deploy_mode]))
         },
         summary: payload.operator_summary,
         evidence: %{
@@ -411,11 +416,16 @@ defmodule SymphonyElixirWeb.Presenter do
               get_in(payload, [:workflow_profile, :merge_mode]) == "review_gate",
           deploy_required:
             get_in(payload, [:workflow_profile, :production_deploy_mode]) not in [nil, :disabled, "disabled"] ||
-              delivery_involved?(%{evidence: %{
-                preview_deploy_status: get_in(payload, [:runtime_health, :deploy, :preview_status]),
-                production_deploy_status: get_in(payload, [:runtime_health, :deploy, :production_status]),
-                post_deploy_status: get_in(payload, [:runtime_health, :deploy, :post_deploy_status])
-              }}, :deploy) ||
+              delivery_involved?(
+                %{
+                  evidence: %{
+                    preview_deploy_status: get_in(payload, [:runtime_health, :deploy, :preview_status]),
+                    production_deploy_status: get_in(payload, [:runtime_health, :deploy, :production_status]),
+                    post_deploy_status: get_in(payload, [:runtime_health, :deploy, :post_deploy_status])
+                  }
+                },
+                :deploy
+              ) ||
               decision_history_contains?(payload.decision_history, "deploy.approval.recorded")
         },
         explanation:
@@ -446,6 +456,7 @@ defmodule SymphonyElixirWeb.Presenter do
     pr_url = normalize_pr_url(Map.get(refs, :pr_url))
     proof = get_in(payload, [:runtime_health, :proof]) || %{}
     deploy = get_in(payload, [:runtime_health, :deploy]) || %{}
+
     review_required? =
       get_in(payload, [:workflow_profile, :merge_mode]) in [:review_gate, "review_gate"]
 
@@ -480,8 +491,7 @@ defmodule SymphonyElixirWeb.Presenter do
       approval_used: %{
         review_required: review_required?,
         review_approved: get_in(payload, [:review, :approved]) || false,
-        deploy_approval_required:
-          get_in(payload, [:workflow_profile, :production_deploy_mode]) not in [nil, :disabled, "disabled"],
+        deploy_approval_required: get_in(payload, [:workflow_profile, :production_deploy_mode]) not in [nil, :disabled, "disabled"],
         deploy_approved: get_in(payload, [:deploy, :approved]) || false
       },
       still_needs_human_input:
@@ -1187,6 +1197,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp runtime_health_payload(entry, workspace, harness, review) do
     pack = PolicyPack.resolve()
+
     workflow_profile =
       WorkflowProfile.resolve(
         Map.get(entry, :policy_class),
@@ -1202,16 +1213,16 @@ defmodule SymphonyElixirWeb.Presenter do
       )
 
     %{
-        intake: %{
-          source: Map.get(entry, :source),
-          routing_eligible: get_in(entry, [:routing, :eligible]) || false,
-          policy_class: Map.get(entry, :policy_class),
-          policy_source: Map.get(entry, :policy_source),
-          company_mode: Config.company_mode(),
-          policy_pack: PolicyPack.name_string(pack),
-          company_name: Config.company_name(),
-          expected_repo_url: Config.company_repo_url()
-        },
+      intake: %{
+        source: Map.get(entry, :source),
+        routing_eligible: get_in(entry, [:routing, :eligible]) || false,
+        policy_class: Map.get(entry, :policy_class),
+        policy_source: Map.get(entry, :policy_source),
+        company_mode: Config.company_mode(),
+        policy_pack: PolicyPack.name_string(pack),
+        company_name: Config.company_name(),
+        expected_repo_url: Config.company_repo_url()
+      },
       workspace: %{
         checkout: workspace.checkout?,
         git: workspace.git?,
@@ -1273,12 +1284,12 @@ defmodule SymphonyElixirWeb.Presenter do
     pr_url =
       normalize_pr_url(
         (detail_entry && entry_value(detail_entry, "pr_url")) ||
-        get_in(running_payload || %{}, [:review, :pr_url]) ||
-        get_in(run_state || %{}, [:last_merge, :url]) ||
-        review_thread_pr_url(review_threads) ||
-        delivery_pr_url_from_history(decision_history) ||
-        delivery_pr_url_from_summary(Map.get(run_state || %{}, :last_decision_summary)) ||
-        delivery_pr_url_from_summary(get_in(running_payload || %{}, [:operator_summary, :why_here]))
+          get_in(running_payload || %{}, [:review, :pr_url]) ||
+          get_in(run_state || %{}, [:last_merge, :url]) ||
+          review_thread_pr_url(review_threads) ||
+          delivery_pr_url_from_history(decision_history) ||
+          delivery_pr_url_from_summary(Map.get(run_state || %{}, :last_decision_summary)) ||
+          delivery_pr_url_from_summary(get_in(running_payload || %{}, [:operator_summary, :why_here]))
       )
 
     %{
@@ -1310,12 +1321,9 @@ defmodule SymphonyElixirWeb.Presenter do
     ui_proof = get_in(proof, [:ui_proof]) || %{}
 
     %{
-      behavioral_artifact_path:
-        get_in(run_state || %{}, [:compatibility_report, :behavioral_proof, :artifact_path]),
-      ui_artifact_paths:
-        Map.get(ui_proof, :artifact_paths) || Map.get(ui_proof, "artifact_paths") || [],
-      ui_artifact_matches:
-        Map.get(ui_proof, :artifact_matches) || Map.get(ui_proof, "artifact_matches") || %{}
+      behavioral_artifact_path: get_in(run_state || %{}, [:compatibility_report, :behavioral_proof, :artifact_path]),
+      ui_artifact_paths: Map.get(ui_proof, :artifact_paths) || Map.get(ui_proof, "artifact_paths") || [],
+      ui_artifact_matches: Map.get(ui_proof, :artifact_matches) || Map.get(ui_proof, "artifact_matches") || %{}
     }
   end
 
@@ -1380,6 +1388,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp operator_summary_payload(entry, review) do
     summary = status_summary_payload(entry, review)
+
     workflow_profile =
       WorkflowProfile.resolve(
         Map.get(entry, :policy_class),
@@ -1461,16 +1470,30 @@ defmodule SymphonyElixirWeb.Presenter do
             "Issue is not currently running.",
         automatic_next:
           cond do
-            normalized_status == "queued" -> "Wait for runtime dispatch."
-            normalized_status == "retrying" -> "Wait for retry backoff to expire."
-            normalized_status == "paused" -> "No automatic action until resumed."
+            normalized_status == "queued" ->
+              "Wait for runtime dispatch."
+
+            normalized_status == "retrying" ->
+              "Wait for retry backoff to expire."
+
+            normalized_status == "paused" ->
+              "No automatic action until resumed."
+
             normalize_state(status) ==
                 normalize_state(Map.get(run_state || %{}, :deploy_approval_gate_state)) ->
               "Await deploy approval in #{status}."
-            normalized_status == "human review" -> "Await human review or operator approval."
-            WorkflowProfile.approval_gate_state?(status) -> "Await approval in #{status}."
-            normalized_status == "done" -> "No further runtime action is required."
-            true -> "No automatic next step available."
+
+            normalized_status == "human review" ->
+              "Await human review or operator approval."
+
+            WorkflowProfile.approval_gate_state?(status) ->
+              "Await approval in #{status}."
+
+            normalized_status == "done" ->
+              "No further runtime action is required."
+
+            true ->
+              "No automatic next step available."
           end,
         human_action_required: Map.get(run_state || %{}, :next_human_action),
         rule_id: Map.get(run_state || %{}, :last_rule_id),
@@ -1576,9 +1599,11 @@ defmodule SymphonyElixirWeb.Presenter do
     post_merge =
       Enum.find(history, fn entry -> Map.get(entry, :event_type) == "post_merge.completed" end) ||
         Enum.find(history, fn entry -> Map.get(entry, "event_type") == "post_merge.completed" end)
+
     preview =
       Enum.find(history, fn entry -> Map.get(entry, :event_type) == "deploy.preview.completed" end) ||
         Enum.find(history, fn entry -> Map.get(entry, "event_type") == "deploy.preview.completed" end)
+
     post_deploy =
       Enum.find(history, fn entry -> Map.get(entry, :event_type) == "deploy.post_deploy.completed" end) ||
         Enum.find(history, fn entry -> Map.get(entry, "event_type") == "deploy.post_deploy.completed" end)
@@ -2048,6 +2073,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp ledger_message(entry) do
     event = entry_value(entry, "event_type") || entry_value(entry, "event")
+
     summary =
       cond do
         event == "runtime.repaired" ->
@@ -2072,11 +2098,20 @@ defmodule SymphonyElixirWeb.Presenter do
         event == "deploy.post_deploy.completed" ->
           entry_value(entry, "summary") || "post-deploy verification completed"
 
-        value = entry_value(entry, "summary") -> value
-        value = entry_value(entry, "rule_id") -> value
-        value = entry_value(entry, "resume_state") -> "resume to #{value}"
-        value = entry_value(entry, "target_state") -> "target state #{value}"
-        true -> event || "ledger event"
+        value = entry_value(entry, "summary") ->
+          value
+
+        value = entry_value(entry, "rule_id") ->
+          value
+
+        value = entry_value(entry, "resume_state") ->
+          "resume to #{value}"
+
+        value = entry_value(entry, "target_state") ->
+          "target state #{value}"
+
+        true ->
+          event || "ledger event"
       end
 
     details = entry_value(entry, "details")
@@ -2427,7 +2462,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
   def helper_for_test(:running_entry_payload, [entry, ledger_by_issue]),
     do: running_entry_payload(entry, ledger_by_issue)
+
   def helper_for_test(:status_summary_payload, [entry, review]), do: status_summary_payload(entry, review)
+
   def helper_for_test(:runtime_health_summary, [entry, workspace, harness, review]),
     do:
       runtime_health_summary(
@@ -2445,6 +2482,7 @@ defmodule SymphonyElixirWeb.Presenter do
           )
         )
       )
+
   def helper_for_test(:codex_activity_payload, [updates]), do: codex_activity_payload(updates)
   def helper_for_test(:ledger_activity_payload, [entries]), do: ledger_activity_payload(entries)
   def helper_for_test(:runner_activity_payload, [entries]), do: runner_activity_payload(entries)

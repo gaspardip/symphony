@@ -113,9 +113,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :missing_harness_version}, {:stop, :blocked}]
 
@@ -155,9 +153,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :missing_required_checks}, {:stop, :blocked}]
 
@@ -195,9 +191,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :missing_harness_command}, {:stop, :blocked}]
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -239,9 +233,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :invalid_harness}, {:stop, :blocked}]
 
@@ -264,9 +256,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :invalid_harness}, {:stop, :blocked}]
 
@@ -284,9 +274,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
       codex_command: fake_codex_binary!("checkout-missing-harness")
     )
 
-    assert DeliveryEngine.run(workspace, issue, nil,
-             command_runner: &checkout_command_runner/3
-           ) in [{:stop, :missing_harness}, {:stop, :blocked}]
+    assert DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3) in [{:stop, :missing_harness}, {:stop, :blocked}]
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert get_in(state, [:stop_reason, :code]) == "missing_harness"
@@ -294,6 +282,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
 
   test "checkout blocks generic git failures" do
     {workspace, issue} = git_stage_workspace!("checkout-git-failed")
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       workspace_root: Path.dirname(workspace),
@@ -545,9 +534,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &pending_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &pending_merge_command_runner/3)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.stage == "await_checks"
@@ -571,9 +558,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :required_checks_failed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &failed_checks_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &failed_checks_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -594,9 +579,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &pending_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &pending_merge_command_runner/3)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.stage == "await_checks"
@@ -620,9 +603,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :required_checks_cancelled} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &cancelled_checks_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &cancelled_checks_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -645,9 +626,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :required_checks_missing} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &missing_checks_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &missing_checks_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -669,9 +648,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :pr_closed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &closed_pr_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &closed_pr_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -694,9 +671,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :invalid_labels} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &pending_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &pending_merge_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -768,9 +743,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &ready_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &ready_merge_command_runner/3)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.stage == "await_checks"
@@ -797,9 +770,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:done, %Issue{id: ^issue_id}} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &already_merged_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &already_merged_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -825,9 +796,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:done, %Issue{id: ^issue_id}} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &already_merged_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &already_merged_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -853,9 +822,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:done, %Issue{id: ^issue_id}} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &already_merged_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &already_merged_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -880,9 +847,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &ready_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &ready_merge_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -990,9 +955,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :post_merge_failed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &post_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &post_merge_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -1077,9 +1040,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :pr_closed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &closed_pr_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &closed_pr_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end

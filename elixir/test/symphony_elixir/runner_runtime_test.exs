@@ -15,6 +15,7 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
 
     try do
       File.mkdir_p!(release_path)
+
       File.write!(
         manifest_path,
         Jason.encode!(%{
@@ -152,6 +153,7 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
       assert mismatch_health.dispatch_enabled == false
 
       File.mkdir_p!(release_missing_root)
+
       File.write!(
         RunnerRuntime.metadata_path(release_missing_root),
         Jason.encode!(%{

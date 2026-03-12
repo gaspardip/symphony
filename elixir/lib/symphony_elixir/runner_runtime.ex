@@ -185,9 +185,9 @@ defmodule SymphonyElixir.RunnerRuntime do
         workflow_labels
 
       runner_mode(metadata) == "canary_active" ->
-      workflow_labels
-      |> Kernel.++(canary_required_labels(metadata))
-      |> normalize_labels()
+        workflow_labels
+        |> Kernel.++(canary_required_labels(metadata))
+        |> normalize_labels()
 
       true ->
         workflow_labels

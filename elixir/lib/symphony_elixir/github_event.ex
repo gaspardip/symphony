@@ -48,9 +48,9 @@ defmodule SymphonyElixir.GitHubEvent do
       |> Enum.join(":")
 
     if base == "" do
-      "github-event:" <>
-        :crypto.hash(:sha256, Jason.encode!(event.raw))
-        |> Base.encode16(case: :lower)
+      ("github-event:" <>
+         :crypto.hash(:sha256, Jason.encode!(event.raw)))
+      |> Base.encode16(case: :lower)
     else
       base
     end

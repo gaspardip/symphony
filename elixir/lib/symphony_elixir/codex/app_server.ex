@@ -253,6 +253,7 @@ defmodule SymphonyElixir.Codex.AppServer do
        when is_binary(command) do
     codex_home = Map.get(runtime_profile, :codex_home)
     inherit_env = Map.get(runtime_profile, :inherit_env, true)
+
     env_allowlist =
       runtime_profile
       |> Map.get(:env_allowlist, [])
@@ -571,18 +572,19 @@ defmodule SymphonyElixir.Codex.AppServer do
         else
           case maybe_track_command_output(method, payload) do
             :ok ->
-          emit_message(
-            on_message,
-            :notification,
-            %{
-              payload: payload,
-              raw: payload_string
-            },
-            metadata
-          )
+              emit_message(
+                on_message,
+                :notification,
+                %{
+                  payload: payload,
+                  raw: payload_string
+                },
+                metadata
+              )
 
-          Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+              Logger.debug("Codex notification: #{inspect(method)}")
+              receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+
             {:error, reason} ->
               {:error, reason}
           end
@@ -602,16 +604,16 @@ defmodule SymphonyElixir.Codex.AppServer do
        ) do
     with :ok <- check_stage_command_allowed(payload),
          :ok <- increment_command_count() do
-    approve_or_require(
-      port,
-      id,
-      "acceptForSession",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      auto_approve_requests
-    )
+      approve_or_require(
+        port,
+        id,
+        "acceptForSession",
+        payload,
+        payload_string,
+        on_message,
+        metadata,
+        auto_approve_requests
+      )
     end
   end
 
@@ -1293,6 +1295,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   def helper_for_test(:needs_input, [method, payload]), do: needs_input?(method, payload)
   def helper_for_test(:stop_port, [port]), do: stop_port(port)
   def helper_for_test(:shell_escape, [value]), do: shell_escape(value)
+
   def helper_for_test(:log_stream_output, [stream_label, data]),
     do: log_non_json_stream_line(data, stream_label)
 end

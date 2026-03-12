@@ -179,7 +179,7 @@ defmodule SymphonyElixir.RunPolicy do
     Config.policy_require_validation?() and
       (RunInspector.code_changed?(before_snapshot, after_snapshot) or
          not is_nil(after_snapshot.pr_url) or
-      approval_gate_state?(refreshed_issue))
+         approval_gate_state?(refreshed_issue))
   end
 
   defp require_pr_before_review_violation?(refreshed_issue, after_snapshot) do
@@ -254,21 +254,21 @@ defmodule SymphonyElixir.RunPolicy do
 
     ledger_event =
       RunLedger.record("runtime.stopped", %{
-      issue_id: issue_id,
-      issue_identifier: issue_identifier,
-      actor_type: "runtime",
-      actor_id: "run_policy",
-      failure_class: violation.failure_class,
-      rule_id: violation.rule_id,
-      summary: violation.summary,
-      details: violation.details,
-      target_state: violation.target_state,
-      metadata: %{
-        code: Atom.to_string(violation.code),
-        human_action: violation.human_action,
-        violation_metadata: violation.metadata
-      }
-    })
+        issue_id: issue_id,
+        issue_identifier: issue_identifier,
+        actor_type: "runtime",
+        actor_id: "run_policy",
+        failure_class: violation.failure_class,
+        rule_id: violation.rule_id,
+        summary: violation.summary,
+        details: violation.details,
+        target_state: violation.target_state,
+        metadata: %{
+          code: Atom.to_string(violation.code),
+          human_action: violation.human_action,
+          violation_metadata: violation.metadata
+        }
+      })
 
     if is_binary(workspace) do
       _ =

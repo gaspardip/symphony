@@ -742,7 +742,9 @@ defmodule SymphonyElixir.RepoHarness do
 
   defp validate_optional_command(section, path) do
     case Map.get(section, "command") do
-      nil -> {:ok, nil}
+      nil ->
+        {:ok, nil}
+
       value ->
         case normalize_command(value) do
           nil -> {:error, {:invalid_harness_value, path, value}}

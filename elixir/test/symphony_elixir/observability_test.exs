@@ -74,17 +74,15 @@ defmodule SymphonyElixir.ObservabilityTest do
         :info,
         {:string, ~c"hello world"},
         {{2026, 3, 12}, {18, 30, 45}, 123_456},
-        [
-          event: "stage.start",
-          issue_identifier: "CLZ-22",
-          source: "tracker",
-          stage: "implement",
-          rule_id: "policy.ok",
-          policy_class: "fully_autonomous",
-          trace_id: "abc123",
-          span_id: "def456",
-          custom: "value"
-        ]
+        event: "stage.start",
+        issue_identifier: "CLZ-22",
+        source: "tracker",
+        stage: "implement",
+        rule_id: "policy.ok",
+        policy_class: "fully_autonomous",
+        trace_id: "abc123",
+        span_id: "def456",
+        custom: "value"
       )
       |> IO.iodata_to_binary()
 

@@ -264,9 +264,7 @@ defmodule SymphonyElixir.Linear.Client do
             linear_error_context(payload, response)
         )
 
-        {:error,
-         {:linear_api_status, response.status,
-          %{retry_after_ms: retry_after_ms(response), body: Map.get(response, :body)}}}
+        {:error, {:linear_api_status, response.status, %{retry_after_ms: retry_after_ms(response), body: Map.get(response, :body)}}}
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
