@@ -159,7 +159,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert refresh.operations == ["events", "reconcile"]
 
     snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
-    assert [%{identifier: "MT-PAUSED", resume_state: "In Progress"}] = snapshot.paused
+    assert [%{identifier: "MT-PAUSED", resume_state: "In Progress"}] = Map.get(snapshot, :paused)
 
     assert [%{issue_identifier: "MT-SKIP", reason: "missing canary labels"}] =
              snapshot.skipped
