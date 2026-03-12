@@ -27,6 +27,7 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Validated the Docker Compose stack structure with `docker compose -f ops/observability/docker-compose.yml config`.
 - Ran the harness preflight successfully and confirmed the smoke suite passes (`143 tests, 0 failures`).
 - Full validation is currently blocked by pre-existing `mix lint` / `specs.check` failures on the branch base, including missing `@spec` declarations in files outside the observability change set.
+- Pushed `codex/clz-22-observability` to `origin`, but GitHub rejected `gh pr create` with `GraphQL: gaspardip does not have the correct permissions to execute CreatePullRequest`.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -38,6 +39,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Preflight: `./scripts/symphony-preflight.sh` exited `0`
 - Smoke: `./scripts/symphony-smoke.sh` exited `0` with `143 tests, 0 failures`
 - Validation blocker: `./scripts/symphony-validate.sh` reaches `mix lint` and fails on existing `specs.check` missing `@spec` declarations
+- Remote branch: `origin/codex/clz-22-observability`
+- PR publish blocker: `gh pr create --base main --head gaspardip:codex/clz-22-observability` failed with `CreatePullRequest` permissions
 
 ## Next Step
-Commit the self-hosted ops/docs slice, decide whether to keep the mechanical repo formatting sweep as a separate change, and publish the branch with the existing `specs.check` lint debt called out explicitly.
+Open the PR once GitHub permissions allow `CreatePullRequest`, keeping the existing `specs.check` lint debt called out explicitly in the PR body.
