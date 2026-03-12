@@ -95,6 +95,47 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @query_by_identifier """
+  query SymphonyLinearIssueByIdentifier($projectSlug: String!, $teamKey: String!, $number: Float!, $relationFirst: Int!) {
+    issues(filter: {project: {slugId: {eq: $projectSlug}}, team: {key: {eq: $teamKey}}, number: {eq: $number}}, first: 1) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state {
+          name
+        }
+        branchName
+        url
+        assignee {
+          id
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              state {
+                name
+              }
+            }
+          }
+        }
+        createdAt
+        updatedAt
+      }
+    }
+  }
+  """
+
   @viewer_query """
   query SymphonyLinearViewer {
     viewer {
@@ -158,6 +199,55 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @spec fetch_issue_by_identifier(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_identifier(issue_identifier) when is_binary(issue_identifier) do
+    identifier = String.trim(issue_identifier)
+    project_slug = Config.linear_project_slug()
+
+    cond do
+      identifier == "" ->
+        {:ok, nil}
+
+      is_nil(Config.linear_api_token()) ->
+        {:error, :missing_linear_api_token}
+
+      is_nil(project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        with {:ok, team_key, issue_number} <- parse_issue_identifier(identifier),
+             {:ok, body} <-
+               graphql(@query_by_identifier, %{
+                 projectSlug: project_slug,
+                 teamKey: team_key,
+                 number: issue_number,
+                 relationFirst: @issue_page_size
+               }),
+             {:ok, issues} <- decode_linear_response(body, nil) do
+          {:ok, List.first(issues)}
+        end
+    end
+  end
+
+  @spec fetch_issue_by_id(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_id(issue_id) when is_binary(issue_id) do
+    trimmed_id = String.trim(issue_id)
+
+    cond do
+      trimmed_id == "" ->
+        {:ok, nil}
+
+      is_nil(Config.linear_api_token()) ->
+        {:error, :missing_linear_api_token}
+
+      true ->
+        with {:ok, assignee_filter} <- routing_assignee_filter(),
+             {:ok, issues} <- do_fetch_issue_states([trimmed_id], assignee_filter) do
+          {:ok, List.first(issues)}
+        end
+    end
+  end
+
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
@@ -174,7 +264,9 @@ defmodule SymphonyElixir.Linear.Client do
             linear_error_context(payload, response)
         )
 
-        {:error, {:linear_api_status, response.status}}
+        {:error,
+         {:linear_api_status, response.status,
+          %{retry_after_ms: retry_after_ms(response), body: Map.get(response, :body)}}}
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
@@ -217,6 +309,14 @@ defmodule SymphonyElixir.Linear.Client do
     |> Enum.reduce([], &prepend_page_issues/2)
     |> finalize_paginated_issues()
   end
+
+  @doc false
+  def helper_for_test(:build_assignee_filter, [assignee]), do: build_assignee_filter(assignee)
+  def helper_for_test(:assigned_to_worker, [assignee, assignee_filter]), do: assigned_to_worker?(assignee, assignee_filter)
+  def helper_for_test(:truncate_error_body, [body]), do: truncate_error_body(body)
+  def helper_for_test(:normalize_assignee_match_value, [value]), do: normalize_assignee_match_value(value)
+  def helper_for_test(:graphql_headers, []), do: graphql_headers()
+  def helper_for_test(:routing_assignee_filter, []), do: routing_assignee_filter()
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
     do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
@@ -264,6 +364,16 @@ defmodule SymphonyElixir.Linear.Client do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp parse_issue_identifier(identifier) when is_binary(identifier) do
+    case Regex.run(~r/^([A-Za-z][A-Za-z0-9_]*)-(\d+)$/, identifier) do
+      [_, team_key, issue_number] ->
+        {:ok, String.upcase(team_key), String.to_integer(issue_number) * 1.0}
+
+      _ ->
+        {:error, :invalid_linear_issue_identifier}
     end
   end
 
@@ -356,7 +466,11 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp decode_linear_response(%{"errors" => errors}, _assignee_filter) do
-    {:error, {:linear_graphql_errors, errors}}
+    if rate_limited_errors?(errors) do
+      {:error, {:linear_rate_limited, %{errors: errors}}}
+    else
+      {:error, {:linear_graphql_errors, errors}}
+    end
   end
 
   defp decode_linear_response(_unknown, _assignee_filter) do
@@ -394,6 +508,8 @@ defmodule SymphonyElixir.Linear.Client do
 
     %Issue{
       id: issue["id"],
+      external_id: issue["id"],
+      canonical_identifier: issue["identifier"],
       identifier: issue["identifier"],
       title: issue["title"],
       description: issue["description"],
@@ -402,6 +518,7 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      source: :tracker,
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
@@ -432,6 +549,16 @@ defmodule SymphonyElixir.Linear.Client do
   defp assignee_id(%{} = assignee), do: normalize_assignee_match_value(assignee["id"])
 
   defp routing_assignee_filter do
+    case Config.tracker_handoff_mode() do
+      "labels" ->
+        {:ok, nil}
+
+      _ ->
+        routing_assignee_filter_from_config()
+    end
+  end
+
+  defp routing_assignee_filter_from_config do
     case Config.linear_assignee() do
       nil ->
         {:ok, nil}
@@ -527,4 +654,39 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp parse_priority(priority) when is_integer(priority), do: priority
   defp parse_priority(_priority), do: nil
+
+  defp retry_after_ms(%{headers: headers}) when is_list(headers) do
+    headers
+    |> Enum.find_value(fn
+      {name, value} when is_binary(name) and is_binary(value) ->
+        if String.downcase(name) == "retry-after" do
+          case Integer.parse(String.trim(value)) do
+            {seconds, ""} when seconds >= 0 -> seconds * 1_000
+            _ -> nil
+          end
+        end
+
+      _ ->
+        nil
+    end)
+  end
+
+  defp retry_after_ms(_response), do: nil
+
+  defp rate_limited_errors?(errors) when is_list(errors) do
+    Enum.any?(errors, fn
+      %{"extensions" => %{"code" => code}} when is_binary(code) ->
+        String.upcase(String.trim(code)) == "RATELIMITED"
+
+      %{"message" => message} when is_binary(message) ->
+        message
+        |> String.downcase()
+        |> String.contains?("rate limit")
+
+      _ ->
+        false
+    end)
+  end
+
+  defp rate_limited_errors?(_errors), do: false
 end

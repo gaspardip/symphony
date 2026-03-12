@@ -29,6 +29,13 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
+  @spec path_for_issue(map() | String.t() | nil) :: Path.t()
+  def path_for_issue(issue_or_identifier) do
+    issue_context = issue_context(issue_or_identifier)
+    safe_id = safe_identifier(issue_context.issue_identifier)
+    workspace_path_for_issue(safe_id)
+  end
+
   defp ensure_workspace(workspace) do
     cond do
       File.dir?(workspace) ->

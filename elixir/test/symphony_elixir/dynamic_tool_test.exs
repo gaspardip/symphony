@@ -16,6 +16,18 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                  "type" => "object"
                },
                "name" => "linear_graphql"
+             },
+             %{
+               "inputSchema" => %{
+                 "required" => ["summary", "files_touched", "needs_another_turn", "blocked", "blocker_type"]
+               },
+               "name" => "report_agent_turn_result"
+             },
+             %{
+               "inputSchema" => %{
+                 "required" => ["verdict", "summary", "acceptance_gaps", "risky_areas", "evidence", "raw_output"]
+               },
+               "name" => "report_verifier_result"
              }
            ] = DynamicTool.tool_specs()
 
@@ -37,7 +49,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(text) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => ["linear_graphql", "report_agent_turn_result", "report_verifier_result"]
              }
            }
   end

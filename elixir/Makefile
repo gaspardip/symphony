@@ -1,4 +1,4 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer
+.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer harness-check
 
 MIX ?= mix
 
@@ -24,7 +24,10 @@ lint:
 	$(MIX) lint
 
 coverage:
-	$(MIX) test --cover
+	$(MIX) coverage.audit
+
+harness-check:
+	$(MIX) harness.check
 
 test:
 	$(MIX) test
@@ -35,6 +38,7 @@ dialyzer:
 
 ci:
 	$(MAKE) setup
+	$(MAKE) harness-check
 	$(MAKE) build
 	$(MAKE) fmt-check
 	$(MAKE) lint

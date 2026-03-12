@@ -37,6 +37,123 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "config validation rejects invalid dogfood runner harnesses on startup" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-dogfood-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace_root, ".symphony"))
+
+      File.write!(
+        Path.join(workspace_root, ".symphony/harness.yml"),
+        """
+        base_branch: main
+        preflight:
+          command:
+            - ./scripts/preflight.sh
+        validation:
+          command:
+            - ./scripts/validate.sh
+        smoke:
+          command:
+            - ./scripts/smoke.sh
+        post_merge:
+          command:
+            - ./scripts/post-merge.sh
+        artifacts:
+          command:
+            - ./scripts/artifacts.sh
+        pull_request:
+          required_checks:
+            - validate
+        """
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        runner_self_host_project: true
+      )
+
+      assert {:error, :missing_harness_version} =
+               SymphonyElixir.RepoHarness.validate_runner_checkout(true, workspace_root)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "config exposes stage-aware token budgets" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      policy_per_turn_input_budget: 150_000,
+      policy_per_issue_total_budget: 500_000
+    )
+
+    assert Config.policy_stage_token_budget("implement")[:per_turn_input_soft] == 60_000
+    assert Config.policy_stage_token_budget("implement")[:per_turn_input_hard] == 120_000
+    assert Config.policy_stage_token_budget("verify")[:per_turn_input_soft] == 40_000
+    assert Config.policy_stage_token_budget("verify")[:per_turn_input_hard] == 80_000
+  end
+
+  test "config exposes default abstract reasoning tiers and codex mappings by stage" do
+    write_workflow_file!(Workflow.workflow_file_path())
+
+    assert Config.reasoning_tier_for_stage("implement") == "balanced"
+    assert Config.reasoning_tier_for_stage("verify") == "deep"
+    assert Config.reasoning_tier_for_stage("verifier") == "rigorous"
+
+    assert Config.codex_turn_effort("implement") == "medium"
+    assert Config.codex_turn_effort("verify") == "high"
+    assert Config.codex_turn_effort("verifier") == "xhigh"
+  end
+
+  test "company mode defaults to the policy pack and can be overridden explicitly" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      company_name: "Client Example",
+      company_policy_pack: "client_safe"
+    )
+
+    assert Config.company_mode() == "client_safe_shadow"
+    assert Config.policy_pack_name() == "client_safe"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      company_name: "Client Example",
+      company_mode: "private_autopilot",
+      company_policy_pack: "client_safe"
+    )
+
+    assert Config.company_mode() == "private_autopilot"
+    assert Config.policy_pack_name() == "client_safe"
+  end
+
+  test "config allows overriding stage reasoning tiers and provider mappings" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_reasoning_stages: %{
+        implement: "deep",
+        verify: "rigorous",
+        verifier: "balanced"
+      },
+      codex_reasoning_providers: %{
+        codex: %{
+          reasoning_map: %{
+            balanced: "medium",
+            deep: "high",
+            rigorous: "high"
+          }
+        }
+      }
+    )
+
+    assert Config.reasoning_tier_for_stage("implement") == "deep"
+    assert Config.reasoning_tier_for_stage("verify") == "rigorous"
+    assert Config.reasoning_tier_for_stage("verifier") == "balanced"
+
+    assert Config.codex_turn_effort("implement") == "high"
+    assert Config.codex_turn_effort("verify") == "high"
+    assert Config.codex_turn_effort("verifier") == "medium"
+  end
+
   test "workspace path is deterministic per issue identifier" do
     workspace_root =
       Path.join(
@@ -333,6 +450,28 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute issue.assigned_to_worker
   end
 
+  test "linear client helper seams cover assignee and header fallback branches" do
+    previous_token = System.get_env("LINEAR_API_KEY")
+
+    on_exit(fn ->
+      if is_nil(previous_token) do
+        System.delete_env("LINEAR_API_KEY")
+      else
+        System.put_env("LINEAR_API_KEY", previous_token)
+      end
+    end)
+
+    System.delete_env("LINEAR_API_KEY")
+
+    assert Client.helper_for_test(:build_assignee_filter, ["   "]) == {:ok, nil}
+    assert match?({:error, _}, Client.helper_for_test(:build_assignee_filter, ["me"]))
+    assert Client.helper_for_test(:assigned_to_worker, [%{}, %{match_values: MapSet.new(["user-1"])}]) == false
+    assert Client.helper_for_test(:assigned_to_worker, [nil, :invalid]) == false
+    assert Client.helper_for_test(:truncate_error_body, [String.duplicate("a", 1_050)]) =~ "...<truncated>"
+    assert Client.helper_for_test(:normalize_assignee_match_value, [nil]) == nil
+    assert {:ok, _headers} = Client.helper_for_test(:graphql_headers, [])
+  end
+
   test "linear client pagination merge helper preserves issue ordering" do
     issue_page_1 = [
       %Issue{id: "issue-1", identifier: "MT-1"},
@@ -351,7 +490,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "linear client logs response bodies for non-200 graphql responses" do
     log =
       ExUnit.CaptureLog.capture_log(fn ->
-        assert {:error, {:linear_api_status, 400}} =
+        assert {:error, {:linear_api_status, 400, %{retry_after_ms: nil, body: %{"errors" => _}}}} =
                  Client.graphql(
                    "query Viewer { viewer { id } }",
                    %{},
@@ -648,6 +787,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_approval_policy: nil,
       codex_thread_sandbox: nil,
       codex_turn_sandbox_policy: nil,
+      codex_runtime_profile_codex_home: nil,
+      codex_runtime_profile_inherit_env: nil,
+      codex_runtime_profile_env_allowlist: nil,
       codex_turn_timeout_ms: nil,
       codex_read_timeout_ms: nil,
       codex_stall_timeout_ms: nil,
@@ -671,6 +813,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
 
     assert Config.codex_thread_sandbox() == "workspace-write"
+    assert Config.codex_runtime_profile() == %{codex_home: nil, inherit_env: true, env_allowlist: []}
 
     assert Config.codex_turn_sandbox_policy() == %{
              "type" => "workspaceWrite",
@@ -688,11 +831,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
     assert Config.codex_command() == "codex app-server --model gpt-5.3-codex"
 
+    codex_home_env_var = "SYMP_CODEX_HOME_#{System.unique_integer([:positive])}"
+    previous_codex_home = System.get_env(codex_home_env_var)
+    codex_home = Path.join(System.tmp_dir!(), "codex-home-config")
+    System.put_env(codex_home_env_var, codex_home)
+
+    on_exit(fn -> restore_env(codex_home_env_var, previous_codex_home) end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
+      codex_runtime_profile_codex_home: "$#{codex_home_env_var}",
+      codex_runtime_profile_inherit_env: false,
+      codex_runtime_profile_env_allowlist: ["HOME", "PATH", "GH_TOKEN"],
       codex_approval_policy: "on-request",
       codex_thread_sandbox: "workspace-write",
       codex_turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["/tmp/workspace", "/tmp/cache"]}
     )
+
+    assert Config.codex_runtime_profile() == %{
+             codex_home: Path.expand(codex_home),
+             inherit_env: false,
+             env_allowlist: ["HOME", "PATH", "GH_TOKEN"]
+           }
 
     assert Config.codex_approval_policy() == "on-request"
     assert Config.codex_thread_sandbox() == "workspace-write"
@@ -734,7 +893,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Config.linear_active_states() == ["Todo", "In Progress"]
     assert Config.linear_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
-    assert Config.poll_interval_ms() == 30_000
+    assert Config.poll_interval_ms() == 600_000
+    assert Config.healing_poll_interval_ms() == 1_800_000
     assert Config.workspace_root() == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert Config.max_retry_backoff_ms() == 300_000
     assert Config.max_concurrent_agents_for_state("Todo") == 1

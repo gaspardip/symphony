@@ -28,12 +28,24 @@ defmodule SymphonyElixirWeb.Router do
   end
 
   scope "/", SymphonyElixirWeb do
+    post("/api/webhooks/linear", LinearWebhookController, :create)
+    match(:*, "/api/webhooks/linear", ObservabilityApiController, :method_not_allowed)
+    post("/api/webhooks/github", GitHubWebhookController, :create)
+    match(:*, "/api/webhooks/github", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/state", ObservabilityApiController, :state)
+    get("/api/v1/portfolio", ObservabilityApiController, :portfolio)
+    post("/api/v1/manual-runs", ObservabilityApiController, :manual_run)
+    match(:*, "/api/v1/manual-runs", ObservabilityApiController, :method_not_allowed)
+    get("/api/v1/reports/delivery", ObservabilityApiController, :delivery_report)
+    match(:*, "/api/v1/reports/delivery", ObservabilityApiController, :method_not_allowed)
 
     match(:*, "/", ObservabilityApiController, :method_not_allowed)
     match(:*, "/api/v1/state", ObservabilityApiController, :method_not_allowed)
+    match(:*, "/api/v1/portfolio", ObservabilityApiController, :method_not_allowed)
     post("/api/v1/refresh", ObservabilityApiController, :refresh)
     match(:*, "/api/v1/refresh", ObservabilityApiController, :method_not_allowed)
+    post("/api/v1/:issue_identifier/actions/:action", ObservabilityApiController, :control)
+    match(:*, "/api/v1/:issue_identifier/actions/:action", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/:issue_identifier", ObservabilityApiController, :issue)
     match(:*, "/api/v1/:issue_identifier", ObservabilityApiController, :method_not_allowed)
     match(:*, "/*path", ObservabilityApiController, :not_found)

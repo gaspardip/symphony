@@ -1,0 +1,15 @@
+id: portfolio
+title: Portfolio Console
+status: active
+summary: Multi-runner aggregation, business-readable delivery reports, and operator workload shaping.
+source_paths:
+  - elixir/lib/symphony_elixir_web/presenter.ex
+  - elixir/lib/symphony_elixir_web/live/dashboard_live.ex
+  - docs/CONTRACTOR_AUTOPILOT_MASTER_PLAN.md
+acceptance_signals:
+  - Portfolio payloads aggregate companies, repos, and operator attention
+  - Delivery reports summarize proof, approvals, and finalization
+dependencies:
+  - runtime-core
+last_updated_by_issue: seed
+

@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @port_line_bytes 1_048_576
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
+  @command_monitor_key :symphony_command_monitor
 
   @type session :: %{
           port: port(),
@@ -26,7 +27,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace) do
+    with {:ok, session} <- start_session(workspace, opts) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -35,10 +36,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  @spec start_session(Path.t()) :: {:ok, session()} | {:error, term()}
-  def start_session(workspace) do
+  @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
+  def start_session(workspace, opts \\ []) do
     with :ok <- validate_workspace_cwd(workspace),
-         {:ok, port} <- start_port(workspace) do
+         {:ok, port} <- start_port(workspace, opts) do
       metadata = port_metadata(port)
       expanded_workspace = Path.expand(workspace)
 
@@ -85,9 +86,19 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(
+           port,
+           thread_id,
+           prompt,
+           issue,
+           workspace,
+           approval_policy,
+           turn_sandbox_policy,
+           Keyword.get(opts, :effort)
+         ) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
+        Process.put(@command_monitor_key, command_monitor(opts))
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
         emit_message(
@@ -101,32 +112,36 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-          {:ok, result} ->
-            Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
+        try do
+          case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+            {:ok, result} ->
+              Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
-            {:ok,
-             %{
-               result: result,
-               session_id: session_id,
-               thread_id: thread_id,
-               turn_id: turn_id
-             }}
+              {:ok,
+               %{
+                 result: result,
+                 session_id: session_id,
+                 thread_id: thread_id,
+                 turn_id: turn_id
+               }}
 
-          {:error, reason} ->
-            Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+            {:error, reason} ->
+              Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
-            emit_message(
-              on_message,
-              :turn_ended_with_error,
-              %{
-                session_id: session_id,
-                reason: reason
-              },
-              metadata
-            )
+              emit_message(
+                on_message,
+                :turn_ended_with_error,
+                %{
+                  session_id: session_id,
+                  reason: reason
+                },
+                metadata
+              )
 
-            {:error, reason}
+              {:error, reason}
+          end
+        after
+          Process.delete(@command_monitor_key)
         end
 
       {:error, reason} ->
@@ -159,12 +174,21 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace) do
+  defp start_port(workspace, opts) do
     executable = System.find_executable("bash")
+    env_executable = System.find_executable("env") || "env"
 
     if is_nil(executable) do
       {:error, :bash_not_found}
     else
+      command =
+        launch_command(
+          Keyword.get(opts, :codex_command, Config.codex_command()),
+          executable,
+          env_executable,
+          Config.codex_runtime_profile()
+        )
+
       port =
         Port.open(
           {:spawn_executable, String.to_charlist(executable)},
@@ -172,7 +196,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.codex_command())],
+            args: [~c"-lc", String.to_charlist(command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -220,6 +244,79 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace)
   end
 
+  defp launch_command(command, _bash_executable, _env_executable, %{inherit_env: true, codex_home: nil})
+       when is_binary(command) do
+    command
+  end
+
+  defp launch_command(command, bash_executable, env_executable, runtime_profile)
+       when is_binary(command) do
+    codex_home = Map.get(runtime_profile, :codex_home)
+    inherit_env = Map.get(runtime_profile, :inherit_env, true)
+    env_allowlist =
+      runtime_profile
+      |> Map.get(:env_allowlist, [])
+      |> Kernel.++(test_runtime_env_allowlist())
+
+    env_assignments =
+      env_allowlist
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+      |> Enum.reduce([], fn env_name, acc ->
+        case System.get_env(env_name) do
+          nil -> acc
+          value -> ["#{env_name}=#{shell_escape(value)}" | acc]
+        end
+      end)
+      |> then(fn assignments ->
+        if is_binary(codex_home) and byte_size(String.trim(codex_home)) > 0 do
+          ["CODEX_HOME=#{shell_escape(codex_home)}" | assignments]
+        else
+          assignments
+        end
+      end)
+      |> Enum.reverse()
+
+    cond do
+      inherit_env ->
+        case codex_home do
+          value when is_binary(value) ->
+            trimmed = String.trim(value)
+
+            if trimmed == "" do
+              command
+            else
+              "export CODEX_HOME=#{shell_escape(trimmed)}; exec #{command}"
+            end
+
+          _ ->
+            command
+        end
+
+      true ->
+        "exec " <>
+          env_executable <>
+          " -i " <>
+          Enum.join(env_assignments, " ") <>
+          " " <>
+          shell_escape(bash_executable) <>
+          " -lc " <>
+          shell_escape(command)
+    end
+  end
+
+  defp test_runtime_env_allowlist do
+    System.get_env()
+    |> Map.keys()
+    |> Enum.filter(&String.starts_with?(&1, "SYMP_TEST_"))
+  end
+
+  defp shell_escape(value) when is_binary(value) do
+    escaped = String.replace(value, "'", "'\"'\"'")
+    "'#{escaped}'"
+  end
+
   defp do_start_session(port, workspace, session_policies) do
     case send_initialize(port) do
       :ok -> start_thread(port, workspace, session_policies)
@@ -251,11 +348,18 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
-    send_message(port, %{
-      "method" => "turn/start",
-      "id" => @turn_start_id,
-      "params" => %{
+  defp start_turn(
+         port,
+         thread_id,
+         prompt,
+         issue,
+         workspace,
+         approval_policy,
+         turn_sandbox_policy,
+         effort
+       ) do
+    params =
+      %{
         "threadId" => thread_id,
         "input" => [
           %{
@@ -268,6 +372,12 @@ defmodule SymphonyElixir.Codex.AppServer do
         "approvalPolicy" => approval_policy,
         "sandboxPolicy" => turn_sandbox_policy
       }
+      |> maybe_put_effort(effort)
+
+    send_message(port, %{
+      "method" => "turn/start",
+      "id" => @turn_start_id,
+      "params" => params
     })
 
     case await_response(port, @turn_start_id) do
@@ -275,6 +385,12 @@ defmodule SymphonyElixir.Codex.AppServer do
       other -> other
     end
   end
+
+  defp maybe_put_effort(params, effort) when is_binary(effort) and effort != "" do
+    Map.put(params, "effort", effort)
+  end
+
+  defp maybe_put_effort(params, _effort), do: params
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
     receive_loop(port, on_message, Config.codex_turn_timeout_ms(), "", tool_executor, auto_approve_requests)
@@ -365,15 +481,17 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream")
 
-        emit_message(
-          on_message,
-          :malformed,
-          %{
-            payload: payload_string,
-            raw: payload_string
-          },
-          metadata_from_message(port, %{raw: payload_string})
-        )
+        if likely_json_payload?(payload_string) do
+          emit_message(
+            on_message,
+            :malformed,
+            %{
+              payload: payload_string,
+              raw: payload_string
+            },
+            metadata_from_message(port, %{raw: payload_string})
+          )
+        end
 
         receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
     end
@@ -437,6 +555,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
         {:error, {:approval_required, payload}}
 
+      {:error, reason} ->
+        {:error, reason}
+
       :unhandled ->
         if needs_input?(method, payload) do
           emit_message(
@@ -448,6 +569,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
           {:error, {:turn_input_required, payload}}
         else
+          case maybe_track_command_output(method, payload) do
+            :ok ->
           emit_message(
             on_message,
             :notification,
@@ -460,6 +583,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
           Logger.debug("Codex notification: #{inspect(method)}")
           receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+            {:error, reason} ->
+              {:error, reason}
+          end
         end
     end
   end
@@ -474,6 +600,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          _tool_executor,
          auto_approve_requests
        ) do
+    with :ok <- check_stage_command_allowed(payload),
+         :ok <- increment_command_count() do
     approve_or_require(
       port,
       id,
@@ -484,6 +612,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       metadata,
       auto_approve_requests
     )
+    end
   end
 
   defp maybe_handle_approval_request(
@@ -879,6 +1008,16 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  defp likely_json_payload?(payload_string) when is_binary(payload_string) do
+    case String.trim_leading(payload_string) do
+      "{" <> _ -> true
+      "[" <> _ -> true
+      _ -> false
+    end
+  end
+
+  defp likely_json_payload?(_payload_string), do: false
+
   defp issue_context(%{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
@@ -894,6 +1033,9 @@ defmodule SymphonyElixir.Codex.AppServer do
           :ok
         rescue
           ArgumentError ->
+            :ok
+        catch
+          :exit, _reason ->
             :ok
         end
     end
@@ -922,6 +1064,138 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp default_on_message(_message), do: :ok
 
+  defp command_monitor(opts) do
+    budget = Keyword.get(opts, :command_output_budget, %{})
+
+    %{
+      stage: Keyword.get(opts, :stage),
+      forbidden_commands: Keyword.get(opts, :forbidden_commands, []),
+      per_command_bytes: Map.get(budget, :per_command_bytes),
+      per_turn_bytes: Map.get(budget, :per_turn_bytes),
+      max_command_count: Map.get(budget, :max_command_count),
+      command_count: 0,
+      command_outputs: %{},
+      total_output_bytes: 0
+    }
+  end
+
+  defp maybe_track_command_output("item/commandExecution/outputDelta", %{"params" => params}) do
+    monitor = Process.get(@command_monitor_key) || %{}
+    item_id = Map.get(params, "itemId") || Map.get(params, "id") || "command"
+    output = to_string(Map.get(params, "outputDelta") || "")
+    bytes = byte_size(output)
+    command_outputs = Map.get(monitor, :command_outputs, %{})
+    current_bytes = Map.get(command_outputs, item_id, 0)
+    next_command_bytes = current_bytes + bytes
+    next_total_bytes = Map.get(monitor, :total_output_bytes, 0) + bytes
+
+    cond do
+      exceeded?(Map.get(monitor, :per_command_bytes), next_command_bytes) ->
+        {:error, {:turn_failed, %{reason: "implementation.command_output_budget_exceeded", scope: "per_command", item_id: item_id}}}
+
+      exceeded?(Map.get(monitor, :per_turn_bytes), next_total_bytes) ->
+        {:error, {:turn_failed, %{reason: "implementation.command_output_budget_exceeded", scope: "per_turn"}}}
+
+      true ->
+        Process.put(
+          @command_monitor_key,
+          monitor
+          |> Map.put(:command_outputs, Map.put(command_outputs, item_id, next_command_bytes))
+          |> Map.put(:total_output_bytes, next_total_bytes)
+        )
+
+        :ok
+    end
+  end
+
+  defp maybe_track_command_output(_method, _payload), do: :ok
+
+  defp check_stage_command_allowed(%{"params" => params}) do
+    monitor = Process.get(@command_monitor_key) || %{}
+
+    if Map.get(monitor, :stage) == "implement" do
+      command =
+        Map.get(params, "parsedCmd") ||
+          Map.get(params, "command") ||
+          ""
+
+      normalized = normalize_command(command)
+
+      cond do
+        normalized == "" ->
+          :ok
+
+        broad_read_command?(normalized) ->
+          {:error, {:turn_failed, %{reason: "implementation.broad_read_violation", command: command}}}
+
+        forbidden_command?(normalized, Map.get(monitor, :forbidden_commands, [])) ->
+          {:error, {:turn_failed, %{reason: "implementation.stage_command_violation", command: command}}}
+
+        true ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp check_stage_command_allowed(_payload), do: :ok
+
+  defp increment_command_count do
+    monitor = Process.get(@command_monitor_key) || %{}
+    count = Map.get(monitor, :command_count, 0) + 1
+    Process.put(@command_monitor_key, Map.put(monitor, :command_count, count))
+
+    if exceeded?(Map.get(monitor, :max_command_count), count) do
+      {:error, {:turn_failed, %{reason: "implementation.command_count_exceeded", count: count}}}
+    else
+      :ok
+    end
+  end
+
+  defp forbidden_command?(command, forbidden_commands) do
+    Enum.any?(forbidden_commands, fn forbidden ->
+      normalized = normalize_command(forbidden)
+      normalized != "" and String.contains?(command, normalized)
+    end)
+  end
+
+  defp broad_read_command?(command) when is_binary(command) do
+    cond do
+      String.contains?(command, "rg --files") ->
+        true
+
+      Regex.match?(~r/(^|\s)fd(\s|$)/, command) ->
+        true
+
+      String.starts_with?(command, "find .") ->
+        true
+
+      String.contains?(command, "git diff") and not allowed_git_diff_command?(command) ->
+        true
+
+      true ->
+        false
+    end
+  end
+
+  defp broad_read_command?(_command), do: false
+
+  defp allowed_git_diff_command?(command) when is_binary(command) do
+    Enum.any?(["--stat", "--shortstat", "--numstat", "--name-only", "--name-status"], &String.contains?(command, &1))
+  end
+
+  defp normalize_command(command) when is_binary(command) do
+    command
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_command(_command), do: ""
+
+  defp exceeded?(nil, _value), do: false
+  defp exceeded?(limit, value) when is_integer(limit), do: value > limit
+
   defp tool_call_name(params) when is_map(params) do
     case Map.get(params, "tool") || Map.get(params, :tool) || Map.get(params, "name") || Map.get(params, :name) do
       name when is_binary(name) ->
@@ -945,7 +1219,16 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp send_message(port, message) do
     line = Jason.encode!(message) <> "\n"
-    Port.command(port, line)
+
+    try do
+      Port.command(port, line)
+    rescue
+      ArgumentError ->
+        :ok
+    catch
+      :exit, _reason ->
+        :ok
+    end
   end
 
   defp needs_input?(method, payload)
@@ -982,4 +1265,34 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp needs_input_field?(_payload), do: false
+
+  @doc false
+  def helper_for_test(:port_metadata, [port]), do: port_metadata(port)
+
+  def helper_for_test(:launch_command, [command, bash_executable, env_executable, runtime_profile]),
+    do: launch_command(command, bash_executable, env_executable, runtime_profile)
+
+  def helper_for_test(:tool_request_user_input_approval_answers, [params]),
+    do: tool_request_user_input_approval_answers(params)
+
+  def helper_for_test(:tool_request_user_input_unavailable_answers, [params]),
+    do: tool_request_user_input_unavailable_answers(params)
+
+  def helper_for_test(:tool_request_user_input_approval_answer, [question]),
+    do: tool_request_user_input_approval_answer(question)
+
+  def helper_for_test(:tool_request_user_input_approval_option_label, [options]),
+    do: tool_request_user_input_approval_option_label(options)
+
+  def helper_for_test(:tool_request_user_input_option_label, [option]),
+    do: tool_request_user_input_option_label(option)
+
+  def helper_for_test(:tool_call_name, [params]), do: tool_call_name(params)
+  def helper_for_test(:tool_call_arguments, [params]), do: tool_call_arguments(params)
+  def helper_for_test(:maybe_set_usage, [metadata, payload]), do: maybe_set_usage(metadata, payload)
+  def helper_for_test(:needs_input, [method, payload]), do: needs_input?(method, payload)
+  def helper_for_test(:stop_port, [port]), do: stop_port(port)
+  def helper_for_test(:shell_escape, [value]), do: shell_escape(value)
+  def helper_for_test(:log_stream_output, [stream_label, data]),
+    do: log_non_json_stream_line(data, stream_label)
 end

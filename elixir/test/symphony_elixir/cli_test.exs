@@ -98,6 +98,53 @@ defmodule SymphonyElixir.CLITest do
     assert expanded_path == Path.expand("tmp/custom-logs")
   end
 
+  test "accepts --port and passes it to runtime deps" do
+    parent = self()
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn port ->
+        send(parent, {:port, port})
+        :ok
+      end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag, "--port", "4040", "WORKFLOW.md"], deps)
+    assert_received {:port, 4040}
+  end
+
+  test "rejects blank logs-root values" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "--logs-root", "   ", "WORKFLOW.md"], deps)
+    assert message =~ "Usage: symphony"
+  end
+
+  test "returns usage for invalid args and unexpected extra positional arguments" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "--bogus"], deps)
+    assert message =~ "Usage: symphony"
+
+    assert {:error, message} = CLI.evaluate([@ack_flag, "one.md", "two.md"], deps)
+    assert message =~ "Usage: symphony"
+  end
+
   test "returns not found when workflow file does not exist" do
     deps = %{
       file_regular?: fn _path -> false end,
@@ -128,6 +175,8 @@ defmodule SymphonyElixir.CLITest do
   test "returns ok when workflow exists and app starts" do
     deps = %{
       file_regular?: fn _path -> true end,
+      load_json_file: fn _path -> {:ok, %{}} end,
+      submit_manual_issue: fn _server, _payload -> {:ok, %{}} end,
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
@@ -135,5 +184,53 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+  end
+
+  test "manual submit loads the spec and submits it to the default server" do
+    parent = self()
+
+    deps = %{
+      file_regular?: fn _path -> true end,
+      load_json_file: fn path ->
+        send(parent, {:loaded, path})
+        {:ok, %{"identifier" => "CLZ-14"}}
+      end,
+      submit_manual_issue: fn server, payload ->
+        send(parent, {:submitted, server, payload})
+        {:ok, %{"ok" => true, "source" => "manual"}}
+      end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:ok, %{"ok" => true, "source" => "manual"}} =
+             CLI.evaluate(["manual", "submit", "tmp/issue.json"], deps)
+
+    assert_received {:loaded, loaded_path}
+    assert loaded_path == Path.expand("tmp/issue.json")
+    assert_received {:submitted, "http://127.0.0.1:4040", %{"identifier" => "CLZ-14"}}
+  end
+
+  test "manual submit accepts an explicit server override and returns usage for invalid args" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      load_json_file: fn _path -> {:ok, %{"identifier" => "CLZ-14"}} end,
+      submit_manual_issue: fn server, _payload -> {:ok, %{"server" => server}} end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:ok, %{"server" => "http://localhost:5050"}} =
+             CLI.evaluate(
+               ["manual", "submit", "--server", "http://localhost:5050", "tmp/issue.json"],
+               deps
+             )
+
+    assert {:error, message} = CLI.evaluate(["manual", "submit"], deps)
+    assert message =~ "Usage: symphony manual submit"
   end
 end
