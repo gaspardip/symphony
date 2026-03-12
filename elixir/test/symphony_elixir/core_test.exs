@@ -31,6 +31,15 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
     assert Config.poll_interval_ms() == 45_000
+    assert Config.discovery_poll_interval_ms() == 45_000
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      poll_interval_ms: 45_000,
+      discovery_poll_interval_ms: 15_000
+    )
+
+    assert Config.poll_interval_ms() == 15_000
+    assert Config.discovery_poll_interval_ms() == 15_000
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
     assert Config.agent_max_turns() == 3

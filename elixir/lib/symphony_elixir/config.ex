@@ -583,8 +583,14 @@ defmodule SymphonyElixir.Config do
   def discovery_poll_interval_ms do
     options = validated_workflow_options()
 
-    get_in(options, [:polling, :discovery_interval_ms]) ||
-      get_in(options, [:polling, :interval_ms])
+    interval_ms = get_in(options, [:polling, :interval_ms])
+    discovery_interval_ms = get_in(options, [:polling, :discovery_interval_ms])
+
+    if discovery_interval_ms == @default_poll_interval_ms and interval_ms != @default_poll_interval_ms do
+      interval_ms
+    else
+      discovery_interval_ms || interval_ms
+    end
   end
 
   @spec healing_poll_interval_ms() :: pos_integer()

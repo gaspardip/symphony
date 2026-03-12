@@ -132,6 +132,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_active_states: ["Todo", "In Progress"],
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           poll_interval_ms: 600_000,
+          discovery_poll_interval_ms: 600_000,
           healing_poll_interval_ms: 1_800_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           manual_enabled: true,
@@ -208,6 +209,7 @@ defmodule SymphonyElixir.TestSupport do
     tracker_active_states = Keyword.get(config, :tracker_active_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
+    discovery_poll_interval_ms = Keyword.get(config, :discovery_poll_interval_ms)
     healing_poll_interval_ms = Keyword.get(config, :healing_poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     manual_enabled = Keyword.get(config, :manual_enabled)
@@ -282,7 +284,7 @@ defmodule SymphonyElixir.TestSupport do
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
-        "  discovery_interval_ms: #{yaml_value(poll_interval_ms)}",
+        "  discovery_interval_ms: #{yaml_value(discovery_poll_interval_ms)}",
         "  healing_interval_ms: #{yaml_value(healing_poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
