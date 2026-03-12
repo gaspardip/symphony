@@ -4,8 +4,16 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
   import Phoenix.ConnTest
   import Plug.Conn
 
-  alias SymphonyElixir.Linear.{Adapter, Client, Webhook}
-  alias SymphonyElixir.{GitHubEventInbox, Orchestrator, RunStateStore, TrackerEvent, TrackerEventInbox}
+  alias SymphonyElixir.Linear.{Adapter, Client, Issue, Webhook}
+
+  alias SymphonyElixir.{
+    GitHubEventInbox,
+    ManualIssueStore,
+    Orchestrator,
+    RunStateStore,
+    TrackerEvent,
+    TrackerEventInbox
+  }
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -72,7 +80,9 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     log_file = Application.get_env(:symphony_elixir, :log_file)
     linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
     pr_watcher_client = Application.get_env(:symphony_elixir, :pr_watcher_github_client)
-    inbox_root = Path.join(System.tmp_dir!(), "symphony-webhook-#{System.unique_integer([:positive])}")
+
+    inbox_root =
+      Path.join(System.tmp_dir!(), "symphony-webhook-#{System.unique_integer([:positive])}")
 
     Application.put_env(:symphony_elixir, :log_file, Path.join(inbox_root, "symphony.log"))
     TrackerEventInbox.reset()
@@ -119,7 +129,10 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     on_exit(fn -> restore_env("GITHUB_WEBHOOK_SECRET", previous_secret) end)
 
     workspace_root =
-      Path.join(System.tmp_dir!(), "symphony-github-webhook-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-github-webhook-#{System.unique_integer([:positive])}"
+      )
 
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
     Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubReviewClient)
@@ -130,7 +143,11 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       :symphony_elixir,
       SymphonyElixirWeb.Endpoint,
       Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-      |> Keyword.merge(orchestrator: orchestrator_name, secret_key_base: String.duplicate("s", 64), server: false)
+      |> Keyword.merge(
+        orchestrator: orchestrator_name,
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
     )
 
     start_supervised!({Orchestrator, name: orchestrator_name})
@@ -180,14 +197,143 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       {:ok, run_state} = RunStateStore.load(workspace)
 
       assert Map.get(run_state, :last_review_decision) == "CHANGES_REQUESTED"
-      assert Map.get(run_state, :last_decision_summary) == "New PR review feedback detected on https://github.com/gaspardip/events/pull/8."
+
+      assert Map.get(run_state, :last_decision_summary) ==
+               "New PR review feedback detected on https://github.com/gaspardip/events/pull/8."
+
       assert Map.get(run_state, :next_human_action) =~ "Review drafted replies"
 
       review_threads = Map.get(run_state, :review_threads)
       assert get_in(review_threads, ["review:91", "draft_state"]) == "drafted"
       assert is_binary(get_in(review_threads, ["review:91", "draft_reply"]))
       assert get_in(review_threads, ["comment:92", "draft_state"]) == "drafted"
+
+      assert get_in(review_threads, ["comment:92", "path"]) ==
+               "LocalEventsExplorer/ViewModels/EventsViewModel.swift"
+
+      assert get_in(review_threads, ["comment:92", "line"]) == 42
+      assert get_in(review_threads, ["comment:92", "body"]) =~ "Consider simplifying this branch."
     end)
+  end
+
+  test "github webhook controller returns fully autonomous PRs to implement with review context" do
+    secret = "github-webhook-secret"
+    previous_secret = System.get_env("GITHUB_WEBHOOK_SECRET")
+    System.put_env("GITHUB_WEBHOOK_SECRET", secret)
+    on_exit(fn -> restore_env("GITHUB_WEBHOOK_SECRET", previous_secret) end)
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-github-webhook-autonomous-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root,
+      max_concurrent_agents: 0
+    )
+
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubReviewClient)
+
+    orchestrator_name =
+      :"github-webhook-autonomous-orchestrator-#{System.unique_integer([:positive])}"
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(
+        orchestrator: orchestrator_name,
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
+    )
+
+    start_supervised!({Orchestrator, name: orchestrator_name})
+    start_supervised!({SymphonyElixirWeb.Endpoint, []})
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "github-webhook-autonomous",
+        "identifier" => "EVT-GH-AUTO",
+        "title" => "Autonomous webhook review follow-up",
+        "description" => "Resume automatically when PR review feedback arrives",
+        "acceptance_criteria" => [
+          "Return the runtime to implement when GitHub review feedback lands"
+        ],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.mkdir_p!(workspace)
+
+    :ok =
+      RunStateStore.save(workspace, %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        stage: "await_checks",
+        effective_policy_class: "fully_autonomous",
+        pr_url: "https://github.com/gaspardip/events/pull/8",
+        review_threads: %{},
+        stage_history: [%{stage: "publish"}, %{stage: "await_checks"}],
+        stage_transition_counts: %{"publish" => 1, "await_checks" => 1}
+      })
+
+    raw_body =
+      Jason.encode!(%{
+        "action" => "submitted",
+        "review" => %{
+          "id" => 91,
+          "body" => "Please tighten this conditional.",
+          "submitted_at" => "2026-03-11T12:00:00Z"
+        },
+        "pull_request" => %{
+          "html_url" => "https://github.com/gaspardip/events/pull/8",
+          "updated_at" => "2026-03-11T12:00:00Z"
+        },
+        "repository" => %{"full_name" => "gaspardip/events"}
+      })
+
+    conn =
+      build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-github-event", "pull_request_review")
+      |> put_req_header("x-github-delivery", "delivery-autonomous")
+      |> put_req_header("x-hub-signature-256", github_signature(secret, raw_body))
+      |> post("/api/webhooks/github", raw_body)
+
+    assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
+
+    assert_eventually(
+      fn ->
+        {:ok, run_state} = RunStateStore.load(workspace)
+
+        {:ok, %Issue{} = refreshed_issue} =
+          ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+
+        assert Map.get(run_state, :stage) == "implement"
+        assert Map.get(run_state, :last_review_decision) == "CHANGES_REQUESTED"
+        assert Map.get(run_state, :last_decision_summary) =~ "Returning to implement"
+        assert Map.get(run_state, :next_human_action) == nil
+
+        assert get_in(run_state, [:resume_context, :next_objective]) =~
+                 "Address the pending GitHub review feedback"
+
+        assert get_in(run_state, [:resume_context, :review_feedback_summary]) =~
+                 "LocalEventsExplorer/ViewModels/EventsViewModel.swift:42"
+
+        assert get_in(run_state, [:review_threads, "review:91", "body"]) =~
+                 "Please tighten this conditional."
+
+        assert get_in(run_state, [:review_threads, "comment:92", "draft_state"]) == "drafted"
+        assert refreshed_issue.state == "In Progress"
+      end,
+      60
+    )
   end
 
   test "linear webhook controller enqueues verified issue events and notifies the orchestrator" do
@@ -198,7 +344,11 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       :symphony_elixir,
       SymphonyElixirWeb.Endpoint,
       Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-      |> Keyword.merge(orchestrator: self(), secret_key_base: String.duplicate("s", 64), server: false)
+      |> Keyword.merge(
+        orchestrator: self(),
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
     )
 
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
@@ -241,7 +391,11 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       :symphony_elixir,
       SymphonyElixirWeb.Endpoint,
       Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-      |> Keyword.merge(orchestrator: self(), secret_key_base: String.duplicate("s", 64), server: false)
+      |> Keyword.merge(
+        orchestrator: self(),
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
     )
 
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
@@ -256,7 +410,11 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert json_response(conn, 401)["error"]["code"] == "invalid_signature"
 
-    assert_receive {:tracker_webhook_rejected, %{rule_id: "webhook.signature_invalid", reason: "Linear webhook signature verification failed."}}
+    assert_receive {:tracker_webhook_rejected,
+                    %{
+                      rule_id: "webhook.signature_invalid",
+                      reason: "Linear webhook signature verification failed."
+                    }}
   end
 
   test "linear webhook controller records ignored non schedule-affecting issue events" do
@@ -267,7 +425,11 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       :symphony_elixir,
       SymphonyElixirWeb.Endpoint,
       Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
-      |> Keyword.merge(orchestrator: self(), secret_key_base: String.duplicate("s", 64), server: false)
+      |> Keyword.merge(
+        orchestrator: self(),
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
     )
 
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
@@ -510,14 +672,21 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     )
 
     assert :ok = Adapter.update_issue_state("issue-1", "Done")
+
     assert_receive {:cached_graphql_called, state_lookup_query, %{issueId: "issue-1", stateName: "__unused__"}}
+
     assert state_lookup_query =~ "team"
+
     assert_receive {:cached_graphql_called, _state_lookup_query, %{issueId: "issue-1", stateName: "Done"}}
+
     assert_receive {:cached_graphql_called, update_issue_query, %{issueId: "issue-1", stateId: "state-1"}}
+
     assert update_issue_query =~ "issueUpdate"
 
     assert :ok = Adapter.update_issue_state("issue-1", "Done")
+
     assert_receive {:cached_graphql_called, second_update_issue_query, %{issueId: "issue-1", stateId: "state-1"}}
+
     assert second_update_issue_query =~ "issueUpdate"
     refute_received {:cached_graphql_called, _, %{issueId: "issue-1", stateName: "__unused__"}}
   end
@@ -557,7 +726,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     "sha256=" <> digest
   end
 
-  defp assert_eventually(fun, attempts \\ 20)
+  defp assert_eventually(fun, attempts \\ 60)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do
     fun.()

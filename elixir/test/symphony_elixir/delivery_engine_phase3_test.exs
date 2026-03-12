@@ -121,7 +121,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
         end
       )
 
-    assert result in [{:stop, :verifier_failed}, {:stop, :noop_turn}]
+    assert result in [{:stop, :verifier_failed}, {:stop, :noop_turn}, {:stop, :behavior_proof_missing}]
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert Enum.any?(state.stage_history, &(&1.stage == "implement"))

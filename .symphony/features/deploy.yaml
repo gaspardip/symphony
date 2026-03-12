@@ -1,15 +1,15 @@
 id: deploy
 title: Deployment Runtime
 status: planned
-summary: Preview, production, post-deploy verification, and rollback stages governed by policy packs.
+summary: Preview, production, post-deploy verification, and rollback stages governed by policy packs, with runtime coverage for passive deploy dispatch.
 source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - docs/CONTRACTOR_AUTOPILOT_MASTER_PLAN.md
 acceptance_signals:
   - Preview deploy can run autonomously where allowed
   - Production deploy stays policy-gated and rollback-ready
+  - Passive deploy stages block clearly when harness deploy commands are missing
 dependencies:
   - runtime-core
   - harness
-last_updated_by_issue: seed
-
+last_updated_by_issue: CLZ-22

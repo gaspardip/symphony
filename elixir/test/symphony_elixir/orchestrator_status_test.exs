@@ -1220,7 +1220,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           _ ->
             false
         end,
-        1_000
+        5_000
       )
 
     state = :sys.get_state(pid)

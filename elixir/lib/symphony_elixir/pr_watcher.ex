@@ -2,10 +2,9 @@ defmodule SymphonyElixir.PRWatcher do
   @moduledoc """
   Policy-derived PR watcher posture.
 
-  Phase 2 will add live GitHub review/comment ingestion. For now, this module
-  exposes the effective watcher mode so the runtime and operator surfaces can
-  explain how PR review automation is expected to behave for the active policy
-  pack.
+  This module owns live GitHub review/comment ingestion posture and feedback
+  synthesis so the runtime can decide whether to draft operator replies or
+  automatically return a fully autonomous run to implementation.
   """
 
   alias SymphonyElixir.{AuthorProfile, Config, CredentialRegistry, GitHubCLIClient, Observability, PolicyPack}
