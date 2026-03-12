@@ -1,10 +1,11 @@
 id: dogfood
 title: Self Dogfood
 status: active
-summary: Symphony uses its own runtime against the Symphony repo with assignee-first routing and release safety.
+summary: Symphony uses its own runtime against the Symphony repo with assignee-first routing, the self-development harness, and release safety.
 source_paths:
   - docs/DOGFOOD_OPERATIONS.md
   - docs/SYMPHONY_SELF_DOGFOOD_EXECUTION_PLAN.md
+  - AGENTS.md
   - elixir/lib/symphony_elixir/runner_runtime.ex
 acceptance_signals:
   - Symphony project issues can run end to end through the self-host queue
@@ -12,5 +13,4 @@ acceptance_signals:
 dependencies:
   - harness
   - runtime-core
-last_updated_by_issue: seed
-
+last_updated_by_issue: CLZ-16

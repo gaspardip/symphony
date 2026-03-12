@@ -1,7 +1,7 @@
 id: harness
 title: Repo Harness
 status: active
-summary: Strict repo contract parsing, self-development harness, and publish-gated knowledge/progress artifacts.
+summary: Strict repo contract parsing, self-development harness, and publish-gated knowledge/progress artifacts for Symphony self-host runs.
 source_paths:
   - .symphony/harness.yml
   - elixir/lib/symphony_elixir/repo_harness.ex
@@ -11,5 +11,4 @@ acceptance_signals:
   - Self-host runs require knowledge, progress, and feature updates
 dependencies:
   - runtime-core
-last_updated_by_issue: seed
-
+last_updated_by_issue: CLZ-16
