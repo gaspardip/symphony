@@ -23,6 +23,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Observability
   alias SymphonyElixir.PriorityEngine
   alias SymphonyElixir.PRWatcher
+  alias SymphonyElixir.ReviewEvidenceCollector
   alias SymphonyElixir.RuleCatalog
   alias SymphonyElixir.RunInspector
   alias SymphonyElixir.RunLedger
@@ -58,12 +59,12 @@ defmodule SymphonyElixir.Orchestrator do
              issue_for_run_state: 1,
              issue_ref_for_run_state: 1,
              normalize_issue_source: 1,
-             maybe_start_autonomous_review_follow_up: 7,
+             maybe_start_autonomous_review_follow_up: 8,
              autonomous_review_follow_up?: 3,
              paused_issue?: 3,
              maybe_dispatch_autonomous_review_follow_up: 2,
-             put_review_resume_context: 4,
-             review_resume_context: 4,
+             put_review_resume_context: 5,
+             review_resume_context: 5,
              review_feedback_summary: 1}
 
   defmodule State do
@@ -648,6 +649,64 @@ defmodule SymphonyElixir.Orchestrator do
       )
 
     if Map.get(feedback, :status) == "ok" and Map.get(feedback, :pending_drafts_count, 0) > 0 do
+      review_claims =
+        feedback
+        |> Map.get(:items, [])
+        |> Enum.reduce(Map.get(run_state, :review_claims, %{}), fn item, acc ->
+          case Map.get(item, :thread_key) do
+            thread_key when is_binary(thread_key) ->
+              persisted = Map.get(acc, thread_key, %{})
+
+              verification_status =
+                Map.get(
+                  persisted,
+                  "verification_status",
+                  if(Map.get(item, :disposition) == "needs_verification",
+                    do: "pending",
+                    else: "not_needed"
+                  )
+                )
+
+              claim_state = %{
+                "thread_key" => Map.get(item, :thread_key),
+                "id" => Map.get(item, :id),
+                "kind" => Map.get(item, :kind) |> to_string(),
+                "author" => Map.get(item, :author),
+                "body" => Map.get(item, :body),
+                "path" => Map.get(item, :path),
+                "line" => Map.get(item, :line),
+                "state" => Map.get(item, :state),
+                "review_decision" => Map.get(item, :review_decision),
+                "submitted_at" => Map.get(item, :submitted_at),
+                "source_class" => Map.get(item, :source_class),
+                "claim_type" => Map.get(item, :claim_type),
+                "veracity_score" => Map.get(item, :veracity_score),
+                "reproducibility_score" => Map.get(item, :reproducibility_score),
+                "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+                "locality_score" => Map.get(item, :locality_score),
+                "source_precision_score" => Map.get(item, :source_precision_score),
+                "consensus_score" => Map.get(item, :consensus_score),
+                "historical_precision_score" => Map.get(item, :historical_precision_score),
+                "hard_proof" => Map.get(item, :hard_proof, false),
+                "proof_sources" => Map.get(item, :proof_sources, []),
+                "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+                "disposition" => Map.get(item, :disposition),
+                "actionable" => Map.get(item, :actionable, false),
+                "adjudication_summary" => Map.get(item, :adjudication_summary),
+                "verification_status" => verification_status,
+                "verification_attempts" => Map.get(persisted, "verification_attempts", 0),
+                "evidence_refs" => Map.get(persisted, "evidence_refs", []),
+                "evidence_summary" => Map.get(persisted, "evidence_summary"),
+                "pr_url" => pr_url
+              }
+
+              Map.put(acc, thread_key, claim_state)
+
+            _ ->
+              acc
+          end
+        end)
+
       review_threads =
         feedback
         |> Map.get(:items, [])
@@ -670,7 +729,8 @@ defmodule SymphonyElixir.Orchestrator do
              run_state,
              pr_url,
              feedback,
-             review_threads
+             review_threads,
+             review_claims
            ) do
         {:ok, next_state} ->
           next_state
@@ -687,10 +747,11 @@ defmodule SymphonyElixir.Orchestrator do
           case RunStateStore.update(workspace, fn persisted ->
                  persisted
                  |> Map.put(:review_threads, review_threads)
+                 |> Map.put(:review_claims, review_claims)
                  |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
                  |> Map.put(:last_decision_summary, summary)
                  |> Map.put(:next_human_action, human_action)
-                 |> put_review_resume_context(pr_url, review_threads, nil)
+                 |> put_review_resume_context(pr_url, review_threads, review_claims, nil)
                end) do
             {:ok, next_run_state} ->
               RunLedger.record("review.feedback_detected", %{
@@ -787,21 +848,38 @@ defmodule SymphonyElixir.Orchestrator do
          run_state,
          pr_url,
          feedback,
-         review_threads
+         review_threads,
+         review_claims
        ) do
     if autonomous_review_follow_up?(state, issue, run_state) and PRWatcher.actionable_feedback?(feedback) do
+      target_stage = PRWatcher.follow_up_stage(feedback)
+
       next_objective =
-        "Address the pending GitHub review feedback on #{pr_url}, update the code, and return the branch to runtime validation."
+        case target_stage do
+          "review_verification" ->
+            "Verify the pending GitHub review feedback on #{pr_url}, collect local evidence, and reopen implementation only for verified claims."
+
+          _ ->
+            "Address the pending GitHub review feedback on #{pr_url}, update the code, and return the branch to runtime validation."
+        end
 
       summary =
-        "GitHub review feedback detected on #{pr_url}. Returning to implement to address the requested changes."
+        case target_stage do
+          "review_verification" ->
+            "GitHub review feedback detected on #{pr_url}. Returning to review_verification before reopening implementation."
 
-      case RunStateStore.transition(workspace, "implement", %{
+          _ ->
+            "GitHub review feedback detected on #{pr_url}. Returning to implement to address the requested changes."
+        end
+
+      case RunStateStore.transition(workspace, target_stage, %{
              issue_id: Map.get(run_state, :issue_id),
              issue_identifier: Map.get(run_state, :issue_identifier),
              issue_source: Map.get(run_state, :issue_source),
              pr_url: pr_url,
              review_threads: review_threads,
+             review_claims: review_claims,
+             review_return_stage: Map.get(run_state, :stage),
              last_review_decision: Map.get(feedback, :review_decision),
              stop_reason: nil,
              last_decision: nil,
@@ -814,6 +892,7 @@ defmodule SymphonyElixir.Orchestrator do
                  Map.get(run_state, :resume_context),
                  pr_url,
                  review_threads,
+                 review_claims,
                  next_objective
                )
            }) do
@@ -843,7 +922,7 @@ defmodule SymphonyElixir.Orchestrator do
             metadata: %{
               review_decision: Map.get(feedback, :review_decision),
               pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
-              target_stage: "implement"
+              target_stage: target_stage
             }
           })
 
@@ -863,10 +942,11 @@ defmodule SymphonyElixir.Orchestrator do
           case RunStateStore.update(workspace, fn persisted ->
                  persisted
                  |> Map.put(:review_threads, review_threads)
+                 |> Map.put(:review_claims, review_claims)
                  |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
                  |> Map.put(:last_decision_summary, summary)
                  |> Map.put(:next_human_action, nil)
-                 |> put_review_resume_context(pr_url, review_threads, nil)
+                 |> put_review_resume_context(pr_url, review_threads, review_claims, nil)
                end) do
             {:ok, next_run_state} ->
               RunLedger.record("review.feedback_triaged", %{
@@ -954,7 +1034,7 @@ defmodule SymphonyElixir.Orchestrator do
     state
   end
 
-  defp put_review_resume_context(run_state, pr_url, review_threads, next_objective)
+  defp put_review_resume_context(run_state, pr_url, review_threads, review_claims, next_objective)
        when is_map(run_state) do
     Map.put(
       run_state,
@@ -963,12 +1043,13 @@ defmodule SymphonyElixir.Orchestrator do
         Map.get(run_state, :resume_context),
         pr_url,
         review_threads,
+        review_claims,
         next_objective
       )
     )
   end
 
-  defp review_resume_context(current_context, pr_url, review_threads, next_objective) do
+  defp review_resume_context(current_context, pr_url, review_threads, review_claims, next_objective) do
     context =
       case current_context do
         value when is_map(value) -> value
@@ -978,6 +1059,7 @@ defmodule SymphonyElixir.Orchestrator do
     context =
       context
       |> Map.put(:review_feedback_summary, review_feedback_summary(review_threads))
+      |> Map.put(:review_claim_summary, ReviewEvidenceCollector.summary(review_claims))
       |> Map.put(:review_feedback_pr_url, pr_url)
 
     if is_binary(next_objective) and String.trim(next_objective) != "" do

@@ -198,6 +198,8 @@ defmodule SymphonyElixir.RunStateStore do
       effective_policy_source: nil,
       last_pr_state: nil,
       review_threads: %{},
+      review_claims: %{},
+      review_return_stage: nil,
       last_review_decision: nil,
       last_check_statuses: [],
       last_required_checks_state: nil,

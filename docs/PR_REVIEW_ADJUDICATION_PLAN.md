@@ -23,6 +23,15 @@ This plan defines a model-agnostic adjudication system for PR review comments th
 - category-specific thresholds
 - persistent learning from historical precision
 
+## Implemented Slices
+The runtime now includes the first two slices of this plan:
+
+- source-aware review triage via `SymphonyElixir.ReviewAdjudicator`
+- persisted `review_claims` state alongside drafted review threads
+- a passive `review_verification` stage that collects cheap local proof before reopening `implement`
+
+The remaining phases below describe how to extend that foundation with stronger proof sources, independent consensus, stagnation detection, reply planning, and thread-resolution policy.
+
 ## Problem Statement
 The current webhook-driven review loop can detect and surface PR comments, but it does not yet decide whether a comment is correct with enough rigor to safely automate the response.
 

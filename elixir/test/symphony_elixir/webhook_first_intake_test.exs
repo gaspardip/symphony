@@ -346,16 +346,23 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
         {:ok, %Issue{} = refreshed_issue} =
           ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
 
-        assert Map.get(run_state, :stage) == "implement"
+        assert Map.get(run_state, :stage) == "review_verification"
         assert Map.get(run_state, :last_review_decision) == "CHANGES_REQUESTED"
-        assert Map.get(run_state, :last_decision_summary) =~ "Returning to implement"
+        assert Map.get(run_state, :last_decision_summary) =~ "Returning to review_verification"
         assert Map.get(run_state, :next_human_action) == nil
+        assert Map.get(run_state, :review_return_stage) == "await_checks"
+
+        assert get_in(run_state, [:review_claims, "review:91", "verification_status"]) == "pending"
+        assert get_in(run_state, [:review_claims, "review:91", "disposition"]) == "needs_verification"
 
         assert get_in(run_state, [:resume_context, :next_objective]) =~
-                 "Address the pending GitHub review feedback"
+                 "Verify the pending GitHub review feedback"
 
         assert get_in(run_state, [:resume_context, :review_feedback_summary]) =~
                  "LocalEventsExplorer/ViewModels/EventsViewModel.swift:42"
+
+        assert get_in(run_state, [:resume_context, :review_claim_summary]) =~
+                 "correctness_risk"
 
         assert get_in(run_state, [:review_threads, "review:91", "body"]) =~
                  "Please tighten this conditional."

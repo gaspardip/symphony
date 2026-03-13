@@ -1,17 +1,19 @@
 id: review-automation
 title: Review Automation
 status: active
-summary: Draft-first PR review ingestion, reply generation, thread-state management, source-aware claim triage, and webhook-triggered autonomous follow-up.
+summary: Draft-first PR review ingestion, reply generation, thread-state management, source-aware claim triage, persisted review claims, and webhook-triggered autonomous verification before follow-up.
 source_paths:
   - elixir/lib/symphony_elixir/pr_watcher.ex
   - elixir/lib/symphony_elixir/review_adjudicator.ex
+  - elixir/lib/symphony_elixir/review_evidence_collector.ex
   - elixir/lib/symphony_elixir/github_cli_client.ex
   - elixir/lib/symphony_elixir_web/presenter.ex
 acceptance_signals:
   - New review feedback is ingested and exposed as drafted replies
   - Review comments are triaged into actionable and non-actionable dispositions before autonomous follow-up
+  - Review claims persist verification state and evidence refs separately from drafted thread replies
   - Thread state transitions are visible and policy-controlled
-  - Webhook-driven review feedback can return fully autonomous runs to implement with persisted resume context
+  - Webhook-driven review feedback can route fully autonomous runs into a focused review verification stage before reopening implement
   - Copilot-style nit noise does not reopen fully autonomous runs
 dependencies:
   - runtime-core

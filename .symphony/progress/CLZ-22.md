@@ -42,6 +42,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Wired the PR watcher to attach adjudication metadata to review items, count actionable feedback separately from drafted threads, and draft more precise replies based on disposition instead of treating all comments as equally actionable.
 - Updated the webhook follow-up runtime so fully autonomous runs only return to `implement` when review feedback is actionable; Copilot-style nit noise is now persisted and summarized without reopening implementation.
 - Added regression coverage for adjudicator heuristics, actionable review synthesis, and the non-actionable autonomous webhook path.
+- Added persisted `review_claims` state to the runtime, separate from drafted review threads, so individual PR comments can carry verification state, evidence refs, and follow-up summaries across webhook-triggered runs.
+- Added `SymphonyElixir.ReviewEvidenceCollector` plus a passive `review_verification` delivery stage that gathers cheap local proof, upgrades verified claims into accepted implementation work, and returns contradicted or weak claims to the prior passive stage instead of churning `implement`.
+- Updated the orchestrator resume context to include review-claim summaries, the return stage before verification, and the new claim/evidence state so autonomous follow-up is evidence-driven instead of comment-driven.
+- Added focused verification coverage for the evidence collector, webhook intake claim persistence, and delivery-engine behavior when review verification either confirms or contradicts a pending claim.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -69,6 +73,12 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest Dialyzer: `mix dialyzer --format short` passed on March 12, 2026 after the webhook helper cleanup
 - Focused adjudication tests: `mix test --trace test/symphony_elixir/review_adjudicator_test.exs test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/webhook_first_intake_test.exs` passed on March 12, 2026 with `24 tests, 0 failures`
 - Latest full validation after adjudication slice: `./scripts/symphony-validate.sh` passed on March 12, 2026 with `761 tests, 0 failures`, total coverage `86.61%`, `SymphonyElixir.ReviewAdjudicator` at `72.13%`, `SymphonyElixir.PRWatcher` at `88.74%`, and Dialyzer clean under the ignore baseline (`Total errors: 158, Skipped: 158, Unnecessary Skips: 4`)
+- New review verification module: `elixir/lib/symphony_elixir/review_evidence_collector.ex`
+- Latest focused verification suites:
+  `mix test --trace test/symphony_elixir/review_evidence_collector_test.exs test/symphony_elixir/review_adjudicator_test.exs test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/webhook_first_intake_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed on March 12, 2026 with `56 tests, 0 failures`
+- Latest targeted rerun after Dialyzer cleanup:
+  `mix test test/symphony_elixir/review_evidence_collector_test.exs test/symphony_elixir/webhook_first_intake_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed on March 12, 2026 with `44 tests, 0 failures`
+- Latest full validation after review verification slice: `./scripts/symphony-validate.sh` passed on March 12, 2026 with `767 tests, 0 failures`, total coverage `86.65%`, `SymphonyElixir.ReviewEvidenceCollector` at `84.93%`, `SymphonyElixir.DeliveryEngine` at `79.01%`, `SymphonyElixir.Orchestrator` at `82.15%`, and Dialyzer clean (`Total errors: 158, Skipped: 158, Unnecessary Skips: 4`)
 
 ## Next Step
-Push the latest branch updates to PR `gaspardip/symphony#1`, then extend the new adjudication slice with hard-proof collection, independent consensus passes, and stagnation detection from `docs/PR_REVIEW_ADJUDICATION_PLAN.md`. Keep the cleanup-stage plan as a follow-on after the evidence and consensus path is in place.
+Push the latest branch updates to PR `gaspardip/symphony#1`, then extend the review verification slice with stronger proof sources, independent consensus passes, reply planning, and stagnation detection from `docs/PR_REVIEW_ADJUDICATION_PLAN.md`. Keep the cleanup-stage plan as a follow-on after the claim-evidence-consensus path is in place.

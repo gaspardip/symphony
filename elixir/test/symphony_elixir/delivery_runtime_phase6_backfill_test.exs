@@ -246,6 +246,60 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert get_in(state, [:last_validation, :status]) == "passed"
   end
 
+  test "delivery engine review_verification reopens implement when focused proof confirms a review claim" do
+    {workspace, issue} = review_verification_workspace!("review-claim-accepted")
+
+    assert {:stop, :review_verification_completed} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "implement"
+    assert get_in(state, [:review_claims, "review:91", "verification_status"]) == "verified_review_decision"
+    assert get_in(state, [:review_claims, "review:91", "disposition"]) == "accepted"
+    assert get_in(state, [:review_threads, "review:91", "verification_status"]) == "verified_review_decision"
+    assert get_in(state, [:resume_context, :review_claim_summary]) =~ "verified_review_decision"
+    assert get_in(state, [:resume_context, :next_objective]) =~ "Address the verified PR review claims"
+  end
+
+  test "delivery engine review_verification returns to the passive stage when focused proof contradicts a claim" do
+    {workspace, issue} = review_verification_workspace!("review-claim-contradicted")
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:review_claims, %{
+                 "comment:92" => %{
+                   "thread_key" => "comment:92",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 3,
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "pending"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:92" => %{
+                   "thread_key" => "comment:92",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 3,
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :review_verification_completed} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "await_checks"
+    assert get_in(state, [:review_claims, "comment:92", "verification_status"]) == "contradicted"
+    assert get_in(state, [:review_claims, "comment:92", "disposition"]) == "dismissed"
+    assert state.last_decision_summary =~ "did not find enough evidence"
+  end
+
   test "delivery engine blocks deploy preview stage when the harness omits a preview command" do
     {workspace, issue} = checkout_workspace!("deploy-preview-missing")
     configure_delivery_workflow!(workspace, fake_codex_binary!("deploy-preview-missing", :missing))
@@ -521,6 +575,40 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
              RunStateStore.transition(workspace, "validate", %{
                issue_id: issue.id,
                issue_identifier: issue.identifier
+             })
+
+    {workspace, issue}
+  end
+
+  defp review_verification_workspace!(suffix) do
+    {workspace, issue} = implement_workspace!(suffix)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "review_verification", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               review_return_stage: "await_checks",
+               review_claims: %{
+                 "review:91" => %{
+                   "thread_key" => "review:91",
+                   "kind" => "review",
+                   "review_decision" => "CHANGES_REQUESTED",
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "pending"
+                 }
+               },
+               review_threads: %{
+                 "review:91" => %{
+                   "thread_key" => "review:91",
+                   "kind" => "review",
+                   "review_decision" => "CHANGES_REQUESTED",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               }
              })
 
     {workspace, issue}

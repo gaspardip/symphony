@@ -17,6 +17,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.Observability
   alias SymphonyElixir.PolicyPack
   alias SymphonyElixir.PullRequestManager
+  alias SymphonyElixir.ReviewEvidenceCollector
   alias SymphonyElixir.RepoMap
   alias SymphonyElixir.RepoHarness
   alias SymphonyElixir.RuleCatalog
@@ -40,6 +41,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   @codex_turn_error_methods ["codex/event/stream_error", "codex/event/error", "error"]
   @passive_stages [
     "await_checks",
+    "review_verification",
     "merge",
     "post_merge",
     "deploy_preview",
@@ -262,6 +264,19 @@ defmodule SymphonyElixir.DeliveryEngine do
 
         "validate" ->
           handle_validate(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
+
+        "review_verification" ->
+          handle_review_verification(
             app_session,
             workspace,
             issue,
@@ -707,6 +722,94 @@ defmodule SymphonyElixir.DeliveryEngine do
       :unavailable ->
         block_issue(workspace, issue, :validation_unavailable, result.output, @blocked_state)
     end
+  end
+
+  defp handle_review_verification(
+         _app_session,
+         workspace,
+         issue,
+         _recipient,
+         _fetcher,
+         _max_turns,
+         state,
+         inspection,
+         opts
+       ) do
+    {updated_claims, stats} =
+      ReviewEvidenceCollector.collect(Map.get(state, :review_claims, %{}), workspace)
+
+    updated_threads = sync_review_claims_into_threads(Map.get(state, :review_threads, %{}), updated_claims)
+    return_stage = Map.get(state, :review_return_stage) || "await_checks"
+
+    {target_stage, summary, next_objective} =
+      cond do
+        stats.accepted_count > 0 ->
+          {
+            "implement",
+            "Focused review verification confirmed #{stats.accepted_count} actionable PR review claim(s). Returning to implement.",
+            "Address the verified PR review claims without rerunning the full repo validation in implement."
+          }
+
+        stats.insufficient_count > 0 or stats.contradicted_count > 0 ->
+          {
+            return_stage,
+            "Focused review verification did not find enough evidence to reopen implementation. Returning to #{return_stage}.",
+            "Wait for new review evidence or status changes before reopening implementation."
+          }
+
+        true ->
+          {
+            return_stage,
+            "No pending PR review claims required focused verification. Returning to #{return_stage}.",
+            "Continue the passive review/check state unless new review feedback arrives."
+          }
+      end
+
+    RunLedger.record("review.verification_completed", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      stage: "review_verification",
+      actor_type: "runtime",
+      actor_id: "delivery_engine",
+      policy_class: Map.get(state, :effective_policy_class),
+      summary: summary,
+      details: ReviewEvidenceCollector.summary(updated_claims),
+      metadata: %{
+        accepted_count: stats.accepted_count,
+        contradicted_count: stats.contradicted_count,
+        insufficient_count: stats.insufficient_count,
+        return_stage: return_stage,
+        target_stage: target_stage
+      }
+    })
+
+    {:ok, _state} =
+      RunStateStore.transition(
+        workspace,
+        target_stage,
+        Map.merge(
+          %{
+            review_claims: updated_claims,
+            review_threads: updated_threads,
+            last_decision_summary: summary,
+            next_human_action: nil
+          },
+          resume_context_attrs(
+            workspace,
+            issue,
+            state,
+            inspection,
+            %{
+              review_feedback_summary: review_feedback_summary(updated_threads),
+              review_claim_summary: ReviewEvidenceCollector.summary(updated_claims),
+              next_objective: next_objective
+            },
+            opts
+          )
+        )
+      )
+
+    {:stop, :review_verification_completed}
   end
 
   defp handle_verify(
@@ -1835,6 +1938,9 @@ defmodule SymphonyElixir.DeliveryEngine do
       review_feedback_summary:
         Map.get(overrides, :review_feedback_summary) ||
           review_feedback_summary(Map.get(state, :review_threads, %{})),
+      review_claim_summary:
+        Map.get(overrides, :review_claim_summary) ||
+          ReviewEvidenceCollector.summary(Map.get(state, :review_claims, %{})),
       next_objective:
         Map.get(overrides, :next_objective) ||
           "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
@@ -1844,7 +1950,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp preserved_resume_context(context) when is_map(context) do
     context
-    |> Map.take([:next_objective, :review_feedback_summary, :review_feedback_pr_url])
+    |> Map.take([:next_objective, :review_feedback_summary, :review_claim_summary, :review_feedback_pr_url])
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
@@ -1884,6 +1990,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         "Pending PR review feedback",
         resume_context[:review_feedback_summary]
       ),
+      maybe_named_multiline("Pending PR review claims", resume_context[:review_claim_summary]),
       maybe_named_list("Dirty files", resume_context[:dirty_files], 20),
       maybe_named_multiline("Diff stat", resume_context[:diff_summary])
     ]
@@ -1946,6 +2053,26 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp review_feedback_summary(_review_threads), do: nil
+
+  defp sync_review_claims_into_threads(review_threads, review_claims)
+       when is_map(review_threads) and is_map(review_claims) do
+    Enum.reduce(review_claims, review_threads, fn {thread_key, claim}, acc ->
+      Map.update(acc, thread_key, %{}, fn thread_state ->
+        thread_state
+        |> Map.put("disposition", Map.get(claim, "disposition"))
+        |> Map.put("actionable", Map.get(claim, "actionable", false))
+        |> Map.put("hard_proof", Map.get(claim, "hard_proof", false))
+        |> Map.put("proof_sources", Map.get(claim, "proof_sources", []))
+        |> Map.put("contradiction_sources", Map.get(claim, "contradiction_sources", []))
+        |> Map.put("verification_status", Map.get(claim, "verification_status"))
+        |> Map.put("verification_attempts", Map.get(claim, "verification_attempts", 0))
+        |> Map.put("evidence_refs", Map.get(claim, "evidence_refs", []))
+        |> Map.put("evidence_summary", Map.get(claim, "evidence_summary"))
+      end)
+    end)
+  end
+
+  defp sync_review_claims_into_threads(review_threads, _review_claims), do: review_threads
 
   defp maybe_named_list(_label, [], _limit), do: nil
 
