@@ -194,6 +194,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `SymphonyElixir.TurnResult.normalize/1` now coerces noisy non-blocking `blocker_type` values back to `:none` instead of failing the entire turn, which keeps useful review-fix edits from being discarded when the model emits an unnecessary blocker label while `blocked=false`.
 - Latest focused review-fix runtime validation on March 13, 2026:
   `mix test test/symphony_elixir/utility_phase6_backfill_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed with `92 tests, 0 failures`.
+- Seeded retry-state repair on March 13, 2026:
+  synthesized manual issues now reflect `run_state.stage == "blocked"` as issue state `Blocked`, so `retry_now` resumes the stored stage instead of redispatching a still-blocked seeded run and exiting before any review-fix turn starts.
+- Latest focused seeded-retry validation on March 13, 2026:
+  `mix test test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs` passed with `50 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the seeded retry-state fix.
 
 ## Next Step
-Restart the local canary runner on the scoped review-fix and fail-soft turn-result patch, retry `CLZ-22`, and verify that the canary preserves the PR-comment edits instead of failing on `invalid_turn_result`. After that, continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests.
+Restart the local canary runner on the seeded retry-state fix, retry `CLZ-22`, and verify that the canary now reaches a real scoped review-fix turn instead of exiting immediately from the stale `blocked` stage. After that, continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests.

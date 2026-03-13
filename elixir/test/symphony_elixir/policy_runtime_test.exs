@@ -850,6 +850,24 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
     assert Orchestrator.issue_target_runner_channel_for_test(issue) == "canary"
   end
 
+  test "seeded manual replay reflects blocked run state so retry can resume it" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    run_state = %{
+      issue_source: :manual,
+      effective_policy_class: "fully_autonomous",
+      issue_id: "manual:CLZ-22",
+      issue_identifier: "CLZ-22",
+      issue_state: "In Progress",
+      stage: "blocked",
+      branch: "codex/clz-22-local-canary"
+    }
+
+    issue = Orchestrator.seeded_manual_issue_from_run_state_for_test(run_state)
+
+    assert %Issue{state: "Blocked", branch_name: "codex/clz-22-local-canary"} = issue
+  end
+
   test "after-turn policy blocks human review without a PR" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())

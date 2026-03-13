@@ -1095,7 +1095,7 @@ defmodule SymphonyElixir.Orchestrator do
         title:
           Map.get(run_state, :issue_title) ||
             "Seeded local replay for #{issue_identifier}",
-        state: Map.get(run_state, :issue_state) || "In Progress",
+        state: seeded_manual_issue_state(run_state),
         source: :manual,
         branch_name: seeded_manual_issue_branch_name(run_state, issue_identifier),
         labels: seeded_manual_issue_labels(run_state),
@@ -1126,6 +1126,19 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(run_state, :target_runner_channel) || Map.get(run_state, :runner_channel) do
       "canary" -> "canary"
       _ -> "stable"
+    end
+  end
+
+  defp seeded_manual_issue_state(run_state) when is_map(run_state) do
+    case Map.get(run_state, :stage) do
+      "blocked" ->
+        @blocked_state
+
+      "done" ->
+        "Done"
+
+      _ ->
+        Map.get(run_state, :issue_state) || "In Progress"
     end
   end
 
