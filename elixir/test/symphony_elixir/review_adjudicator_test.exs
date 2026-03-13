@@ -27,6 +27,8 @@ defmodule SymphonyElixir.ReviewAdjudicatorTest do
     assert adjudication.claim_type == "style_or_nit"
     assert adjudication.disposition == "dismissed"
     assert adjudication.actionable == false
+    assert adjudication.consensus_state == "negative"
+    assert adjudication.consensus_score <= 0.10
   end
 
   test "treats change-requested review feedback as needs verification" do
@@ -44,6 +46,8 @@ defmodule SymphonyElixir.ReviewAdjudicatorTest do
     assert adjudication.disposition == "needs_verification"
     assert adjudication.actionable == true
     assert adjudication.veracity_score >= 0.60
+    assert adjudication.consensus_state in ["strong_positive", "mixed_positive"]
+    assert adjudication.consensus_summary =~ "correctness_risk"
   end
 
   defp temp_workspace(prefix) do

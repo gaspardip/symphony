@@ -750,6 +750,13 @@ defmodule SymphonyElixir.DeliveryEngine do
             "Address the verified PR review claims without rerunning the full repo validation in implement."
           }
 
+        stats.pending_count > 0 ->
+          {
+            return_stage,
+            "Focused review verification found #{stats.pending_count} plausible PR review claim(s), but not enough hard proof to reopen implementation automatically. Returning to #{return_stage}.",
+            "Wait for stronger proof, a narrower reproducer, or new review evidence before reopening implementation."
+          }
+
         stats.insufficient_count > 0 or stats.contradicted_count > 0 ->
           {
             return_stage,
@@ -2057,22 +2064,42 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp sync_review_claims_into_threads(review_threads, review_claims)
        when is_map(review_threads) and is_map(review_claims) do
     Enum.reduce(review_claims, review_threads, fn {thread_key, claim}, acc ->
+      reply_plan = ReviewEvidenceCollector.reply_plan(claim)
+
       Map.update(acc, thread_key, %{}, fn thread_state ->
+        draft_state = Map.get(thread_state, "draft_state", "drafted")
+
         thread_state
         |> Map.put("disposition", Map.get(claim, "disposition"))
         |> Map.put("actionable", Map.get(claim, "actionable", false))
         |> Map.put("hard_proof", Map.get(claim, "hard_proof", false))
         |> Map.put("proof_sources", Map.get(claim, "proof_sources", []))
         |> Map.put("contradiction_sources", Map.get(claim, "contradiction_sources", []))
+        |> Map.put("consensus_score", Map.get(claim, "consensus_score"))
+        |> Map.put("consensus_state", Map.get(claim, "consensus_state"))
+        |> Map.put("consensus_summary", Map.get(claim, "consensus_summary"))
+        |> Map.put("consensus_reasons", Map.get(claim, "consensus_reasons", []))
         |> Map.put("verification_status", Map.get(claim, "verification_status"))
         |> Map.put("verification_attempts", Map.get(claim, "verification_attempts", 0))
         |> Map.put("evidence_refs", Map.get(claim, "evidence_refs", []))
         |> Map.put("evidence_summary", Map.get(claim, "evidence_summary"))
+        |> maybe_put_reply_plan(draft_state, reply_plan)
       end)
     end)
   end
 
   defp sync_review_claims_into_threads(review_threads, _review_claims), do: review_threads
+
+  defp maybe_put_reply_plan(thread_state, draft_state, _reply_plan)
+       when draft_state in ["approved_to_post", "posted"] do
+    thread_state
+  end
+
+  defp maybe_put_reply_plan(thread_state, _draft_state, reply_plan) do
+    thread_state
+    |> Map.put("draft_reply", Map.get(reply_plan, :draft_reply))
+    |> Map.put("resolution_recommendation", Map.get(reply_plan, :resolution_recommendation))
+  end
 
   defp maybe_named_list(_label, [], _limit), do: nil
 

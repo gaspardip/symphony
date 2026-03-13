@@ -46,6 +46,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Added `SymphonyElixir.ReviewEvidenceCollector` plus a passive `review_verification` delivery stage that gathers cheap local proof, upgrades verified claims into accepted implementation work, and returns contradicted or weak claims to the prior passive stage instead of churning `implement`.
 - Updated the orchestrator resume context to include review-claim summaries, the return stage before verification, and the new claim/evidence state so autonomous follow-up is evidence-driven instead of comment-driven.
 - Added focused verification coverage for the evidence collector, webhook intake claim persistence, and delivery-engine behavior when review verification either confirms or contradicts a pending claim.
+- Added `SymphonyElixir.ReviewConsensus` as a first local consensus layer with independent heuristic passes, giving review claims structured consensus state, reasons, and score before they enter verification.
+- Strengthened `SymphonyElixir.ReviewEvidenceCollector` to verify referenced symbols in scoped files, preserve strong-consensus-but-unproven claims as pending instead of auto-churning, and produce evidence-based draft reply plans.
+- Updated PR watcher and delivery-engine thread syncing so drafted PR replies and resolution recommendations reflect actual verification outcomes rather than generic acknowledgements.
+- Added regression coverage for consensus scoring states, symbol-backed verification, consensus-supported pending claims, and evidence-based reply updates after review verification.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -79,6 +83,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest targeted rerun after Dialyzer cleanup:
   `mix test test/symphony_elixir/review_evidence_collector_test.exs test/symphony_elixir/webhook_first_intake_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed on March 12, 2026 with `44 tests, 0 failures`
 - Latest full validation after review verification slice: `./scripts/symphony-validate.sh` passed on March 12, 2026 with `767 tests, 0 failures`, total coverage `86.65%`, `SymphonyElixir.ReviewEvidenceCollector` at `84.93%`, `SymphonyElixir.DeliveryEngine` at `79.01%`, `SymphonyElixir.Orchestrator` at `82.15%`, and Dialyzer clean (`Total errors: 158, Skipped: 158, Unnecessary Skips: 4`)
+- New consensus module: `elixir/lib/symphony_elixir/review_consensus.ex`
+- Latest focused consensus and reply suites:
+  `mix test test/symphony_elixir/review_consensus_test.exs test/symphony_elixir/review_adjudicator_test.exs test/symphony_elixir/review_evidence_collector_test.exs test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed on March 12, 2026 with `52 tests, 0 failures`
+- Latest full validation after the consensus and reply-planning slice: `./scripts/symphony-validate.sh` passed on March 12, 2026 with `775 tests, 0 failures`, total coverage `86.64%`, `SymphonyElixir.ReviewConsensus` at `90.14%`, `SymphonyElixir.ReviewEvidenceCollector` at `82.40%`, `SymphonyElixir.DeliveryEngine` at `78.84%`, `SymphonyElixir.PRWatcher` at `87.27%`, and Dialyzer clean (`Total errors: 156, Skipped: 156, Unnecessary Skips: 6`)
 
 ## Next Step
-Push the latest branch updates to PR `gaspardip/symphony#1`, then extend the review verification slice with stronger proof sources, independent consensus passes, reply planning, and stagnation detection from `docs/PR_REVIEW_ADJUDICATION_PLAN.md`. Keep the cleanup-stage plan as a follow-on after the claim-evidence-consensus path is in place.
+Push the latest branch updates to PR `gaspardip/symphony#1`, then extend the adjudication path with stronger proof adapters beyond local scope checks, historical precision tracking, and stagnation detection from `docs/PR_REVIEW_ADJUDICATION_PLAN.md`. Keep the cleanup-stage plan as a follow-on after the claim-evidence-consensus path is in place.

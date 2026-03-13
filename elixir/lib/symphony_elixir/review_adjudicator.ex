@@ -8,6 +8,8 @@ defmodule SymphonyElixir.ReviewAdjudicator do
   can use to suppress obvious noise before reopening implementation.
   """
 
+  alias SymphonyElixir.ReviewConsensus
+
   @neutral_score 0.5
 
   @type disposition :: :accepted | :needs_verification | :deferred | :dismissed
@@ -34,7 +36,8 @@ defmodule SymphonyElixir.ReviewAdjudicator do
     evidence_quality_score = evidence_quality_score(item, claim_type)
     locality_score = locality_score(item, workspace)
     source_precision_score = source_precision_score(source_class)
-    consensus_score = @neutral_score
+    consensus = ReviewConsensus.assess(item, claim_type: claim_type)
+    consensus_score = Map.get(consensus, :consensus_score, @neutral_score)
     historical_precision_score = @neutral_score
 
     veracity_score =
@@ -68,6 +71,9 @@ defmodule SymphonyElixir.ReviewAdjudicator do
       locality_score: round_score(locality_score),
       source_precision_score: round_score(source_precision_score),
       consensus_score: round_score(consensus_score),
+      consensus_state: Map.get(consensus, :consensus_state, "unclear"),
+      consensus_summary: Map.get(consensus, :consensus_summary),
+      consensus_reasons: Map.get(consensus, :consensus_reasons, []),
       historical_precision_score: round_score(historical_precision_score),
       hard_proof: hard_proof_sources != [],
       proof_sources: Enum.map(hard_proof_sources, &to_string/1),

@@ -50,6 +50,54 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
 
   def summary(_review_claims), do: nil
 
+  @spec reply_plan(claim()) :: %{draft_reply: String.t(), resolution_recommendation: String.t()}
+  def reply_plan(claim) when is_map(claim) do
+    verification_status = Map.get(claim, "verification_status")
+    evidence_summary = Map.get(claim, "evidence_summary") |> to_string() |> String.trim()
+    consensus_summary = Map.get(claim, "consensus_summary") |> to_string() |> String.trim()
+    disposition = Map.get(claim, "disposition")
+
+    draft_reply =
+      cond do
+        verification_status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+          "I verified this concern locally and it is actionable. #{evidence_summary} I will address it in the next change."
+
+        verification_status == "contradicted" ->
+          "I checked this locally and could not confirm the claim. #{evidence_summary} If you have a narrower reproducer, I can revisit it."
+
+        verification_status == "consensus_supported" ->
+          "I found this concern plausible after a focused pass, but I still do not have hard proof to justify a change. #{consensus_summary}"
+
+        verification_status == "insufficient_evidence" ->
+          "I reviewed this feedback and did not find enough concrete evidence to reopen implementation yet. #{consensus_summary}"
+
+        disposition == "deferred" ->
+          "I agree this may be worthwhile, but I am deferring it for now to avoid churn on the current PR."
+
+        true ->
+          "I reviewed this feedback and will either address it in code or reply with stronger evidence before resolving it."
+      end
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    resolution_recommendation =
+      cond do
+        verification_status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+          "keep_open_until_change"
+
+        verification_status in ["contradicted", "consensus_supported", "insufficient_evidence"] ->
+          "keep_open_until_confirmed"
+
+        disposition == "deferred" ->
+          "keep_open_until_confirmed"
+
+        true ->
+          "keep_open_until_confirmed"
+      end
+
+    %{draft_reply: draft_reply, resolution_recommendation: resolution_recommendation}
+  end
+
   defp collect_claim(claim, workspace) when is_map(claim) do
     disposition = Map.get(claim, "disposition") || "dismissed"
     verification_attempts = Map.get(claim, "verification_attempts", 0) + 1
@@ -69,6 +117,18 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         |> Map.put("evidence_refs", contradiction_evidence_refs(claim, workspace))
         |> Map.put("evidence_summary", "Focused review verification contradicted the claim in the local workspace.")
         |> append_proof_source("focused_review_verification")
+
+      symbol_scope_verified?(claim, workspace) ->
+        claim
+        |> Map.put("verification_attempts", verification_attempts)
+        |> Map.put("verification_status", "verified_symbol_scope")
+        |> Map.put("disposition", "accepted")
+        |> Map.put("actionable", true)
+        |> Map.put("hard_proof", true)
+        |> Map.put("evidence_refs", symbol_evidence_refs(claim))
+        |> Map.put("evidence_summary", "Focused review verification confirmed the referenced symbol exists in the scoped file.")
+        |> append_proof_source("workspace_symbol_verified")
+        |> ensure_contradiction_sources()
 
       review_decision_confirmed?(claim) ->
         claim
@@ -92,6 +152,17 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         |> Map.put("evidence_refs", scoped_evidence_refs(claim))
         |> Map.put("evidence_summary", "Focused review verification confirmed the referenced file scope exists locally.")
         |> append_proof_source("workspace_scope_verified")
+        |> ensure_contradiction_sources()
+
+      consensus_supported?(claim, workspace) ->
+        claim
+        |> Map.put("verification_attempts", verification_attempts)
+        |> Map.put("verification_status", "consensus_supported")
+        |> Map.put("evidence_refs", consensus_evidence_refs(claim))
+        |> Map.put(
+          "evidence_summary",
+          "Focused review verification found scoped support and strong consensus, but not enough hard proof to reopen implementation automatically."
+        )
         |> ensure_contradiction_sources()
 
       true ->
@@ -130,6 +201,14 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     Map.get(claim, "kind") == "review" and normalized_review_decision(claim) == "changes_requested"
   end
 
+  defp symbol_scope_verified?(claim, workspace) do
+    path = Map.get(claim, "path")
+    symbol = referenced_symbol(claim)
+
+    is_binary(path) and is_binary(symbol) and symbol != "" and file_exists?(workspace, path) and
+      file_contains_symbol?(workspace, path, symbol)
+  end
+
   defp scoped_claim_verified?(claim, workspace) do
     claim_type = Map.get(claim, "claim_type")
     path = Map.get(claim, "path")
@@ -140,7 +219,28 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
       (is_nil(line) or line_exists?(workspace, path, line))
   end
 
+  defp consensus_supported?(claim, workspace) do
+    consensus_score = Map.get(claim, "consensus_score", 0.0)
+    evidence_quality_score = Map.get(claim, "evidence_quality_score", 0.0)
+    locality_score = Map.get(claim, "locality_score", 0.0)
+    path = Map.get(claim, "path")
+    line = Map.get(claim, "line")
+
+    consensus_score >= 0.70 and evidence_quality_score >= 0.70 and locality_score >= 0.80 and
+      is_binary(path) and file_exists?(workspace, path) and (is_nil(line) or line_exists?(workspace, path, line))
+  end
+
   defp file_exists?(workspace, path), do: File.exists?(Path.join(workspace, path))
+
+  defp file_contains_symbol?(workspace, path, symbol) do
+    case File.read(Path.join(workspace, path)) do
+      {:ok, contents} ->
+        String.contains?(contents, symbol)
+
+      _ ->
+        false
+    end
+  end
 
   defp line_exists?(workspace, path, line)
        when is_binary(workspace) and is_binary(path) and is_integer(line) and line > 0 do
@@ -181,6 +281,38 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
       {path, line} when is_binary(path) and is_integer(line) -> ["file_scope:#{path}:#{line}"]
       {path, _line} when is_binary(path) -> ["file_scope:#{path}"]
       _ -> []
+    end
+  end
+
+  defp symbol_evidence_refs(claim) do
+    case {Map.get(claim, "path"), referenced_symbol(claim)} do
+      {path, symbol} when is_binary(path) and is_binary(symbol) and symbol != "" ->
+        ["file_symbol:#{path}:#{symbol}"]
+
+      _ ->
+        scoped_evidence_refs(claim)
+    end
+  end
+
+  defp consensus_evidence_refs(claim) do
+    refs = scoped_evidence_refs(claim)
+
+    case Map.get(claim, "consensus_state") do
+      state when is_binary(state) and state != "" -> refs ++ ["consensus:#{state}"]
+      _ -> refs
+    end
+  end
+
+  defp referenced_symbol(claim) do
+    claim
+    |> Map.get("body")
+    |> to_string()
+    |> case do
+      text ->
+        case Regex.run(~r/`([A-Za-z_][A-Za-z0-9_!?]*)`/, text, capture: :all_but_first) do
+          [symbol] -> symbol
+          _ -> nil
+        end
     end
   end
 

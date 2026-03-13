@@ -256,6 +256,8 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert get_in(state, [:review_claims, "review:91", "verification_status"]) == "verified_review_decision"
     assert get_in(state, [:review_claims, "review:91", "disposition"]) == "accepted"
     assert get_in(state, [:review_threads, "review:91", "verification_status"]) == "verified_review_decision"
+    assert get_in(state, [:review_threads, "review:91", "draft_reply"]) =~ "verified this concern locally"
+    assert get_in(state, [:review_threads, "review:91", "resolution_recommendation"]) == "keep_open_until_change"
     assert get_in(state, [:resume_context, :review_claim_summary]) =~ "verified_review_decision"
     assert get_in(state, [:resume_context, :next_objective]) =~ "Address the verified PR review claims"
   end
@@ -297,6 +299,7 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert state.stage == "await_checks"
     assert get_in(state, [:review_claims, "comment:92", "verification_status"]) == "contradicted"
     assert get_in(state, [:review_claims, "comment:92", "disposition"]) == "dismissed"
+    assert get_in(state, [:review_threads, "comment:92", "draft_reply"]) =~ "could not confirm the claim"
     assert state.last_decision_summary =~ "did not find enough evidence"
   end
 

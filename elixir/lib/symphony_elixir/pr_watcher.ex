@@ -21,6 +21,8 @@ defmodule SymphonyElixir.PRWatcher do
   @dialyzer {:nowarn_function, review_item: 4}
   @dialyzer {:nowarn_function, comment_item: 4}
   @dialyzer {:nowarn_function, merge_adjudication: 3}
+  @dialyzer {:nowarn_function, draft_reply: 3}
+  @dialyzer {:nowarn_function, resolution_recommendation: 3}
 
   @type t :: %{
           enabled: boolean(),
@@ -54,6 +56,9 @@ defmodule SymphonyElixir.PRWatcher do
           locality_score: float(),
           source_precision_score: float(),
           consensus_score: float(),
+          consensus_state: String.t(),
+          consensus_summary: String.t() | nil,
+          consensus_reasons: [String.t()],
           historical_precision_score: float(),
           hard_proof: boolean(),
           proof_sources: [String.t()],
@@ -237,6 +242,9 @@ defmodule SymphonyElixir.PRWatcher do
       locality_score: Map.get(persisted, "locality_score", 0.0),
       source_precision_score: Map.get(persisted, "source_precision_score", 0.0),
       consensus_score: Map.get(persisted, "consensus_score", 0.0),
+      consensus_state: Map.get(persisted, "consensus_state", "unclear"),
+      consensus_summary: Map.get(persisted, "consensus_summary"),
+      consensus_reasons: Map.get(persisted, "consensus_reasons", []),
       historical_precision_score: Map.get(persisted, "historical_precision_score", 0.0),
       hard_proof: Map.get(persisted, "hard_proof", false),
       proof_sources: Map.get(persisted, "proof_sources", []),
@@ -299,25 +307,37 @@ defmodule SymphonyElixir.PRWatcher do
 
     base_item
     |> Map.merge(adjudication)
-    |> Map.put(:draft_reply, Map.get(persisted, "draft_reply", draft_reply(base_item, adjudication)))
+    |> Map.put(:draft_reply, Map.get(persisted, "draft_reply", draft_reply(base_item, adjudication, persisted)))
     |> Map.put(
       :resolution_recommendation,
       Map.get(
         persisted,
         "resolution_recommendation",
-        resolution_recommendation(base_item, adjudication)
+        resolution_recommendation(base_item, adjudication, persisted)
       )
     )
   end
 
-  defp draft_reply(item, adjudication) do
+  defp draft_reply(item, adjudication, persisted) do
     body = Map.get(item, :body)
     state = Map.get(item, :state)
     disposition = Map.get(adjudication, :disposition)
     claim_type = Map.get(adjudication, :claim_type)
+    verification_status = Map.get(persisted, "verification_status")
+    evidence_summary = Map.get(persisted, "evidence_summary")
+    consensus_state = Map.get(adjudication, :consensus_state)
 
     base =
       cond do
+        verification_status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+          "I verified this concern locally and it is actionable. #{to_string(evidence_summary)} I will address it in the follow-up change."
+
+        verification_status == "contradicted" ->
+          "I checked this locally and could not confirm the claim. #{to_string(evidence_summary)} If you have a narrower reproducer, I can revisit it."
+
+        verification_status == "consensus_supported" ->
+          "I found this concern plausible after a focused pass, but I still do not have hard proof to justify a code change. #{to_string(evidence_summary)}"
+
         disposition == "dismissed" ->
           "I reviewed this feedback and did not find enough evidence to reopen implementation yet. I can revisit it with a more specific reproducer or stronger proof."
 
@@ -330,6 +350,9 @@ defmodule SymphonyElixir.PRWatcher do
         contains_nit?(body) ->
           "I agree with the nit and will adjust it in the follow-up update."
 
+        consensus_state in ["strong_positive", "mixed_positive"] ->
+          "I reviewed this feedback and it looks plausible, so I will verify it with focused checks before deciding whether to change code."
+
         claim_type in ["correctness_risk", "failure_handling_risk", "policy_violation"] ->
           "I reviewed this feedback and will verify the claim with focused checks before deciding whether to change code."
 
@@ -340,17 +363,30 @@ defmodule SymphonyElixir.PRWatcher do
     AuthorProfile.summarize(base, :comment)
   end
 
-  defp resolution_recommendation(item, adjudication) do
+  defp resolution_recommendation(item, adjudication, persisted) do
     body = Map.get(item, :body)
     state = Map.get(item, :state)
     disposition = Map.get(adjudication, :disposition)
+    verification_status = Map.get(persisted, "verification_status")
 
     cond do
-      disposition == "dismissed" -> "keep_open_until_confirmed"
-      disposition == "deferred" -> "keep_open_until_confirmed"
-      normalized_state(state) == "changes_requested" -> "keep_open_until_change"
-      contains_nit?(body) -> "resolve_after_change"
-      true -> "keep_open_until_confirmed"
+      verification_status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+        "keep_open_until_change"
+
+      disposition == "dismissed" ->
+        "keep_open_until_confirmed"
+
+      disposition == "deferred" ->
+        "keep_open_until_confirmed"
+
+      normalized_state(state) == "changes_requested" ->
+        "keep_open_until_change"
+
+      contains_nit?(body) ->
+        "resolve_after_change"
+
+      true ->
+        "keep_open_until_confirmed"
     end
   end
 

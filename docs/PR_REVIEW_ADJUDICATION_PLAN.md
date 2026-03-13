@@ -29,6 +29,7 @@ The runtime now includes the first two slices of this plan:
 - source-aware review triage via `SymphonyElixir.ReviewAdjudicator`
 - persisted `review_claims` state alongside drafted review threads
 - a passive `review_verification` stage that collects cheap local proof before reopening `implement`
+- a first local consensus layer plus evidence-based draft replies after review verification
 
 The remaining phases below describe how to extend that foundation with stronger proof sources, independent consensus, stagnation detection, reply planning, and thread-resolution policy.
 
