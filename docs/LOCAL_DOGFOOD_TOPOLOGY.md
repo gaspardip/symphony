@@ -9,15 +9,13 @@ Run Symphony locally with:
 - enough wiring to test GitHub review-follow-up behavior on real PRs
 
 ## Current Limitation
-This branch does not yet have the full cross-process scheduler that lets a stable ingress process accept a GitHub webhook and forward it to a separate canary runner automatically.
+This branch now supports stable-ingress relay for GitHub review webhooks: stable can accept the verified webhook and relay it to the canary runner internally.
 
-That means:
+What is still missing is the fuller scheduler/control-plane split:
 
-- the dual-instance topology can run locally today
-- metrics, traces, logs, lease state, and runner controls work locally today
-- for live GitHub PR review dogfooding, point the webhook at the canary instance for now
-
-Use the stable instance locally as the future ingress target, observability reference, and control-plane comparison. Use the canary instance to actually process Symphony self-work until the scheduler split lands.
+- stable ingress still relays review webhooks directly to configured sibling instances instead of assigning durable work items through a dedicated scheduler
+- tracker event routing and issue dispatch are still per-process
+- the eventual target remains a stable ingress that persists and assigns cross-runner work instead of relaying it opportunistically
 
 ## Bootstrap
 
@@ -104,14 +102,14 @@ curl http://127.0.0.1:4041/metrics
 
 ## Live GitHub PR Review Dogfooding
 
-For now, use the canary instance as the webhook target for live review follow-up.
+For local review dogfooding, use the stable instance as the GitHub webhook target.
 
-1. Expose the canary runner publicly with a tunnel.
-2. Set `GITHUB_WEBHOOK_SECRET` in the canary runner environment before starting it.
+1. Expose the stable runner publicly with a tunnel.
+2. Set `GITHUB_WEBHOOK_SECRET` in both stable and canary runner environments before starting them.
 3. In GitHub, configure the webhook payload URL as:
 
 ```text
-https://<your-tunnel-host>/api/webhooks/github
+https://<your-stable-tunnel-host>/api/webhooks/github
 ```
 
 4. Enable:
@@ -120,6 +118,8 @@ https://<your-tunnel-host>/api/webhooks/github
 5. Label the Symphony self-work issue or PR so it is clearly canary-targeted.
    Use `canary:symphony` on the issue or PR that should route to canary behavior.
 6. Redeliver the existing PR review event from GitHub or add a fresh review comment.
+
+Stable will verify the webhook, enqueue it locally for observability, and relay the same signed request to configured sibling instances from `portfolio.instances`. The canary instance will then process the review follow-up normally.
 
 ## Observing The Run
 
@@ -153,8 +153,8 @@ curl -X POST http://127.0.0.1:4041/api/v1/runner/actions/inspect
 
 After local dogfooding works, the next structural step is the missing seam:
 
-- stable ingress accepts GitHub webhooks
-- ingress persists and routes the event
-- canary runner receives assigned work without GitHub pointing at it directly
+- stable ingress persists and assigns cross-runner work instead of relaying it directly
+- canary runner receives explicit assigned work items rather than a forwarded webhook request
+- tracker ingress and review ingress converge on the same scheduler path
 
-That is the point where the local topology becomes the real target architecture rather than a local bootstrap with one temporary direct-webhook compromise.
+That is the point where the local topology becomes the full target architecture instead of a stable-ingress relay bridge.

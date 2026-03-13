@@ -136,6 +136,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     log_file = Application.get_env(:symphony_elixir, :log_file)
     linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
     pr_watcher_client = Application.get_env(:symphony_elixir, :pr_watcher_github_client)
+    relay_client = Application.get_env(:symphony_elixir, :github_webhook_relay_client)
 
     inbox_root =
       Path.join(System.tmp_dir!(), "symphony-webhook-#{System.unique_integer([:positive])}")
@@ -165,6 +166,12 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
         Application.put_env(:symphony_elixir, :pr_watcher_github_client, pr_watcher_client)
       end
 
+      if is_nil(relay_client) do
+        Application.delete_env(:symphony_elixir, :github_webhook_relay_client)
+      else
+        Application.put_env(:symphony_elixir, :github_webhook_relay_client, relay_client)
+      end
+
       File.rm_rf(inbox_root)
       TrackerEventInbox.reset()
       GitHubEventInbox.reset()
@@ -176,6 +183,154 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     end)
 
     :ok
+  end
+
+  test "stable github webhook ingress relays verified review events to configured sibling runners" do
+    secret = "github-webhook-secret"
+    previous_secret = System.get_env("GITHUB_WEBHOOK_SECRET")
+    System.put_env("GITHUB_WEBHOOK_SECRET", secret)
+    on_exit(fn -> restore_env("GITHUB_WEBHOOK_SECRET", previous_secret) end)
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-github-webhook-relay-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      runner_channel: "stable",
+      runner_instance_name: "stable-local",
+      server_host: "127.0.0.1",
+      server_port: 4040,
+      portfolio_instances: [
+        %{name: "stable-local", url: "http://127.0.0.1:4040"},
+        %{name: "canary-local", url: "http://127.0.0.1:4041"}
+      ]
+    )
+
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubReviewClient)
+
+    Application.put_env(:symphony_elixir, :github_webhook_relay_client, fn url, headers, body ->
+      send(self(), {:github_webhook_relay, url, headers, body})
+      {:ok, 200}
+    end)
+
+    orchestrator_name = :"github-webhook-relay-orchestrator-#{System.unique_integer([:positive])}"
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(
+        orchestrator: orchestrator_name,
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
+    )
+
+    start_supervised!({Orchestrator, name: orchestrator_name})
+    start_supervised!({SymphonyElixirWeb.Endpoint, []})
+
+    raw_body =
+      Jason.encode!(%{
+        "action" => "submitted",
+        "review" => %{
+          "id" => 191,
+          "body" => "Please tighten this conditional.",
+          "submitted_at" => "2026-03-11T12:00:00Z"
+        },
+        "pull_request" => %{
+          "html_url" => "https://github.com/gaspardip/events/pull/8",
+          "updated_at" => "2026-03-11T12:00:00Z"
+        },
+        "repository" => %{"full_name" => "gaspardip/events"}
+      })
+
+    conn =
+      build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-github-event", "pull_request_review")
+      |> put_req_header("x-github-delivery", "delivery-relay")
+      |> put_req_header("x-hub-signature-256", github_signature(secret, raw_body))
+      |> post("/api/webhooks/github", raw_body)
+
+    assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
+
+    assert_receive {:github_webhook_relay, url, headers, ^raw_body}
+    assert url == "http://127.0.0.1:4041/api/webhooks/github"
+    assert Enum.any?(headers, fn {name, value} -> name == "x-symphony-forwarded-by" and value == "stable:stable-local" end)
+    assert Enum.any?(headers, fn {name, value} -> name == "x-hub-signature-256" and value == github_signature(secret, raw_body) end)
+  end
+
+  test "stable github webhook ingress does not re-relay forwarded review events" do
+    secret = "github-webhook-secret"
+    previous_secret = System.get_env("GITHUB_WEBHOOK_SECRET")
+    System.put_env("GITHUB_WEBHOOK_SECRET", secret)
+    on_exit(fn -> restore_env("GITHUB_WEBHOOK_SECRET", previous_secret) end)
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-github-webhook-forwarded-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      runner_channel: "stable",
+      runner_instance_name: "stable-local",
+      server_host: "127.0.0.1",
+      server_port: 4040,
+      portfolio_instances: [%{name: "canary-local", url: "http://127.0.0.1:4041"}]
+    )
+
+    Application.put_env(:symphony_elixir, :github_webhook_relay_client, fn url, headers, body ->
+      send(self(), {:github_webhook_relay, url, headers, body})
+      {:ok, 200}
+    end)
+
+    orchestrator_name = :"github-webhook-forwarded-orchestrator-#{System.unique_integer([:positive])}"
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(
+        orchestrator: orchestrator_name,
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
+    )
+
+    start_supervised!({Orchestrator, name: orchestrator_name})
+    start_supervised!({SymphonyElixirWeb.Endpoint, []})
+
+    raw_body =
+      Jason.encode!(%{
+        "action" => "submitted",
+        "review" => %{
+          "id" => 291,
+          "body" => "Already forwarded review.",
+          "submitted_at" => "2026-03-11T12:00:00Z"
+        },
+        "pull_request" => %{
+          "html_url" => "https://github.com/gaspardip/events/pull/8",
+          "updated_at" => "2026-03-11T12:00:00Z"
+        },
+        "repository" => %{"full_name" => "gaspardip/events"}
+      })
+
+    conn =
+      build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-github-event", "pull_request_review")
+      |> put_req_header("x-github-delivery", "delivery-forwarded")
+      |> put_req_header("x-hub-signature-256", github_signature(secret, raw_body))
+      |> put_req_header("x-symphony-forwarded-by", "stable:other")
+      |> post("/api/webhooks/github", raw_body)
+
+    assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
+    refute_receive {:github_webhook_relay, _, _, _}
   end
 
   test "github webhook controller enqueues verified review events and updates matching workspace state" do

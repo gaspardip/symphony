@@ -1,9 +1,10 @@
 id: runtime-core
 title: Runtime Core
 status: active
-summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, evidence-based review follow-up with non-actionable noise suppression, operator-visible lease and webhook assignment state, runner identity plus lease-backed channel-aware issue and webhook routing seams for stable ingress and isolated runner pools, and repo-native runner promotion controls.
+summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, evidence-based review follow-up with non-actionable noise suppression, operator-visible lease and webhook assignment state, runner identity plus lease-backed channel-aware issue and webhook routing seams for stable ingress and isolated runner pools, a stable-ingress webhook relay bridge for healthy canary runners, and repo-native runner promotion controls.
 source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
+  - elixir/lib/symphony_elixir/github_webhook_relay.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
 acceptance_signals:
@@ -20,6 +21,7 @@ acceptance_signals:
   - Dispatch, lease refresh, and lease release keep persisted run-state ownership aligned with the live lease file
   - Issue dispatch respects the target runner channel so stable and canary pools do not steal each other's work
   - Operator snapshots surface lease age, TTL, reclaimability, and latest GitHub assignment state so webhook and routing skips are explainable
+  - Stable ingress can relay verified GitHub review webhooks to configured sibling runner instances without creating forwarding loops
   - Operators can invoke inspect, promote, record-canary, and rollback runner actions through the observability API using the repo-owned promotion script
   - Seeded manual run states with explicit policy metadata can synthesize a minimal issue shell and re-enter active review follow-up without a manual-store issue record
   - Replay refresh drains GitHub inbox work even when runner metadata disables normal tracker dispatch

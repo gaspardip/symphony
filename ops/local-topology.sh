@@ -266,6 +266,8 @@ render_workflow() {
   WORKSPACE_ROOT="$workspace_root" \
   RUNNER_ROOT="$runner_root" \
   ARTIFACT_ROOT="$artifact_root" \
+  STABLE_PORT_VALUE="$STABLE_PORT" \
+  CANARY_PORT_VALUE="$CANARY_PORT" \
   SERVER_PORT_VALUE="$server_port" \
   REQUIRED_LABELS_VALUE="$REQUIRED_LABELS" \
   LINEAR_ENDPOINT_VALUE="$LINEAR_ENDPOINT" \
@@ -305,6 +307,8 @@ workspace_root = os.environ["WORKSPACE_ROOT"]
 runner_root = os.environ["RUNNER_ROOT"]
 artifact_root = os.environ["ARTIFACT_ROOT"]
 server_port = int(os.environ["SERVER_PORT_VALUE"])
+stable_port = int(os.environ["STABLE_PORT_VALUE"])
+canary_port = int(os.environ["CANARY_PORT_VALUE"])
 required_labels = os.environ.get("REQUIRED_LABELS_VALUE", "")
 linear_endpoint = os.environ.get("LINEAR_ENDPOINT_VALUE", "")
 linear_api_key = os.environ.get("LINEAR_API_KEY_RENDERED", "")
@@ -341,6 +345,12 @@ runner:
   instance_name: {yaml_scalar(instance_name)}
   channel: {yaml_scalar(channel)}
   self_host_project: true
+portfolio:
+  instances:
+    - name: 'stable-local'
+      url: 'http://127.0.0.1:{stable_port}'
+    - name: 'canary-local'
+      url: 'http://127.0.0.1:{canary_port}'
 company:
   repo_url: 'https://github.com/gaspardip/symphony'
   internal_project_name: 'Symphony'
@@ -418,7 +428,7 @@ Canary metrics: http://127.0.0.1:$CANARY_PORT/metrics
 GitHub webhook secret present: $( [[ -n "$GITHUB_WEBHOOK_SECRET_VALUE" ]] && printf yes || printf no )
 
 Current limitation:
-  Direct live PR review dogfooding should target the canary instance until the stable-ingress scheduler can forward events across processes.
+  Stable ingress can relay GitHub review webhooks to canary locally, but the full durable scheduler/assignment seam across processes is still pending.
 EOF
 }
 
