@@ -5,7 +5,23 @@ defmodule SymphonyElixirWeb.Presenter do
 
   # credo:disable-for-this-file
 
-  alias SymphonyElixir.{Config, IssuePolicy, IssueSource, Orchestrator, PRWatcher, PolicyPack, Portfolio, RiskClassifier, RunInspector, RunLedger, RunStateStore, StatusDashboard, WorkflowProfile}
+  alias SymphonyElixir.{
+    Config,
+    IssuePolicy,
+    IssueSource,
+    Orchestrator,
+    PRWatcher,
+    PolicyPack,
+    Portfolio,
+    RiskClassifier,
+    RunInspector,
+    RunLedger,
+    RunStateStore,
+    RunnerRuntime,
+    StatusDashboard,
+    WorkflowProfile
+  }
+
   alias SymphonyElixir.Linear.Issue
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
@@ -247,6 +263,42 @@ defmodule SymphonyElixirWeb.Presenter do
       %{ok: _} = payload -> {:ok, payload}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :unknown_action}
+    end
+  end
+
+  @spec runner_control_payload(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def runner_control_payload(action, params) when is_binary(action) and is_map(params) do
+    case action do
+      "inspect" ->
+        {:ok,
+         %{
+           ok: true,
+           action: "inspect",
+           requested_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+           runner: RunnerRuntime.info(),
+           commands: RunnerRuntime.commands()
+         }}
+
+      "promote" ->
+        with {:ok, ref} <- fetch_required_param(params, ["ref", "git_ref"], "git ref is required") do
+          RunnerRuntime.promote(ref, canary_labels: normalize_string_list(params["canary_labels"] || params["canary_label"]))
+        end
+
+      "record_canary" ->
+        with {:ok, result} <- fetch_required_param(params, ["result"], "canary result is required") do
+          RunnerRuntime.record_canary(result,
+            issues: normalize_string_list(params["issues"] || params["issue"]),
+            prs: normalize_string_list(params["prs"] || params["pr"]),
+            note: normalize_optional_string(params["note"])
+          )
+        end
+
+      "rollback" ->
+        target_sha = normalize_optional_string(params["release_sha"] || params["target_sha"])
+        RunnerRuntime.rollback(target_sha)
+
+      _ ->
+        {:error, :unknown_action}
     end
   end
 
@@ -584,6 +636,40 @@ defmodule SymphonyElixirWeb.Presenter do
   defp normalize_timestamp(%DateTime{} = value), do: DateTime.to_iso8601(value)
   defp normalize_timestamp(value) when is_binary(value), do: value
   defp normalize_timestamp(value), do: value
+
+  defp fetch_required_param(params, keys, message) when is_map(params) and is_list(keys) do
+    keys
+    |> Enum.find_value(fn key -> normalize_optional_string(Map.get(params, key)) end)
+    |> case do
+      nil -> {:error, {:invalid_params, message}}
+      value -> {:ok, value}
+    end
+  end
+
+  defp normalize_string_list(value) when is_list(value) do
+    value
+    |> Enum.map(&normalize_optional_string/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp normalize_string_list(value) when is_binary(value) do
+    case normalize_optional_string(value) do
+      nil -> []
+      normalized -> [normalized]
+    end
+  end
+
+  defp normalize_string_list(_value), do: []
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_optional_string(_value), do: nil
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0

@@ -667,6 +667,7 @@ defmodule SymphonyElixir.Orchestrator do
     issue_identifier = Map.get(run_state, :issue_identifier)
     target_runner_channel = Map.get(run_state, :runner_channel)
     runner_instance_id = Map.get(run_state, :runner_instance_id)
+    lease_status = review_follow_up_lease_status(state, run_state)
 
     cond do
       not run_state_routed_to_current_runner?(run_state) ->
@@ -687,8 +688,8 @@ defmodule SymphonyElixir.Orchestrator do
            | outcomes
          ]}
 
-      match?({:skip, _}, review_follow_up_lease_status(state, run_state)) ->
-        {:skip, owner} = review_follow_up_lease_status(state, run_state)
+      match?({:skip, _}, lease_status) ->
+        {:skip, owner} = lease_status
 
         Logger.info("Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} lease_owner=#{inspect(owner)} current_owner=#{state.lease_owner}")
 
@@ -706,8 +707,8 @@ defmodule SymphonyElixir.Orchestrator do
            | outcomes
          ]}
 
-      match?({:error, _}, review_follow_up_lease_status(state, run_state)) ->
-        {:error, reason} = review_follow_up_lease_status(state, run_state)
+      match?({:error, _}, lease_status) ->
+        {:error, reason} = lease_status
 
         Logger.warning("Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} due to lease lookup error: #{inspect(reason)}")
 
@@ -733,8 +734,24 @@ defmodule SymphonyElixir.Orchestrator do
               target_runner_channel: target_runner_channel || Config.runner_channel(),
               assigned_runner_channel: Config.runner_channel(),
               assigned_runner_instance_id: RunnerRuntime.instance_id(),
-              assignment_state: "processed",
-              assignment_reason: "review_feedback_persisted"
+              assignment_state:
+                case lease_status do
+                  {:reclaimable, _owner} -> "stale_lease_reclaimable"
+                  _ -> "processed"
+                end,
+              assignment_reason:
+                case lease_status do
+                  {:reclaimable, _owner} ->
+                    "review_feedback_persisted_pending_stale_lease_takeover"
+
+                  _ ->
+                    "review_feedback_persisted"
+                end,
+              lease_owner:
+                case lease_status do
+                  {:reclaimable, owner} -> inspect(owner)
+                  _ -> nil
+                end
             }
             | outcomes
           ]
@@ -749,7 +766,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp summarize_github_assignment(%GitHubEvent{} = event, pr_url, outcomes) when is_list(outcomes) do
     preferred_outcome =
       Enum.find_value(
-        ["processed", "leased_elsewhere", "routed_to_other_runner", "lease_lookup_error"],
+        ["stale_lease_reclaimable", "processed", "leased_elsewhere", "routed_to_other_runner", "lease_lookup_error"],
         fn target_state ->
           Enum.find(outcomes, &(Map.get(&1, :assignment_state) == target_state))
         end
@@ -811,10 +828,15 @@ defmodule SymphonyElixir.Orchestrator do
           {:ok, lease} ->
             owner = lease_owner_from_snapshot(lease)
 
-            if owner == state.lease_owner do
-              :ok
-            else
-              {:skip, owner}
+            cond do
+              owner == state.lease_owner ->
+                :ok
+
+              LeaseManager.reclaimable?(lease) ->
+                {:reclaimable, owner}
+
+              true ->
+                {:skip, owner}
             end
 
           {:error, :missing} ->
@@ -1215,7 +1237,11 @@ defmodule SymphonyElixir.Orchestrator do
 
     policy_class == "fully_autonomous" and
       run_state_routed_to_current_runner?(run_state) and
-      review_follow_up_lease_status(state, run_state) == :ok and
+      case review_follow_up_lease_status(state, run_state) do
+        :ok -> true
+        {:reclaimable, _owner} -> true
+        _ -> false
+      end and
       stage not in [
         "done",
         "post_merge",
@@ -6051,10 +6077,21 @@ defmodule SymphonyElixir.Orchestrator do
           {:ok, lease} ->
             owner = lease_owner_from_snapshot(lease)
 
-            if owner == state.lease_owner do
-              {:ok, lease_snapshot_for_state(lease), false}
-            else
-              {:skip, owner}
+            cond do
+              owner == state.lease_owner ->
+                {:ok, lease_snapshot_for_state(lease), false}
+
+              LeaseManager.reclaimable?(lease) ->
+                with :ok <- LeaseManager.acquire(issue_id, issue_identifier, state.lease_owner),
+                     {:ok, refreshed_lease} <- LeaseManager.read(issue_id) do
+                  {:ok, lease_snapshot_for_state(refreshed_lease), true}
+                else
+                  {:error, :claimed} -> {:skip, owner}
+                  {:error, reason} -> {:error, reason}
+                end
+
+              true ->
+                {:skip, owner}
             end
 
           {:error, :missing} ->

@@ -85,6 +85,31 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @spec runner_control(Conn.t(), map()) :: Conn.t()
+  def runner_control(conn, %{"action" => action} = params) do
+    case Presenter.runner_control_payload(action, params) do
+      {:ok, payload} ->
+        json(conn, payload)
+
+      {:error, :unknown_action} ->
+        error_response(conn, 400, "unknown_action", "Unknown runner action")
+
+      {:error, {:invalid_params, message}} ->
+        error_response(conn, 400, "invalid_params", message)
+
+      {:error, %{error: "script_missing", message: message}} ->
+        error_response(conn, 503, "runner_script_missing", message)
+
+      {:error, %{error: "command_failed", message: message} = payload} ->
+        conn
+        |> put_status(409)
+        |> json(payload |> Map.put(:error, %{code: "runner_command_failed", message: message}))
+
+      {:error, reason} ->
+        error_response(conn, 500, "runner_action_failed", inspect(reason))
+    end
+  end
+
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
   def method_not_allowed(conn, _params) do
     error_response(conn, 405, "method_not_allowed", "Method not allowed")

@@ -318,6 +318,51 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              Presenter.control_payload("bogus", "MT-WEB", %{}, orchestrator_name)
   end
 
+  test "presenter runner control payload validates params and executes runner commands" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn command, args, opts ->
+        send(self(), {:runner_runtime_cmd, command, args, opts})
+        {"runner ok\n", 0}
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    assert {:error, {:invalid_params, "git ref is required"}} =
+             Presenter.runner_control_payload("promote", %{})
+
+    assert {:ok, inspect_payload} = Presenter.runner_control_payload("inspect", %{})
+    assert inspect_payload.ok == true
+    assert is_map(inspect_payload.runner)
+    assert inspect_payload.commands.promote =~ "promote <git-ref>"
+
+    assert {:ok, promote_payload} =
+             Presenter.runner_control_payload("promote", %{
+               "ref" => "main",
+               "canary_labels" => ["canary:symphony"]
+             })
+
+    assert promote_payload.ok == true
+    assert promote_payload.action == "promote"
+    assert_receive {:runner_runtime_cmd, "bash", [_script, "promote", "main", "--canary-label", "canary:symphony"], _opts}
+
+    assert {:ok, rollback_payload} =
+             Presenter.runner_control_payload("rollback", %{"release_sha" => "deadbeef"})
+
+    assert rollback_payload.action == "rollback"
+    assert_receive {:runner_runtime_cmd, "bash", [_script, "rollback", "deadbeef"], _opts}
+  end
+
   test "observability api control returns 400 for unknown actions and 503 for unavailable orchestrators" do
     orchestrator_name = Module.concat(__MODULE__, :ApiControlOrchestrator)
 
@@ -335,6 +380,107 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "observability api runner control returns validation and command payloads" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn _command, args, _opts ->
+        send(self(), {:runner_api_cmd, args})
+        {"runner api ok\n", 0}
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    orchestrator_name = Module.concat(__MODULE__, :ApiRunnerControlOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()})
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert json_response(post(build_conn(), "/api/v1/runner/actions/promote", %{}), 400) ==
+             %{
+               "error" => %{
+                 "code" => "invalid_params",
+                 "message" => "git ref is required"
+               }
+             }
+
+    response =
+      post(build_conn(), "/api/v1/runner/actions/promote", %{
+        "ref" => "main",
+        "canary_labels" => ["canary:symphony"]
+      })
+      |> json_response(200)
+
+    assert response["ok"] == true
+    assert response["action"] == "promote"
+    assert_receive {:runner_api_cmd, [_script, "promote", "main", "--canary-label", "canary:symphony"]}
+  end
+
+  test "observability api runner control maps inspect record_canary and command failures" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn _command, args, _opts ->
+        send(self(), {:runner_api_cmd, args})
+
+        case args do
+          [_script, "record-canary", "fail" | _rest] ->
+            {"runner command failed\n", 9}
+
+          _ ->
+            {"runner api ok\n", 0}
+        end
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    orchestrator_name = Module.concat(__MODULE__, :ApiRunnerControlFailureOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()})
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    inspect_response =
+      post(build_conn(), "/api/v1/runner/actions/inspect", %{})
+      |> json_response(200)
+
+    assert inspect_response["ok"] == true
+    assert inspect_response["action"] == "inspect"
+    assert is_map(inspect_response["runner"])
+
+    error_response =
+      post(build_conn(), "/api/v1/runner/actions/record_canary", %{
+        "result" => "fail",
+        "issue" => "CLZ-22",
+        "pr" => "https://github.com/gaspardip/symphony/pull/1"
+      })
+      |> json_response(409)
+
+    assert error_response["error"]["code"] == "runner_command_failed"
+    assert error_response["action"] == "record_canary"
+    assert error_response["exit_status"] == 9
+    assert_receive {:runner_api_cmd, [_script, "record-canary", "fail", "--issue", "CLZ-22", "--pr", "https://github.com/gaspardip/symphony/pull/1"]}
   end
 
   test "delivery report summarizes completed work in client-readable form" do

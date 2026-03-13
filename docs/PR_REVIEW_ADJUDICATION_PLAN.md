@@ -715,6 +715,14 @@ Suggested default for Symphony self-host:
 - calibrate thresholds by module and source class
 - tune noise filters from observed false-positive rates
 
+## Implemented Slices
+
+- Review comments now persist first-class claim state, verification state, consensus state, historical precision, and stagnation metadata before they can reopen implementation.
+- GitHub webhook intake now records receiver and assignment metadata so stable ingress decisions survive inbox replay and show up in operator payloads.
+- Runner and lease-aware routing now exposes lease owner, age, TTL, reclaimability, and the latest GitHub assignment outcome through the presenter and API payloads.
+- Fully autonomous review follow-up can reclaim stale same-channel leases before resuming `review_verification`, instead of skipping work forever behind dead-runner ownership.
+- Runner promotion, canary recording, rollback, and inspect now have a repo-native operator control surface through `SymphonyElixir.RunnerRuntime` and `/api/v1/runner/actions/:action`, backed by `ops/promote-runner.sh`.
+
 ## Open Questions
 - whether to use two or three consensus passes by default
 - whether maintainability comments should feed the later cleanup stage automatically

@@ -68,6 +68,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Added a lightweight review-history layer in `PRWatcher` and `ReviewAdjudicator`, including historical precision priors, repeated-feedback counts, and `stagnant_feedback` detection for repeated low-signal review comments.
 - Updated review verification to defer repeated stagnant feedback instead of repeatedly reopening implementation without new proof, and added evidence-based draft replies for that state.
 - Added regression coverage for GitHub inbox routing metadata persistence, stagnant-feedback verification behavior, and lease plus GitHub assignment rendering in the presenter backfill suite.
+- Taught GitHub review webhook follow-up to treat reclaimable stale leases as resumable instead of skipping them, and to reacquire those leases before autonomous review verification resumes.
+- Added stale-lease reclaim coverage for both review-follow-up helpers and the real GitHub webhook path so dead runner ownership no longer blocks new review feedback indefinitely.
+- Wrapped the repo-owned `ops/promote-runner.sh` flow in `SymphonyElixir.RunnerRuntime`, exposing inspect/promote/record-canary/rollback command templates plus synchronous operator actions.
+- Added `/api/v1/runner/actions/:action` plus presenter support for runner promotion, canary recording, rollback, and inspect responses so operators can control canary-to-stable rollout through the existing observability surface.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -117,6 +121,13 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest focused review-depth suite: `mix test test/symphony_elixir/review_evidence_collector_test.exs` passed on March 13, 2026 with `9 tests, 0 failures`
 - Latest focused GitHub webhook and inbox suite: `mix test test/symphony_elixir/webhook_first_intake_test.exs` passed on March 13, 2026 with `14 tests, 0 failures`
 - Latest focused presenter/operator suite: `mix test test/symphony_elixir/web_phase6_backfill_test.exs` passed on March 13, 2026 with `27 tests, 0 failures`
+- Latest focused runner control suite: `mix test test/symphony_elixir/runner_runtime_test.exs` passed on March 13, 2026 with `8 tests, 0 failures`
+- Latest focused stale lease recovery suite: `mix test test/symphony_elixir/recovery_and_lease_test.exs` passed on March 13, 2026 with `18 tests, 0 failures`
+- Latest focused GitHub reclaim suite: `mix test test/symphony_elixir/webhook_first_intake_test.exs` passed on March 13, 2026 with `16 tests, 0 failures`
+- Latest focused operator API suite: `mix test test/symphony_elixir/web_phase6_backfill_test.exs` passed on March 13, 2026 with `37 tests, 0 failures`
+- Latest focused runner control and presenter reruns:
+  `mix test test/symphony_elixir/runner_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs` passed on March 13, 2026 with `39 tests, 0 failures`
+- Latest full validation after stale-lease reclaim and runner control surfaces: `./scripts/symphony-validate.sh` passed on March 13, 2026 with `794 tests, 0 failures`, total coverage `86.34%` against threshold `86.25%`, `SymphonyElixir.RunnerRuntime` at `89.33%`, `SymphonyElixirWeb.Presenter` at `89.27%`, `SymphonyElixir.Orchestrator` at `81.58%`, and Dialyzer clean (`Total errors: 161, Skipped: 161, Unnecessary Skips: 7`)
 
 ## Next Step
-Continue the existing `CLZ-22` branch with stronger proof adapters, explicit webhook-to-run assignment beyond co-located ingress, stale-lease reclaim operator actions, and an explicit promotion command path for canary-to-stable runner rollout. Keep the cleanup-stage plan as a follow-on after the review claim path and operating topology are in place.
+Continue the existing `CLZ-22` branch with stronger proof adapters, explicit webhook-to-run assignment beyond co-located ingress, and richer promotion safety checks around canary evidence and rollback policy. Keep the cleanup-stage plan as a follow-on after the review claim path and operating topology are in place.

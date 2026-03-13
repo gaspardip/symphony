@@ -36,6 +36,8 @@ defmodule SymphonyElixirWeb.Router do
     match(:*, "/metrics", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/state", ObservabilityApiController, :state)
     get("/api/v1/portfolio", ObservabilityApiController, :portfolio)
+    post("/api/v1/runner/actions/:action", ObservabilityApiController, :runner_control)
+    match(:*, "/api/v1/runner/actions/:action", ObservabilityApiController, :method_not_allowed)
     post("/api/v1/manual-runs", ObservabilityApiController, :manual_run)
     match(:*, "/api/v1/manual-runs", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/reports/delivery", ObservabilityApiController, :delivery_report)

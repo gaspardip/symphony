@@ -692,6 +692,137 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     refute_received {:github_review_feedback_called, ^workspace}
   end
 
+  test "github webhook controller reclaims stale leases before autonomous review follow-up" do
+    secret = "github-webhook-secret"
+    previous_secret = System.get_env("GITHUB_WEBHOOK_SECRET")
+    System.put_env("GITHUB_WEBHOOK_SECRET", secret)
+    on_exit(fn -> restore_env("GITHUB_WEBHOOK_SECRET", previous_secret) end)
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-github-webhook-stale-lease-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root,
+      max_concurrent_agents: 0,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubReviewClient)
+
+    orchestrator_name =
+      :"github-webhook-stale-lease-orchestrator-#{System.unique_integer([:positive])}"
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(
+        orchestrator: orchestrator_name,
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
+    )
+
+    start_supervised!({Orchestrator, name: orchestrator_name})
+    start_supervised!({SymphonyElixirWeb.Endpoint, []})
+
+    unique = System.unique_integer([:positive])
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "github-webhook-stale-lease-#{unique}",
+        "identifier" => "EVT-GH-STALE-#{unique}",
+        "title" => "Webhook stale lease reclaim",
+        "description" => "Reclaim stale leases before resuming autonomous review work",
+        "acceptance_criteria" => [
+          "Webhook review follow-up can reclaim a stale lease held by a dead runner"
+        ],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.mkdir_p!(workspace)
+
+    :ok =
+      RunStateStore.save(workspace, %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        stage: "await_checks",
+        effective_policy_class: "fully_autonomous",
+        pr_url: "https://github.com/gaspardip/events/pull/8",
+        review_threads: %{},
+        stage_history: [%{stage: "publish"}, %{stage: "await_checks"}],
+        stage_transition_counts: %{"publish" => 1, "await_checks" => 1}
+      })
+
+    old_timestamp = DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.to_iso8601()
+
+    File.mkdir_p!(Path.dirname(LeaseManager.lease_path(issue.id)))
+
+    File.write!(
+      LeaseManager.lease_path(issue.id),
+      Jason.encode!(%{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        owner: "stale-review-owner",
+        lease_version: 1,
+        epoch: 2,
+        acquired_at: old_timestamp,
+        updated_at: old_timestamp
+      })
+    )
+
+    raw_body =
+      Jason.encode!(%{
+        "action" => "submitted",
+        "review" => %{
+          "id" => 91,
+          "body" => "Please tighten this conditional.",
+          "submitted_at" => "2026-03-11T12:00:00Z"
+        },
+        "pull_request" => %{
+          "html_url" => "https://github.com/gaspardip/events/pull/8",
+          "updated_at" => "2026-03-11T12:00:00Z"
+        },
+        "repository" => %{"full_name" => "gaspardip/events"}
+      })
+
+    conn =
+      build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-github-event", "pull_request_review")
+      |> put_req_header("x-github-delivery", "delivery-stale-lease")
+      |> put_req_header("x-hub-signature-256", github_signature(secret, raw_body))
+      |> post("/api/webhooks/github", raw_body)
+
+    assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
+
+    assert_eventually(
+      fn ->
+        {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, lease} = LeaseManager.read(issue.id)
+
+        assert Map.get(run_state, :stage) == "review_verification"
+        assert Map.get(run_state, :lease_owner) == lease["owner"]
+        assert Map.get(run_state, :lease_owner_channel) == "stable"
+        assert Map.get(run_state, :lease_owner_instance_id) == "stable:stable-runner"
+        assert Map.get(run_state, :lease_epoch) == lease["epoch"]
+        assert Map.get(run_state, :lease_status) == "held"
+        assert lease["owner"] != "stale-review-owner"
+        assert lease["epoch"] == 3
+      end,
+      60
+    )
+  end
+
   test "linear webhook controller enqueues verified issue events and notifies the orchestrator" do
     secret = "linear-webhook-secret"
     write_workflow_file!(Workflow.workflow_file_path(), tracker_webhook_secret: secret)
