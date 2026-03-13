@@ -749,6 +749,68 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert lease["owner"] != "stale-owner"
   end
 
+  test "retry now resumes a seeded blocked manual replay without a manual store record" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-seeded-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: Path.join(workspace_root, "manual-store")
+    )
+
+    issue = %Issue{
+      id: "manual:clz-22",
+      identifier: "CLZ-22",
+      title: "Seeded blocked replay",
+      description: "resume from implement",
+      state: "Blocked",
+      source: :manual,
+      labels: ["policy:fully-autonomous"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "codex/clz-22-local-canary")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        effective_policy_class: "fully_autonomous",
+        runner_channel: "canary",
+        branch: "codex/clz-22-local-canary"
+      })
+
+    {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{})
+
+    orchestrator_name = Module.concat(__MODULE__, :RetrySeededManualOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+
+    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.stage == "implement"
+    assert run_state.stop_reason == nil
+
+    {_state, resumed_issue} =
+      Orchestrator.maybe_resume_blocked_issue_for_test(:sys.get_state(pid), issue)
+
+    assert resumed_issue.state == "In Progress"
+  end
+
   test "retry now sends verifier feedback blocks back to implement" do
     workspace_root =
       Path.join(

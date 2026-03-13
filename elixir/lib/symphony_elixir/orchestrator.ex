@@ -4397,6 +4397,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_resume_blocked_issue(%State{} = state, %Issue{state: @blocked_state} = issue) do
     workspace = Workspace.path_for_issue(issue.identifier)
+    local_resume =
+      fn resume_state ->
+        cond do
+          issue.source == :manual and is_binary(resume_state) ->
+            {state, %{issue | state: resume_state}}
+
+          true ->
+            {state, %{issue | state: "Todo"}}
+        end
+      end
 
     with true <- File.dir?(workspace),
          run_state when is_map(run_state) <- RunStateStore.load_or_default(workspace, issue),
@@ -4420,21 +4430,30 @@ defmodule SymphonyElixir.Orchestrator do
       {state, refreshed_issue || %{issue | state: resume_state}}
     else
       _ ->
+        resume_state =
+          with true <- File.dir?(workspace),
+               run_state when is_map(run_state) <- RunStateStore.load_or_default(workspace, issue),
+               {:ok, resume_stage} <- resumable_stage_from_run_state(run_state, issue) do
+            issue_state_for_stage(resume_stage)
+          else
+            _ -> nil
+          end
+
         case IssueSource.update_issue_state(issue, "Todo") do
           :ok ->
             case IssueSource.refresh_issue(%{issue | state: "Todo"}) do
               {:ok, %Issue{state: @blocked_state}} ->
-                {state, %{issue | state: "Todo"}}
+                local_resume.(resume_state)
 
               {:ok, %Issue{} = refreshed_issue} ->
                 {state, refreshed_issue}
 
               _ ->
-                {state, %{issue | state: "Todo"}}
+                local_resume.(resume_state)
             end
 
           _ ->
-            {state, issue}
+            local_resume.(resume_state)
         end
     end
   end

@@ -198,6 +198,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   synthesized manual issues now reflect `run_state.stage == "blocked"` as issue state `Blocked`, so `retry_now` resumes the stored stage instead of redispatching a still-blocked seeded run and exiting before any review-fix turn starts.
 - Latest focused seeded-retry validation on March 13, 2026:
   `mix test test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs` passed with `50 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the seeded retry-state fix.
+- Seeded manual retry redispatch repair on March 13, 2026:
+  `SymphonyElixir.Orchestrator.maybe_resume_blocked_issue/2` now preserves the locally resumed `"In Progress"` state for seeded manual replays when tracker/manual-store refresh fails, instead of falling back to a non-dispatchable blocked issue shell. Tracker-backed blocked retries still fall back to `"Todo"` so existing redispatch behavior stays intact.
+- Latest focused seeded-manual redispatch validation on March 13, 2026:
+  `mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs` passed with `51 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the seeded-manual fallback fix.
 
 ## Next Step
-Restart the local canary runner on the seeded retry-state fix, retry `CLZ-22`, and verify that the canary now reaches a real scoped review-fix turn instead of exiting immediately from the stale `blocked` stage. After that, continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests.
+Restart the local canary runner on the seeded manual redispatch fix, retry `CLZ-22`, and verify that the canary now reaches a real scoped review-fix turn instead of idling in `implement` without dispatch. After that, continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests.
