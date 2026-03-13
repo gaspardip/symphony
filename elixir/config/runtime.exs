@@ -21,7 +21,7 @@ if is_binary(otlp_endpoint) and String.trim(otlp_endpoint) != "" do
     processors: [
       {:otel_batch_processor,
        %{
-         exporter: {:opentelemetry_exporter, []}
+         exporter: {:opentelemetry_exporter, %{}}
        }}
     ]
 

@@ -128,6 +128,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest focused runner control and presenter reruns:
   `mix test test/symphony_elixir/runner_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs` passed on March 13, 2026 with `39 tests, 0 failures`
 - Latest full validation after stale-lease reclaim and runner control surfaces: `./scripts/symphony-validate.sh` passed on March 13, 2026 with `794 tests, 0 failures`, total coverage `86.34%` against threshold `86.25%`, `SymphonyElixir.RunnerRuntime` at `89.33%`, `SymphonyElixirWeb.Presenter` at `89.27%`, `SymphonyElixir.Orchestrator` at `81.58%`, and Dialyzer clean (`Total errors: 161, Skipped: 161, Unnecessary Skips: 7`)
+- Local topology bootstrap added on March 13, 2026:
+  [ops/local-topology.sh](/Users/gaspar/src/symphony-clz-22/ops/local-topology.sh) now generates stable and canary `WORKFLOW.md` files, starts the repo-owned observability stack, and launches local stable or canary runners with OTLP/log roots aligned to the self-host dashboards
+- Local dogfood operating note added on March 13, 2026:
+  [LOCAL_DOGFOOD_TOPOLOGY.md](/Users/gaspar/src/symphony-clz-22/docs/LOCAL_DOGFOOD_TOPOLOGY.md) documents the current limitation that live GitHub PR review testing should target the canary runner directly until the stable-ingress scheduler can forward webhook events across processes
 
 ## Next Step
-Continue the existing `CLZ-22` branch with stronger proof adapters, explicit webhook-to-run assignment beyond co-located ingress, and richer promotion safety checks around canary evidence and rollback policy. Keep the cleanup-stage plan as a follow-on after the review claim path and operating topology are in place.
+Continue the existing `CLZ-22` branch by exercising the local stable/canary bootstrap against a real PR review webhook, then implement the missing stable-ingress scheduler seam so the stable process can assign GitHub review work to the canary runner without GitHub pointing at canary directly. After that, add stronger proof adapters and richer promotion safety checks around canary evidence and rollback policy.

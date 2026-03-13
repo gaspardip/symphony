@@ -114,6 +114,15 @@ Merged dogfood PRs should not replace the live runtime automatically.
 ### Immediate rollout direction
 For the current `CLZ-22` branch, implement the adjudication and webhook behavior in the active branch and merge it manually. Use the stable ingress plus isolated runner model as the target topology, but do not block the current branch on full control-plane extraction.
 
+### Local bootstrap before scheduler split
+Until the stable-ingress scheduler can forward events across processes, local dogfooding should use:
+
+- one local stable runner for visibility and future-ingress validation
+- one local canary runner for live Symphony self-work
+- direct GitHub webhook delivery to the canary runner for real PR review testing
+
+The repo-owned bootstrap for this lives in [ops/local-topology.sh](/Users/gaspar/src/symphony-clz-22/ops/local-topology.sh) and [LOCAL_DOGFOOD_TOPOLOGY.md](/Users/gaspar/src/symphony-clz-22/docs/LOCAL_DOGFOOD_TOPOLOGY.md).
+
 ## Problem Statement
 The current webhook-driven review loop can detect and surface PR comments, but it does not yet decide whether a comment is correct with enough rigor to safely automate the response.
 

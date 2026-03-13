@@ -84,6 +84,7 @@ Repo-owned assets live under [ops/observability](/Users/gaspar/src/symphony-clz-
 - Tempo config
 - Grafana datasources
 - starter Grafana dashboard
+- local stable/canary bootstrap via [ops/local-topology.sh](/Users/gaspar/src/symphony-clz-22/ops/local-topology.sh)
 
 Bring the stack up with:
 
@@ -100,6 +101,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 mise exec -- mix phx.server
 ```
 
 Prometheus scrapes the host Symphony process at `http://host.docker.internal:4040/metrics`. If Symphony runs on a different port, update [ops/observability/prometheus/prometheus.yml](/Users/gaspar/src/symphony-clz-22/ops/observability/prometheus/prometheus.yml) before starting the stack.
+
+For local dogfooding with both stable and canary runners, use [LOCAL_DOGFOOD_TOPOLOGY.md](/Users/gaspar/src/symphony-clz-22/docs/LOCAL_DOGFOOD_TOPOLOGY.md). The repo-owned Prometheus and Promtail configs are now set up to observe both local runner ports and nested log roots.
 
 ## Rollout Order
 

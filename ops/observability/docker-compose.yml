@@ -36,6 +36,7 @@ services:
 
   tempo:
     image: grafana/tempo:2.6.0
+    user: "0:0"
     command:
       - -config.file=/etc/tempo/config.yml
     ports:

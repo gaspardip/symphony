@@ -17,3 +17,9 @@ scrape_configs:
           job: symphony
           app: symphony
           __path__: /var/log/symphony/*.log
+      - targets:
+          - localhost
+        labels:
+          job: symphony
+          app: symphony
+          __path__: /var/log/symphony/**/*.log
