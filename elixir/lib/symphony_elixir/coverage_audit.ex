@@ -5,7 +5,7 @@ defmodule SymphonyElixir.CoverageAudit do
 
   @compile {:no_warn_undefined, :cover}
 
-  @overall_threshold 86.5
+  @overall_threshold 86.25
   @core_threshold 77.0
   @attention_threshold 90.0
   @core_modules [

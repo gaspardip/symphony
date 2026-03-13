@@ -1110,7 +1110,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       workspace_root: workspace_root,
-      hook_after_create: nil
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
     )
 
     issue = %Issue{
@@ -1151,6 +1153,16 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         %{pid: running_pid} when is_pid(running_pid) -> running_pid
         _ -> nil
       end
+
+    workspace = Path.join(workspace_root, spawned_issue.identifier)
+    assert {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert {:ok, lease} = LeaseManager.read(spawned_issue.id)
+    assert run_state.lease_owner == owner
+    assert run_state.lease_owner == lease["owner"]
+    assert run_state.lease_owner_channel == "stable"
+    assert run_state.lease_owner_instance_id == "stable:stable-runner"
+    assert run_state.lease_epoch == lease["epoch"]
+    assert run_state.lease_status == "held"
 
     on_exit(fn ->
       if is_pid(pid) and Process.alive?(pid) do
@@ -1204,6 +1216,67 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert retry_entry.attempt == 5
     assert retry_entry.identifier == "MT-SPAWN-ERRORS"
     assert retry_entry.error =~ "failed to spawn agent: :noproc"
+  end
+
+  test "dispatch clears persisted lease metadata when worker startup fails after lease acquisition" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-dispatch-lease-clear-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    owner = "dispatch-owner-#{System.unique_integer([:positive])}"
+
+    issue = %Issue{
+      id: "issue-dispatch-clear",
+      identifier: "MT-DISPATCH-CLEAR",
+      title: "Dispatch clears lease",
+      description: "cover persisted lease cleanup on startup failure",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    returned_state =
+      Orchestrator.do_dispatch_issue_for_test(
+        %State{lease_owner: owner},
+        issue,
+        2,
+        spawn_fun: fn dispatch_state, dispatch_issue, attempt, recipient ->
+          Orchestrator.do_spawn_issue_worker_for_test(
+            dispatch_state,
+            dispatch_issue,
+            attempt,
+            recipient,
+            start_child_fun: fn _supervisor, _fun -> {:error, :noproc} end
+          )
+        end
+      )
+
+    retry_entry = Map.fetch!(returned_state.retry_attempts, issue.id)
+    assert retry_entry.attempt == 3
+    assert retry_entry.identifier == issue.identifier
+    assert match?({:error, :missing}, LeaseManager.read(issue.id))
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    assert {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.lease_owner == nil
+    assert run_state.lease_owner_instance_id == nil
+    assert run_state.lease_owner_channel == nil
+    assert run_state.lease_acquired_at == nil
+    assert run_state.lease_updated_at == nil
+    assert run_state.lease_status == nil
+    assert run_state.lease_epoch == nil
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
   end
 
   test "dispatch default wrappers cover claimed leases and default worker spawning" do

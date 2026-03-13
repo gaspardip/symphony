@@ -8,6 +8,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
   alias SymphonyElixir.{
     GitHubEventInbox,
+    LeaseManager,
     ManualIssueStore,
     Orchestrator,
     RunStateStore,
@@ -264,7 +265,9 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
       manual_store_root: manual_store_root,
-      max_concurrent_agents: 0
+      max_concurrent_agents: 0,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
     )
 
     Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubReviewClient)
@@ -344,6 +347,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     assert_eventually(
       fn ->
         {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, lease} = LeaseManager.read(issue.id)
 
         {:ok, %Issue{} = refreshed_issue} =
           ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
@@ -370,6 +374,14 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
                  "Please tighten this conditional."
 
         assert get_in(run_state, [:review_threads, "comment:92", "draft_state"]) == "drafted"
+        assert is_binary(Map.get(run_state, :lease_owner))
+        assert Map.get(run_state, :lease_owner) == lease["owner"]
+        assert Map.get(run_state, :lease_owner_channel) == "stable"
+        assert Map.get(run_state, :lease_owner_instance_id) == "stable:stable-runner"
+        assert Map.get(run_state, :lease_epoch) == lease["epoch"]
+        assert Map.get(run_state, :lease_acquired_at) == lease["acquired_at"]
+        assert Map.get(run_state, :lease_updated_at) == lease["updated_at"]
+        assert Map.get(run_state, :lease_status) == "held"
         assert refreshed_issue.state == "In Progress"
       end,
       60
@@ -577,6 +589,103 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       assert Map.get(run_state, :review_threads) == %{}
       assert Map.get(run_state, :runner_channel) == "canary"
       assert Map.get(run_state, :runner_instance_id) == "canary:dogfood-runner"
+    end)
+
+    refute_received {:github_review_feedback_called, ^workspace}
+  end
+
+  test "github webhook controller does not refresh workspaces leased by another owner on the same runner" do
+    secret = "github-webhook-secret"
+    previous_secret = System.get_env("GITHUB_WEBHOOK_SECRET")
+    System.put_env("GITHUB_WEBHOOK_SECRET", secret)
+    on_exit(fn -> restore_env("GITHUB_WEBHOOK_SECRET", previous_secret) end)
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-github-webhook-leased-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubReviewClient)
+
+    orchestrator_name =
+      :"github-webhook-leased-orchestrator-#{System.unique_integer([:positive])}"
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(
+        orchestrator: orchestrator_name,
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
+    )
+
+    start_supervised!({Orchestrator, name: orchestrator_name})
+    start_supervised!({SymphonyElixirWeb.Endpoint, []})
+
+    workspace = Path.join(workspace_root, "EVT-GH-LEASED")
+    File.mkdir_p!(workspace)
+
+    :ok = LeaseManager.acquire("manual:evt-gh-leased", "EVT-GH-LEASED", "other-orchestrator-owner")
+
+    on_exit(fn ->
+      LeaseManager.release("manual:evt-gh-leased")
+    end)
+
+    :ok =
+      RunStateStore.save(workspace, %{
+        issue_id: "manual:evt-gh-leased",
+        issue_identifier: "EVT-GH-LEASED",
+        issue_source: "manual",
+        stage: "await_checks",
+        pr_url: "https://github.com/gaspardip/events/pull/8",
+        runner_channel: "stable",
+        runner_instance_id: "stable:stable-runner",
+        review_threads: %{},
+        stage_history: [%{stage: "publish"}, %{stage: "await_checks"}],
+        stage_transition_counts: %{"publish" => 1, "await_checks" => 1}
+      })
+
+    raw_body =
+      Jason.encode!(%{
+        "action" => "submitted",
+        "review" => %{
+          "id" => 91,
+          "body" => "Please tighten this conditional.",
+          "submitted_at" => "2026-03-11T12:00:00Z"
+        },
+        "pull_request" => %{
+          "html_url" => "https://github.com/gaspardip/events/pull/8",
+          "updated_at" => "2026-03-11T12:00:00Z"
+        },
+        "repository" => %{"full_name" => "gaspardip/events"}
+      })
+
+    conn =
+      build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-github-event", "pull_request_review")
+      |> put_req_header("x-github-delivery", "delivery-leased")
+      |> put_req_header("x-hub-signature-256", github_signature(secret, raw_body))
+      |> post("/api/webhooks/github", raw_body)
+
+    assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
+
+    assert_eventually(fn ->
+      {:ok, run_state} = RunStateStore.load(workspace)
+      assert Map.get(run_state, :stage) == "await_checks"
+      assert Map.get(run_state, :last_review_decision) == nil
+      assert Map.get(run_state, :review_threads) == %{}
+      assert Map.get(run_state, :runner_channel) == "stable"
+      assert Map.get(run_state, :runner_instance_id) == "stable:stable-runner"
     end)
 
     refute_received {:github_review_feedback_called, ^workspace}

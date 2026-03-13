@@ -107,6 +107,56 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
     end
   end
 
+  test "run state store syncs and clears lease ownership metadata without losing issue context" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-state-lease-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-lease-sync", identifier: "MT-LEASE-SYNC", source: :manual}
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+      assert {:ok, synced_state} =
+               RunStateStore.sync_lease(workspace, issue, %{
+                 "owner" => "orchestrator-owner",
+                 "epoch" => 4,
+                 "acquired_at" => "2026-03-13T01:02:03Z",
+                 "updated_at" => "2026-03-13T01:03:04Z",
+                 "lease_status" => "held",
+                 "lease_owner_instance_id" => "canary:dogfood-runner",
+                 "lease_owner_channel" => "canary"
+               })
+
+      assert synced_state.issue_id == issue.id
+      assert synced_state.issue_identifier == issue.identifier
+      assert synced_state.issue_source == :manual
+      assert synced_state.lease_owner == "orchestrator-owner"
+      assert synced_state.lease_owner_instance_id == "canary:dogfood-runner"
+      assert synced_state.lease_owner_channel == "canary"
+      assert synced_state.lease_acquired_at == "2026-03-13T01:02:03Z"
+      assert synced_state.lease_updated_at == "2026-03-13T01:03:04Z"
+      assert synced_state.lease_status == "held"
+      assert synced_state.lease_epoch == 4
+
+      assert {:ok, cleared_state} = RunStateStore.clear_lease(workspace)
+      assert cleared_state.issue_id == issue.id
+      assert cleared_state.issue_identifier == issue.identifier
+      assert cleared_state.issue_source == "manual"
+      assert cleared_state.lease_owner == nil
+      assert cleared_state.lease_owner_instance_id == nil
+      assert cleared_state.lease_owner_channel == nil
+      assert cleared_state.lease_acquired_at == nil
+      assert cleared_state.lease_updated_at == nil
+      assert cleared_state.lease_status == nil
+      assert cleared_state.lease_epoch == nil
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "passive await_checks delay honors merge window next allowed time" do
     next_allowed_at =
       DateTime.utc_now()
@@ -152,6 +202,124 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
       assert :ok = LeaseManager.refresh(issue_id, "owner-b")
     after
       File.rm(path)
+    end
+  end
+
+  test "review follow-up lease helpers acquire, classify, and release owner state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-follow-up-lease-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{id: "manual:review-lease", identifier: "MT-REVIEW-LEASE", source: :manual}
+    workspace = Workspace.path_for_issue(issue)
+
+    try do
+      File.mkdir_p!(workspace)
+
+      :ok =
+        RunStateStore.save(workspace, %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          issue_source: issue.source,
+          stage: "await_checks"
+        })
+
+      state = %Orchestrator.State{lease_owner: "review-owner"}
+
+      run_state = %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source
+      }
+
+      assert :ok = Orchestrator.review_follow_up_lease_status_for_test(state, run_state)
+
+      assert {:ok, lease_attrs, true} =
+               Orchestrator.ensure_review_follow_up_lease_for_test(state, run_state)
+
+      assert lease_attrs.lease_owner == "review-owner"
+      assert lease_attrs.lease_owner_instance_id == "stable:stable-runner"
+      assert lease_attrs.lease_owner_channel == "stable"
+      assert lease_attrs.lease_status == "held"
+      assert :ok = Orchestrator.review_follow_up_lease_status_for_test(state, run_state)
+      assert Orchestrator.workspace_for_issue_id_for_test(state, issue.id) == workspace
+
+      assert {:ok, _synced_state} = RunStateStore.sync_lease(workspace, issue, lease_attrs)
+      assert :ok = Orchestrator.release_review_follow_up_lease_for_test(state, run_state, workspace)
+      assert {:error, :missing} = LeaseManager.read(issue.id)
+
+      assert {:ok, cleared_state} = RunStateStore.load(workspace)
+      assert cleared_state.lease_owner == nil
+      assert cleared_state.lease_status == nil
+      assert Orchestrator.workspace_for_issue_id_for_test(state, issue.id) == nil
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "persisted lease helpers sync and clear run-state ownership from live leases" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-persist-live-lease-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{id: "issue-persist-live-lease", identifier: "MT-PERSIST-LIVE-LEASE"}
+    workspace = Workspace.path_for_issue(issue)
+
+    try do
+      File.mkdir_p!(workspace)
+      assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "persist-owner")
+
+      state = %Orchestrator.State{
+        lease_owner: "persist-owner",
+        running: %{
+          issue.id => %{
+            issue: issue,
+            identifier: issue.identifier
+          }
+        }
+      }
+
+      assert {:ok, persisted_state} =
+               Orchestrator.persist_live_issue_lease_for_test(state, workspace, issue)
+
+      assert persisted_state.lease_owner == "persist-owner"
+      assert persisted_state.lease_owner_instance_id == "stable:stable-runner"
+      assert persisted_state.lease_owner_channel == "stable"
+      assert persisted_state.lease_status == "held"
+
+      Process.sleep(5)
+      assert :ok = LeaseManager.refresh(issue.id, "persist-owner")
+      assert :ok = Orchestrator.maybe_sync_running_issue_lease_for_test(state, issue.id)
+
+      assert {:ok, refreshed_state} = RunStateStore.load(workspace)
+      assert refreshed_state.lease_owner == "persist-owner"
+      assert refreshed_state.lease_updated_at != nil
+
+      assert :ok = Orchestrator.maybe_clear_persisted_lease_for_test(workspace)
+      assert {:ok, cleared_state} = RunStateStore.load(workspace)
+      assert cleared_state.lease_owner == nil
+      assert cleared_state.lease_epoch == nil
+    after
+      LeaseManager.release(issue.id)
+      File.rm_rf(workspace_root)
     end
   end
 

@@ -33,6 +33,8 @@ The runtime now includes the first routing and adjudication slices of this plan:
 - runner identity stamped into persisted `run_state`
 - channel-aware GitHub webhook follow-up that skips workspaces owned by another runner channel or instance
 - label-driven issue routing that keeps canary-targeted work off stable runners and keeps stable-targeted work off canary runners
+- lease-backed ownership persisted into `run_state` so live dispatch leases, webhook follow-up, and runner routing can share the same ownership facts
+- autonomous review follow-up that acquires a lease before reopening `review_verification` or `implement`, and skips same-channel work already owned by another orchestrator
 
 The remaining phases below describe how to extend that foundation with stronger proof sources, independent consensus, stagnation detection, reply planning, and thread-resolution policy.
 

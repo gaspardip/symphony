@@ -139,6 +139,25 @@ defmodule SymphonyElixir.RunStateStore do
     end
   end
 
+  @spec sync_lease(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def sync_lease(workspace, issue, lease_attrs)
+      when is_binary(workspace) and is_map(issue) and is_map(lease_attrs) do
+    state =
+      workspace
+      |> load_or_default(issue)
+      |> apply_lease_attrs(lease_attrs)
+
+    case save(workspace, state) do
+      :ok -> {:ok, state}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec clear_lease(Path.t()) :: {:ok, map()} | {:error, term()}
+  def clear_lease(workspace) when is_binary(workspace) do
+    update(workspace, &clear_lease_attrs/1)
+  end
+
   @spec delete(Path.t()) :: :ok
   def delete(workspace) when is_binary(workspace) do
     File.rm(state_path(workspace))
@@ -230,6 +249,12 @@ defmodule SymphonyElixir.RunStateStore do
       last_ledger_event_id: nil,
       last_merge: nil,
       stop_reason: nil,
+      lease_owner: nil,
+      lease_owner_instance_id: nil,
+      lease_owner_channel: nil,
+      lease_acquired_at: nil,
+      lease_updated_at: nil,
+      lease_status: nil,
       lease_epoch: nil
     }
   end
@@ -258,6 +283,52 @@ defmodule SymphonyElixir.RunStateStore do
     |> put_missing(:runner_channel, Config.runner_channel())
     |> put_missing(:runner_runtime_version, RunnerRuntime.runtime_version())
     |> put_missing(:runner_workspace_root, Config.workspace_root())
+  end
+
+  defp apply_lease_attrs(state, lease_attrs) when is_map(state) and is_map(lease_attrs) do
+    lease = normalize_lease_attrs(lease_attrs)
+
+    state
+    |> Map.put(:lease_owner, Map.get(lease, :lease_owner))
+    |> Map.put(:lease_owner_instance_id, Map.get(lease, :lease_owner_instance_id))
+    |> Map.put(:lease_owner_channel, Map.get(lease, :lease_owner_channel))
+    |> Map.put(:lease_acquired_at, Map.get(lease, :lease_acquired_at))
+    |> Map.put(:lease_updated_at, Map.get(lease, :lease_updated_at))
+    |> Map.put(:lease_status, Map.get(lease, :lease_status) || "held")
+    |> Map.put(:lease_epoch, Map.get(lease, :lease_epoch))
+  end
+
+  defp clear_lease_attrs(state) when is_map(state) do
+    state
+    |> Map.put(:lease_owner, nil)
+    |> Map.put(:lease_owner_instance_id, nil)
+    |> Map.put(:lease_owner_channel, nil)
+    |> Map.put(:lease_acquired_at, nil)
+    |> Map.put(:lease_updated_at, nil)
+    |> Map.put(:lease_status, nil)
+    |> Map.put(:lease_epoch, nil)
+  end
+
+  defp normalize_lease_attrs(lease_attrs) when is_map(lease_attrs) do
+    %{
+      lease_owner:
+        Map.get(lease_attrs, :lease_owner) || Map.get(lease_attrs, "lease_owner") ||
+          Map.get(lease_attrs, :owner) || Map.get(lease_attrs, "owner"),
+      lease_owner_instance_id:
+        Map.get(lease_attrs, :lease_owner_instance_id) ||
+          Map.get(lease_attrs, "lease_owner_instance_id"),
+      lease_owner_channel: Map.get(lease_attrs, :lease_owner_channel) || Map.get(lease_attrs, "lease_owner_channel"),
+      lease_acquired_at:
+        Map.get(lease_attrs, :lease_acquired_at) || Map.get(lease_attrs, "lease_acquired_at") ||
+          Map.get(lease_attrs, :acquired_at) || Map.get(lease_attrs, "acquired_at"),
+      lease_updated_at:
+        Map.get(lease_attrs, :lease_updated_at) || Map.get(lease_attrs, "lease_updated_at") ||
+          Map.get(lease_attrs, :updated_at) || Map.get(lease_attrs, "updated_at"),
+      lease_status: Map.get(lease_attrs, :lease_status) || Map.get(lease_attrs, "lease_status"),
+      lease_epoch:
+        Map.get(lease_attrs, :lease_epoch) || Map.get(lease_attrs, "lease_epoch") ||
+          Map.get(lease_attrs, :epoch) || Map.get(lease_attrs, "epoch")
+    }
   end
 
   defp put_missing(state, key, value) when is_map(state) do
