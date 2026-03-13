@@ -50,6 +50,7 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Strengthened `SymphonyElixir.ReviewEvidenceCollector` to verify referenced symbols in scoped files, preserve strong-consensus-but-unproven claims as pending instead of auto-churning, and produce evidence-based draft reply plans.
 - Updated PR watcher and delivery-engine thread syncing so drafted PR replies and resolution recommendations reflect actual verification outcomes rather than generic acknowledgements.
 - Added regression coverage for consensus scoring states, symbol-backed verification, consensus-supported pending claims, and evidence-based reply updates after review verification.
+- Folded the control-plane and canary-runner operating model into `docs/PR_REVIEW_ADJUDICATION_PLAN.md` so webhook ingress stays stable, dogfood work routes to isolated runner pools, and Symphony self-host changes promote explicitly instead of mutating the live runtime in place.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -89,4 +90,4 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest full validation after the consensus and reply-planning slice: `./scripts/symphony-validate.sh` passed on March 12, 2026 with `775 tests, 0 failures`, total coverage `86.64%`, `SymphonyElixir.ReviewConsensus` at `90.14%`, `SymphonyElixir.ReviewEvidenceCollector` at `82.40%`, `SymphonyElixir.DeliveryEngine` at `78.84%`, `SymphonyElixir.PRWatcher` at `87.27%`, and Dialyzer clean (`Total errors: 156, Skipped: 156, Unnecessary Skips: 6`)
 
 ## Next Step
-Push the latest branch updates to PR `gaspardip/symphony#1`, then extend the adjudication path with stronger proof adapters beyond local scope checks, historical precision tracking, and stagnation detection from `docs/PR_REVIEW_ADJUDICATION_PLAN.md`. Keep the cleanup-stage plan as a follow-on after the claim-evidence-consensus path is in place.
+Implement the next adjudication/runtime slice in the existing `CLZ-22` branch rather than opening a separate design PR. Prioritize stronger proof adapters, historical precision tracking, stagnation detection, and the first control-plane-aware routing seams needed for stable-ingress plus isolated-runner operation. Keep the cleanup-stage plan as a follow-on after the review claim path and operating topology are in place.

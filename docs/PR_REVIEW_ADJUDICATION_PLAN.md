@@ -33,6 +33,79 @@ The runtime now includes the first two slices of this plan:
 
 The remaining phases below describe how to extend that foundation with stronger proof sources, independent consensus, stagnation detection, reply planning, and thread-resolution policy.
 
+## Deployment Topology
+The adjudication loop should not depend on whichever Symphony branch is currently under test.
+
+The best operating model is:
+
+- one stable webhook ingress for GitHub and tracker events
+- one durable event log or inbox
+- one scheduler that maps events to runs
+- one or more isolated runner pools that execute issue work in per-issue workspaces
+- explicit promotion of runner versions after dogfood validation
+
+This avoids the unsafe pattern where a dogfood branch attempts to mutate the live process that is currently executing it.
+
+### Control plane
+The control plane should remain stable and own:
+
+- webhook verification and normalization
+- durable event persistence
+- queueing and deduplication
+- run registry and leases
+- routing decisions
+- operator visibility
+
+### Runner plane
+Runner instances should be versioned and disposable. Each runner should register:
+
+- `instance_id`
+- `runtime_version`
+- `channel`
+- `workspace_root`
+- `logs_root`
+- repo allowlist or routing scope
+- capabilities
+
+Runners should execute work only inside isolated per-issue workspaces and should never rewrite the checkout that is hosting the live control plane.
+
+### Channels
+Use explicit runner channels rather than binding webhooks directly to branches:
+
+- `stable`
+- `canary`
+- `experimental`
+
+Dogfood work for Symphony should route to `canary` runners by policy. Normal repo work should stay on `stable` unless explicitly opted into canary behavior.
+
+### Routing policy
+GitHub should send one webhook stream to the stable ingress. Internal routing should decide which runner pool handles the event based on:
+
+- repo
+- PR number
+- labels
+- issue metadata
+- runtime feature flags
+- current ownership lease
+- target channel
+
+Do not configure one GitHub webhook per branch. Keep GitHub configuration stable and move routing decisions inside Symphony.
+
+### Promotion model
+Dogfood changes should follow:
+
+1. stable ingress receives webhook and records it
+2. scheduler routes Symphony self-work to a canary runner pool
+3. canary runner creates or resumes an isolated issue workspace
+4. canary runner handles review adjudication and follow-up
+5. merged changes pass post-merge verification
+6. operator or promotion command upgrades the stable runner version
+
+Merged dogfood PRs should not replace the live runtime automatically.
+
+### Immediate rollout direction
+For the current `CLZ-22` branch, implement the adjudication and webhook behavior in the active branch and merge it manually. Use the stable ingress plus isolated runner model as the target topology, but do not block the current branch on full control-plane extraction.
+
 ## Problem Statement
 The current webhook-driven review loop can detect and surface PR comments, but it does not yet decide whether a comment is correct with enough rigor to safely automate the response.
 
