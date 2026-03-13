@@ -29,6 +29,7 @@ ops/local-topology.sh prepare
 ```
 
 The script writes stable and canary workflow files under your local state directory and prints the active paths and ports.
+It also seeds each local runner install root with a valid `metadata.json`, `history.jsonl`, `current` symlink, and release manifest so the runner-health gate starts in a healthy state instead of `runner.metadata_invalid`.
 
 ### Tracker mode
 The script chooses tracker mode automatically:

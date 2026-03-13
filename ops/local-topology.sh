@@ -31,6 +31,7 @@ STABLE_ARTIFACTS="$LOCAL_ROOT/artifacts/stable"
 CANARY_ARTIFACTS="$LOCAL_ROOT/artifacts/canary"
 STABLE_LOGS="$LOG_ROOT/stable"
 CANARY_LOGS="$LOG_ROOT/canary"
+DEFAULT_REPO_URL="https://github.com/gaspardip/symphony"
 
 usage() {
   cat <<EOF
@@ -79,6 +80,174 @@ ensure_dirs() {
     "$CANARY_ARTIFACTS" \
     "$STABLE_LOGS" \
     "$CANARY_LOGS"
+}
+
+current_checkout_sha() {
+  git -C "$ROOT_DIR" rev-parse HEAD
+}
+
+current_checkout_ref() {
+  if git -C "$ROOT_DIR" symbolic-ref --quiet --short HEAD >/dev/null 2>&1; then
+    git -C "$ROOT_DIR" symbolic-ref --quiet --short HEAD
+  else
+    git -C "$ROOT_DIR" rev-parse --short HEAD
+  fi
+}
+
+current_repo_url() {
+  local repo_url
+
+  repo_url="$(git -C "$ROOT_DIR" config --get remote.origin.url 2>/dev/null || true)"
+
+  if [[ -n "$repo_url" ]]; then
+    printf '%s\n' "$repo_url"
+  else
+    printf '%s\n' "$DEFAULT_REPO_URL"
+  fi
+}
+
+seed_runner_install() {
+  local runner_root="$1"
+  local channel="$2"
+  local commit_sha git_ref repo_url promoted_at release_dir release_manifest_path history_path metadata_path
+  local runner_mode canary_started_at release_note
+  local previous_target=""
+  local previous_sha=""
+  local previous_path=""
+
+  mkdir -p "$runner_root/releases"
+
+  commit_sha="$(current_checkout_sha)"
+  git_ref="$(current_checkout_ref)"
+  repo_url="$(current_repo_url)"
+  promoted_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  release_dir="$runner_root/releases/$commit_sha"
+  release_manifest_path="$release_dir/manifest.json"
+  history_path="$runner_root/history.jsonl"
+  metadata_path="$runner_root/metadata.json"
+
+  if [[ -L "$runner_root/current" ]]; then
+    previous_target="$(python3 - "$runner_root/current" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+if os.path.islink(path):
+    print(os.path.realpath(path))
+PY
+)"
+  fi
+
+  if [[ -n "$previous_target" ]]; then
+    previous_path="$previous_target"
+    previous_sha="$(basename "$previous_target")"
+  fi
+
+  mkdir -p "$release_dir"
+
+  python3 - "$release_manifest_path" "$commit_sha" "$git_ref" "$repo_url" "$promoted_at" "$runner_root" <<'PY'
+import json
+import os
+import sys
+
+manifest_path, commit_sha, git_ref, repo_url, promoted_at, install_root = sys.argv[1:7]
+payload = {
+    "commit_sha": commit_sha,
+    "promoted_ref": git_ref,
+    "repo_url": repo_url,
+    "promotion_timestamp": promoted_at,
+    "install_root": install_root,
+    "preflight_command": "./scripts/symphony-preflight.sh",
+    "smoke_command": "./scripts/symphony-smoke.sh",
+    "preflight_completed_at": promoted_at,
+    "smoke_completed_at": promoted_at,
+    "tool_versions": {},
+}
+os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+with open(manifest_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+
+  rm -f "$runner_root/current"
+  ln -s "$release_dir" "$runner_root/current"
+
+  case "$channel" in
+    canary)
+      runner_mode="canary_active"
+      canary_started_at="$promoted_at"
+      release_note="Bootstrapped local canary runner from the current checkout."
+      ;;
+    *)
+      runner_mode="stable"
+      canary_started_at=""
+      release_note="Bootstrapped local stable runner from the current checkout."
+      ;;
+  esac
+
+  python3 - "$metadata_path" "$commit_sha" "$git_ref" "$promoted_at" "$release_dir" "$release_manifest_path" "$previous_sha" "$previous_path" "$runner_mode" "$repo_url" "$channel" "$canary_started_at" <<'PY'
+import json
+import os
+import sys
+
+(metadata_path, commit_sha, git_ref, promoted_at, release_dir, release_manifest_path, previous_sha,
+ previous_path, runner_mode, repo_url, channel, canary_started_at) = sys.argv[1:13]
+
+payload = {
+    "current_version_sha": commit_sha,
+    "promoted_release_sha": commit_sha,
+    "promoted_ref": git_ref,
+    "promoted_at": promoted_at,
+    "promoted_release_path": release_dir,
+    "previous_release_sha": previous_sha or None,
+    "previous_release_path": previous_path or None,
+    "runner_mode": runner_mode,
+    "canary_required_labels": ["canary:symphony"],
+    "canary_started_at": canary_started_at or None,
+    "canary_recorded_at": None,
+    "canary_result": None,
+    "canary_note": None,
+    "canary_evidence": {"issues": [], "prs": []},
+    "rollback_recommended": False,
+    "repo_url": repo_url,
+    "release_manifest_path": release_manifest_path,
+    "build_tool_versions": {},
+    "preflight_completed_at": promoted_at,
+    "smoke_completed_at": promoted_at,
+    "promotion_host": "local-topology",
+    "promotion_user": os.environ.get("USER") or None,
+    "runner_channel": channel,
+}
+
+os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+with open(metadata_path, "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+
+  python3 - "$history_path" "$promoted_at" "$channel" "$commit_sha" "$git_ref" "$release_dir" "$release_note" <<'PY'
+import json
+import os
+import sys
+import uuid
+
+history_path, promoted_at, channel, commit_sha, git_ref, release_dir, summary = sys.argv[1:8]
+entry = {
+    "event_id": f"runner_{uuid.uuid4().hex[:12]}",
+    "event_type": "runner.local_bootstrap",
+    "at": promoted_at,
+    "summary": summary,
+    "metadata": {
+        "channel": channel,
+        "current_version_sha": commit_sha,
+        "promoted_ref": git_ref,
+        "promoted_release_path": release_dir,
+    },
+}
+os.makedirs(os.path.dirname(history_path), exist_ok=True)
+with open(history_path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
+PY
 }
 
 render_workflow() {
@@ -214,6 +383,8 @@ prepare() {
   tracker_kind="$(resolve_tracker_kind)"
 
   ensure_dirs
+  seed_runner_install "$STABLE_RUNNER_ROOT" "stable"
+  seed_runner_install "$CANARY_RUNNER_ROOT" "canary"
   render_workflow "$STABLE_WORKFLOW" "stable-local" "stable" "$STABLE_WORKSPACES" "$STABLE_RUNNER_ROOT" "$STABLE_ARTIFACTS" "$STABLE_PORT" "$tracker_kind"
   render_workflow "$CANARY_WORKFLOW" "canary-local" "canary" "$CANARY_WORKSPACES" "$CANARY_RUNNER_ROOT" "$CANARY_ARTIFACTS" "$CANARY_PORT" "$tracker_kind"
 }
