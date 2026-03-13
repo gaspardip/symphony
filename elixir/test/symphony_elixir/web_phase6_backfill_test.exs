@@ -834,6 +834,8 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert state_payload.polling.dispatch_summary =~ "manual issues continue to dispatch"
     assert state_payload.pr_watcher.enabled == true
     assert state_payload.pr_watcher.mode == "draft_first"
+    assert state_payload.github_webhooks.health == "healthy"
+    assert state_payload.github_inbox.last_assignment.assignment_state == "processed"
     assert state_payload.triage.summary.attention_now >= 3
     assert state_payload.triage.summary.autonomous_now == 0
     assert state_payload.triage.summary.recently_finished == 0
@@ -849,6 +851,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert running.policy.token_budget.per_turn_input.tone == "warn"
     assert running.policy.token_budget.per_issue_total.tone == "danger"
     assert running.policy.token_budget.per_issue_total_output.tone == "good"
+    assert running.lease.owner == "orchestrator-rich"
+    assert running.lease.status == "reclaimable"
+    assert running.lease.reclaimable == true
     assert running.last_decision.output == String.duplicate("x", 239) <> "…"
     assert Enum.any?(running.recent_activity, &(&1.message == "turn failed: compiler boom"))
     assert Enum.any?(state_payload.activity, &(&1.issue_identifier == "runner" and &1.message =~ "rollback suggested"))
@@ -865,11 +870,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     [skipped] = state_payload.skipped
     assert skipped.reason == "missing labels"
+    assert skipped.lease.owner_channel == "canary"
     assert skipped.operator_summary.why_here == "Skipped"
 
     [queue] = state_payload.queue
     assert queue.label_gate_eligible == false
     assert queue.rank == 7
+    assert queue.lease.owner == "queue-owner"
     assert queue.operator_summary.why_here == "Queued"
     assert queue.operator_summary.automatic_next == "Wait for the required operator action before dispatch."
     assert Enum.any?(state_payload.triage.attention_now, &(&1.issue_identifier == "MT-PAUSED"))
@@ -1791,6 +1798,18 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
         tracker_reads_paused: true,
         manual_dispatch_enabled: true
       },
+      github_webhooks: %{health: "healthy"},
+      github_inbox: %{
+        depth: 1,
+        oldest_pending_event_at: "2026-03-07T15:14:00Z",
+        last_drained_at: "2026-03-07T15:14:30Z",
+        last_assignment: %{
+          event_id: "delivery-rich",
+          assignment_state: "processed",
+          assignment_reason: "review_feedback_persisted",
+          assigned_runner_channel: "stable"
+        }
+      },
       runner: %{
         instance_name: "test-runner",
         runner_mode: "stable",
@@ -2002,6 +2021,19 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_decision_summary: "Need review",
       next_human_action: "Attach a PR.",
       last_ledger_event_id: "evt-run",
+      lease: %{
+        lease_owner: "orchestrator-rich",
+        lease_owner_instance_id: "stable:test-runner",
+        lease_owner_channel: "stable",
+        lease_acquired_at: "2026-03-07T15:00:00Z",
+        lease_updated_at: "2026-03-07T15:12:30Z",
+        lease_status: "reclaimable",
+        lease_epoch: 4,
+        lease_age_ms: 150_000,
+        lease_ttl_ms: 60_000,
+        lease_reclaimable: true,
+        lease_source: "live"
+      },
       last_decision: %{status: "failed", command: "mix test", output: String.duplicate("x", 260)},
       last_deploy_preview: %{status: "passed", command: "./scripts/deploy-preview.sh", output: "preview ok"},
       last_deploy_production: %{status: "passed", command: "./scripts/deploy-production.sh", output: "production ok"},
@@ -2059,7 +2091,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_rule_id: "routing.labels",
       last_failure_class: "routing",
       last_decision_summary: "Skipped",
-      last_ledger_event_id: "evt-skip"
+      last_ledger_event_id: "evt-skip",
+      lease: %{
+        lease_owner: "skip-owner",
+        lease_owner_instance_id: "canary:dogfood-runner",
+        lease_owner_channel: "canary",
+        lease_status: "held",
+        lease_epoch: 2,
+        lease_reclaimable: false
+      }
     }
   end
 
@@ -2082,7 +2122,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_rule_id: "priority.rank",
       last_failure_class: "priority",
       last_decision_summary: "Queued",
-      last_ledger_event_id: "evt-queue"
+      last_ledger_event_id: "evt-queue",
+      lease: %{
+        lease_owner: "queue-owner",
+        lease_owner_instance_id: "stable:test-runner",
+        lease_owner_channel: "stable",
+        lease_status: "held",
+        lease_epoch: 1,
+        lease_reclaimable: false
+      }
     }
   end
 

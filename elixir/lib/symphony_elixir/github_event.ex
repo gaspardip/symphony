@@ -14,6 +14,13 @@ defmodule SymphonyElixir.GitHubEvent do
     :pr_url,
     :repo_full_name,
     :updated_at,
+    :received_runner_channel,
+    :received_runner_instance_id,
+    :target_runner_channel,
+    :assigned_runner_channel,
+    :assigned_runner_instance_id,
+    :assignment_state,
+    :assignment_reason,
     :raw
   ]
 
@@ -27,6 +34,13 @@ defmodule SymphonyElixir.GitHubEvent do
           pr_url: String.t() | nil,
           repo_full_name: String.t() | nil,
           updated_at: DateTime.t() | nil,
+          received_runner_channel: String.t() | nil,
+          received_runner_instance_id: String.t() | nil,
+          target_runner_channel: String.t() | nil,
+          assigned_runner_channel: String.t() | nil,
+          assigned_runner_instance_id: String.t() | nil,
+          assignment_state: String.t() | nil,
+          assignment_reason: String.t() | nil,
           raw: map()
         }
 

@@ -35,6 +35,9 @@ The runtime now includes the first routing and adjudication slices of this plan:
 - label-driven issue routing that keeps canary-targeted work off stable runners and keeps stable-targeted work off canary runners
 - lease-backed ownership persisted into `run_state` so live dispatch leases, webhook follow-up, and runner routing can share the same ownership facts
 - autonomous review follow-up that acquires a lease before reopening `review_verification` or `implement`, and skips same-channel work already owned by another orchestrator
+- operator-visible lease snapshots with owner, age, TTL, and reclaimability for running, queued, and skipped work
+- GitHub inbox assignment snapshots that show whether review webhook work was processed, routed to another runner, skipped by a lease, or unmatched
+- lightweight review-history scoring with repeated-feedback counts and a `stagnant_feedback` state so repeated low-signal comments stop reopening implementation without new proof
 
 The remaining phases below describe how to extend that foundation with stronger proof sources, independent consensus, stagnation detection, reply planning, and thread-resolution policy.
 

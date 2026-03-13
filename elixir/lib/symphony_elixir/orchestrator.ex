@@ -113,7 +113,8 @@ defmodule SymphonyElixir.Orchestrator do
       github_webhook_last_rejected_reason: nil,
       github_webhook_last_rejected_rule_id: nil,
       github_inbox_last_drained_at: nil,
-      github_webhook_check_in_progress: false
+      github_webhook_check_in_progress: false,
+      github_last_assignment: nil
     ]
   end
 
@@ -605,62 +606,193 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_process_github_event(%State{} = state, %GitHubEvent{} = event) do
     if GitHubEvent.review_affecting?(event) do
-      refresh_pr_feedback_by_url(state, event.pr_url)
+      {next_state, assignment} = refresh_pr_feedback_by_url(state, event)
+      record_github_assignment(next_state, event, assignment)
     else
-      state
+      record_github_assignment(state, event, %{
+        assignment_state: "ignored",
+        assignment_reason: "non_review_affecting_event"
+      })
     end
   end
 
-  defp refresh_pr_feedback_by_url(%State{} = state, pr_url)
-       when is_binary(pr_url) and pr_url != "" do
-    refresh_pr_feedback_for_url(state, pr_url)
+  defp refresh_pr_feedback_by_url(%State{} = state, %GitHubEvent{} = event) do
+    pr_url = Map.get(event, :pr_url)
+
+    if is_binary(pr_url) and pr_url != "" do
+      refresh_pr_feedback_for_url(state, event, pr_url)
+    else
+      {state,
+       %{
+         assignment_state: "ignored",
+         assignment_reason: "missing_pr_url"
+       }}
+    end
   end
 
-  defp refresh_pr_feedback_by_url(%State{} = state, _pr_url), do: state
-
-  defp refresh_pr_feedback_for_url(%State{} = state, pr_url)
+  defp refresh_pr_feedback_for_url(%State{} = state, %GitHubEvent{} = event, pr_url)
        when is_binary(pr_url) and pr_url != "" do
-    Config.workspace_root()
-    |> list_workspace_paths()
-    |> Enum.reduce(state, fn workspace, state_acc ->
-      case RunStateStore.load(workspace) do
-        {:ok, run_state} ->
-          cond do
-            Map.get(run_state, :pr_url) != pr_url ->
-              state_acc
+    {next_state, outcomes} =
+      Config.workspace_root()
+      |> list_workspace_paths()
+      |> Enum.reduce({state, []}, fn workspace, {state_acc, outcomes_acc} ->
+        case RunStateStore.load(workspace) do
+          {:ok, run_state} ->
+            if Map.get(run_state, :pr_url) != pr_url do
+              {state_acc, outcomes_acc}
+            else
+              process_github_workspace_match(state_acc, workspace, run_state, pr_url, outcomes_acc)
+            end
 
-            not run_state_routed_to_current_runner?(run_state) ->
-              Logger.info(
-                "Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} runner_channel=#{Map.get(run_state, :runner_channel)} runner_instance_id=#{Map.get(run_state, :runner_instance_id)} current_channel=#{Config.runner_channel()} current_instance_id=#{RunnerRuntime.instance_id()}"
-              )
+          _ ->
+            {state_acc, outcomes_acc}
+        end
+      end)
 
-              state_acc
-
-            match?({:skip, _}, review_follow_up_lease_status(state_acc, run_state)) ->
-              {:skip, owner} = review_follow_up_lease_status(state_acc, run_state)
-
-              Logger.info("Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} lease_owner=#{inspect(owner)} current_owner=#{state_acc.lease_owner}")
-
-              state_acc
-
-            match?({:error, _}, review_follow_up_lease_status(state_acc, run_state)) ->
-              {:error, reason} = review_follow_up_lease_status(state_acc, run_state)
-
-              Logger.warning("Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} due to lease lookup error: #{inspect(reason)}")
-
-              state_acc
-
-            true ->
-              persist_review_feedback_for_workspace(state_acc, workspace, run_state, pr_url)
-          end
-
-        _ ->
-          state_acc
-      end
-    end)
+    {next_state, summarize_github_assignment(event, pr_url, outcomes)}
   end
 
-  defp refresh_pr_feedback_for_url(%State{} = state, _pr_url), do: state
+  defp refresh_pr_feedback_for_url(%State{} = state, _event, _pr_url) do
+    {state, %{assignment_state: "ignored", assignment_reason: "missing_pr_url"}}
+  end
+
+  defp process_github_workspace_match(
+         %State{} = state,
+         workspace,
+         run_state,
+         pr_url,
+         outcomes
+       )
+       when is_map(run_state) do
+    issue_identifier = Map.get(run_state, :issue_identifier)
+    target_runner_channel = Map.get(run_state, :runner_channel)
+    runner_instance_id = Map.get(run_state, :runner_instance_id)
+
+    cond do
+      not run_state_routed_to_current_runner?(run_state) ->
+        Logger.info(
+          "Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} runner_channel=#{target_runner_channel} runner_instance_id=#{runner_instance_id} current_channel=#{Config.runner_channel()} current_instance_id=#{RunnerRuntime.instance_id()}"
+        )
+
+        {state,
+         [
+           %{
+             issue_identifier: issue_identifier,
+             target_runner_channel: target_runner_channel,
+             assigned_runner_channel: target_runner_channel,
+             assigned_runner_instance_id: runner_instance_id,
+             assignment_state: "routed_to_other_runner",
+             assignment_reason: "run_state_owned_by_other_runner"
+           }
+           | outcomes
+         ]}
+
+      match?({:skip, _}, review_follow_up_lease_status(state, run_state)) ->
+        {:skip, owner} = review_follow_up_lease_status(state, run_state)
+
+        Logger.info("Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} lease_owner=#{inspect(owner)} current_owner=#{state.lease_owner}")
+
+        {state,
+         [
+           %{
+             issue_identifier: issue_identifier,
+             target_runner_channel: target_runner_channel,
+             assigned_runner_channel: Config.runner_channel(),
+             assigned_runner_instance_id: RunnerRuntime.instance_id(),
+             assignment_state: "leased_elsewhere",
+             assignment_reason: "issue_lease_owned_by_other_runner",
+             lease_owner: inspect(owner)
+           }
+           | outcomes
+         ]}
+
+      match?({:error, _}, review_follow_up_lease_status(state, run_state)) ->
+        {:error, reason} = review_follow_up_lease_status(state, run_state)
+
+        Logger.warning("Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} due to lease lookup error: #{inspect(reason)}")
+
+        {state,
+         [
+           %{
+             issue_identifier: issue_identifier,
+             target_runner_channel: target_runner_channel,
+             assigned_runner_channel: Config.runner_channel(),
+             assigned_runner_instance_id: RunnerRuntime.instance_id(),
+             assignment_state: "lease_lookup_error",
+             assignment_reason: inspect(reason)
+           }
+           | outcomes
+         ]}
+
+      true ->
+        {
+          persist_review_feedback_for_workspace(state, workspace, run_state, pr_url),
+          [
+            %{
+              issue_identifier: issue_identifier,
+              target_runner_channel: target_runner_channel || Config.runner_channel(),
+              assigned_runner_channel: Config.runner_channel(),
+              assigned_runner_instance_id: RunnerRuntime.instance_id(),
+              assignment_state: "processed",
+              assignment_reason: "review_feedback_persisted"
+            }
+            | outcomes
+          ]
+        }
+    end
+  end
+
+  defp process_github_workspace_match(%State{} = state, _workspace, _run_state, _pr_url, outcomes) do
+    {state, outcomes}
+  end
+
+  defp summarize_github_assignment(%GitHubEvent{} = event, pr_url, outcomes) when is_list(outcomes) do
+    preferred_outcome =
+      Enum.find_value(
+        ["processed", "leased_elsewhere", "routed_to_other_runner", "lease_lookup_error"],
+        fn target_state ->
+          Enum.find(outcomes, &(Map.get(&1, :assignment_state) == target_state))
+        end
+      )
+
+    base = %{
+      event_id: Map.get(event, :event_id),
+      event_name: Map.get(event, :event_name),
+      action: Map.get(event, :action),
+      pr_url: pr_url,
+      repo_full_name: Map.get(event, :repo_full_name),
+      received_runner_channel: Map.get(event, :received_runner_channel) || Config.runner_channel(),
+      received_runner_instance_id: Map.get(event, :received_runner_instance_id) || RunnerRuntime.instance_id(),
+      matched_run_states: length(outcomes),
+      processed_at: datetime_to_iso8601(DateTime.utc_now())
+    }
+
+    case preferred_outcome do
+      nil ->
+        Map.merge(base, %{
+          assignment_state: "unmatched_pr",
+          assignment_reason: "no_workspace_for_pr"
+        })
+
+      %{} = outcome ->
+        Map.merge(base, outcome)
+    end
+  end
+
+  defp record_github_assignment(%State{} = state, %GitHubEvent{} = event, attrs) when is_map(attrs) do
+    assignment =
+      attrs
+      |> Map.put_new(:event_id, Map.get(event, :event_id))
+      |> Map.put_new(:event_name, Map.get(event, :event_name))
+      |> Map.put_new(:action, Map.get(event, :action))
+      |> Map.put_new(:pr_url, Map.get(event, :pr_url))
+      |> Map.put_new(:repo_full_name, Map.get(event, :repo_full_name))
+      |> Map.put_new(:received_runner_channel, Map.get(event, :received_runner_channel))
+      |> Map.put_new(:received_runner_instance_id, Map.get(event, :received_runner_instance_id))
+      |> Map.put_new(:processed_at, datetime_to_iso8601(DateTime.utc_now()))
+
+    %{state | github_last_assignment: assignment}
+  end
 
   defp run_state_routed_to_current_runner?(run_state) when is_map(run_state) do
     channel = Map.get(run_state, :runner_channel)
@@ -748,6 +880,9 @@ defmodule SymphonyElixir.Orchestrator do
                 "consensus_summary" => Map.get(item, :consensus_summary),
                 "consensus_reasons" => Map.get(item, :consensus_reasons, []),
                 "historical_precision_score" => Map.get(item, :historical_precision_score),
+                "stagnation_score" => Map.get(item, :stagnation_score),
+                "stagnation_state" => Map.get(item, :stagnation_state),
+                "repeated_feedback_count" => Map.get(item, :repeated_feedback_count, 1),
                 "hard_proof" => Map.get(item, :hard_proof, false),
                 "proof_sources" => Map.get(item, :proof_sources, []),
                 "contradiction_sources" => Map.get(item, :contradiction_sources, []),
@@ -868,6 +1003,9 @@ defmodule SymphonyElixir.Orchestrator do
       "consensus_summary" => Map.get(item, :consensus_summary),
       "consensus_reasons" => Map.get(item, :consensus_reasons, []),
       "historical_precision_score" => Map.get(item, :historical_precision_score),
+      "stagnation_score" => Map.get(item, :stagnation_score),
+      "stagnation_state" => Map.get(item, :stagnation_state),
+      "repeated_feedback_count" => Map.get(item, :repeated_feedback_count, 1),
       "hard_proof" => Map.get(item, :hard_proof, false),
       "proof_sources" => Map.get(item, :proof_sources, []),
       "contradiction_sources" => Map.get(item, :contradiction_sources, []),
@@ -1289,6 +1427,13 @@ defmodule SymphonyElixir.Orchestrator do
       pr_url: Map.get(payload, "pr_url"),
       repo_full_name: Map.get(payload, "repo_full_name"),
       updated_at: parse_tracker_event_timestamp(Map.get(payload, "updated_at")),
+      received_runner_channel: Map.get(payload, "received_runner_channel"),
+      received_runner_instance_id: Map.get(payload, "received_runner_instance_id"),
+      target_runner_channel: Map.get(payload, "target_runner_channel"),
+      assigned_runner_channel: Map.get(payload, "assigned_runner_channel"),
+      assigned_runner_instance_id: Map.get(payload, "assigned_runner_instance_id"),
+      assignment_state: Map.get(payload, "assignment_state"),
+      assignment_reason: Map.get(payload, "assignment_reason"),
       raw: Map.get(payload, "raw") || %{}
     }
   rescue
@@ -3367,7 +3512,8 @@ defmodule SymphonyElixir.Orchestrator do
          |> Map.put(
            :last_drained_at,
            datetime_to_iso8601(Map.get(state, :github_inbox_last_drained_at))
-         ),
+         )
+         |> Map.put(:last_assignment, Map.get(state, :github_last_assignment)),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          mode: state.current_poll_mode,
@@ -3515,6 +3661,7 @@ defmodule SymphonyElixir.Orchestrator do
     workspace_path = Path.join(Config.workspace_root(), metadata.identifier || issue_id)
     inspection = RunInspector.inspect(workspace_path)
     run_state = load_run_state(workspace_path, metadata.issue)
+    lease = stateful_lease_details(issue_id, run_state, now)
 
     {policy_class, policy_source, policy_override} =
       policy_snapshot_values(metadata.issue, state, run_state)
@@ -3589,7 +3736,17 @@ defmodule SymphonyElixir.Orchestrator do
       next_human_action: Map.get(run_state, :next_human_action),
       last_ledger_event_id: Map.get(run_state, :last_ledger_event_id),
       passive?: Map.get(metadata, :passive?, false),
-      lease_owner: stateful_lease_owner(issue_id),
+      lease: lease,
+      lease_owner: Map.get(lease, :lease_owner),
+      lease_status: Map.get(lease, :lease_status),
+      lease_owner_instance_id: Map.get(lease, :lease_owner_instance_id),
+      lease_owner_channel: Map.get(lease, :lease_owner_channel),
+      lease_acquired_at: Map.get(lease, :lease_acquired_at),
+      lease_updated_at: Map.get(lease, :lease_updated_at),
+      lease_epoch: Map.get(lease, :lease_epoch),
+      lease_age_ms: Map.get(lease, :lease_age_ms),
+      lease_ttl_ms: Map.get(lease, :lease_ttl_ms),
+      lease_reclaimable: Map.get(lease, :lease_reclaimable, false),
       current_turn_input_tokens:
         max(
           0,
@@ -3638,7 +3795,18 @@ defmodule SymphonyElixir.Orchestrator do
         policy_override: Map.get(entry, :policy_override),
         next_human_action: Map.get(entry, :next_human_action),
         last_rule_id: Map.get(entry, :last_rule_id),
-        last_failure_class: Map.get(entry, :last_failure_class)
+        last_failure_class: Map.get(entry, :last_failure_class),
+        lease: Map.get(entry, :lease),
+        lease_owner: lease_owner_from_entry(entry),
+        lease_status: lease_status_from_entry(entry),
+        lease_owner_instance_id: lease_owner_instance_id_from_entry(entry),
+        lease_owner_channel: lease_owner_channel_from_entry(entry),
+        lease_acquired_at: lease_acquired_at_from_entry(entry),
+        lease_updated_at: lease_updated_at_from_entry(entry),
+        lease_epoch: lease_epoch_from_entry(entry),
+        lease_age_ms: lease_age_ms_from_entry(entry),
+        lease_ttl_ms: lease_ttl_ms_from_entry(entry),
+        lease_reclaimable: lease_reclaimable_from_entry(entry)
       }
     end)
   end
@@ -3674,6 +3842,8 @@ defmodule SymphonyElixir.Orchestrator do
         {last_rule_id, last_failure_class, last_decision_summary, next_human_action} =
           queue_policy_reason(entry.issue, state, run_state)
 
+        lease = stateful_lease_details(entry.issue_id, run_state)
+
         %{
           issue_id: entry.issue_id,
           issue_identifier: entry.identifier,
@@ -3695,7 +3865,18 @@ defmodule SymphonyElixir.Orchestrator do
           last_rule_id: last_rule_id,
           last_failure_class: last_failure_class,
           last_decision_summary: last_decision_summary,
-          last_ledger_event_id: Map.get(run_state, :last_ledger_event_id)
+          last_ledger_event_id: Map.get(run_state, :last_ledger_event_id),
+          lease: lease,
+          lease_owner: Map.get(lease, :lease_owner),
+          lease_status: Map.get(lease, :lease_status),
+          lease_owner_instance_id: Map.get(lease, :lease_owner_instance_id),
+          lease_owner_channel: Map.get(lease, :lease_owner_channel),
+          lease_acquired_at: Map.get(lease, :lease_acquired_at),
+          lease_updated_at: Map.get(lease, :lease_updated_at),
+          lease_epoch: Map.get(lease, :lease_epoch),
+          lease_age_ms: Map.get(lease, :lease_age_ms),
+          lease_ttl_ms: Map.get(lease, :lease_ttl_ms),
+          lease_reclaimable: Map.get(lease, :lease_reclaimable, false)
         }
       end)
 
@@ -5742,12 +5923,119 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | paused_issue_states: Map.put(state.paused_issue_states, issue_id, paused_entry)}
   end
 
-  defp stateful_lease_owner(issue_id) when is_binary(issue_id) do
-    case LeaseManager.read(issue_id) do
-      {:ok, %{"owner" => owner}} -> owner
+  defp stateful_lease_details(issue_id, run_state)
+       when is_binary(issue_id) and is_map(run_state) do
+    stateful_lease_details(issue_id, run_state, DateTime.utc_now())
+  end
+
+  defp stateful_lease_details(issue_id, run_state, now)
+       when is_binary(issue_id) and is_map(run_state) and is_struct(now, DateTime) do
+    live_lease =
+      case LeaseManager.read(issue_id) do
+        {:ok, lease} when is_map(lease) -> lease
+        _ -> nil
+      end
+
+    ttl_ms = LeaseManager.ttl_ms()
+    lease_owner = lease_field(live_lease, "owner") || Map.get(run_state, :lease_owner)
+    lease_updated_at = lease_field(live_lease, "updated_at") || Map.get(run_state, :lease_updated_at)
+    lease_acquired_at = lease_field(live_lease, "acquired_at") || Map.get(run_state, :lease_acquired_at)
+    lease_epoch = lease_field(live_lease, "epoch") || Map.get(run_state, :lease_epoch)
+    reclaimable? = lease_reclaimable?(live_lease, lease_updated_at, ttl_ms, now)
+
+    lease_source =
+      cond do
+        is_map(live_lease) -> "live"
+        present?(lease_owner) -> "persisted"
+        true -> "missing"
+      end
+
+    %{
+      lease_owner: lease_owner,
+      lease_owner_instance_id: Map.get(run_state, :lease_owner_instance_id),
+      lease_owner_channel: Map.get(run_state, :lease_owner_channel),
+      lease_acquired_at: lease_acquired_at,
+      lease_updated_at: lease_updated_at,
+      lease_status: lease_status_value(lease_owner, reclaimable?, Map.get(run_state, :lease_status)),
+      lease_epoch: lease_epoch,
+      lease_age_ms: lease_age_ms(live_lease, lease_updated_at, now),
+      lease_ttl_ms: ttl_ms,
+      lease_reclaimable: reclaimable?,
+      lease_source: lease_source
+    }
+  end
+
+  defp stateful_lease_details(_issue_id, _run_state, _now) do
+    %{
+      lease_owner: nil,
+      lease_owner_instance_id: nil,
+      lease_owner_channel: nil,
+      lease_acquired_at: nil,
+      lease_updated_at: nil,
+      lease_status: "missing",
+      lease_epoch: nil,
+      lease_age_ms: nil,
+      lease_ttl_ms: LeaseManager.ttl_ms(),
+      lease_reclaimable: false,
+      lease_source: "missing"
+    }
+  end
+
+  defp lease_field(nil, _key), do: nil
+  defp lease_field(lease, "owner") when is_map(lease), do: Map.get(lease, "owner") || Map.get(lease, :owner)
+  defp lease_field(lease, "updated_at") when is_map(lease), do: Map.get(lease, "updated_at") || Map.get(lease, :updated_at)
+  defp lease_field(lease, "acquired_at") when is_map(lease), do: Map.get(lease, "acquired_at") || Map.get(lease, :acquired_at)
+  defp lease_field(lease, "epoch") when is_map(lease), do: Map.get(lease, "epoch") || Map.get(lease, :epoch)
+  defp lease_field(_lease, _key), do: nil
+
+  defp lease_reclaimable?(lease, _updated_at, ttl_ms, now) when is_map(lease) do
+    LeaseManager.reclaimable?(lease, now, ttl_ms: ttl_ms)
+  rescue
+    ArgumentError -> false
+  end
+
+  defp lease_reclaimable?(_lease, updated_at, ttl_ms, %DateTime{} = now) when is_binary(updated_at) do
+    case DateTime.from_iso8601(updated_at) do
+      {:ok, timestamp, _offset} -> DateTime.diff(now, timestamp, :millisecond) > ttl_ms
+      _ -> true
+    end
+  end
+
+  defp lease_reclaimable?(_lease, _updated_at, _ttl_ms, _now), do: false
+
+  defp lease_status_value(nil, _reclaimable?, _persisted_status), do: "missing"
+  defp lease_status_value(_owner, true, _persisted_status), do: "reclaimable"
+
+  defp lease_status_value(_owner, false, persisted_status)
+       when is_binary(persisted_status) and persisted_status != "" do
+    persisted_status
+  end
+
+  defp lease_status_value(_owner, false, _persisted_status), do: "held"
+
+  defp lease_age_ms(lease, _updated_at, %DateTime{} = now) when is_map(lease) do
+    LeaseManager.age_ms(lease, now)
+  end
+
+  defp lease_age_ms(_lease, updated_at, %DateTime{} = now) when is_binary(updated_at) do
+    case DateTime.from_iso8601(updated_at) do
+      {:ok, timestamp, _offset} -> max(DateTime.diff(now, timestamp, :millisecond), 0)
       _ -> nil
     end
   end
+
+  defp lease_age_ms(_lease, _updated_at, _now), do: nil
+
+  defp lease_owner_from_entry(entry), do: get_in(entry, [:lease, :lease_owner]) || Map.get(entry, :lease_owner)
+  defp lease_status_from_entry(entry), do: get_in(entry, [:lease, :lease_status]) || Map.get(entry, :lease_status)
+  defp lease_owner_instance_id_from_entry(entry), do: get_in(entry, [:lease, :lease_owner_instance_id]) || Map.get(entry, :lease_owner_instance_id)
+  defp lease_owner_channel_from_entry(entry), do: get_in(entry, [:lease, :lease_owner_channel]) || Map.get(entry, :lease_owner_channel)
+  defp lease_acquired_at_from_entry(entry), do: get_in(entry, [:lease, :lease_acquired_at]) || Map.get(entry, :lease_acquired_at)
+  defp lease_updated_at_from_entry(entry), do: get_in(entry, [:lease, :lease_updated_at]) || Map.get(entry, :lease_updated_at)
+  defp lease_epoch_from_entry(entry), do: get_in(entry, [:lease, :lease_epoch]) || Map.get(entry, :lease_epoch)
+  defp lease_age_ms_from_entry(entry), do: get_in(entry, [:lease, :lease_age_ms]) || Map.get(entry, :lease_age_ms)
+  defp lease_ttl_ms_from_entry(entry), do: get_in(entry, [:lease, :lease_ttl_ms]) || Map.get(entry, :lease_ttl_ms)
+  defp lease_reclaimable_from_entry(entry), do: get_in(entry, [:lease, :lease_reclaimable]) || Map.get(entry, :lease_reclaimable, false)
 
   defp ensure_review_follow_up_lease(%State{} = state, run_state) when is_map(run_state) do
     issue_ref = issue_ref_for_run_state(run_state)

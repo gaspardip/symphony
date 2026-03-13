@@ -179,6 +179,39 @@ defmodule SymphonyElixir.ReviewEvidenceCollectorTest do
     assert ReviewEvidenceCollector.summary(%{}) == nil
   end
 
+  test "collect defers repeated stagnant feedback without reopening implementation" do
+    workspace = Path.join(System.tmp_dir!(), "review-evidence-stagnant-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join(workspace, "lib/example.ex"), "def useful_fun(), do: :ok\n")
+
+    {updated_claims, stats} =
+      ReviewEvidenceCollector.collect(
+        %{
+          "comment:131" => %{
+            "thread_key" => "comment:131",
+            "kind" => "comment",
+            "body" => "Maybe this is risky.",
+            "path" => "lib/example.ex",
+            "line" => 1,
+            "claim_type" => "performance_risk",
+            "disposition" => "needs_verification",
+            "actionable" => true,
+            "verification_status" => "pending",
+            "verification_attempts" => 1,
+            "stagnation_state" => "stagnant_feedback"
+          }
+        },
+        workspace
+      )
+
+    claim = updated_claims["comment:131"]
+
+    assert claim["verification_status"] == "stagnant_feedback"
+    assert claim["disposition"] == "deferred"
+    assert claim["actionable"] == false
+    assert stats.pending_count == 0
+  end
+
   test "reply_plan explains contradicted claims with evidence" do
     reply_plan =
       ReviewEvidenceCollector.reply_plan(%{
@@ -188,6 +221,17 @@ defmodule SymphonyElixir.ReviewEvidenceCollectorTest do
 
     assert reply_plan.draft_reply =~ "could not confirm the claim"
     assert reply_plan.draft_reply =~ "contradicted the claim"
+    assert reply_plan.resolution_recommendation == "keep_open_until_confirmed"
+  end
+
+  test "reply_plan explains stagnant feedback" do
+    reply_plan =
+      ReviewEvidenceCollector.reply_plan(%{
+        "verification_status" => "stagnant_feedback",
+        "evidence_summary" => "Repeated low-signal review feedback has not produced new local proof."
+      })
+
+    assert reply_plan.draft_reply =~ "seen this feedback repeatedly"
     assert reply_plan.resolution_recommendation == "keep_open_until_confirmed"
   end
 end

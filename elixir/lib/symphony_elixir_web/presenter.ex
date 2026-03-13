@@ -49,7 +49,9 @@ defmodule SymphonyElixirWeb.Presenter do
             rate_limits: snapshot.rate_limits,
             runner: runner_payload,
             webhooks: Map.get(snapshot, :webhooks, %{}),
+            github_webhooks: Map.get(snapshot, :github_webhooks, %{}),
             tracker_inbox: Map.get(snapshot, :tracker_inbox, %{}),
+            github_inbox: Map.get(snapshot, :github_inbox, %{}),
             polling: Map.get(snapshot, :polling, %{})
         }
 
@@ -143,7 +145,9 @@ defmodule SymphonyElixirWeb.Presenter do
              Map.merge(payload, %{
                runner: Map.get(snapshot, :runner, %{}),
                webhooks: Map.get(snapshot, :webhooks, %{}),
+               github_webhooks: Map.get(snapshot, :github_webhooks, %{}),
                tracker_inbox: Map.get(snapshot, :tracker_inbox, %{}),
+               github_inbox: Map.get(snapshot, :github_inbox, %{}),
                polling: Map.get(snapshot, :polling, %{}),
                pr_watcher:
                  pr_watcher_payload(
@@ -620,6 +624,7 @@ defmodule SymphonyElixirWeb.Presenter do
       review: review,
       publish: publish_payload(entry),
       routing: routing_payload(entry),
+      lease: lease_payload(entry),
       policy: policy,
       company: company_payload(),
       policy_pack: policy_pack_payload(),
@@ -662,6 +667,7 @@ defmodule SymphonyElixirWeb.Presenter do
       error: Map.get(entry, :error),
       priority_override: Map.get(entry, :priority_override),
       policy_class: Map.get(entry, :policy_class),
+      lease: lease_payload(entry),
       company: company_payload(),
       policy_pack: policy_pack_payload(),
       workflow_profile: workflow_profile_payload(entry),
@@ -683,6 +689,7 @@ defmodule SymphonyElixirWeb.Presenter do
       source: Map.get(entry, :source),
       resume_state: entry.resume_state,
       policy_class: Map.get(entry, :policy_class),
+      lease: lease_payload(entry),
       company: company_payload(),
       policy_pack: policy_pack_payload(),
       workflow_profile: workflow_profile_payload(entry),
@@ -707,6 +714,7 @@ defmodule SymphonyElixirWeb.Presenter do
       required_labels: Map.get(entry, :required_labels, []),
       reason: Map.get(entry, :reason),
       policy_class: Map.get(entry, :policy_class),
+      lease: lease_payload(entry),
       company: company_payload(),
       policy_pack: policy_pack_payload(),
       workflow_profile: workflow_profile_payload(entry),
@@ -736,6 +744,7 @@ defmodule SymphonyElixirWeb.Presenter do
       label_gate_eligible: Map.get(entry, :label_gate_eligible, true),
       error: Map.get(entry, :error),
       policy_class: Map.get(entry, :policy_class),
+      lease: lease_payload(entry),
       policy_pack: policy_pack_payload(),
       workflow_profile: workflow_profile_payload(entry),
       policy_source: Map.get(entry, :policy_source),
@@ -995,7 +1004,27 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       labels: Map.get(entry, :labels, []),
       required_labels: Map.get(entry, :required_labels, []),
-      eligible: Map.get(entry, :label_gate_eligible, true)
+      eligible: Map.get(entry, :label_gate_eligible, true),
+      runner_channel: Map.get(entry, :runner_channel),
+      target_runner_channel: Map.get(entry, :target_runner_channel)
+    }
+  end
+
+  defp lease_payload(entry) when is_map(entry) do
+    raw_lease = Map.get(entry, :lease, %{})
+
+    %{
+      owner: Map.get(raw_lease, :lease_owner) || Map.get(entry, :lease_owner),
+      owner_instance_id: Map.get(raw_lease, :lease_owner_instance_id) || Map.get(entry, :lease_owner_instance_id),
+      owner_channel: Map.get(raw_lease, :lease_owner_channel) || Map.get(entry, :lease_owner_channel),
+      acquired_at: normalize_timestamp(Map.get(raw_lease, :lease_acquired_at) || Map.get(entry, :lease_acquired_at)),
+      updated_at: normalize_timestamp(Map.get(raw_lease, :lease_updated_at) || Map.get(entry, :lease_updated_at)),
+      status: Map.get(raw_lease, :lease_status) || Map.get(entry, :lease_status),
+      epoch: Map.get(raw_lease, :lease_epoch) || Map.get(entry, :lease_epoch),
+      age_ms: Map.get(raw_lease, :lease_age_ms) || Map.get(entry, :lease_age_ms),
+      ttl_ms: Map.get(raw_lease, :lease_ttl_ms) || Map.get(entry, :lease_ttl_ms),
+      reclaimable: Map.get(raw_lease, :lease_reclaimable) || Map.get(entry, :lease_reclaimable, false),
+      source: Map.get(raw_lease, :lease_source)
     }
   end
 
@@ -1051,7 +1080,9 @@ defmodule SymphonyElixirWeb.Presenter do
       rate_limits: nil,
       runner: %{},
       webhooks: %{},
+      github_webhooks: %{},
       tracker_inbox: %{depth: 0, oldest_pending_event_at: nil, last_drained_at: nil},
+      github_inbox: %{depth: 0, oldest_pending_event_at: nil, last_drained_at: nil},
       polling: %{checking?: false, next_poll_in_ms: nil, poll_interval_ms: nil}
     }
   end

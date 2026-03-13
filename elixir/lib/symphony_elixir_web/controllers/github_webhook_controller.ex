@@ -6,7 +6,7 @@ defmodule SymphonyElixirWeb.GitHubWebhookController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
-  alias SymphonyElixir.{GitHub.Webhook, GitHubEventInbox}
+  alias SymphonyElixir.{Config, GitHub.Webhook, GitHubEventInbox, RunnerRuntime}
   alias SymphonyElixirWeb.Endpoint
 
   @spec create(Conn.t(), map()) :: Conn.t()
@@ -15,6 +15,17 @@ defmodule SymphonyElixirWeb.GitHubWebhookController do
 
     case Webhook.decode(conn.req_headers, raw_body) do
       {:ok, events} ->
+        events =
+          Enum.map(events, fn event ->
+            %{
+              event
+              | received_runner_channel: Config.runner_channel(),
+                received_runner_instance_id: RunnerRuntime.instance_id(),
+                assignment_state: "queued",
+                assignment_reason: "awaiting_runtime_assignment"
+            }
+          end)
+
         case GitHubEventInbox.enqueue(events) do
           {:ok, result} ->
             _ =

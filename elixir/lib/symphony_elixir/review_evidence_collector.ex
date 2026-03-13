@@ -68,6 +68,9 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         verification_status == "consensus_supported" ->
           "I found this concern plausible after a focused pass, but I still do not have hard proof to justify a change. #{consensus_summary}"
 
+        verification_status == "stagnant_feedback" ->
+          "I have seen this feedback repeatedly, but focused verification still has not produced new concrete evidence. #{evidence_summary}"
+
         verification_status == "insufficient_evidence" ->
           "I reviewed this feedback and did not find enough concrete evidence to reopen implementation yet. #{consensus_summary}"
 
@@ -86,6 +89,9 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
           "keep_open_until_change"
 
         verification_status in ["contradicted", "consensus_supported", "insufficient_evidence"] ->
+          "keep_open_until_confirmed"
+
+        verification_status == "stagnant_feedback" ->
           "keep_open_until_confirmed"
 
         disposition == "deferred" ->
@@ -107,6 +113,19 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         claim
         |> Map.put("verification_attempts", verification_attempts)
         |> Map.put_new("verification_status", "not_needed")
+
+      stagnant_feedback?(claim, verification_attempts) ->
+        claim
+        |> Map.put("verification_attempts", verification_attempts)
+        |> Map.put("verification_status", "stagnant_feedback")
+        |> Map.put("disposition", "deferred")
+        |> Map.put("actionable", false)
+        |> Map.put("evidence_refs", Map.get(claim, "evidence_refs", []))
+        |> Map.put(
+          "evidence_summary",
+          "Repeated low-signal review feedback has not produced new local proof. Waiting for stronger evidence before reopening implementation."
+        )
+        |> ensure_contradiction_sources()
 
       contradiction?(claim, workspace) ->
         claim
@@ -228,6 +247,12 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
 
     consensus_score >= 0.70 and evidence_quality_score >= 0.70 and locality_score >= 0.80 and
       is_binary(path) and file_exists?(workspace, path) and (is_nil(line) or line_exists?(workspace, path, line))
+  end
+
+  defp stagnant_feedback?(claim, verification_attempts) do
+    verification_attempts >= 2 and
+      Map.get(claim, "stagnation_state") == "stagnant_feedback" and
+      not Map.get(claim, "hard_proof", false)
   end
 
   defp file_exists?(workspace, path), do: File.exists?(Path.join(workspace, path))

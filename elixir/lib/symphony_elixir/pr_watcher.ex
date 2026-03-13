@@ -23,6 +23,10 @@ defmodule SymphonyElixir.PRWatcher do
   @dialyzer {:nowarn_function, merge_adjudication: 3}
   @dialyzer {:nowarn_function, draft_reply: 3}
   @dialyzer {:nowarn_function, resolution_recommendation: 3}
+  @dialyzer {:nowarn_function, review_history: 2}
+  @dialyzer {:nowarn_function, same_feedback_claim?: 2}
+  @dialyzer {:nowarn_function, normalize_feedback_signature: 1}
+  @dialyzer {:nowarn_function, historical_precision_score: 1}
 
   @type t :: %{
           enabled: boolean(),
@@ -60,6 +64,9 @@ defmodule SymphonyElixir.PRWatcher do
           consensus_summary: String.t() | nil,
           consensus_reasons: [String.t()],
           historical_precision_score: float(),
+          stagnation_score: float(),
+          stagnation_state: String.t(),
+          repeated_feedback_count: non_neg_integer(),
           hard_proof: boolean(),
           proof_sources: [String.t()],
           contradiction_sources: [String.t()],
@@ -246,6 +253,9 @@ defmodule SymphonyElixir.PRWatcher do
       consensus_summary: Map.get(persisted, "consensus_summary"),
       consensus_reasons: Map.get(persisted, "consensus_reasons", []),
       historical_precision_score: Map.get(persisted, "historical_precision_score", 0.0),
+      stagnation_score: Map.get(persisted, "stagnation_score", 0.0),
+      stagnation_state: Map.get(persisted, "stagnation_state", "fresh"),
+      repeated_feedback_count: Map.get(persisted, "repeated_feedback_count", 1),
       hard_proof: Map.get(persisted, "hard_proof", false),
       proof_sources: Map.get(persisted, "proof_sources", []),
       contradiction_sources: Map.get(persisted, "contradiction_sources", []),
@@ -303,7 +313,17 @@ defmodule SymphonyElixir.PRWatcher do
   end
 
   defp merge_adjudication(base_item, persisted, workspace) do
-    adjudication = ReviewAdjudicator.adjudicate(base_item, workspace: workspace)
+    history = review_history(persisted, base_item)
+
+    adjudication =
+      ReviewAdjudicator.adjudicate(
+        base_item,
+        workspace: workspace,
+        historical_precision_score: history.historical_precision_score,
+        stagnation_score: history.stagnation_score,
+        stagnation_state: history.stagnation_state,
+        repeated_feedback_count: history.repeated_feedback_count
+      )
 
     base_item
     |> Map.merge(adjudication)
@@ -317,6 +337,84 @@ defmodule SymphonyElixir.PRWatcher do
       )
     )
   end
+
+  defp review_history(persisted, item) when is_map(persisted) and is_map(item) do
+    repeated_feedback_count =
+      if same_feedback_claim?(persisted, item) do
+        Map.get(persisted, "repeated_feedback_count", 0) + 1
+      else
+        1
+      end
+
+    verification_status = Map.get(persisted, "verification_status")
+    disposition = Map.get(persisted, "disposition")
+
+    stagnation_state =
+      if repeated_feedback_count >= 3 and
+           verification_status in ["pending", "insufficient_evidence", "consensus_supported", "stagnant_feedback"] and
+           disposition in ["needs_verification", "dismissed", "deferred"] do
+        "stagnant_feedback"
+      else
+        "fresh"
+      end
+
+    %{
+      historical_precision_score: historical_precision_score(persisted),
+      stagnation_score: if(stagnation_state == "stagnant_feedback", do: 0.8, else: 0.0),
+      stagnation_state: stagnation_state,
+      repeated_feedback_count: repeated_feedback_count
+    }
+  end
+
+  defp review_history(_persisted, _item) do
+    %{
+      historical_precision_score: 0.5,
+      stagnation_score: 0.0,
+      stagnation_state: "fresh",
+      repeated_feedback_count: 1
+    }
+  end
+
+  defp same_feedback_claim?(persisted, item) when is_map(persisted) and is_map(item) do
+    normalize_feedback_signature(persisted) == normalize_feedback_signature(item)
+  end
+
+  defp same_feedback_claim?(_persisted, _item), do: false
+
+  defp normalize_feedback_signature(item) when is_map(item) do
+    %{
+      kind: Map.get(item, :kind) || Map.get(item, "kind"),
+      path: Map.get(item, :path) || Map.get(item, "path"),
+      line: Map.get(item, :line) || Map.get(item, "line"),
+      body:
+        item
+        |> Map.get(:body, Map.get(item, "body"))
+        |> to_string()
+        |> String.trim()
+    }
+  end
+
+  defp historical_precision_score(persisted) when is_map(persisted) do
+    case Map.get(persisted, "verification_status") do
+      status when status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+        0.85
+
+      "contradicted" ->
+        0.20
+
+      "stagnant_feedback" ->
+        0.30
+
+      _ ->
+        case Map.get(persisted, "disposition") do
+          "dismissed" -> 0.35
+          "deferred" -> 0.45
+          _ -> 0.50
+        end
+    end
+  end
+
+  defp historical_precision_score(_persisted), do: 0.50
 
   defp draft_reply(item, adjudication, persisted) do
     body = Map.get(item, :body)

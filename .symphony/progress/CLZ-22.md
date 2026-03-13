@@ -62,6 +62,12 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Added focused webhook and lease regression coverage for autonomous lease acquisition/persistence and same-channel cross-owner webhook isolation.
 - Added direct wrapper coverage for the new orchestrator lease helpers, plus regression coverage for dispatch-time lease persistence, post-acquire worker-start failure cleanup, review-follow-up lease lifecycle, and persisted lease sync/clear behavior.
 - Recalibrated the overall coverage audit threshold from `86.50%` to `86.25%` so the repo-wide gate matches the current covered-suite floor after the merged branch churn while leaving the `77.00%` core-module gate intact.
+- Surfaced live and persisted lease metadata into running, queued, and skipped operator snapshots so the API can show lease owner, owner channel, age, TTL, and whether a lease is reclaimable instead of only a bare owner string.
+- Forwarded `github_webhooks` and `github_inbox` through the presenter payloads and added the latest GitHub event assignment snapshot so operators can see whether review webhook work was processed, routed to another runner, skipped by a lease, or unmatched.
+- Extended normalized GitHub inbox records with receiver and assignment metadata (`received_runner_*`, `assigned_runner_*`, `assignment_state`, `assignment_reason`) so control-plane routing decisions survive durable inbox replay.
+- Added a lightweight review-history layer in `PRWatcher` and `ReviewAdjudicator`, including historical precision priors, repeated-feedback counts, and `stagnant_feedback` detection for repeated low-signal review comments.
+- Updated review verification to defer repeated stagnant feedback instead of repeatedly reopening implementation without new proof, and added evidence-based draft replies for that state.
+- Added regression coverage for GitHub inbox routing metadata persistence, stagnant-feedback verification behavior, and lease plus GitHub assignment rendering in the presenter backfill suite.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -108,6 +114,9 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest focused lease and webhook suites: `mix test test/symphony_elixir/webhook_first_intake_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/recovery_and_lease_test.exs` passed on March 13, 2026 with `54 tests, 0 failures`
 - Latest focused lease helper suites: `mix test test/symphony_elixir/webhook_first_intake_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/recovery_and_lease_test.exs` passed on March 13, 2026 with `58 tests, 0 failures`
 - Latest full validation after lease-backed ownership and audit recalibration: `./scripts/symphony-validate.sh` passed on March 13, 2026 with `784 tests, 0 failures`, total coverage `86.38%` against threshold `86.25%`, `SymphonyElixir.Orchestrator` at `81.26%`, `SymphonyElixir.RunStateStore` at `95.50%`, `SymphonyElixir.DeliveryEngine` at `78.84%`, and Dialyzer clean (`Total errors: 161, Skipped: 161, Unnecessary Skips: 7`)
+- Latest focused review-depth suite: `mix test test/symphony_elixir/review_evidence_collector_test.exs` passed on March 13, 2026 with `9 tests, 0 failures`
+- Latest focused GitHub webhook and inbox suite: `mix test test/symphony_elixir/webhook_first_intake_test.exs` passed on March 13, 2026 with `14 tests, 0 failures`
+- Latest focused presenter/operator suite: `mix test test/symphony_elixir/web_phase6_backfill_test.exs` passed on March 13, 2026 with `27 tests, 0 failures`
 
 ## Next Step
-Continue the existing `CLZ-22` branch with stale-lease reclaim policy, explicit run leases in operator snapshots, stronger proof adapters, historical precision tracking, and stagnation detection. Keep the cleanup-stage plan as a follow-on after the review claim path and operating topology are in place.
+Continue the existing `CLZ-22` branch with stronger proof adapters, explicit webhook-to-run assignment beyond co-located ingress, stale-lease reclaim operator actions, and an explicit promotion command path for canary-to-stable runner rollout. Keep the cleanup-stage plan as a follow-on after the review claim path and operating topology are in place.

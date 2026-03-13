@@ -1,7 +1,7 @@
 id: runtime-core
 title: Runtime Core
 status: active
-summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, evidence-based review follow-up with non-actionable noise suppression, and runner identity plus lease-backed channel-aware issue and webhook routing seams for stable ingress and isolated runner pools.
+summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, evidence-based review follow-up with non-actionable noise suppression, operator-visible lease and webhook assignment state, and runner identity plus lease-backed channel-aware issue and webhook routing seams for stable ingress and isolated runner pools.
 source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
@@ -19,6 +19,7 @@ acceptance_signals:
   - Persisted run state records live lease ownership so same-channel runners do not both resume the same review follow-up
   - Dispatch, lease refresh, and lease release keep persisted run-state ownership aligned with the live lease file
   - Issue dispatch respects the target runner channel so stable and canary pools do not steal each other's work
+  - Operator snapshots surface lease age, TTL, reclaimability, and latest GitHub assignment state so webhook and routing skips are explainable
 dependencies:
   - harness
 last_updated_by_issue: CLZ-22

@@ -38,7 +38,19 @@ defmodule SymphonyElixir.ReviewAdjudicator do
     source_precision_score = source_precision_score(source_class)
     consensus = ReviewConsensus.assess(item, claim_type: claim_type)
     consensus_score = Map.get(consensus, :consensus_score, @neutral_score)
-    historical_precision_score = @neutral_score
+
+    historical_precision_score =
+      Keyword.get(opts, :historical_precision_score, @neutral_score)
+      |> clamp_score()
+      |> round_score()
+
+    stagnation_score =
+      Keyword.get(opts, :stagnation_score, 0.0)
+      |> clamp_score()
+      |> round_score()
+
+    stagnation_state = Keyword.get(opts, :stagnation_state, "fresh")
+    repeated_feedback_count = Keyword.get(opts, :repeated_feedback_count, 1)
 
     veracity_score =
       [
@@ -51,6 +63,7 @@ defmodule SymphonyElixir.ReviewAdjudicator do
       ]
       |> Enum.sum()
       |> maybe_adjust_for_review_decision(item)
+      |> maybe_adjust_for_stagnation(stagnation_score, claim_type, hard_proof_sources)
       |> clamp_score()
       |> round_score()
 
@@ -75,6 +88,9 @@ defmodule SymphonyElixir.ReviewAdjudicator do
       consensus_summary: Map.get(consensus, :consensus_summary),
       consensus_reasons: Map.get(consensus, :consensus_reasons, []),
       historical_precision_score: round_score(historical_precision_score),
+      stagnation_score: stagnation_score,
+      stagnation_state: stagnation_state,
+      repeated_feedback_count: repeated_feedback_count,
       hard_proof: hard_proof_sources != [],
       proof_sources: Enum.map(hard_proof_sources, &to_string/1),
       contradiction_sources: Enum.map(contradictions, &to_string/1),
@@ -275,6 +291,15 @@ defmodule SymphonyElixir.ReviewAdjudicator do
   defp maybe_adjust_for_review_decision(score, item) do
     if review_change_requested?(item), do: score + 0.10, else: score
   end
+
+  defp maybe_adjust_for_stagnation(score, stagnation_score, claim_type, hard_proof_sources)
+       when hard_proof_sources == [] and stagnation_score >= 0.70 and
+              claim_type in [:maintainability, :style_or_nit, :unclear, :performance_risk] do
+    score - 0.10
+  end
+
+  defp maybe_adjust_for_stagnation(score, _stagnation_score, _claim_type, _hard_proof_sources),
+    do: score
 
   defp disposition(_claim_type, _score, _hard_proof?, true), do: :dismissed
 

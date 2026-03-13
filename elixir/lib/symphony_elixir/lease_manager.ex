@@ -8,6 +8,52 @@ defmodule SymphonyElixir.LeaseManager do
   @lease_dir "leases"
   @lease_version 1
 
+  @spec ttl_ms() :: pos_integer()
+  def ttl_ms do
+    default_ttl_ms()
+  end
+
+  @spec age_ms(map()) :: non_neg_integer() | nil
+  def age_ms(lease) when is_map(lease) do
+    age_ms(lease, DateTime.utc_now())
+  end
+
+  @spec age_ms(map(), DateTime.t()) :: non_neg_integer() | nil
+  def age_ms(lease, %DateTime{} = now) when is_map(lease) do
+    lease
+    |> updated_at_value()
+    |> case do
+      %DateTime{} = timestamp ->
+        max(DateTime.diff(now, timestamp, :millisecond), 0)
+
+      _ ->
+        nil
+    end
+  end
+
+  def age_ms(_lease, _now), do: nil
+
+  @spec reclaimable?(map()) :: boolean()
+  def reclaimable?(lease) when is_map(lease) do
+    reclaimable?(lease, DateTime.utc_now())
+  end
+
+  @spec reclaimable?(map(), DateTime.t()) :: boolean()
+  def reclaimable?(lease, %DateTime{} = now) when is_map(lease) do
+    reclaimable?(lease, now, [])
+  end
+
+  @spec reclaimable?(map(), DateTime.t(), keyword()) :: boolean()
+  def reclaimable?(lease, %DateTime{} = now, opts) when is_map(lease) and is_list(opts) do
+    ttl_ms = Keyword.get(opts, :ttl_ms, ttl_ms())
+
+    lease
+    |> updated_at_value()
+    |> stale_lease?(now, ttl_ms)
+  end
+
+  def reclaimable?(_lease, _now, _opts), do: false
+
   @spec read(String.t()) :: {:ok, map()} | {:error, :missing | term()}
   def read(issue_id) when is_binary(issue_id) do
     path = lease_path(issue_id)
@@ -165,6 +211,22 @@ defmodule SymphonyElixir.LeaseManager do
   end
 
   defp stale_lease?(_updated_at, _now, _ttl_ms), do: true
+
+  defp updated_at_value(lease) when is_map(lease) do
+    case lease["updated_at"] || lease[:updated_at] do
+      value when is_binary(value) ->
+        case DateTime.from_iso8601(value) do
+          {:ok, timestamp, _offset} -> timestamp
+          _ -> nil
+        end
+
+      %DateTime{} = timestamp ->
+        timestamp
+
+      _ ->
+        nil
+    end
+  end
 
   defp normalize_timestamp(%DateTime{} = timestamp, _now), do: DateTime.to_iso8601(timestamp)
 

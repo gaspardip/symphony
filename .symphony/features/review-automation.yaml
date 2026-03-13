@@ -1,7 +1,7 @@
 id: review-automation
 title: Review Automation
 status: active
-summary: Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, and runner plus lease-aware webhook and issue routing for noisy PR feedback.
+summary: Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, historical precision and stagnation tracking, and runner plus lease-aware webhook and issue routing for noisy PR feedback.
 source_paths:
   - elixir/lib/symphony_elixir/pr_watcher.ex
   - elixir/lib/symphony_elixir/review_adjudicator.ex
@@ -22,6 +22,8 @@ acceptance_signals:
   - Review webhook follow-up skips workspaces owned by another runner channel or instance
   - Review webhook follow-up also skips same-channel workspaces when a different orchestrator owner holds the live lease
   - Autonomous review follow-up acquires and persists lease ownership before reopening implementation or review verification
+  - Operators can inspect GitHub webhook assignment state and lease reclaimability through the presenter and API payloads
+  - Repeated low-signal review comments are tracked as stagnant feedback instead of repeatedly reopening implementation without new proof
   - Canary-targeted issues are skipped by stable runners and stay dispatchable on canary runners
 dependencies:
   - runtime-core

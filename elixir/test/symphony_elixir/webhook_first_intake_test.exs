@@ -7,6 +7,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
   alias SymphonyElixir.Linear.{Adapter, Client, Issue, Webhook}
 
   alias SymphonyElixir.{
+    GitHubEvent,
     GitHubEventInbox,
     LeaseManager,
     ManualIssueStore,
@@ -871,6 +872,34 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert :ok = TrackerEventInbox.ack(1)
     assert [] == TrackerEventInbox.pending_events(10)
+  end
+
+  test "github event inbox preserves routing metadata for webhook assignment" do
+    event = %GitHubEvent{
+      provider: "github",
+      event_id: "gh-delivery-1",
+      event_name: "pull_request_review",
+      action: "submitted",
+      entity_type: "PullRequestReview",
+      entity_id: "91",
+      pr_url: "https://github.com/gaspardip/events/pull/8",
+      repo_full_name: "gaspardip/events",
+      updated_at: ~U[2026-03-13 01:15:00Z],
+      received_runner_channel: "stable",
+      received_runner_instance_id: "stable:stable-runner",
+      target_runner_channel: "canary",
+      assigned_runner_channel: "canary",
+      assigned_runner_instance_id: "canary:dogfood-runner",
+      assignment_state: "routed_to_other_runner",
+      assignment_reason: "run_state_owned_by_other_runner",
+      raw: %{"action" => "submitted"}
+    }
+
+    assert {:ok, %{accepted: 1, duplicates: 0}} = GitHubEventInbox.enqueue([event])
+    assert [%{"event" => payload}] = GitHubEventInbox.pending_events(10)
+    assert payload["received_runner_channel"] == "stable"
+    assert payload["assigned_runner_instance_id"] == "canary:dogfood-runner"
+    assert payload["assignment_state"] == "routed_to_other_runner"
   end
 
   test "orchestrator records ignored webhook notices in runtime state" do
