@@ -1,7 +1,7 @@
 id: runtime-core
 title: Runtime Core
 status: active
-summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, evidence-based review follow-up with non-actionable noise suppression, and the first routing seams for stable ingress plus isolated runner pools.
+summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, evidence-based review follow-up with non-actionable noise suppression, and runner identity plus channel-aware issue and webhook routing seams for stable ingress and isolated runner pools.
 source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
@@ -15,6 +15,8 @@ acceptance_signals:
   - Review verification can enrich thread replies and resolution recommendations from collected evidence
   - Fully autonomous runs stay in place when webhook review feedback is triaged as non-actionable
   - Runtime topology supports stable webhook ingress with internal routing to isolated per-issue runners instead of live self-mutation
+  - Persisted run state records runner identity and channel so review webhook follow-up can avoid cross-instance interference
+  - Issue dispatch respects the target runner channel so stable and canary pools do not steal each other's work
 dependencies:
   - harness
 last_updated_by_issue: CLZ-22

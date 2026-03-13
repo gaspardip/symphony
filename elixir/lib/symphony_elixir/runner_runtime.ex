@@ -30,11 +30,15 @@ defmodule SymphonyElixir.RunnerRuntime do
     canary_evidence = canary_evidence(metadata)
 
     %{
+      instance_id: Config.runner_instance_id(),
       instance_name: Config.runner_instance_name(),
+      channel: Config.runner_channel(),
       install_root: install_root,
+      workspace_root: Config.workspace_root(),
       current_checkout_root: current_root,
       current_link_target: current_link_target,
       current_version_sha: current_version_sha(current_root) || Map.get(metadata, "current_version_sha"),
+      runtime_version: current_version_sha(current_root) || Map.get(metadata, "current_version_sha"),
       promoted_release_sha: Map.get(metadata, "promoted_release_sha"),
       promoted_ref: Map.get(metadata, "promoted_ref"),
       promoted_at: Map.get(metadata, "promoted_at"),
@@ -69,6 +73,22 @@ defmodule SymphonyElixir.RunnerRuntime do
       dispatch_enabled: runner_health.dispatch_enabled,
       history: history
     }
+  end
+
+  @spec instance_id() :: String.t()
+  def instance_id do
+    Config.runner_instance_id()
+  end
+
+  @spec channel() :: String.t()
+  def channel do
+    Config.runner_channel()
+  end
+
+  @spec runtime_version() :: String.t() | nil
+  def runtime_version do
+    current_version_sha(current_checkout_root()) ||
+      Map.get(load_metadata(Config.runner_install_root()), "current_version_sha")
   end
 
   @spec metadata_path(Path.t()) :: Path.t()

@@ -645,7 +645,8 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         tracker_required_labels: ["dogfood:symphony"],
-        runner_install_root: runner_root
+        runner_install_root: runner_root,
+        runner_channel: "canary"
       )
 
       dogfood_issue = %Issue{
@@ -675,10 +676,79 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
         })
       )
 
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_required_labels: ["dogfood:symphony"],
+        runner_install_root: runner_root,
+        runner_channel: "stable"
+      )
+
       assert Orchestrator.should_dispatch_issue_for_test(dogfood_issue, %Orchestrator.State{})
     after
       File.rm_rf(runner_root)
     end
+  end
+
+  test "stable runner skips canary-targeted issues and records the channel mismatch" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["dogfood:symphony"],
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-canary-routed",
+      identifier: "MT-302F2",
+      title: "Canary targeted",
+      state: "Todo",
+      labels: ["dogfood:symphony", "canary:symphony"]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, %Orchestrator.State{})
+    assert Orchestrator.issue_target_runner_channel_for_test(issue) == "canary"
+
+    {eligible, skipped} =
+      Orchestrator.partition_issues_by_label_gate_for_test([issue], %Orchestrator.State{})
+
+    assert eligible == []
+
+    assert [
+             %{
+               issue_id: "issue-canary-routed",
+               reason: "wrong runner channel",
+               runner_channel: "stable",
+               target_runner_channel: "canary"
+             }
+           ] = skipped
+  end
+
+  test "canary runner only dispatches canary-targeted issues" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["dogfood:symphony"],
+      runner_channel: "canary"
+    )
+
+    stable_issue = %Issue{
+      id: "issue-stable-routed",
+      identifier: "MT-302F3",
+      title: "Stable targeted",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    canary_issue = %Issue{
+      id: "issue-canary-routed-2",
+      identifier: "MT-302F4",
+      title: "Canary targeted",
+      state: "Todo",
+      labels: ["dogfood:symphony", "canary:symphony"]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(stable_issue, %Orchestrator.State{})
+    assert Orchestrator.should_dispatch_issue_for_test(canary_issue, %Orchestrator.State{})
+    assert Orchestrator.issue_target_runner_channel_for_test(stable_issue) == "stable"
+    assert Orchestrator.issue_target_runner_channel_for_test(canary_issue) == "canary"
   end
 
   test "after-turn policy blocks human review without a PR" do

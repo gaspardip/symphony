@@ -173,6 +173,7 @@ defmodule SymphonyElixir.TestSupport do
           manual_store_root: nil,
           runner_install_root: Path.join(System.tmp_dir!(), "symphony-runner"),
           runner_instance_name: "test-runner",
+          runner_channel: "stable",
           runner_self_host_project: false,
           company_name: nil,
           company_repo_url: nil,
@@ -261,6 +262,7 @@ defmodule SymphonyElixir.TestSupport do
     manual_store_root = Keyword.get(config, :manual_store_root)
     runner_install_root = Keyword.get(config, :runner_install_root)
     runner_instance_name = Keyword.get(config, :runner_instance_name)
+    runner_channel = Keyword.get(config, :runner_channel)
     runner_self_host_project = Keyword.get(config, :runner_self_host_project)
     company_name = Keyword.get(config, :company_name)
     company_repo_url = Keyword.get(config, :company_repo_url)
@@ -369,6 +371,7 @@ defmodule SymphonyElixir.TestSupport do
         "runner:",
         "  install_root: #{yaml_value(runner_install_root)}",
         "  instance_name: #{yaml_value(runner_instance_name)}",
+        "  channel: #{yaml_value(runner_channel)}",
         "  self_host_project: #{yaml_value(runner_self_host_project)}",
         "company:",
         "  name: #{yaml_value(company_name)}",

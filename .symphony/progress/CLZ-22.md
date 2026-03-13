@@ -51,6 +51,11 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Updated PR watcher and delivery-engine thread syncing so drafted PR replies and resolution recommendations reflect actual verification outcomes rather than generic acknowledgements.
 - Added regression coverage for consensus scoring states, symbol-backed verification, consensus-supported pending claims, and evidence-based reply updates after review verification.
 - Folded the control-plane and canary-runner operating model into `docs/PR_REVIEW_ADJUDICATION_PLAN.md` so webhook ingress stays stable, dogfood work routes to isolated runner pools, and Symphony self-host changes promote explicitly instead of mutating the live runtime in place.
+- Added runner identity and channel configuration to the runtime, stamped runner ownership metadata into persisted `run_state`, and made GitHub review webhook follow-up skip workspaces owned by another runner channel or instance.
+- Added regression coverage for runner channel normalization, runner runtime identity reporting, and cross-channel webhook isolation so stable runners do not reopen canary-owned review work.
+- Added label-driven issue channel routing so canary-targeted issues are skipped by stable runners, stable-targeted issues are skipped by canary runners, and operator snapshots now expose current versus target runner channel in skipped and queued entries.
+- Added regression coverage for wrong-channel dispatch skipping, canary-only issue dispatch on canary runners, and the existing non-actionable webhook review path after the routing helper fix.
+- Stabilized the covered publish-stage noop test by giving its fake Codex workflow a larger read timeout so the full `mix coverage.audit` run no longer flakes on `:response_timeout`.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -88,6 +93,12 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest focused consensus and reply suites:
   `mix test test/symphony_elixir/review_consensus_test.exs test/symphony_elixir/review_adjudicator_test.exs test/symphony_elixir/review_evidence_collector_test.exs test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed on March 12, 2026 with `52 tests, 0 failures`
 - Latest full validation after the consensus and reply-planning slice: `./scripts/symphony-validate.sh` passed on March 12, 2026 with `775 tests, 0 failures`, total coverage `86.64%`, `SymphonyElixir.ReviewConsensus` at `90.14%`, `SymphonyElixir.ReviewEvidenceCollector` at `82.40%`, `SymphonyElixir.DeliveryEngine` at `78.84%`, `SymphonyElixir.PRWatcher` at `87.27%`, and Dialyzer clean (`Total errors: 156, Skipped: 156, Unnecessary Skips: 6`)
+- Latest focused routing suites: `mix test test/symphony_elixir/workspace_and_config_test.exs test/symphony_elixir/runner_runtime_test.exs test/symphony_elixir/webhook_first_intake_test.exs` passed on March 12, 2026 with `59 tests, 0 failures`
+- Latest focused routing and policy suites: `mix test test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/workspace_and_config_test.exs test/symphony_elixir/runner_runtime_test.exs test/symphony_elixir/webhook_first_intake_test.exs` passed on March 12, 2026 with `76 tests, 0 failures`
+- Latest targeted webhook rerun after the channel-routing helper fix: `mix test --trace test/symphony_elixir/webhook_first_intake_test.exs:379` passed on March 12, 2026 with `1 test, 0 failures`
+- Latest targeted routing and publish reruns:
+  `mix test --trace test/symphony_elixir/delivery_engine_phase3_test.exs:398 test/symphony_elixir/policy_runtime_test.exs:627 test/symphony_elixir/policy_runtime_test.exs:692 test/symphony_elixir/policy_runtime_test.exs:725 test/symphony_elixir/webhook_first_intake_test.exs:379` passed on March 12, 2026 with `5 tests, 0 failures`
+- Latest full validation after runner-channel issue routing: `./scripts/symphony-validate.sh` passed on March 12, 2026 with `779 tests, 0 failures`, total coverage `86.54%`, `SymphonyElixir.Orchestrator` at `82.06%`, `SymphonyElixir.Codex.AppServer` at `91.24%`, and Dialyzer clean (`Total errors: 155, Skipped: 155, Unnecessary Skips: 7`)
 
 ## Next Step
-Implement the next adjudication/runtime slice in the existing `CLZ-22` branch rather than opening a separate design PR. Prioritize stronger proof adapters, historical precision tracking, stagnation detection, and the first control-plane-aware routing seams needed for stable-ingress plus isolated-runner operation. Keep the cleanup-stage plan as a follow-on after the review claim path and operating topology are in place.
+Run full harness validation for the routing slice, then continue the existing `CLZ-22` branch with stronger proof adapters, historical precision tracking, stagnation detection, and a more explicit scheduler or lease-based handoff path for stable-ingress plus isolated-runner operation. Keep the cleanup-stage plan as a follow-on after the review claim path and operating topology are in place.

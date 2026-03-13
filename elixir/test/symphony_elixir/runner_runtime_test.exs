@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.RunnerRuntimeTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.RunnerRuntime
+  alias SymphonyElixir.{Config, RunnerRuntime}
 
   test "runner runtime exposes health provenance manifest and canary evidence" do
     runner_root =
@@ -65,12 +65,18 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         runner_install_root: runner_root,
+        runner_instance_name: "dogfood-runner",
+        runner_channel: "canary",
         tracker_required_labels: ["dogfood:symphony"]
       )
 
       info = RunnerRuntime.info()
 
+      assert info.instance_id == "canary:dogfood-runner"
+      assert info.instance_name == "dogfood-runner"
+      assert info.channel == "canary"
       assert info.install_root == runner_root
+      assert info.workspace_root == Config.workspace_root()
       assert info.current_link_target == release_path
       assert info.promoted_release_sha == "promoted123"
       assert info.previous_release_sha == "previous456"
@@ -89,6 +95,7 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
       assert info.rollback_target_exists == false
       assert info.rule_id == "runner.canary_active"
       assert info.rollback_rule_id == "runner.rollback_recommended"
+      assert is_binary(info.runtime_version)
       assert [%{"event_type" => "runner.promoted"}] = info.history
 
       assert RunnerRuntime.effective_required_labels(

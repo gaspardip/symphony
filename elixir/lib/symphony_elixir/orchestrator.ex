@@ -625,10 +625,19 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.reduce(state, fn workspace, state_acc ->
       case RunStateStore.load(workspace) do
         {:ok, run_state} ->
-          if Map.get(run_state, :pr_url) == pr_url do
-            persist_review_feedback_for_workspace(state_acc, workspace, run_state, pr_url)
-          else
-            state_acc
+          cond do
+            Map.get(run_state, :pr_url) != pr_url ->
+              state_acc
+
+            not run_state_routed_to_current_runner?(run_state) ->
+              Logger.info(
+                "Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} runner_channel=#{Map.get(run_state, :runner_channel)} runner_instance_id=#{Map.get(run_state, :runner_instance_id)} current_channel=#{Config.runner_channel()} current_instance_id=#{RunnerRuntime.instance_id()}"
+              )
+
+              state_acc
+
+            true ->
+              persist_review_feedback_for_workspace(state_acc, workspace, run_state, pr_url)
           end
 
         _ ->
@@ -638,6 +647,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp refresh_pr_feedback_for_url(%State{} = state, _pr_url), do: state
+
+  defp run_state_routed_to_current_runner?(run_state) when is_map(run_state) do
+    channel = Map.get(run_state, :runner_channel)
+    instance_id = Map.get(run_state, :runner_instance_id)
+
+    channel_matches? = not present?(channel) or channel == Config.runner_channel()
+    instance_matches? = not present?(instance_id) or instance_id == RunnerRuntime.instance_id()
+
+    channel_matches? and instance_matches?
+  end
 
   defp persist_review_feedback_for_workspace(%State{} = state, workspace, run_state, pr_url) do
     feedback =
@@ -996,6 +1015,7 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
     policy_class == "fully_autonomous" and
+      run_state_routed_to_current_runner?(run_state) and
       stage not in [
         "done",
         "post_merge",
@@ -1559,6 +1579,10 @@ defmodule SymphonyElixir.Orchestrator do
   def issue_matches_required_labels_for_test(issue), do: issue_matches_required_labels?(issue)
 
   @doc false
+  @spec issue_target_runner_channel_for_test(Issue.t()) :: String.t()
+  def issue_target_runner_channel_for_test(%Issue{} = issue), do: issue_target_runner_channel(issue)
+
+  @doc false
   @spec label_gate_status_for_test(term()) :: atom()
   def label_gate_status_for_test(issue), do: label_gate_status(issue)
 
@@ -1845,6 +1869,13 @@ defmodule SymphonyElixir.Orchestrator do
 
         terminate_running_issue(state, issue.id, false)
 
+      !issue_routed_to_current_runner_channel?(issue) ->
+        Logger.info(
+          "Issue no longer matches the current runner channel: #{issue_context(issue)} target_channel=#{issue_target_runner_channel(issue)} current_channel=#{Config.runner_channel()}; stopping active agent"
+        )
+
+        terminate_running_issue(state, issue.id, false)
+
       !issue_matches_required_labels?(issue) ->
         Logger.info("Issue no longer matches the configured label gate: #{issue_context(issue)} labels=#{inspect(Issue.label_names(issue))}; stopping active agent")
 
@@ -2011,6 +2042,8 @@ defmodule SymphonyElixir.Orchestrator do
       source: issue.source,
       state: issue.state,
       labels: Issue.label_names(issue),
+      runner_channel: Config.runner_channel(),
+      target_runner_channel: issue_target_runner_channel(issue),
       required_labels: routing_required_labels(),
       reason: reason,
       policy_class: policy_class,
@@ -2117,6 +2150,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
+      issue_routed_to_current_runner_channel?(issue) and
       issue_matches_required_labels?(issue) and
       match?({:ok, _}, resolve_policy(issue, %State{})) and
       active_issue_state?(state_name, active_states) and
@@ -3482,6 +3516,8 @@ defmodule SymphonyElixir.Orchestrator do
         source: Map.get(entry, :source),
         state: Map.get(entry, :state),
         labels: Map.get(entry, :labels, []),
+        runner_channel: Map.get(entry, :runner_channel),
+        target_runner_channel: Map.get(entry, :target_runner_channel),
         required_labels: Map.get(entry, :required_labels, []),
         reason: Map.get(entry, :reason, "label_gate"),
         policy_class: Map.get(entry, :policy_class),
@@ -3535,6 +3571,8 @@ defmodule SymphonyElixir.Orchestrator do
           retry_penalty: entry.reasons.retry_penalty,
           rank: entry.rank,
           labels: Issue.label_names(entry.issue),
+          runner_channel: Config.runner_channel(),
+          target_runner_channel: issue_target_runner_channel(entry.issue),
           required_labels: routing_required_labels(),
           label_gate_eligible: issue_matches_required_labels?(entry.issue),
           policy_class: policy_class,
@@ -5309,6 +5347,9 @@ defmodule SymphonyElixir.Orchestrator do
     policy_result = resolve_policy(issue, state)
 
     cond do
+      not issue_routed_to_current_runner_channel?(issue) ->
+        "wrong runner channel"
+
       match?(%{eligible?: false}, label_gate) ->
         label_gate.reason
 
@@ -5360,11 +5401,35 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp issue_routed_to_current_runner_channel?(%Issue{} = issue) do
+    issue_target_runner_channel(issue) == Config.runner_channel()
+  end
+
+  defp issue_target_runner_channel(%Issue{} = issue) do
+    canary_labels =
+      RunnerRuntime.canary_required_labels(%{})
+      |> normalize_labels()
+
+    issue_labels =
+      issue
+      |> Issue.label_names()
+      |> normalize_labels()
+
+    if MapSet.size(canary_labels) > 0 and MapSet.subset?(canary_labels, issue_labels) do
+      "canary"
+    else
+      "stable"
+    end
+  end
+
   defp next_human_action_for_skip("missing required labels"),
     do: "Add the required routing labels before Symphony can dispatch this issue."
 
   defp next_human_action_for_skip("missing canary labels"),
     do: "Add the canary routing labels before Symphony can dispatch this issue during canary mode."
+
+  defp next_human_action_for_skip("wrong runner channel"),
+    do: "Route this issue to a runner on the matching channel before Symphony can dispatch it."
 
   defp next_human_action_for_skip(reason) when is_binary(reason) do
     cond do

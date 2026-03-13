@@ -286,10 +286,12 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     start_supervised!({Orchestrator, name: orchestrator_name})
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
 
+    unique = System.unique_integer([:positive])
+
     {:ok, issue} =
       ManualIssueStore.submit(%{
-        "id" => "github-webhook-autonomous",
-        "identifier" => "EVT-GH-AUTO",
+        "id" => "github-webhook-autonomous-#{unique}",
+        "identifier" => "EVT-GH-AUTO-#{unique}",
         "title" => "Autonomous webhook review follow-up",
         "description" => "Resume automatically when PR review feedback arrives",
         "acceptance_criteria" => [
@@ -487,6 +489,97 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       end,
       60
     )
+  end
+
+  test "github webhook controller does not refresh workspaces owned by another runner channel" do
+    secret = "github-webhook-secret"
+    previous_secret = System.get_env("GITHUB_WEBHOOK_SECRET")
+    System.put_env("GITHUB_WEBHOOK_SECRET", secret)
+    on_exit(fn -> restore_env("GITHUB_WEBHOOK_SECRET", previous_secret) end)
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-github-webhook-routed-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubReviewClient)
+
+    orchestrator_name =
+      :"github-webhook-routed-orchestrator-#{System.unique_integer([:positive])}"
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(
+        orchestrator: orchestrator_name,
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
+    )
+
+    start_supervised!({Orchestrator, name: orchestrator_name})
+    start_supervised!({SymphonyElixirWeb.Endpoint, []})
+
+    workspace = Path.join(workspace_root, "EVT-GH-CANARY")
+    File.mkdir_p!(workspace)
+
+    :ok =
+      RunStateStore.save(workspace, %{
+        issue_id: "manual:evt-gh-canary",
+        issue_identifier: "EVT-GH-CANARY",
+        issue_source: "manual",
+        stage: "await_checks",
+        pr_url: "https://github.com/gaspardip/events/pull/8",
+        runner_channel: "canary",
+        runner_instance_id: "canary:dogfood-runner",
+        review_threads: %{},
+        stage_history: [%{stage: "publish"}, %{stage: "await_checks"}],
+        stage_transition_counts: %{"publish" => 1, "await_checks" => 1}
+      })
+
+    raw_body =
+      Jason.encode!(%{
+        "action" => "submitted",
+        "review" => %{
+          "id" => 91,
+          "body" => "Please tighten this conditional.",
+          "submitted_at" => "2026-03-11T12:00:00Z"
+        },
+        "pull_request" => %{
+          "html_url" => "https://github.com/gaspardip/events/pull/8",
+          "updated_at" => "2026-03-11T12:00:00Z"
+        },
+        "repository" => %{"full_name" => "gaspardip/events"}
+      })
+
+    conn =
+      build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-github-event", "pull_request_review")
+      |> put_req_header("x-github-delivery", "delivery-routed")
+      |> put_req_header("x-hub-signature-256", github_signature(secret, raw_body))
+      |> post("/api/webhooks/github", raw_body)
+
+    assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
+
+    assert_eventually(fn ->
+      {:ok, run_state} = RunStateStore.load(workspace)
+      assert Map.get(run_state, :stage) == "await_checks"
+      assert Map.get(run_state, :last_review_decision) == nil
+      assert Map.get(run_state, :review_threads) == %{}
+      assert Map.get(run_state, :runner_channel) == "canary"
+      assert Map.get(run_state, :runner_instance_id) == "canary:dogfood-runner"
+    end)
+
+    refute_received {:github_review_feedback_called, ^workspace}
   end
 
   test "linear webhook controller enqueues verified issue events and notifies the orchestrator" do

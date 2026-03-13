@@ -408,6 +408,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
       tracker_kind: "memory",
       workspace_root: Path.dirname(workspace),
       codex_command: fake_codex_binary!("publish-noop-no-pr"),
+      codex_read_timeout_ms: 15_000,
       policy_publish_required: true
     )
 

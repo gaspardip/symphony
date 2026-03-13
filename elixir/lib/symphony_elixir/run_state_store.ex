@@ -5,6 +5,8 @@ defmodule SymphonyElixir.RunStateStore do
 
   alias SymphonyElixir.Observability
   alias SymphonyElixir.RunLedger
+  alias SymphonyElixir.RunnerRuntime
+  alias SymphonyElixir.Config
 
   @relative_dir ".symphony"
   @filename "run_state.json"
@@ -62,6 +64,7 @@ defmodule SymphonyElixir.RunStateStore do
   @spec save(Path.t(), map()) :: :ok | {:error, term()}
   def save(workspace, state) when is_binary(workspace) and is_map(state) do
     path = state_path(workspace)
+    state = ensure_runner_metadata(state)
     :ok = File.mkdir_p(Path.dirname(path))
     File.write(path, Jason.encode!(state), [:write])
   end
@@ -181,6 +184,11 @@ defmodule SymphonyElixir.RunStateStore do
       issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
       issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
       issue_source: Map.get(issue, :source) || Map.get(issue, "source"),
+      runner_instance_id: Config.runner_instance_id(),
+      runner_instance_name: Config.runner_instance_name(),
+      runner_channel: Config.runner_channel(),
+      runner_runtime_version: RunnerRuntime.runtime_version(),
+      runner_workspace_root: Config.workspace_root(),
       stage: "checkout",
       stage_history: [],
       stage_transition_counts: %{},
@@ -240,6 +248,23 @@ defmodule SymphonyElixir.RunStateStore do
       :issue_source,
       Map.get(state, :issue_source) || Map.get(defaults, :issue_source)
     )
+    |> ensure_runner_metadata()
+  end
+
+  defp ensure_runner_metadata(state) when is_map(state) do
+    state
+    |> put_missing(:runner_instance_id, Config.runner_instance_id())
+    |> put_missing(:runner_instance_name, Config.runner_instance_name())
+    |> put_missing(:runner_channel, Config.runner_channel())
+    |> put_missing(:runner_runtime_version, RunnerRuntime.runtime_version())
+    |> put_missing(:runner_workspace_root, Config.workspace_root())
+  end
+
+  defp put_missing(state, key, value) when is_map(state) do
+    case Map.get(state, key) do
+      existing when existing in [nil, ""] -> Map.put(state, key, value)
+      _existing -> state
+    end
   end
 
   defp run_state_matches_issue?(state, issue) when is_map(state) and is_map(issue) do

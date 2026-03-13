@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Config do
   @default_workspace_root Path.join(System.tmp_dir!(), "symphony_workspaces")
   @default_runner_install_root Path.join(System.user_home!(), ".local/share/symphony-runner")
   @default_runner_instance_name "default"
+  @default_runner_channel "stable"
   @default_author_profile_path Path.join([System.get_env("CODEX_HOME") || Path.join(System.user_home!(), ".codex"), "symphony", "author_profile.json"])
   @default_credential_registry_path Path.join([System.get_env("CODEX_HOME") || Path.join(System.user_home!(), ".codex"), "symphony", "credential_registry.json"])
   @default_hook_timeout_ms 60_000
@@ -162,6 +163,10 @@ defmodule SymphonyElixir.Config do
                                  instance_name: [
                                    type: {:or, [:string, nil]},
                                    default: @default_runner_instance_name
+                                 ],
+                                 channel: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_runner_channel
                                  ],
                                  self_host_project: [
                                    type: :boolean,
@@ -464,7 +469,9 @@ defmodule SymphonyElixir.Config do
   @type tracker_kind :: String.t() | nil
   @type runner_settings :: %{
           install_root: String.t() | nil,
-          instance_name: String.t() | nil
+          instance_name: String.t() | nil,
+          channel: String.t(),
+          self_host_project: boolean()
         }
   @type manual_settings :: %{
           enabled: boolean(),
@@ -692,6 +699,7 @@ defmodule SymphonyElixir.Config do
     %{
       install_root: runner_install_root(),
       instance_name: runner_instance_name(),
+      channel: runner_channel(),
       self_host_project: runner_self_host_project?()
     }
   end
@@ -718,6 +726,19 @@ defmodule SymphonyElixir.Config do
       _ ->
         @default_runner_instance_name
     end
+  end
+
+  @spec runner_channel() :: String.t()
+  def runner_channel do
+    validated_workflow_options()
+    |> get_in([:runner, :channel])
+    |> resolve_env_value(System.get_env("SYMPHONY_RUNNER_CHANNEL"))
+    |> normalize_runner_channel()
+  end
+
+  @spec runner_instance_id() :: String.t()
+  def runner_instance_id do
+    "#{runner_channel()}:#{runner_instance_name()}"
   end
 
   @spec runner_self_host_project?() :: boolean()
@@ -1531,8 +1552,20 @@ defmodule SymphonyElixir.Config do
     %{}
     |> put_if_present(:install_root, binary_value(Map.get(section, "install_root")))
     |> put_if_present(:instance_name, scalar_string_value(Map.get(section, "instance_name")))
+    |> put_if_present(:channel, scalar_string_value(Map.get(section, "channel")))
     |> put_if_present(:self_host_project, boolean_value(Map.get(section, "self_host_project")))
   end
+
+  defp normalize_runner_channel(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "canary" -> "canary"
+      "experimental" -> "experimental"
+      "stable" -> "stable"
+      _ -> @default_runner_channel
+    end
+  end
+
+  defp normalize_runner_channel(_value), do: @default_runner_channel
 
   defp default_manual_store_root do
     case Application.get_env(:symphony_elixir, :log_file) do

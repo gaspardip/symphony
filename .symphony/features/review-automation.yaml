@@ -1,7 +1,7 @@
 id: review-automation
 title: Review Automation
 status: active
-summary: Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, and a stable-ingress/canary-runner operating model for noisy PR feedback.
+summary: Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, and runner-aware webhook plus issue routing for noisy PR feedback.
 source_paths:
   - elixir/lib/symphony_elixir/pr_watcher.ex
   - elixir/lib/symphony_elixir/review_adjudicator.ex
@@ -19,6 +19,8 @@ acceptance_signals:
   - Webhook-driven review feedback can route fully autonomous runs into a focused review verification stage before reopening implement
   - Copilot-style nit noise does not reopen fully autonomous runs
   - Review webhooks are designed to enter through a stable ingress and be routed internally to isolated runner channels instead of branch-bound endpoints
+  - Review webhook follow-up skips workspaces owned by another runner channel or instance
+  - Canary-targeted issues are skipped by stable runners and stay dispatchable on canary runners
 dependencies:
   - runtime-core
 last_updated_by_issue: CLZ-22

@@ -281,6 +281,7 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     assert Config.runner() == %{
              install_root: Path.join(runner_root, "install"),
              instance_name: "default",
+             channel: "stable",
              self_host_project: false
            }
 
