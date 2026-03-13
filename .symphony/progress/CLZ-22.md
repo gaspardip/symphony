@@ -36,6 +36,7 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Added regression coverage for webhook-driven review follow-up, Codex bootstrap failure handling, agent-harness initialization, and passive deploy-stage dispatch so the delivery engine coverage audit stays above the core threshold.
 - Restored the tracked `elixir/WORKFLOW.md` fixture after test-generated drift, widened flaky full-suite waits in `webhook_first_intake_test.exs` and `orchestrator_status_test.exs`, and aligned the phase-3 verifier expectation with the current `:behavior_proof_missing` stop code.
 - Cleaned up Dialyzer issues in the new webhook follow-up helpers by making the persistence paths total and annotating the private helper cluster that Dialyzer treats as dead code despite direct test coverage.
+- Added `docs/MODEL_AGNOSTIC_CLEANUP_STAGE_PLAN.md` to capture the follow-on design for a provider-neutral `/simplify` equivalent, while keeping the active implementation focus on review comment adjudication and observability.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -63,4 +64,4 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest Dialyzer: `mix dialyzer --format short` passed on March 12, 2026 after the webhook helper cleanup
 
 ## Next Step
-Push the latest branch updates to PR `gaspardip/symphony#1` and then address the outstanding Copilot review comments using the new webhook-driven autonomous follow-up path as the runtime baseline.
+Push the latest branch updates to PR `gaspardip/symphony#1`, then implement review comment adjudication with evidence, multi-model consensus, and thresholds on top of the new webhook-driven autonomous follow-up path. Keep the cleanup-stage plan as a follow-on after adjudication is in place.
