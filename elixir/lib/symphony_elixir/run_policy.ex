@@ -496,7 +496,13 @@ defmodule SymphonyElixir.RunPolicy do
       Map.get(running_entry, :stage) ||
         current_stage(issue)
 
-    Config.policy_stage_token_budget(stage)
+    stage_budget =
+      case Config.policy_stage_token_budget(stage) do
+        budget when is_map(budget) -> budget
+        _ -> %{}
+      end
+
+    maybe_relax_review_fix_budget(stage_budget, issue, stage)
   end
 
   defp current_stage(issue) do
@@ -522,11 +528,25 @@ defmodule SymphonyElixir.RunPolicy do
           :ok
 
         state when is_map(state) ->
+          review_fix_retry_count =
+            if review_fix_retry_tracking_candidate?(
+                 state,
+                 Map.get(running_entry, :stage) || Map.get(state, :stage)
+               ) do
+              state
+              |> review_fix_budget_retry_count()
+              |> Kernel.+(1)
+              |> min(2)
+            else
+              nil
+            end
+
           resume_context =
             state
             |> Map.get(:resume_context, %{})
             |> Enum.into(%{})
             |> Map.put(:token_pressure, "high")
+            |> maybe_put_review_fix_retry_count(review_fix_retry_count)
 
           _ =
             RunStateStore.transition(workspace, Map.get(state, :stage, "checkout"), %{
@@ -557,6 +577,73 @@ defmodule SymphonyElixir.RunPolicy do
       :ok
     end
   end
+
+  defp maybe_relax_review_fix_budget(stage_budget, issue, stage) when is_map(stage_budget) do
+    workspace = Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+
+    case RunStateStore.load_or_default(workspace, issue) do
+      state when is_map(state) ->
+        if review_fix_budget_candidate?(state, stage) and review_fix_budget_retry_count(state) > 0 do
+          stage_budget
+          |> Map.put(
+            :per_turn_input_soft,
+            relaxed_budget_value(stage_budget[:per_turn_input_soft], 75_000)
+          )
+          |> Map.put(
+            :per_turn_input_hard,
+            relaxed_budget_value(stage_budget[:per_turn_input_hard], 135_000)
+          )
+        else
+          stage_budget
+        end
+
+      _ ->
+        stage_budget
+    end
+  end
+
+  defp review_fix_budget_candidate?(state, stage) do
+    stage == "implement" and
+      review_token_pressure_high?(state) and
+      accepted_review_claim_count(state) > 0
+  end
+
+  defp review_fix_retry_tracking_candidate?(state, stage) do
+    stage == "implement" and accepted_review_claim_count(state) > 0
+  end
+
+  defp review_token_pressure_high?(%{resume_context: %{"token_pressure" => "high"}}), do: true
+  defp review_token_pressure_high?(%{resume_context: %{token_pressure: "high"}}), do: true
+  defp review_token_pressure_high?(_state), do: false
+
+  defp review_fix_budget_retry_count(state) when is_map(state) do
+    context =
+      state
+      |> Map.get(:resume_context, %{})
+      |> Enum.into(%{})
+
+    case Map.get(context, :review_fix_budget_retry_count) || Map.get(context, "review_fix_budget_retry_count") do
+      count when is_integer(count) and count >= 0 -> count
+      _ -> 0
+    end
+  end
+
+  defp maybe_put_review_fix_retry_count(resume_context, nil), do: resume_context
+
+  defp maybe_put_review_fix_retry_count(resume_context, count) when is_map(resume_context) do
+    Map.put(resume_context, :review_fix_budget_retry_count, count)
+  end
+
+  defp accepted_review_claim_count(state) when is_map(state) do
+    state
+    |> Map.get(:review_claims, %{})
+    |> Enum.count(fn {_thread_key, claim} ->
+      Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
+    end)
+  end
+
+  defp relaxed_budget_value(nil, fallback), do: fallback
+  defp relaxed_budget_value(value, fallback) when is_integer(value), do: max(value, fallback)
 
   defp normalize_state(state) when is_binary(state) do
     state

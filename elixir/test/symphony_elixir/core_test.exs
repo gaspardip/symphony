@@ -266,12 +266,80 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "This is a scoped review-fix turn. Do not rediscover the issue or rescan the repo."
     assert prompt =~ "Scoped review claims for this turn:"
     assert prompt =~ "lib/one.ex:10"
-    assert prompt =~ "lib/three.ex:30"
     refute prompt =~ "lib/two.ex:20"
-    assert prompt =~ "Additional verified claims remain after this batch: 1"
+    refute prompt =~ "lib/three.ex:30"
+    assert prompt =~ "Additional verified claims remain after this batch: 2"
     assert prompt =~ "If you complete this claim batch but additional verified review claims remain"
     refute prompt =~ "Issue brief:"
     refute prompt =~ "Repo map:"
+    refute prompt =~ "Scoped review feedback:"
+    refute prompt =~ "Last implementation summary:"
+  end
+
+  test "implement prompt narrows high-pressure review turns to one claim at a time" do
+    issue = %Issue{
+      id: "issue-review-fix-pressure",
+      identifier: "MT-REVIEW-PRESSURE",
+      title: "Address review comments under budget pressure",
+      description: "Keep scoped review turns small."
+    }
+
+    state = %{
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/one.ex",
+          "line" => 10,
+          "body" => "First verified review claim."
+        },
+        "comment:2" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/two.ex",
+          "line" => 20,
+          "body" => "Second verified review claim."
+        }
+      },
+      resume_context: %{token_pressure: "high"}
+    }
+
+    prompt = SymphonyElixir.DeliveryEngine.implement_prompt_for_test(issue, state, [], 1, 3)
+
+    assert prompt =~ "lib/one.ex:10"
+    refute prompt =~ "lib/two.ex:20"
+    assert prompt =~ "Additional verified claims remain after this batch: 1"
+  end
+
+  test "implement prompt keeps the last blocking rule in focused review context" do
+    issue = %Issue{
+      id: "issue-review-fix-rule",
+      identifier: "MT-REVIEW-RULE",
+      title: "Address review comments after a budget stop",
+      description: "Keep only the relevant retry context."
+    }
+
+    state = %{
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/one.ex",
+          "line" => 10,
+          "body" => "First verified review claim."
+        }
+      },
+      last_rule_id: "budget.per_turn_input_exceeded",
+      resume_context: %{token_pressure: "high"}
+    }
+
+    prompt = SymphonyElixir.DeliveryEngine.implement_prompt_for_test(issue, state, [], 1, 3)
+
+    assert prompt =~ "Last blocking rule: budget.per_turn_input_exceeded"
+    refute prompt =~ "Last implementation summary:"
   end
 
   test "existing workspace changes can advance to validation without a new diff" do

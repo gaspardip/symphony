@@ -1,7 +1,7 @@
 id: review-automation
 title: Review Automation
 status: active
-summary: Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, historical precision and stagnation tracking, runner plus lease-aware webhook and issue routing for noisy PR feedback, stale-lease reclaim on autonomous review follow-up, a narrowed review-to-implement handoff that scopes accepted PR claims before reopening implementation, scoped review-fix implement prompts that keep autonomous PR-comment turns small enough to continue dogfood work, seeded blocked-run replay recovery so `retry_now` can actually re-enter scoped PR-comment work, and seeded manual redispatch fallback so locally recovered PR-comment runs continue after retry even without manual-store tracker state.
+summary: Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, historical precision and stagnation tracking, runner plus lease-aware webhook and issue routing for noisy PR feedback, stale-lease reclaim on autonomous review follow-up, a narrowed review-to-implement handoff that scopes accepted PR claims before reopening implementation, scoped review-fix implement prompts that keep autonomous PR-comment turns small enough to continue dogfood work, high-pressure prompt trimming that drops duplicated review context and reduces accepted-claim batches to one, conditional review-fix budget fallback after repeated soft-pressure retries, seeded blocked-run replay recovery so `retry_now` can actually re-enter scoped PR-comment work, and seeded manual redispatch fallback so locally recovered PR-comment runs continue after retry even without manual-store tracker state.
 source_paths:
   - elixir/lib/symphony_elixir/pr_watcher.ex
   - elixir/lib/symphony_elixir/review_adjudicator.ex
@@ -25,6 +25,8 @@ acceptance_signals:
   - Autonomous review follow-up acquires and persists lease ownership before reopening implementation or review verification
   - Operators can inspect GitHub webhook assignment state and lease reclaimability through the presenter and API payloads
   - Repeated low-signal review comments are tracked as stagnant feedback instead of repeatedly reopening implementation without new proof
+  - High token-pressure review retries avoid duplicating review-feedback text and batch only one accepted claim so Copilot comment follow-up can keep progressing under the implement budget
+  - Review-fix token-cap relaxation only occurs after the runtime has already recorded a prior soft-budget retry for accepted PR claims, so broad implement turns do not inherit a larger cap by default
   - Canary-targeted issues are skipped by stable runners and stay dispatchable on canary runners
   - Seeded review workspaces can adjudicate scoped comments against the current checkout root instead of dismissing them as missing paths
   - Replayed review feedback can promote previously dismissed claims back into pending verification and reopen seeded autonomous runs without a manual issue record

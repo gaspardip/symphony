@@ -1840,7 +1840,12 @@ defmodule SymphonyElixir.DeliveryEngine do
     token_pressure = token_pressure_note(state)
     repo_map = RepoMap.from_harness(inspection.harness)
     workflow_profile = WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
-    focused_review_claims = focused_review_claims(Map.get(state, :review_claims, %{}))
+
+    focused_review_claims =
+      focused_review_claims(
+        Map.get(state, :review_claims, %{}),
+        focused_review_claim_limit(state)
+      )
 
     prompt_lines =
       if focused_review_claims == [] do
@@ -1967,7 +1972,11 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp fresh_resume_context(workspace, issue, state, inspection, overrides) do
-    focused_review_claims = focused_review_claims(Map.get(state, :review_claims, %{}))
+    focused_review_claims =
+      focused_review_claims(
+        Map.get(state, :review_claims, %{}),
+        focused_review_claim_limit(state)
+      )
 
     %{
       issue_identifier: issue.identifier,
@@ -2051,8 +2060,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp focused_resume_context_block(resume_context) when is_map(resume_context) do
     [
       maybe_named_multiline("Scoped review claims", resume_context[:review_claim_summary]),
-      maybe_named_multiline("Scoped review feedback", resume_context[:review_feedback_summary]),
-      maybe_named_line("Last implementation summary", resume_context[:last_turn_summary], 300)
+      maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200)
     ]
     |> Enum.reject(&is_nil/1)
     |> case do
@@ -2117,9 +2125,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp default_review_feedback_summary(state, []),
     do: review_feedback_summary(Map.get(state, :review_threads, %{}))
 
-  defp default_review_feedback_summary(_state, focused_claims) do
-    focused_review_feedback_summary(focused_claims)
-  end
+  defp default_review_feedback_summary(_state, _focused_claims), do: nil
 
   defp default_review_claim_summary(state, []),
     do: ReviewEvidenceCollector.summary(Map.get(state, :review_claims, %{}))
@@ -2247,7 +2253,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         detail =
           claim
           |> Map.get("body")
-          |> summarized_text(220)
+          |> summarized_text(140)
 
         "- #{Map.get(claim, "claim_type") || "review_claim"} #{location}: #{detail}"
       end)
@@ -2257,30 +2263,6 @@ defmodule SymphonyElixir.DeliveryEngine do
       block <> "\n- Additional verified claims remain after this batch: #{remaining_count}"
     else
       block
-    end
-  end
-
-  defp focused_review_feedback_summary(focused_claims) when is_list(focused_claims) do
-    focused_claims
-    |> Enum.map(fn {_thread_key, claim} ->
-      location =
-        case {Map.get(claim, "path"), Map.get(claim, "line")} do
-          {path, line} when is_binary(path) and is_integer(line) -> "#{path}:#{line}"
-          {path, _line} when is_binary(path) -> path
-          _ -> "review feedback"
-        end
-
-      detail =
-        claim
-        |> Map.get("body")
-        |> summarized_text(180)
-
-      "- #{location}: #{detail}"
-    end)
-    |> Enum.join("\n")
-    |> case do
-      "" -> nil
-      text -> text
     end
   end
 
@@ -2446,6 +2428,13 @@ defmodule SymphonyElixir.DeliveryEngine do
         per_turn_bytes: 24_576,
         max_command_count: 6
       }
+    end
+  end
+
+  defp focused_review_claim_limit(state) do
+    case get_in(state, [:resume_context, :token_pressure]) do
+      "high" -> 1
+      _ -> 2
     end
   end
 
