@@ -37,6 +37,7 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Restored the tracked `elixir/WORKFLOW.md` fixture after test-generated drift, widened flaky full-suite waits in `webhook_first_intake_test.exs` and `orchestrator_status_test.exs`, and aligned the phase-3 verifier expectation with the current `:behavior_proof_missing` stop code.
 - Cleaned up Dialyzer issues in the new webhook follow-up helpers by making the persistence paths total and annotating the private helper cluster that Dialyzer treats as dead code despite direct test coverage.
 - Added `docs/MODEL_AGNOSTIC_CLEANUP_STAGE_PLAN.md` to capture the follow-on design for a provider-neutral `/simplify` equivalent, while keeping the active implementation focus on review comment adjudication and observability.
+- Added `docs/PR_REVIEW_ADJUDICATION_PLAN.md` to define the next runtime step: source-aware PR comment triage with evidence collection, multi-model consensus, structured convergence, stagnation detection, and category-specific thresholds for `accepted`, `needs_verification`, and `dismissed`.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -64,4 +65,4 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Latest Dialyzer: `mix dialyzer --format short` passed on March 12, 2026 after the webhook helper cleanup
 
 ## Next Step
-Push the latest branch updates to PR `gaspardip/symphony#1`, then implement review comment adjudication with evidence, multi-model consensus, and thresholds on top of the new webhook-driven autonomous follow-up path. Keep the cleanup-stage plan as a follow-on after adjudication is in place.
+Push the latest branch updates to PR `gaspardip/symphony#1`, then implement the claim-normalization and evidence-first review adjudication path from `docs/PR_REVIEW_ADJUDICATION_PLAN.md` on top of the new webhook-driven autonomous follow-up flow. Keep the cleanup-stage plan as a follow-on after adjudication is in place.
