@@ -38,6 +38,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Cleaned up Dialyzer issues in the new webhook follow-up helpers by making the persistence paths total and annotating the private helper cluster that Dialyzer treats as dead code despite direct test coverage.
 - Added `docs/MODEL_AGNOSTIC_CLEANUP_STAGE_PLAN.md` to capture the follow-on design for a provider-neutral `/simplify` equivalent, while keeping the active implementation focus on review comment adjudication and observability.
 - Added `docs/PR_REVIEW_ADJUDICATION_PLAN.md` to define the next runtime step: source-aware PR comment triage with evidence collection, multi-model consensus, structured convergence, stagnation detection, and category-specific thresholds for `accepted`, `needs_verification`, and `dismissed`.
+- Implemented the first review adjudication slice with a new `SymphonyElixir.ReviewAdjudicator`, source-aware claim classification, heuristic veracity scoring, `dismissed`/`deferred`/`needs_verification` dispositions, and persisted review-thread metadata for PR feedback.
+- Wired the PR watcher to attach adjudication metadata to review items, count actionable feedback separately from drafted threads, and draft more precise replies based on disposition instead of treating all comments as equally actionable.
+- Updated the webhook follow-up runtime so fully autonomous runs only return to `implement` when review feedback is actionable; Copilot-style nit noise is now persisted and summarized without reopening implementation.
+- Added regression coverage for adjudicator heuristics, actionable review synthesis, and the non-actionable autonomous webhook path.
 
 ## Evidence
 - Linear issue: `CLZ-22`
@@ -63,6 +67,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `test/symphony_elixir/delivery_engine_phase3_test.exs:87` -> `1 test, 0 failures`
   `test/symphony_elixir/orchestrator_status_test.exs:1162` -> `1 test, 0 failures`
 - Latest Dialyzer: `mix dialyzer --format short` passed on March 12, 2026 after the webhook helper cleanup
+- Focused adjudication tests: `mix test --trace test/symphony_elixir/review_adjudicator_test.exs test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/webhook_first_intake_test.exs` passed on March 12, 2026 with `24 tests, 0 failures`
+- Latest full validation after adjudication slice: `./scripts/symphony-validate.sh` passed on March 12, 2026 with `761 tests, 0 failures`, total coverage `86.61%`, `SymphonyElixir.ReviewAdjudicator` at `72.13%`, `SymphonyElixir.PRWatcher` at `88.74%`, and Dialyzer clean under the ignore baseline (`Total errors: 158, Skipped: 158, Unnecessary Skips: 4`)
 
 ## Next Step
-Push the latest branch updates to PR `gaspardip/symphony#1`, then implement the claim-normalization and evidence-first review adjudication path from `docs/PR_REVIEW_ADJUDICATION_PLAN.md` on top of the new webhook-driven autonomous follow-up flow. Keep the cleanup-stage plan as a follow-on after adjudication is in place.
+Push the latest branch updates to PR `gaspardip/symphony#1`, then extend the new adjudication slice with hard-proof collection, independent consensus passes, and stagnation detection from `docs/PR_REVIEW_ADJUDICATION_PLAN.md`. Keep the cleanup-stage plan as a follow-on after the evidence and consensus path is in place.

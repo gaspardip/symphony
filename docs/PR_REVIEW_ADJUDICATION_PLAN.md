@@ -19,6 +19,7 @@ This plan defines a model-agnostic adjudication system for PR review comments th
 - evidence-first verification
 - multi-model consensus
 - structured convergence checks
+- explicit `defer` vs `dismiss` outcomes
 - category-specific thresholds
 - persistent learning from historical precision
 
@@ -252,7 +253,7 @@ Soft evidence:
 - repeated independent comments on the same claim
 - historical reviewer precision
 
-Hard evidence should dominate final disposition.
+Hard evidence should dominate final disposition. Soft evidence can upgrade confidence, but it cannot replace hard proof for autonomous correctness-changing code updates.
 
 ## Multi-Model Consensus
 Consensus is useful, but it should increase confidence rather than create confidence from nothing.
@@ -386,7 +387,7 @@ Suggested default thresholds by claim type:
 - `< 0.50`: `dismissed`
 
 ### `style_or_nit`
-- default: `dismissed` or `deferred`
+- default: `deferred` or `dismissed`
 - never auto-trigger implementation by itself
 
 ## Hard Rules
@@ -397,6 +398,7 @@ Regardless of score:
 - a claim contradicted by deterministic local evidence should be dismissed
 - a claim outside touched scope should need stronger evidence than one on changed lines
 - no single AI reviewer comment should force code changes without hard proof or corroboration
+- no soft-consensus-only claim should be auto-fixed
 
 ## Reviewer Precision Tracking
 The system should keep rolling precision data for:

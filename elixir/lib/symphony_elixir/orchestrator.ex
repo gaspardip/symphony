@@ -675,6 +675,9 @@ defmodule SymphonyElixir.Orchestrator do
         {:ok, next_state} ->
           next_state
 
+        {:ok, next_state, :non_actionable} ->
+          next_state
+
         :not_autonomous ->
           summary = "New PR review feedback detected on #{pr_url}."
 
@@ -726,10 +729,26 @@ defmodule SymphonyElixir.Orchestrator do
       "path" => Map.get(item, :path),
       "line" => Map.get(item, :line),
       "state" => Map.get(item, :state),
+      "review_decision" => Map.get(item, :review_decision),
       "submitted_at" => Map.get(item, :submitted_at),
       "draft_state" => Map.get(item, :draft_state, "drafted"),
       "draft_reply" => Map.get(item, :draft_reply),
       "resolution_recommendation" => Map.get(item, :resolution_recommendation),
+      "source_class" => Map.get(item, :source_class),
+      "claim_type" => Map.get(item, :claim_type),
+      "veracity_score" => Map.get(item, :veracity_score),
+      "reproducibility_score" => Map.get(item, :reproducibility_score),
+      "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+      "locality_score" => Map.get(item, :locality_score),
+      "source_precision_score" => Map.get(item, :source_precision_score),
+      "consensus_score" => Map.get(item, :consensus_score),
+      "historical_precision_score" => Map.get(item, :historical_precision_score),
+      "hard_proof" => Map.get(item, :hard_proof, false),
+      "proof_sources" => Map.get(item, :proof_sources, []),
+      "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+      "disposition" => Map.get(item, :disposition),
+      "actionable" => Map.get(item, :actionable, false),
+      "adjudication_summary" => Map.get(item, :adjudication_summary),
       "pr_url" => pr_url
     }
   end
@@ -770,7 +789,7 @@ defmodule SymphonyElixir.Orchestrator do
          feedback,
          review_threads
        ) do
-    if autonomous_review_follow_up?(state, issue, run_state) do
+    if autonomous_review_follow_up?(state, issue, run_state) and PRWatcher.actionable_feedback?(feedback) do
       next_objective =
         "Address the pending GitHub review feedback on #{pr_url}, update the code, and return the branch to runtime validation."
 
@@ -836,7 +855,44 @@ defmodule SymphonyElixir.Orchestrator do
           :not_autonomous
       end
     else
-      :not_autonomous
+      case {autonomous_review_follow_up?(state, issue, run_state), PRWatcher.actionable_feedback?(feedback)} do
+        {true, false} ->
+          summary =
+            "GitHub review feedback detected on #{pr_url}, but the current adjudicator triaged it as non-actionable noise."
+
+          case RunStateStore.update(workspace, fn persisted ->
+                 persisted
+                 |> Map.put(:review_threads, review_threads)
+                 |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
+                 |> Map.put(:last_decision_summary, summary)
+                 |> Map.put(:next_human_action, nil)
+                 |> put_review_resume_context(pr_url, review_threads, nil)
+               end) do
+            {:ok, next_run_state} ->
+              RunLedger.record("review.feedback_triaged", %{
+                issue_id: Map.get(next_run_state, :issue_id),
+                issue_identifier: Map.get(next_run_state, :issue_identifier),
+                actor_type: "runtime",
+                actor_id: "github_webhook",
+                summary: summary,
+                details: pr_url,
+                metadata: %{
+                  pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
+                  actionable_items_count: Map.get(feedback, :actionable_items_count, 0),
+                  review_decision: Map.get(feedback, :review_decision)
+                }
+              })
+
+              {:ok, state, :non_actionable}
+
+            {:error, reason} ->
+              Logger.warning("Failed to persist non-actionable review triage for #{pr_url}: #{inspect(reason)}")
+              :not_autonomous
+          end
+
+        _ ->
+          :not_autonomous
+      end
     end
   end
 

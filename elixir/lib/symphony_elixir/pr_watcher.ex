@@ -7,7 +7,20 @@ defmodule SymphonyElixir.PRWatcher do
   automatically return a fully autonomous run to implementation.
   """
 
-  alias SymphonyElixir.{AuthorProfile, Config, CredentialRegistry, GitHubCLIClient, Observability, PolicyPack}
+  alias SymphonyElixir.{
+    AuthorProfile,
+    Config,
+    CredentialRegistry,
+    GitHubCLIClient,
+    Observability,
+    PolicyPack,
+    ReviewAdjudicator
+  }
+
+  @dialyzer {:nowarn_function, build_feedback_items: 3}
+  @dialyzer {:nowarn_function, review_item: 4}
+  @dialyzer {:nowarn_function, comment_item: 4}
+  @dialyzer {:nowarn_function, merge_adjudication: 3}
 
   @type t :: %{
           enabled: boolean(),
@@ -28,10 +41,26 @@ defmodule SymphonyElixir.PRWatcher do
           path: String.t() | nil,
           line: integer() | nil,
           state: String.t() | nil,
+          review_decision: String.t() | nil,
           submitted_at: String.t() | nil,
           draft_state: String.t(),
           draft_reply: String.t(),
-          resolution_recommendation: String.t()
+          resolution_recommendation: String.t(),
+          source_class: String.t(),
+          claim_type: String.t(),
+          veracity_score: float(),
+          reproducibility_score: float(),
+          evidence_quality_score: float(),
+          locality_score: float(),
+          source_precision_score: float(),
+          consensus_score: float(),
+          historical_precision_score: float(),
+          hard_proof: boolean(),
+          proof_sources: [String.t()],
+          contradiction_sources: [String.t()],
+          disposition: String.t(),
+          actionable: boolean(),
+          adjudication_summary: String.t()
         }
 
   @spec status(PolicyPack.t() | String.t() | atom() | nil) :: t()
@@ -68,14 +97,18 @@ defmodule SymphonyElixir.PRWatcher do
 
       case review_feedback_for_source(github_client, workspace, pr_url, github_opts) do
         {:ok, feedback} ->
-          items = build_feedback_items(feedback, thread_states)
+          items = build_feedback_items(feedback, thread_states, workspace)
           review_count = Enum.count(items, &(&1.kind == :review))
           comment_count = Enum.count(items, &(&1.kind == :comment))
+          actionable_items_count = Enum.count(items, &ReviewAdjudicator.actionable_feedback?/1)
+          dismissed_items_count = Enum.count(items, &(Map.get(&1, :disposition) == "dismissed"))
 
           Observability.emit([:symphony, :review, :feedback_detected], %{count: length(items)}, %{
             pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
             review_count: review_count,
-            comment_count: comment_count
+            comment_count: comment_count,
+            actionable_items_count: actionable_items_count,
+            dismissed_items_count: dismissed_items_count
           })
 
           %{
@@ -83,6 +116,7 @@ defmodule SymphonyElixir.PRWatcher do
             pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
             review_decision: Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
             pending_drafts_count: length(items),
+            actionable_items_count: actionable_items_count,
             items: items
           }
 
@@ -107,18 +141,25 @@ defmodule SymphonyElixir.PRWatcher do
     if Map.get(pack, :draft_first_required, true), do: "draft_first", else: "active"
   end
 
-  defp build_feedback_items(feedback, thread_states) do
+  @spec actionable_feedback?(map()) :: boolean()
+  def actionable_feedback?(feedback) when is_map(feedback) do
+    Map.get(feedback, :actionable_items_count, 0) > 0 or Map.get(feedback, "actionable_items_count", 0) > 0
+  end
+
+  defp build_feedback_items(feedback, thread_states, workspace) do
+    review_decision = Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision")
+
     review_items =
       feedback
       |> Map.get(:reviews, [])
       |> Enum.filter(&(present?(Map.get(&1, :body)) or present?(Map.get(&1, "body"))))
-      |> Enum.map(&review_item(&1, thread_states))
+      |> Enum.map(&review_item(&1, thread_states, review_decision, workspace))
 
     comment_items =
       feedback
       |> Map.get(:comments, [])
       |> Enum.filter(&(present?(Map.get(&1, :body)) or present?(Map.get(&1, "body"))))
-      |> Enum.map(&comment_item(&1, thread_states))
+      |> Enum.map(&comment_item(&1, thread_states, review_decision, workspace))
 
     review_items ++ comment_items
   end
@@ -134,12 +175,19 @@ defmodule SymphonyElixir.PRWatcher do
       reason: inspect(reason),
       pr_url: normalize_cached_pr_url(pr_url, thread_states),
       pending_drafts_count: length(items),
+      actionable_items_count: Enum.count(items, &ReviewAdjudicator.actionable_feedback?/1),
       items: items
     }
   end
 
   defp cached_feedback(_thread_states, _pr_url, reason) do
-    %{status: "unavailable", reason: inspect(reason), pending_drafts_count: 0, items: []}
+    %{
+      status: "unavailable",
+      reason: inspect(reason),
+      pending_drafts_count: 0,
+      actionable_items_count: 0,
+      items: []
+    }
   end
 
   defp cached_item({thread_key, persisted}) do
@@ -165,21 +213,37 @@ defmodule SymphonyElixir.PRWatcher do
       path: nil,
       line: nil,
       state: nil,
+      review_decision: Map.get(persisted, "review_decision"),
       submitted_at: nil,
       draft_state: Map.get(persisted, "draft_state", "drafted"),
       draft_reply: Map.get(persisted, "draft_reply"),
-      resolution_recommendation: Map.get(persisted, "resolution_recommendation", "keep_open_until_confirmed")
+      resolution_recommendation: Map.get(persisted, "resolution_recommendation", "keep_open_until_confirmed"),
+      source_class: Map.get(persisted, "source_class", "unknown"),
+      claim_type: Map.get(persisted, "claim_type", "unclear"),
+      veracity_score: Map.get(persisted, "veracity_score", 0.0),
+      reproducibility_score: Map.get(persisted, "reproducibility_score", 0.0),
+      evidence_quality_score: Map.get(persisted, "evidence_quality_score", 0.0),
+      locality_score: Map.get(persisted, "locality_score", 0.0),
+      source_precision_score: Map.get(persisted, "source_precision_score", 0.0),
+      consensus_score: Map.get(persisted, "consensus_score", 0.0),
+      historical_precision_score: Map.get(persisted, "historical_precision_score", 0.0),
+      hard_proof: Map.get(persisted, "hard_proof", false),
+      proof_sources: Map.get(persisted, "proof_sources", []),
+      contradiction_sources: Map.get(persisted, "contradiction_sources", []),
+      disposition: Map.get(persisted, "disposition", "dismissed"),
+      actionable: Map.get(persisted, "actionable", false),
+      adjudication_summary: Map.get(persisted, "adjudication_summary", "Cached review feedback.")
     }
   end
 
-  defp review_item(review, thread_states) do
+  defp review_item(review, thread_states, review_decision, workspace) do
     body = Map.get(review, :body) || Map.get(review, "body")
     state = Map.get(review, :state) || Map.get(review, "state")
     id = to_string(Map.get(review, :id) || Map.get(review, "id"))
     thread_key = "review:#{id}"
     persisted = Map.get(thread_states, thread_key, %{})
 
-    %{
+    base_item = %{
       thread_key: thread_key,
       id: id,
       kind: :review,
@@ -188,20 +252,21 @@ defmodule SymphonyElixir.PRWatcher do
       path: nil,
       line: nil,
       state: state,
+      review_decision: review_decision,
       submitted_at: Map.get(review, :submitted_at) || Map.get(review, "submitted_at"),
-      draft_state: Map.get(persisted, "draft_state", "drafted"),
-      draft_reply: Map.get(persisted, "draft_reply", draft_reply(body, state)),
-      resolution_recommendation: Map.get(persisted, "resolution_recommendation", resolution_recommendation(body, state))
+      draft_state: Map.get(persisted, "draft_state", "drafted")
     }
+
+    merge_adjudication(base_item, persisted, workspace)
   end
 
-  defp comment_item(comment, thread_states) do
+  defp comment_item(comment, thread_states, review_decision, workspace) do
     body = Map.get(comment, :body) || Map.get(comment, "body")
     id = to_string(Map.get(comment, :id) || Map.get(comment, "id"))
     thread_key = "comment:#{id}"
     persisted = Map.get(thread_states, thread_key, %{})
 
-    %{
+    base_item = %{
       thread_key: thread_key,
       id: id,
       kind: :comment,
@@ -210,21 +275,52 @@ defmodule SymphonyElixir.PRWatcher do
       path: Map.get(comment, :path) || Map.get(comment, "path"),
       line: Map.get(comment, :line) || Map.get(comment, "line"),
       state: nil,
+      review_decision: review_decision,
       submitted_at: Map.get(comment, :created_at) || Map.get(comment, "created_at"),
-      draft_state: Map.get(persisted, "draft_state", "drafted"),
-      draft_reply: Map.get(persisted, "draft_reply", draft_reply(body, nil)),
-      resolution_recommendation: Map.get(persisted, "resolution_recommendation", resolution_recommendation(body, nil))
+      draft_state: Map.get(persisted, "draft_state", "drafted")
     }
+
+    merge_adjudication(base_item, persisted, workspace)
   end
 
-  defp draft_reply(body, state) do
+  defp merge_adjudication(base_item, persisted, workspace) do
+    adjudication = ReviewAdjudicator.adjudicate(base_item, workspace: workspace)
+
+    base_item
+    |> Map.merge(adjudication)
+    |> Map.put(:draft_reply, Map.get(persisted, "draft_reply", draft_reply(base_item, adjudication)))
+    |> Map.put(
+      :resolution_recommendation,
+      Map.get(
+        persisted,
+        "resolution_recommendation",
+        resolution_recommendation(base_item, adjudication)
+      )
+    )
+  end
+
+  defp draft_reply(item, adjudication) do
+    body = Map.get(item, :body)
+    state = Map.get(item, :state)
+    disposition = Map.get(adjudication, :disposition)
+    claim_type = Map.get(adjudication, :claim_type)
+
     base =
       cond do
+        disposition == "dismissed" ->
+          "I reviewed this feedback and did not find enough evidence to reopen implementation yet. I can revisit it with a more specific reproducer or stronger proof."
+
+        disposition == "deferred" ->
+          "I agree the suggestion may be worthwhile, but I am deferring it for now to avoid churn on the current PR unless stronger proof or a narrower change lands."
+
         normalized_state(state) == "changes_requested" ->
           "I agree this needs a follow-up change. I will address it before treating the review as resolved."
 
         contains_nit?(body) ->
           "I agree with the nit and will adjust it in the follow-up update."
+
+        claim_type in ["correctness_risk", "failure_handling_risk", "policy_violation"] ->
+          "I reviewed this feedback and will verify the claim with focused checks before deciding whether to change code."
 
         true ->
           "I reviewed this feedback and will either address it in code or reply with context before resolving it."
@@ -233,8 +329,14 @@ defmodule SymphonyElixir.PRWatcher do
     AuthorProfile.summarize(base, :comment)
   end
 
-  defp resolution_recommendation(body, state) do
+  defp resolution_recommendation(item, adjudication) do
+    body = Map.get(item, :body)
+    state = Map.get(item, :state)
+    disposition = Map.get(adjudication, :disposition)
+
     cond do
+      disposition == "dismissed" -> "keep_open_until_confirmed"
+      disposition == "deferred" -> "keep_open_until_confirmed"
       normalized_state(state) == "changes_requested" -> "keep_open_until_change"
       contains_nit?(body) -> "resolve_after_change"
       true -> "keep_open_until_confirmed"
