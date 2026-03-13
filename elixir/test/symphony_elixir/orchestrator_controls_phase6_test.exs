@@ -1191,6 +1191,19 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert {:skip, :missing} =
              Orchestrator.revalidate_issue_for_dispatch_for_test(eligible_issue, fn [_id] -> {:ok, []} end)
 
+    manual_issue = %Issue{
+      id: "manual:issue-seeded",
+      identifier: "MT-MANUAL",
+      title: "Seeded manual replay",
+      state: "In Progress",
+      source: :manual
+    }
+
+    assert {:ok, ^manual_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(manual_issue, fn [_id] ->
+               {:ok, []}
+             end)
+
     assert {:skip, %Issue{state: "Done"}} =
              Orchestrator.revalidate_issue_for_dispatch_for_test(eligible_issue, fn [_id] ->
                {:ok, [%{eligible_issue | state: "Done"}]}
@@ -1655,6 +1668,34 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     refute MapSet.member?(next_state.claimed, issue_id)
     refute Map.has_key?(next_state.retry_attempts, issue_id)
+  end
+
+  test "manual continuation retry reuses seeded issue metadata when tracker lookup is empty" do
+    issue_id = "manual:issue-continuation-retry"
+    identifier = "MT-CONTINUATION-RETRY"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: identifier,
+      title: "Continuation retry",
+      state: "In Progress",
+      source: :manual
+    }
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_for_test(
+        %State{max_concurrent_agents: 0},
+        issue_id,
+        1,
+        %{identifier: identifier, delay_type: :continuation, issue: issue},
+        {:ok, []}
+      )
+
+    retry_entry = Map.fetch!(next_state.retry_attempts, issue_id)
+    assert retry_entry.attempt == 2
+    assert retry_entry.identifier == identifier
+    assert retry_entry.issue == issue
+    assert retry_entry.error == "no available orchestrator slots"
   end
 
   test "passive continuation metadata backs off await_checks retries based on poll count" do

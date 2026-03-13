@@ -25,6 +25,7 @@ acceptance_signals:
   - Operators can invoke inspect, promote, record-canary, and rollback runner actions through the observability API using the repo-owned promotion script
   - Seeded manual run states with explicit policy metadata can synthesize a minimal issue shell and re-enter active review follow-up without a manual-store issue record
   - Replay refresh drains GitHub inbox work even when runner metadata disables normal tracker dispatch
+  - Seeded manual continuation retries can reuse the persisted issue envelope and workspace branch identity so local stable-ingress replays survive the `review_verification` to `implement` handoff
 dependencies:
   - harness
 last_updated_by_issue: CLZ-22

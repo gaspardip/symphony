@@ -598,6 +598,81 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
     end
   end
 
+  test "pre-run policy accepts equivalent https and ssh GitHub remotes for the same repo" do
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_policy_pack: "client_safe",
+      company_name: "Client Boundary",
+      company_repo_url: "https://github.com/gaspardip/events"
+    )
+
+    issue = %Issue{
+      id: "issue-repo-boundary-equivalent",
+      identifier: "MT-BND-SSH-HTTPS",
+      state: "Todo",
+      labels: ["symphony:events"]
+    }
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-repo-boundary-equivalent-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      init_git_workspace!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.mkdir_p!(Path.join(workspace, "scripts"))
+
+      File.write!(Path.join(workspace, "scripts/preflight.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      File.chmod!(Path.join(workspace, "scripts/preflight.sh"), 0o755)
+
+      File.write!(
+        Path.join(workspace, ".symphony/harness.yml"),
+        """
+        version: 1
+        base_branch: main
+        preflight:
+          command:
+            - ./scripts/preflight.sh
+        validation:
+          command:
+            - ./scripts/validate.sh
+        smoke:
+          command:
+            - ./scripts/smoke.sh
+        post_merge:
+          command:
+            - ./scripts/post-merge.sh
+        artifacts:
+          command:
+            - ./scripts/artifacts.sh
+        verification:
+          behavioral_proof:
+            required: true
+            mode: unit_first
+            source_paths:
+              - lib
+            test_paths:
+              - test
+        pull_request:
+          required_checks:
+            - validate
+        """
+      )
+
+      System.cmd(
+        "git",
+        ["-C", workspace, "remote", "add", "origin", "git@github.com:gaspardip/events.git"]
+      )
+
+      assert :ok = RunPolicy.enforce_pre_run(issue, workspace)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "label-gated dispatch only accepts issues with required labels" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -749,6 +824,30 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
     assert Orchestrator.should_dispatch_issue_for_test(canary_issue, %Orchestrator.State{})
     assert Orchestrator.issue_target_runner_channel_for_test(stable_issue) == "stable"
     assert Orchestrator.issue_target_runner_channel_for_test(canary_issue) == "canary"
+  end
+
+  test "seeded manual replay keeps canary channel routing on synthesized issues" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["dogfood:symphony"],
+      runner_channel: "canary"
+    )
+
+    run_state = %{
+      issue_source: :manual,
+      effective_policy_class: "fully_autonomous",
+      issue_id: "manual:CLZ-22",
+      issue_identifier: "CLZ-22",
+      issue_state: "In Progress",
+      runner_channel: "canary",
+      branch: "codex/clz-22-local-canary"
+    }
+
+    issue = Orchestrator.seeded_manual_issue_from_run_state_for_test(run_state)
+
+    assert %Issue{labels: labels, branch_name: "codex/clz-22-local-canary"} = issue
+    assert "canary:symphony" in labels
+    assert Orchestrator.issue_target_runner_channel_for_test(issue) == "canary"
   end
 
   test "after-turn policy blocks human review without a PR" do

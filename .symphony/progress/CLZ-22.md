@@ -172,6 +172,14 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `./scripts/symphony-validate.sh` passed on March 13, 2026 with `803 tests, 0 failures`, total coverage `86.43%` against `86.25%`, and Dialyzer clean under the ignore baseline (`Total errors: 161, Skipped: 161, Unnecessary Skips: 7`).
 - Latest repo-wide validation after the seeded replay and cached-review payload fixes:
   `./scripts/symphony-validate.sh` reached `801 tests, 0 failures` on March 13, 2026 with total coverage `86.46%` against `86.25%`; the only failing tail step was a final Dialyzer unused-function warning for `Presenter.pr_watcher_payload/4`, and `mix dialyzer --format short` passed immediately after adding the nowarn annotation.
+- Latest focused seeded continuation suites:
+  `mix test test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/recovery_and_lease_test.exs` passed on March 13, 2026 with `67 tests, 0 failures`.
+- Live local stable-ingress replay after seeded continuation and branch carry-forward fixes on March 13, 2026:
+  a signed `pull_request_review` replay to `http://127.0.0.1:4040/api/webhooks/github` returned `200 {"accepted":1,"duplicates":0}`, canary advanced `CLZ-22` from `review_verification` to `implement`, retried the seeded manual continuation instead of dropping the issue as invisible, bootstrapped a live Codex session (`thread_id=019ce7d2-f0c3-7a40-a6ca-241f70a9d29d`), and began the autonomous implement turn in the local canary workspace.
+- Latest seeded continuation validation rerun on March 13, 2026:
+  `mix test test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/recovery_and_lease_test.exs` passed again with `67 tests, 0 failures`, and `mix dialyzer --format short` passed clean after removing the unreachable fallback clause from the same-instance lease reclaim helper.
+- Current repo-wide harness status on March 13, 2026:
+  `./scripts/symphony-validate.sh` reaches `make coverage` and then idles indefinitely at `mix coverage.audit`; the build, formatting, lint, `harness.check`, focused tests, and Dialyzer gates above all pass before that point, so the remaining blocker is the pre-existing coverage-audit hang rather than a failing assertion in this slice.
 
 ## Next Step
-Continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests. After that, add stronger proof adapters for the newly-pending PR comments and richer promotion safety checks around canary evidence and rollback policy.
+Continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests. After that, let the canary runner complete an end-to-end local fix cycle against the open PR comments, then add stronger proof adapters and richer promotion safety checks around canary evidence and rollback policy.

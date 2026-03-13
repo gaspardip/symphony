@@ -582,10 +582,10 @@ defmodule SymphonyElixir.RunPolicy do
     url
     |> String.trim()
     |> String.trim_trailing(".git")
-    |> String.replace_prefix("git@", "")
-    |> String.replace(":", "/")
     |> String.replace_prefix("https://", "")
     |> String.replace_prefix("http://", "")
+    |> String.replace_prefix("git@", "")
+    |> String.replace(":", "/")
     |> String.downcase()
   end
 

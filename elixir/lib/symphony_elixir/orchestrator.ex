@@ -853,7 +853,7 @@ defmodule SymphonyElixir.Orchestrator do
               owner == state.lease_owner ->
                 :ok
 
-              LeaseManager.reclaimable?(lease) ->
+              LeaseManager.reclaimable?(lease) or same_runner_instance_lease_reclaimable?(run_state) ->
                 {:reclaimable, owner}
 
               true ->
@@ -1097,13 +1097,58 @@ defmodule SymphonyElixir.Orchestrator do
             "Seeded local replay for #{issue_identifier}",
         state: Map.get(run_state, :issue_state) || "In Progress",
         source: :manual,
-        labels: List.wrap(Map.get(run_state, :issue_labels, [])),
+        branch_name: seeded_manual_issue_branch_name(run_state, issue_identifier),
+        labels: seeded_manual_issue_labels(run_state),
         assigned_to_worker: true
       }
     else
       nil
     end
   end
+
+  defp seeded_manual_issue_labels(run_state) when is_map(run_state) do
+    labels =
+      run_state
+      |> Map.get(:issue_labels, [])
+      |> List.wrap()
+
+    if seeded_manual_issue_target_runner_channel(run_state) == "canary" do
+      labels
+      |> Kernel.++(RunnerRuntime.canary_required_labels(%{}))
+      |> normalize_labels()
+      |> MapSet.to_list()
+    else
+      labels
+    end
+  end
+
+  defp seeded_manual_issue_target_runner_channel(run_state) when is_map(run_state) do
+    case Map.get(run_state, :target_runner_channel) || Map.get(run_state, :runner_channel) do
+      "canary" -> "canary"
+      _ -> "stable"
+    end
+  end
+
+  defp seeded_manual_issue_branch_name(run_state, issue_identifier) when is_map(run_state) do
+    branch_name =
+      Map.get(run_state, :branch_name) ||
+        Map.get(run_state, :branch) ||
+        workspace_branch_name(issue_identifier)
+
+    case branch_name do
+      value when is_binary(value) and value != "" -> value
+      _ -> nil
+    end
+  end
+
+  defp workspace_branch_name(issue_identifier) when is_binary(issue_identifier) do
+    issue_identifier
+    |> Workspace.path_for_issue()
+    |> RunInspector.inspect()
+    |> Map.get(:branch)
+  end
+
+  defp workspace_branch_name(_issue_identifier), do: nil
 
   defp issue_ref_for_run_state(run_state) when is_map(run_state) do
     %{
@@ -1874,6 +1919,12 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec issue_target_runner_channel_for_test(Issue.t()) :: String.t()
   def issue_target_runner_channel_for_test(%Issue{} = issue), do: issue_target_runner_channel(issue)
+
+  @doc false
+  @spec seeded_manual_issue_from_run_state_for_test(map()) :: Issue.t() | nil
+  def seeded_manual_issue_from_run_state_for_test(run_state)
+      when is_map(run_state),
+      do: seeded_manual_issue_from_run_state(run_state)
 
   @doc false
   @spec label_gate_status_for_test(term()) :: atom()
@@ -2881,7 +2932,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
+  defp revalidate_issue_for_dispatch(%Issue{id: issue_id} = issue, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
@@ -2892,7 +2943,7 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       {:ok, []} ->
-        {:skip, :missing}
+        missing_issue_dispatch_fallback(issue, terminal_states)
 
       {:error, reason} ->
         {:error, reason}
@@ -2900,6 +2951,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
+
+  defp missing_issue_dispatch_fallback(%Issue{source: :manual} = issue, terminal_states) do
+    if retry_candidate_issue?(issue, terminal_states) do
+      {:ok, issue}
+    else
+      {:skip, issue}
+    end
+  end
+
+  defp missing_issue_dispatch_fallback(_issue, _terminal_states), do: {:skip, :missing}
 
   defp complete_issue(%State{} = state, issue_id) do
     %{
@@ -3038,10 +3099,19 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp handle_retry_issue_lookup(nil, state, issue_id, _attempt, _metadata) do
-    Logger.debug("Issue no longer visible, removing claim issue_id=#{issue_id}")
-    {:noreply, release_issue_claim(state, issue_id)}
+  defp handle_retry_issue_lookup(nil, state, issue_id, attempt, metadata) do
+    case manual_retry_issue_fallback(metadata) do
+      %Issue{} = issue ->
+        handle_retry_issue_lookup(issue, state, issue_id, attempt, metadata)
+
+      nil ->
+        Logger.debug("Issue no longer visible, removing claim issue_id=#{issue_id}")
+        {:noreply, release_issue_claim(state, issue_id)}
+    end
   end
+
+  defp manual_retry_issue_fallback(%{issue: %Issue{source: :manual} = issue}), do: issue
+  defp manual_retry_issue_fallback(_metadata), do: nil
 
   defp cleanup_issue_workspace(identifier) when is_binary(identifier) do
     Workspace.remove_issue_workspaces(identifier)
@@ -6153,8 +6223,14 @@ defmodule SymphonyElixir.Orchestrator do
               owner == state.lease_owner ->
                 {:ok, lease_snapshot_for_state(lease), false}
 
-              LeaseManager.reclaimable?(lease) ->
-                with :ok <- LeaseManager.acquire(issue_id, issue_identifier, state.lease_owner),
+              LeaseManager.reclaimable?(lease) or same_runner_instance_lease_reclaimable?(run_state) ->
+                with :ok <-
+                       reclaim_review_follow_up_lease(
+                         issue_id,
+                         issue_identifier,
+                         state.lease_owner,
+                         run_state
+                       ),
                      {:ok, refreshed_lease} <- LeaseManager.read(issue_id) do
                   {:ok, lease_snapshot_for_state(refreshed_lease), true}
                 else
@@ -6263,6 +6339,31 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_clear_persisted_lease(_workspace), do: :ok
+
+  defp reclaim_review_follow_up_lease(issue_id, issue_identifier, owner, run_state)
+       when is_binary(issue_id) and is_binary(owner) and is_map(run_state) do
+    case LeaseManager.acquire(issue_id, issue_identifier, owner) do
+      :ok ->
+        :ok
+
+      {:error, :claimed} ->
+        if same_runner_instance_lease_reclaimable?(run_state) do
+          :ok = LeaseManager.release(issue_id)
+          LeaseManager.acquire(issue_id, issue_identifier, owner)
+        else
+          {:error, :claimed}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp same_runner_instance_lease_reclaimable?(run_state) when is_map(run_state) do
+    present?(Map.get(run_state, :lease_owner)) and
+      Map.get(run_state, :lease_owner_instance_id) == RunnerRuntime.instance_id() and
+      Map.get(run_state, :lease_owner_channel) == Config.runner_channel()
+  end
 
   defp lease_snapshot_for_state(lease) when is_map(lease) do
     %{
