@@ -1698,6 +1698,49 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert retry_entry.error == "no available orchestrator slots"
   end
 
+  test "control resolution falls back to seeded manual run state when tracker lookup is empty" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-control-seeded-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      runner_channel: "canary"
+    )
+
+    identifier = "MT-CONTROL-SEEDED"
+    workspace = Workspace.path_for_issue(identifier)
+
+    try do
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+                 issue_id: "manual:control-seeded",
+                 issue_identifier: identifier,
+                 issue_source: :manual,
+                 issue_state: "In Progress",
+                 effective_policy_class: "fully_autonomous",
+                 runner_channel: "canary",
+                 branch: "codex/control-seeded"
+               })
+
+      assert {:ok, %Issue{} = issue} =
+               Orchestrator.resolve_issue_for_control_for_test(%State{}, identifier)
+
+      assert issue.id == "manual:control-seeded"
+      assert issue.identifier == identifier
+      assert issue.source == :manual
+      assert issue.branch_name == "codex/control-seeded"
+      assert "canary:symphony" in issue.labels
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "passive continuation metadata backs off await_checks retries based on poll count" do
     identifier = "MT-PASSIVE-DELAY"
     workspace = Workspace.path_for_issue(identifier)

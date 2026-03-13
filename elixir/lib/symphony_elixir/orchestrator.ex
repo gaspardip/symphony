@@ -1927,6 +1927,13 @@ defmodule SymphonyElixir.Orchestrator do
       do: seeded_manual_issue_from_run_state(run_state)
 
   @doc false
+  @spec resolve_issue_for_control_for_test(State.t(), String.t()) ::
+          {:ok, Issue.t()} | {:error, term()}
+  def resolve_issue_for_control_for_test(%State{} = state, issue_identifier)
+      when is_binary(issue_identifier),
+      do: resolve_issue_for_control(state, issue_identifier)
+
+  @doc false
   @spec label_gate_status_for_test(term()) :: atom()
   def label_gate_status_for_test(issue), do: label_gate_status(issue)
 
@@ -5285,6 +5292,9 @@ defmodule SymphonyElixir.Orchestrator do
       issue = find_running_issue_by_identifier(state, issue_identifier) ->
         {:ok, issue}
 
+      issue = seeded_control_issue(issue_identifier) ->
+        {:ok, issue}
+
       true ->
         case IssueSource.fetch_issue(%{canonical_identifier: issue_identifier}) do
           {:ok, %Issue{} = issue} -> {:ok, issue}
@@ -5295,6 +5305,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp resolve_issue_for_control(_state, _issue_identifier), do: {:error, :blank_issue_identifier}
+
+  defp seeded_control_issue(issue_identifier) when is_binary(issue_identifier) do
+    workspace = Workspace.path_for_issue(issue_identifier)
+
+    with true <- File.dir?(workspace),
+         {:ok, run_state} <- RunStateStore.load(workspace),
+         %Issue{} = issue <- seeded_manual_issue_from_run_state(run_state),
+         ^issue_identifier <- issue.identifier do
+      issue
+    else
+      _ -> nil
+    end
+  end
 
   defp find_running_issue_by_identifier(%State{} = state, issue_identifier) do
     Enum.find_value(state.running, fn
