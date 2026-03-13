@@ -75,6 +75,7 @@ defmodule SymphonyElixir.IssueAcceptanceTest do
     acceptance = IssueAcceptance.from_issue(%{"title" => nil, "description" => nil})
 
     assert acceptance.implicit?
+
     assert IssueAcceptance.to_prompt_map(acceptance) == %{
              implicit_acceptance: true,
              summary: "No explicit acceptance criteria were provided.",

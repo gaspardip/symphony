@@ -6,6 +6,7 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
+  alias SymphonyElixir.Observability.Metrics
   alias SymphonyElixirWeb.{Endpoint, Presenter}
 
   @spec state(Conn.t(), map()) :: Conn.t()
@@ -21,6 +22,13 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   @spec portfolio(Conn.t(), map()) :: Conn.t()
   def portfolio(conn, _params) do
     json(conn, Presenter.portfolio_payload())
+  end
+
+  @spec metrics(Conn.t(), map()) :: Conn.t()
+  def metrics(conn, _params) do
+    conn
+    |> put_resp_content_type("text/plain")
+    |> send_resp(200, Metrics.scrape())
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()

@@ -20,8 +20,10 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.LeaseManager
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.ManualIssueStore
+  alias SymphonyElixir.Observability
   alias SymphonyElixir.PriorityEngine
   alias SymphonyElixir.PRWatcher
+  alias SymphonyElixir.ReviewEvidenceCollector
   alias SymphonyElixir.RuleCatalog
   alias SymphonyElixir.RunInspector
   alias SymphonyElixir.RunLedger
@@ -51,6 +53,19 @@ defmodule SymphonyElixir.Orchestrator do
     total_tokens: 0,
     seconds_running: 0
   }
+  @dialyzer {:nowarn_function,
+             persist_review_feedback_for_workspace: 4,
+             review_thread_state: 2,
+             issue_for_run_state: 1,
+             issue_ref_for_run_state: 1,
+             normalize_issue_source: 1,
+             maybe_start_autonomous_review_follow_up: 8,
+             autonomous_review_follow_up?: 3,
+             paused_issue?: 3,
+             maybe_dispatch_autonomous_review_follow_up: 2,
+             put_review_resume_context: 5,
+             review_resume_context: 5,
+             review_feedback_summary: 1}
 
   defmodule State do
     @moduledoc """
@@ -135,7 +150,13 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def handle_info(:tick, state) do
     state = refresh_runtime_config(state)
-    state = %{state | poll_check_in_progress: true, current_poll_mode: :discovery, next_poll_due_at_ms: nil}
+
+    state = %{
+      state
+      | poll_check_in_progress: true,
+        current_poll_mode: :discovery,
+        next_poll_due_at_ms: nil
+    }
 
     notify_dashboard()
     :ok = schedule_poll_cycle_start()
@@ -144,7 +165,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:healing_tick, state) do
     state = refresh_runtime_config(state)
-    state = %{state | poll_check_in_progress: true, current_poll_mode: :healing, next_healing_poll_due_at_ms: nil}
+
+    state = %{
+      state
+      | poll_check_in_progress: true,
+        current_poll_mode: :healing,
+        next_healing_poll_due_at_ms: nil
+    }
 
     notify_dashboard()
     :ok = schedule_healing_cycle_start()
@@ -226,7 +253,7 @@ defmodule SymphonyElixir.Orchestrator do
     if state.github_webhook_check_in_progress == true do
       {:noreply, state}
     else
-      :ok = start_github_webhook_drain()
+      :ok = schedule_github_webhook_cycle_start()
       {:noreply, %{state | github_webhook_check_in_progress: true}}
     end
   end
@@ -254,26 +281,9 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(:run_github_webhook_cycle, state) do
     state = refresh_runtime_config(state)
     state = maybe_dispatch(state, :github_webhook)
-    state = %{state | poll_check_in_progress: false, current_poll_mode: nil}
+    state = %{state | github_webhook_check_in_progress: false}
     notify_dashboard()
     {:noreply, state}
-  end
-
-  def handle_info({:github_webhook_cycle_completed, attrs}, state) when is_map(attrs) do
-    state = %{
-      state
-      | github_inbox_last_drained_at: Map.get(attrs, :drained_at, DateTime.utc_now()),
-        github_webhook_check_in_progress: false
-    }
-
-    notify_dashboard()
-
-    if GitHubEventInbox.pending_events(1) != [] do
-      :ok = start_github_webhook_drain()
-      {:noreply, %{state | github_webhook_check_in_progress: true}}
-    else
-      {:noreply, state}
-    end
   end
 
   def handle_info(
@@ -295,9 +305,7 @@ defmodule SymphonyElixir.Orchestrator do
               continuation = continuation_metadata_for_running_entry(running_entry)
               continuation_delay_type = Map.get(continuation, :delay_type, :continuation)
 
-              Logger.info(
-                "Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling #{continuation_delay_type} continuation check"
-              )
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling #{continuation_delay_type} continuation check")
 
               state = complete_issue(state, issue_id)
 
@@ -306,12 +314,17 @@ defmodule SymphonyElixir.Orchestrator do
                   state
 
                 delay_type ->
-                  schedule_issue_retry(state, issue_id, 1, %{
-                    identifier: running_entry.identifier,
-                    delay_type: delay_type,
-                    issue: running_entry.issue
-                  }
-                  |> Map.merge(Map.drop(continuation, [:delay_type])))
+                  schedule_issue_retry(
+                    state,
+                    issue_id,
+                    1,
+                    %{
+                      identifier: running_entry.identifier,
+                      delay_type: delay_type,
+                      issue: running_entry.issue
+                    }
+                    |> Map.merge(Map.drop(continuation, [:delay_type]))
+                  )
               end
 
             _ ->
@@ -342,6 +355,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        Observability.emit_token_delta(updated_running_entry, token_delta, update)
 
         state =
           state
@@ -392,11 +406,19 @@ defmodule SymphonyElixir.Orchestrator do
           |> reconcile_running_issues(:manual_only)
           |> maybe_promote_review_ready_issues(:manual_only)
           |> maybe_dispatch_mode(:manual_only)
-          |> Map.put(:candidate_fetch_error, {:tracker_backoff, Map.get(state, :tracker_backoff_rule_id)})
+          |> Map.put(
+            :candidate_fetch_error,
+            {:tracker_backoff, Map.get(state, :tracker_backoff_rule_id)}
+          )
         else
           {:error, reason} ->
             Logger.error("Failed to run degraded tracker dispatch cycle: #{inspect(reason)}")
-            %{state | skipped_issues: [], candidate_fetch_error: {:tracker_backoff, Map.get(state, :tracker_backoff_rule_id)}}
+
+            %{
+              state
+              | skipped_issues: [],
+                candidate_fetch_error: {:tracker_backoff, Map.get(state, :tracker_backoff_rule_id)}
+            }
         end
 
       true ->
@@ -444,6 +466,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           {:error, :workflow_front_matter_not_a_map} ->
             Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
+
             state
 
           {:error, {:workflow_parse_error, reason}} ->
@@ -472,6 +495,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to fetch manual candidate issues during tracker backoff: #{inspect(reason)}")
+
         %{state | skipped_issues: [], candidate_fetch_error: reason}
     end
   end
@@ -559,45 +583,63 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp drain_github_events(%State{} = state) do
-    _ = drain_github_events_stateless()
+    pending_events = GitHubEventInbox.pending_events(100)
+
+    {state, ack_count} =
+      Enum.reduce(pending_events, {state, 0}, fn record, {state_acc, ack_count} ->
+        case decode_github_event_record(record) do
+          %GitHubEvent{} = event ->
+            {maybe_process_github_event(state_acc, event), ack_count + 1}
+
+          _ ->
+            {state_acc, ack_count + 1}
+        end
+      end)
+
+    if ack_count > 0 do
+      _ = GitHubEventInbox.ack(ack_count)
+    end
+
     %{state | github_inbox_last_drained_at: DateTime.utc_now()}
   end
 
   defp maybe_process_github_event(%State{} = state, %GitHubEvent{} = event) do
     if GitHubEvent.review_affecting?(event) do
-      refresh_pr_feedback_for_url(event.pr_url)
-      state
+      refresh_pr_feedback_by_url(state, event.pr_url)
     else
       state
     end
   end
 
-  defp refresh_pr_feedback_by_url(%State{} = state, pr_url) when is_binary(pr_url) and pr_url != "" do
-    refresh_pr_feedback_for_url(pr_url)
-    state
+  defp refresh_pr_feedback_by_url(%State{} = state, pr_url)
+       when is_binary(pr_url) and pr_url != "" do
+    refresh_pr_feedback_for_url(state, pr_url)
   end
 
   defp refresh_pr_feedback_by_url(%State{} = state, _pr_url), do: state
 
-  defp refresh_pr_feedback_for_url(pr_url) when is_binary(pr_url) and pr_url != "" do
+  defp refresh_pr_feedback_for_url(%State{} = state, pr_url)
+       when is_binary(pr_url) and pr_url != "" do
     Config.workspace_root()
     |> list_workspace_paths()
-    |> Enum.each(fn workspace ->
+    |> Enum.reduce(state, fn workspace, state_acc ->
       case RunStateStore.load(workspace) do
         {:ok, run_state} ->
           if Map.get(run_state, :pr_url) == pr_url do
-            persist_review_feedback_for_workspace(workspace, run_state, pr_url)
+            persist_review_feedback_for_workspace(state_acc, workspace, run_state, pr_url)
+          else
+            state_acc
           end
 
         _ ->
-          :ok
+          state_acc
       end
     end)
   end
 
-  defp refresh_pr_feedback_for_url(_pr_url), do: :ok
+  defp refresh_pr_feedback_for_url(%State{} = state, _pr_url), do: state
 
-  defp persist_review_feedback_for_workspace(workspace, run_state, pr_url) do
+  defp persist_review_feedback_for_workspace(%State{} = state, workspace, run_state, pr_url) do
     feedback =
       PRWatcher.review_feedback(
         workspace,
@@ -607,68 +649,465 @@ defmodule SymphonyElixir.Orchestrator do
       )
 
     if Map.get(feedback, :status) == "ok" and Map.get(feedback, :pending_drafts_count, 0) > 0 do
+      review_claims =
+        feedback
+        |> Map.get(:items, [])
+        |> Enum.reduce(Map.get(run_state, :review_claims, %{}), fn item, acc ->
+          case Map.get(item, :thread_key) do
+            thread_key when is_binary(thread_key) ->
+              persisted = Map.get(acc, thread_key, %{})
+
+              verification_status =
+                Map.get(
+                  persisted,
+                  "verification_status",
+                  if(Map.get(item, :disposition) == "needs_verification",
+                    do: "pending",
+                    else: "not_needed"
+                  )
+                )
+
+              claim_state = %{
+                "thread_key" => Map.get(item, :thread_key),
+                "id" => Map.get(item, :id),
+                "kind" => Map.get(item, :kind) |> to_string(),
+                "author" => Map.get(item, :author),
+                "body" => Map.get(item, :body),
+                "path" => Map.get(item, :path),
+                "line" => Map.get(item, :line),
+                "state" => Map.get(item, :state),
+                "review_decision" => Map.get(item, :review_decision),
+                "submitted_at" => Map.get(item, :submitted_at),
+                "source_class" => Map.get(item, :source_class),
+                "claim_type" => Map.get(item, :claim_type),
+                "veracity_score" => Map.get(item, :veracity_score),
+                "reproducibility_score" => Map.get(item, :reproducibility_score),
+                "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+                "locality_score" => Map.get(item, :locality_score),
+                "source_precision_score" => Map.get(item, :source_precision_score),
+                "consensus_score" => Map.get(item, :consensus_score),
+                "consensus_state" => Map.get(item, :consensus_state),
+                "consensus_summary" => Map.get(item, :consensus_summary),
+                "consensus_reasons" => Map.get(item, :consensus_reasons, []),
+                "historical_precision_score" => Map.get(item, :historical_precision_score),
+                "hard_proof" => Map.get(item, :hard_proof, false),
+                "proof_sources" => Map.get(item, :proof_sources, []),
+                "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+                "disposition" => Map.get(item, :disposition),
+                "actionable" => Map.get(item, :actionable, false),
+                "adjudication_summary" => Map.get(item, :adjudication_summary),
+                "verification_status" => verification_status,
+                "verification_attempts" => Map.get(persisted, "verification_attempts", 0),
+                "evidence_refs" => Map.get(persisted, "evidence_refs", []),
+                "evidence_summary" => Map.get(persisted, "evidence_summary"),
+                "pr_url" => pr_url
+              }
+
+              Map.put(acc, thread_key, claim_state)
+
+            _ ->
+              acc
+          end
+        end)
+
       review_threads =
         feedback
         |> Map.get(:items, [])
         |> Enum.reduce(Map.get(run_state, :review_threads, %{}), fn item, acc ->
-          Map.put(acc, item.thread_key, %{
-            "draft_state" => Map.get(item, :draft_state, "drafted"),
-            "draft_reply" => Map.get(item, :draft_reply),
-            "resolution_recommendation" => Map.get(item, :resolution_recommendation)
-          })
+          case Map.get(item, :thread_key) do
+            thread_key when is_binary(thread_key) ->
+              Map.put(acc, thread_key, review_thread_state(item, pr_url))
+
+            _ ->
+              acc
+          end
         end)
 
-      summary = "New PR review feedback detected on #{pr_url}."
-      human_action = "Review drafted replies and decide whether to address code changes or post a response."
+      issue = issue_for_run_state(run_state)
 
-      {:ok, next_run_state} =
-        RunStateStore.update(workspace, fn persisted ->
-          persisted
-          |> Map.put(:review_threads, review_threads)
-          |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
-          |> Map.put(:last_decision_summary, summary)
-          |> Map.put(:next_human_action, human_action)
-        end)
+      case maybe_start_autonomous_review_follow_up(
+             state,
+             issue,
+             workspace,
+             run_state,
+             pr_url,
+             feedback,
+             review_threads,
+             review_claims
+           ) do
+        {:ok, next_state} ->
+          next_state
 
-      RunLedger.record("review.feedback_detected", %{
-        issue_id: Map.get(next_run_state, :issue_id),
-        issue_identifier: Map.get(next_run_state, :issue_identifier),
-        actor_type: "runtime",
-        actor_id: "github_webhook",
-        summary: summary,
-        details: pr_url,
-        metadata: %{
-          pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
-          review_decision: Map.get(feedback, :review_decision)
-        }
-      })
+        {:ok, next_state, :non_actionable} ->
+          next_state
+
+        :not_autonomous ->
+          summary = "New PR review feedback detected on #{pr_url}."
+
+          human_action =
+            "Review drafted replies and decide whether to address code changes or post a response."
+
+          case RunStateStore.update(workspace, fn persisted ->
+                 persisted
+                 |> Map.put(:review_threads, review_threads)
+                 |> Map.put(:review_claims, review_claims)
+                 |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
+                 |> Map.put(:last_decision_summary, summary)
+                 |> Map.put(:next_human_action, human_action)
+                 |> put_review_resume_context(pr_url, review_threads, review_claims, nil)
+               end) do
+            {:ok, next_run_state} ->
+              RunLedger.record("review.feedback_detected", %{
+                issue_id: Map.get(next_run_state, :issue_id),
+                issue_identifier: Map.get(next_run_state, :issue_identifier),
+                actor_type: "runtime",
+                actor_id: "github_webhook",
+                summary: summary,
+                details: pr_url,
+                metadata: %{
+                  pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
+                  review_decision: Map.get(feedback, :review_decision)
+                }
+              })
+
+              state
+
+            {:error, reason} ->
+              Logger.warning("Failed to persist manual review feedback for #{pr_url}: #{inspect(reason)}")
+
+              state
+          end
+      end
+    else
+      state
     end
   end
 
-  defp drain_github_events_stateless do
-    pending_events = GitHubEventInbox.pending_events(100)
+  defp review_thread_state(item, pr_url) when is_map(item) do
+    %{
+      "thread_key" => Map.get(item, :thread_key),
+      "id" => Map.get(item, :id),
+      "kind" => Map.get(item, :kind) |> to_string(),
+      "author" => Map.get(item, :author),
+      "body" => Map.get(item, :body),
+      "path" => Map.get(item, :path),
+      "line" => Map.get(item, :line),
+      "state" => Map.get(item, :state),
+      "review_decision" => Map.get(item, :review_decision),
+      "submitted_at" => Map.get(item, :submitted_at),
+      "draft_state" => Map.get(item, :draft_state, "drafted"),
+      "draft_reply" => Map.get(item, :draft_reply),
+      "resolution_recommendation" => Map.get(item, :resolution_recommendation),
+      "source_class" => Map.get(item, :source_class),
+      "claim_type" => Map.get(item, :claim_type),
+      "veracity_score" => Map.get(item, :veracity_score),
+      "reproducibility_score" => Map.get(item, :reproducibility_score),
+      "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+      "locality_score" => Map.get(item, :locality_score),
+      "source_precision_score" => Map.get(item, :source_precision_score),
+      "consensus_score" => Map.get(item, :consensus_score),
+      "consensus_state" => Map.get(item, :consensus_state),
+      "consensus_summary" => Map.get(item, :consensus_summary),
+      "consensus_reasons" => Map.get(item, :consensus_reasons, []),
+      "historical_precision_score" => Map.get(item, :historical_precision_score),
+      "hard_proof" => Map.get(item, :hard_proof, false),
+      "proof_sources" => Map.get(item, :proof_sources, []),
+      "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+      "disposition" => Map.get(item, :disposition),
+      "actionable" => Map.get(item, :actionable, false),
+      "adjudication_summary" => Map.get(item, :adjudication_summary),
+      "pr_url" => pr_url
+    }
+  end
 
-    ack_count =
-      Enum.reduce(pending_events, 0, fn record, ack_count ->
-        case decode_github_event_record(record) do
-          %GitHubEvent{} = event ->
-            if GitHubEvent.review_affecting?(event) do
-              refresh_pr_feedback_for_url(event.pr_url)
-            end
+  defp issue_for_run_state(run_state) when is_map(run_state) do
+    case IssueSource.fetch_issue(issue_ref_for_run_state(run_state)) do
+      {:ok, %Issue{} = issue} -> issue
+      _ -> nil
+    end
+  end
 
-            ack_count + 1
+  defp issue_ref_for_run_state(run_state) when is_map(run_state) do
+    %{
+      source: normalize_issue_source(Map.get(run_state, :issue_source)),
+      id: Map.get(run_state, :issue_id),
+      identifier: Map.get(run_state, :issue_identifier)
+    }
+  end
+
+  defp normalize_issue_source(value) when value in [:manual, :tracker], do: value
+
+  defp normalize_issue_source(value) when is_binary(value) do
+    case String.trim(String.downcase(value)) do
+      "manual" -> :manual
+      "tracker" -> :tracker
+      _ -> nil
+    end
+  end
+
+  defp normalize_issue_source(_value), do: nil
+
+  defp maybe_start_autonomous_review_follow_up(
+         %State{} = state,
+         issue,
+         workspace,
+         run_state,
+         pr_url,
+         feedback,
+         review_threads,
+         review_claims
+       ) do
+    if autonomous_review_follow_up?(state, issue, run_state) and PRWatcher.actionable_feedback?(feedback) do
+      target_stage = PRWatcher.follow_up_stage(feedback)
+
+      next_objective =
+        case target_stage do
+          "review_verification" ->
+            "Verify the pending GitHub review feedback on #{pr_url}, collect local evidence, and reopen implementation only for verified claims."
 
           _ ->
-            ack_count + 1
+            "Address the pending GitHub review feedback on #{pr_url}, update the code, and return the branch to runtime validation."
         end
-      end)
 
-    if ack_count > 0 do
-      _ = GitHubEventInbox.ack(ack_count)
+      summary =
+        case target_stage do
+          "review_verification" ->
+            "GitHub review feedback detected on #{pr_url}. Returning to review_verification before reopening implementation."
+
+          _ ->
+            "GitHub review feedback detected on #{pr_url}. Returning to implement to address the requested changes."
+        end
+
+      case RunStateStore.transition(workspace, target_stage, %{
+             issue_id: Map.get(run_state, :issue_id),
+             issue_identifier: Map.get(run_state, :issue_identifier),
+             issue_source: Map.get(run_state, :issue_source),
+             pr_url: pr_url,
+             review_threads: review_threads,
+             review_claims: review_claims,
+             review_return_stage: Map.get(run_state, :stage),
+             last_review_decision: Map.get(feedback, :review_decision),
+             stop_reason: nil,
+             last_decision: nil,
+             last_rule_id: nil,
+             last_failure_class: nil,
+             last_decision_summary: summary,
+             next_human_action: nil,
+             resume_context:
+               review_resume_context(
+                 Map.get(run_state, :resume_context),
+                 pr_url,
+                 review_threads,
+                 review_claims,
+                 next_objective
+               )
+           }) do
+        {:ok, _next_run_state} ->
+          issue_ref = issue_ref_for_run_state(run_state)
+          _ = IssueSource.update_issue_state(issue || issue_ref, "In Progress")
+
+          refreshed_issue =
+            case issue do
+              %Issue{} = existing_issue ->
+                case IssueSource.refresh_issue(existing_issue) do
+                  {:ok, %Issue{} = latest_issue} -> latest_issue
+                  _ -> %{existing_issue | state: "In Progress"}
+                end
+
+              _ ->
+                nil
+            end
+
+          RunLedger.record("review.feedback_autonomous_follow_up", %{
+            issue_id: Map.get(run_state, :issue_id),
+            issue_identifier: Map.get(run_state, :issue_identifier),
+            actor_type: "runtime",
+            actor_id: "github_webhook",
+            summary: summary,
+            details: pr_url,
+            metadata: %{
+              review_decision: Map.get(feedback, :review_decision),
+              pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
+              target_stage: target_stage
+            }
+          })
+
+          {:ok, maybe_dispatch_autonomous_review_follow_up(state, refreshed_issue)}
+
+        {:error, reason} ->
+          Logger.warning("Failed to transition #{pr_url} back to implement after review feedback: #{inspect(reason)}")
+
+          :not_autonomous
+      end
+    else
+      case {autonomous_review_follow_up?(state, issue, run_state), PRWatcher.actionable_feedback?(feedback)} do
+        {true, false} ->
+          summary =
+            "GitHub review feedback detected on #{pr_url}, but the current adjudicator triaged it as non-actionable noise."
+
+          case RunStateStore.update(workspace, fn persisted ->
+                 persisted
+                 |> Map.put(:review_threads, review_threads)
+                 |> Map.put(:review_claims, review_claims)
+                 |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
+                 |> Map.put(:last_decision_summary, summary)
+                 |> Map.put(:next_human_action, nil)
+                 |> put_review_resume_context(pr_url, review_threads, review_claims, nil)
+               end) do
+            {:ok, next_run_state} ->
+              RunLedger.record("review.feedback_triaged", %{
+                issue_id: Map.get(next_run_state, :issue_id),
+                issue_identifier: Map.get(next_run_state, :issue_identifier),
+                actor_type: "runtime",
+                actor_id: "github_webhook",
+                summary: summary,
+                details: pr_url,
+                metadata: %{
+                  pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
+                  actionable_items_count: Map.get(feedback, :actionable_items_count, 0),
+                  review_decision: Map.get(feedback, :review_decision)
+                }
+              })
+
+              {:ok, state, :non_actionable}
+
+            {:error, reason} ->
+              Logger.warning("Failed to persist non-actionable review triage for #{pr_url}: #{inspect(reason)}")
+              :not_autonomous
+          end
+
+        _ ->
+          :not_autonomous
+      end
     end
-
-    ack_count
   end
+
+  defp autonomous_review_follow_up?(%State{} = state, issue, run_state) when is_map(run_state) do
+    stage = Map.get(run_state, :stage)
+
+    policy_class =
+      Map.get(run_state, :effective_policy_class) ||
+        case issue do
+          %Issue{} = resolved_issue ->
+            elem(policy_snapshot_values(resolved_issue, state, run_state), 0)
+
+          _ ->
+            nil
+        end
+
+    policy_class == "fully_autonomous" and
+      stage not in [
+        "done",
+        "post_merge",
+        "deploy_preview",
+        "deploy_production",
+        "post_deploy_verify"
+      ] and
+      not paused_issue?(state, issue, run_state)
+  end
+
+  defp autonomous_review_follow_up?(_state, _issue, _run_state), do: false
+
+  defp paused_issue?(%State{} = state, %Issue{id: issue_id}, _run_state)
+       when is_binary(issue_id) do
+    Map.has_key?(state.paused_issue_states, issue_id)
+  end
+
+  defp paused_issue?(%State{} = state, _issue, run_state) when is_map(run_state) do
+    case Map.get(run_state, :issue_id) do
+      issue_id when is_binary(issue_id) -> Map.has_key?(state.paused_issue_states, issue_id)
+      _ -> false
+    end
+  end
+
+  defp maybe_dispatch_autonomous_review_follow_up(%State{} = state, %Issue{} = issue) do
+    cond do
+      Map.has_key?(state.running, issue.id) ->
+        state
+
+      retry_candidate_issue?(issue, terminal_state_set()) and
+          dispatch_slots_available?(issue, state) ->
+        dispatch_runtime_issue(state, issue, nil)
+
+      true ->
+        :ok = schedule_tick(0)
+        state
+    end
+  end
+
+  defp maybe_dispatch_autonomous_review_follow_up(%State{} = state, _issue) do
+    :ok = schedule_tick(0)
+    state
+  end
+
+  defp put_review_resume_context(run_state, pr_url, review_threads, review_claims, next_objective)
+       when is_map(run_state) do
+    Map.put(
+      run_state,
+      :resume_context,
+      review_resume_context(
+        Map.get(run_state, :resume_context),
+        pr_url,
+        review_threads,
+        review_claims,
+        next_objective
+      )
+    )
+  end
+
+  defp review_resume_context(current_context, pr_url, review_threads, review_claims, next_objective) do
+    context =
+      case current_context do
+        value when is_map(value) -> value
+        _ -> %{}
+      end
+
+    context =
+      context
+      |> Map.put(:review_feedback_summary, review_feedback_summary(review_threads))
+      |> Map.put(:review_claim_summary, ReviewEvidenceCollector.summary(review_claims))
+      |> Map.put(:review_feedback_pr_url, pr_url)
+
+    if is_binary(next_objective) and String.trim(next_objective) != "" do
+      Map.put(context, :next_objective, next_objective)
+    else
+      context
+    end
+  end
+
+  defp review_feedback_summary(review_threads) when is_map(review_threads) do
+    review_threads
+    |> Enum.sort_by(fn {thread_key, _thread_state} -> thread_key end)
+    |> Enum.take(8)
+    |> Enum.map(fn {_thread_key, thread_state} ->
+      kind = Map.get(thread_state, "kind") || "comment"
+
+      location =
+        case {Map.get(thread_state, "path"), Map.get(thread_state, "line")} do
+          {path, line} when is_binary(path) and is_integer(line) -> " #{path}:#{line}"
+          {path, _line} when is_binary(path) -> " #{path}"
+          _ -> ""
+        end
+
+      body =
+        thread_state
+        |> Map.get("body")
+        |> to_string()
+        |> String.trim()
+        |> String.replace(~r/\s+/, " ")
+        |> String.slice(0, 280)
+
+      "- #{kind}#{location}: #{body}"
+    end)
+    |> Enum.reject(&String.ends_with?(&1, ": "))
+    |> Enum.join("\n")
+    |> case do
+      "" -> nil
+      summary -> summary
+    end
+  end
+
+  defp review_feedback_summary(_review_threads), do: nil
 
   defp maybe_process_tracker_event(%State{} = state, %TrackerEvent{} = event) do
     cond do
@@ -730,9 +1169,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:rate_limited, next_state}
 
       {%State{} = next_state, {:error, reason}} ->
-        Logger.warning(
-          "Failed to fetch tracker issue from webhook event issue_id=#{inspect(entity_id)} issue_identifier=#{inspect(event.issue_identifier)}: #{inspect(reason)}"
-        )
+        Logger.warning("Failed to fetch tracker issue from webhook event issue_id=#{inspect(entity_id)} issue_identifier=#{inspect(event.issue_identifier)}: #{inspect(reason)}")
 
         {:drop, next_state}
     end
@@ -789,7 +1226,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp parse_tracker_event_timestamp(_value), do: nil
 
-  defp stale_tracker_event?(%State{} = state, %TrackerEvent{entity_id: entity_id, updated_at: %DateTime{} = updated_at})
+  defp stale_tracker_event?(%State{} = state, %TrackerEvent{
+         entity_id: entity_id,
+         updated_at: %DateTime{} = updated_at
+       })
        when is_binary(entity_id) do
     case Map.get(state.issue_routing_cache, entity_id) do
       %{updated_at: %DateTime{} = cached_updated_at} ->
@@ -822,6 +1262,12 @@ defmodule SymphonyElixir.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     retry_after_ms = backoff_delay_ms(state, metadata)
 
+    Observability.emit_tracker_backoff(:entered, %{
+      reason: "Linear API rate limited",
+      rule_id: "tracker.rate_limited",
+      retry_after_ms: retry_after_ms
+    })
+
     %{
       state
       | tracker_backoff_until_ms: now_ms + retry_after_ms,
@@ -831,6 +1277,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp clear_tracker_backoff(%State{} = state) do
+    if is_integer(state.tracker_backoff_until_ms) do
+      Observability.emit_tracker_backoff(:cleared, %{
+        reason: state.tracker_backoff_reason,
+        rule_id: state.tracker_backoff_rule_id
+      })
+    end
+
     %{
       state
       | tracker_backoff_until_ms: nil,
@@ -851,7 +1304,10 @@ defmodule SymphonyElixir.Orchestrator do
         min(retry_after_ms, 1_800_000)
 
       is_integer(state.tracker_backoff_until_ms) ->
-        min(max(state.tracker_backoff_until_ms - System.monotonic_time(:millisecond), 60_000) * 2, 1_800_000)
+        min(
+          max(state.tracker_backoff_until_ms - System.monotonic_time(:millisecond), 60_000) * 2,
+          1_800_000
+        )
 
       true ->
         60_000
@@ -866,9 +1322,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_note_tracker_backoff(%State{} = state, _mode) do
-    Logger.info(
-      "Tracker backoff active; degrading to manual-only dispatch until #{inspect(state.tracker_backoff_until_ms)}"
-    )
+    Logger.info("Tracker backoff active; degrading to manual-only dispatch until #{inspect(state.tracker_backoff_until_ms)}")
 
     state
   end
@@ -892,11 +1346,23 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_webhook_accept(%State{} = state, attrs) do
     accepted_at = Map.get(attrs, :accepted_at) || DateTime.utc_now()
 
+    Observability.emit([:symphony, :intake, :tracker, :webhook, :accepted], %{count: 1}, %{
+      accepted_at: accepted_at
+    })
+
     %{state | webhook_last_accepted_at: accepted_at}
   end
 
   defp record_webhook_ignored(%State{} = state, attrs) do
     ignored_at = Map.get(attrs, :ignored_at) || DateTime.utc_now()
+    reason = Map.get(attrs, :reason)
+    rule_id = Map.get(attrs, :rule_id)
+
+    Observability.emit(
+      [:symphony, :intake, :tracker, :webhook, :ignored],
+      %{count: 1},
+      %{ignored_at: ignored_at, reason: reason, rule_id: rule_id}
+    )
 
     %{
       state
@@ -908,6 +1374,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_webhook_rejection(%State{} = state, attrs) do
     rejected_at = Map.get(attrs, :rejected_at) || DateTime.utc_now()
+    reason = Map.get(attrs, :reason)
+    rule_id = Map.get(attrs, :rule_id)
+
+    Observability.emit(
+      [:symphony, :intake, :tracker, :webhook, :rejected],
+      %{count: 1},
+      %{rejected_at: rejected_at, reason: reason, rule_id: rule_id}
+    )
 
     %{
       state
@@ -919,11 +1393,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_github_webhook_accept(%State{} = state, attrs) do
     accepted_at = Map.get(attrs, :accepted_at) || DateTime.utc_now()
+
+    Observability.emit([:symphony, :intake, :github, :webhook, :accepted], %{count: 1}, %{
+      accepted_at: accepted_at
+    })
+
     %{state | github_webhook_last_accepted_at: accepted_at}
   end
 
   defp record_github_webhook_ignored(%State{} = state, attrs) do
     ignored_at = Map.get(attrs, :ignored_at) || DateTime.utc_now()
+    reason = Map.get(attrs, :reason)
+    rule_id = Map.get(attrs, :rule_id)
+
+    Observability.emit(
+      [:symphony, :intake, :github, :webhook, :ignored],
+      %{count: 1},
+      %{ignored_at: ignored_at, reason: reason, rule_id: rule_id}
+    )
 
     %{
       state
@@ -935,6 +1422,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_github_webhook_rejection(%State{} = state, attrs) do
     rejected_at = Map.get(attrs, :rejected_at) || DateTime.utc_now()
+    reason = Map.get(attrs, :reason)
+    rule_id = Map.get(attrs, :rule_id)
+
+    Observability.emit(
+      [:symphony, :intake, :github, :webhook, :rejected],
+      %{count: 1},
+      %{rejected_at: rejected_at, reason: reason, rule_id: rule_id}
+    )
 
     %{
       state
@@ -988,20 +1483,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec reconcile_stalled_running_issues_for_test(State.t()) :: State.t()
   def reconcile_stalled_running_issues_for_test(%State{} = state) do
     reconcile_stalled_running_issues(state)
   end
 
   @doc false
+  @spec stall_elapsed_ms_for_test(map(), DateTime.t() | integer() | nil) :: integer() | nil
   def stall_elapsed_ms_for_test(running_entry, now), do: stall_elapsed_ms(running_entry, now)
 
   @doc false
+  @spec last_activity_timestamp_for_test(map()) :: DateTime.t() | integer() | nil
   def last_activity_timestamp_for_test(running_entry), do: last_activity_timestamp(running_entry)
 
   @doc false
+  @spec terminate_task_for_test(pid() | term()) :: :ok
   def terminate_task_for_test(pid), do: terminate_task(pid)
 
   @doc false
+  @spec partition_issues_by_label_gate_for_test([Issue.t()], term()) :: term()
   def partition_issues_by_label_gate_for_test(issues, %State{} = state) do
     partition_issues_by_label_gate(issues, state)
   end
@@ -1012,13 +1512,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
-  def skipped_issue_entry_for_test(issue, reason, state), do: skipped_issue_entry(issue, reason, state)
+  @spec skipped_issue_entry_for_test(term(), atom(), term()) :: map()
+  def skipped_issue_entry_for_test(issue, reason, state),
+    do: skipped_issue_entry(issue, reason, state)
 
   @doc false
+  @spec choose_issues_for_test([Issue.t()], State.t()) :: {[Issue.t()], [Issue.t()]}
   def choose_issues_for_test(issues, %State{} = state), do: choose_issues(issues, state)
 
   @doc false
-  def choose_issues_for_test(issues, %State{} = state, dispatch_fun) when is_function(dispatch_fun, 2) do
+  @spec choose_issues_for_test([Issue.t()], State.t(), (Issue.t(), State.t() -> term())) ::
+          {[Issue.t()], [Issue.t()]}
+  def choose_issues_for_test(issues, %State{} = state, dispatch_fun)
+      when is_function(dispatch_fun, 2) do
     choose_issues(issues, state, dispatch_fun)
   end
 
@@ -1032,29 +1538,38 @@ defmodule SymphonyElixir.Orchestrator do
   def should_dispatch_issue_for_test(_issue, _state), do: false
 
   @doc false
+  @spec state_slots_available_for_test(term(), list()) :: non_neg_integer()
   def state_slots_available_for_test(issue, running), do: state_slots_available?(issue, running)
 
   @doc false
+  @spec running_issue_count_for_state_for_test(list(), term()) :: non_neg_integer()
   def running_issue_count_for_state_for_test(running, issue_state),
     do: running_issue_count_for_state(running, issue_state)
 
   @doc false
+  @spec issue_routable_to_worker_for_test(term()) :: boolean()
   def issue_routable_to_worker_for_test(issue), do: issue_routable_to_worker?(issue)
 
   @doc false
+  @spec issue_labels_for_test(term()) :: [String.t()]
   def issue_labels_for_test(issue), do: issue_labels(issue)
 
   @doc false
+  @spec issue_matches_required_labels_for_test(term()) :: boolean()
   def issue_matches_required_labels_for_test(issue), do: issue_matches_required_labels?(issue)
 
   @doc false
+  @spec label_gate_status_for_test(term()) :: atom()
   def label_gate_status_for_test(issue), do: label_gate_status(issue)
 
   @doc false
+  @spec terminal_issue_state_for_test(term(), MapSet.t(String.t()) | [String.t()]) :: boolean()
   def terminal_issue_state_for_test(state_name, terminal_states),
     do: terminal_issue_state?(state_name, terminal_states)
 
   @doc false
+  @spec todo_issue_blocked_by_non_terminal_for_test(term(), MapSet.t(String.t()) | [String.t()]) ::
+          boolean()
   def todo_issue_blocked_by_non_terminal_for_test(issue, terminal_states),
     do: todo_issue_blocked_by_non_terminal?(issue, terminal_states)
 
@@ -1067,19 +1582,24 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec revalidate_issue_passthrough_for_test(Issue.t()) ::
+          {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
   def revalidate_issue_passthrough_for_test(issue) do
     revalidate_issue_for_dispatch(issue, fn _issue_ids -> :unused end, terminal_state_set())
   end
 
   @doc false
+  @spec dispatch_issue_for_test(State.t(), Issue.t()) :: term()
   def dispatch_issue_for_test(state, issue), do: dispatch_issue_for_test(state, issue, [])
 
   @doc false
+  @spec dispatch_runtime_issue_for_test(State.t(), Issue.t(), term()) :: term()
   def dispatch_runtime_issue_for_test(%State{} = state, %Issue{} = issue, attempt \\ nil) do
     dispatch_runtime_issue(state, issue, attempt)
   end
 
   @doc false
+  @spec dispatch_runtime_issue_for_test(State.t(), Issue.t(), term(), keyword()) :: term()
   def dispatch_runtime_issue_for_test(%State{} = state, %Issue{} = issue, attempt, opts)
       when is_list(opts) do
     active_dispatch_fun = Keyword.get(opts, :active_dispatch_fun, &dispatch_issue/3)
@@ -1089,30 +1609,36 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec normalize_dispatch_stage_for_test(Issue.t()) :: String.t()
   def normalize_dispatch_stage_for_test(%Issue{} = issue) do
     normalize_dispatch_stage(issue)
   end
 
   @doc false
+  @spec maybe_resume_blocked_issue_for_test(State.t(), Issue.t()) :: State.t()
   def maybe_resume_blocked_issue_for_test(%State{} = state, %Issue{} = issue) do
     maybe_resume_blocked_issue(state, issue)
   end
 
   @doc false
+  @spec dispatch_issue_default_for_test(State.t(), Issue.t(), term()) :: term()
   def dispatch_issue_default_for_test(%State{} = state, %Issue{} = issue, attempt \\ nil) do
     dispatch_issue(state, issue, attempt)
   end
 
   @doc false
+  @spec dispatch_issue_private_head_for_test(State.t(), term(), term()) :: term()
   def dispatch_issue_private_head_for_test(%State{} = state, issue, attempt) do
     dispatch_issue(state, issue, attempt)
   end
 
   @doc false
+  @spec dispatch_issue_private_head_for_test(State.t(), term()) :: term()
   def dispatch_issue_private_head_for_test(%State{} = state, issue) do
     dispatch_issue(state, issue)
   end
 
+  @spec dispatch_issue_for_test(State.t(), Issue.t(), keyword()) :: term()
   def dispatch_issue_for_test(%State{} = state, %Issue{} = issue, []) do
     dispatch_issue(state, issue, nil)
   end
@@ -1126,11 +1652,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec do_dispatch_issue_for_test(State.t(), Issue.t(), term()) :: term()
   def do_dispatch_issue_for_test(%State{} = state, %Issue{} = issue, attempt \\ nil) do
     do_dispatch_issue(state, issue, attempt)
   end
 
   @doc false
+  @spec do_dispatch_issue_for_test(State.t(), Issue.t(), term(), keyword()) :: term()
   def do_dispatch_issue_for_test(%State{} = state, %Issue{} = issue, attempt, opts)
       when is_list(opts) do
     acquire_fun = Keyword.get(opts, :acquire_fun, &LeaseManager.acquire/3)
@@ -1140,30 +1668,56 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
-  def do_spawn_issue_worker_for_test(%State{} = state, %Issue{} = issue, attempt, recipient, opts \\ [])
+  @spec do_spawn_issue_worker_for_test(State.t(), Issue.t(), term(), pid() | atom(), keyword()) ::
+          term()
+  def do_spawn_issue_worker_for_test(
+        %State{} = state,
+        %Issue{} = issue,
+        attempt,
+        recipient,
+        opts \\ []
+      )
       when is_list(opts) do
     start_child_fun = Keyword.get(opts, :start_child_fun, &Task.Supervisor.start_child/2)
     do_spawn_issue_worker(state, issue, attempt, recipient, start_child_fun)
   end
 
   @doc false
-  def do_spawn_issue_worker_default_for_test(%State{} = state, %Issue{} = issue, attempt, recipient) do
+  @spec do_spawn_issue_worker_default_for_test(State.t(), Issue.t(), term(), pid() | atom()) ::
+          term()
+  def do_spawn_issue_worker_default_for_test(
+        %State{} = state,
+        %Issue{} = issue,
+        attempt,
+        recipient
+      ) do
     do_spawn_issue_worker(state, issue, attempt, recipient)
   end
 
   @doc false
-  def do_spawn_passive_worker_for_test(%State{} = state, %Issue{} = issue, attempt, recipient, opts \\ [])
+  @spec do_spawn_passive_worker_for_test(State.t(), Issue.t(), term(), pid() | atom(), keyword()) ::
+          term()
+  def do_spawn_passive_worker_for_test(
+        %State{} = state,
+        %Issue{} = issue,
+        attempt,
+        recipient,
+        opts \\ []
+      )
       when is_list(opts) do
     start_child_fun = Keyword.get(opts, :start_child_fun, &Task.Supervisor.start_child/2)
     do_spawn_passive_worker(state, issue, attempt, recipient, start_child_fun)
   end
 
   @doc false
+  @spec continuation_metadata_for_running_entry_for_test(map()) :: map()
   def continuation_metadata_for_running_entry_for_test(running_entry),
     do: continuation_metadata_for_running_entry(running_entry)
 
   @doc false
-  def dispatch_passive_issue_for_test(%State{} = state, %Issue{} = issue, opts \\ []) when is_list(opts) do
+  @spec dispatch_passive_issue_for_test(State.t(), Issue.t(), keyword()) :: term()
+  def dispatch_passive_issue_for_test(%State{} = state, %Issue{} = issue, opts \\ [])
+      when is_list(opts) do
     attempt = Keyword.get(opts, :attempt)
     acquire_fun = Keyword.get(opts, :acquire_fun, &LeaseManager.acquire/3)
     spawn_fun = Keyword.get(opts, :spawn_fun, &do_spawn_passive_worker/4)
@@ -1171,17 +1725,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec passive_delay_ms_for_await_checks_for_test(map()) :: non_neg_integer()
   def passive_delay_ms_for_await_checks_for_test(run_state) when is_map(run_state) do
     passive_delay_ms_for_await_checks(run_state)
   end
 
   @doc false
+  @spec schedule_issue_retry_for_test(State.t(), String.t(), non_neg_integer() | nil, map()) ::
+          State.t()
   def schedule_issue_retry_for_test(%State{} = state, issue_id, attempt, metadata)
       when is_binary(issue_id) and is_map(metadata) do
     schedule_issue_retry(state, issue_id, attempt, metadata)
   end
 
   @doc false
+  @spec handle_retry_issue_for_test(State.t(), String.t(), non_neg_integer() | nil, map(), term()) ::
+          State.t()
   def handle_retry_issue_for_test(%State{} = state, issue_id, attempt, metadata, issues_result) do
     handle_retry_issue(
       state,
@@ -1194,6 +1753,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec handle_retry_issue_for_test(
+          State.t(),
+          String.t(),
+          non_neg_integer() | nil,
+          map(),
+          term(),
+          term()
+        ) :: State.t()
   def handle_retry_issue_for_test(
         %State{} = state,
         issue_id,
@@ -1213,6 +1780,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec handle_retry_issue_lookup_for_test(
+          term(),
+          State.t(),
+          String.t(),
+          non_neg_integer() | nil,
+          map()
+        ) :: State.t()
   def handle_retry_issue_lookup_for_test(issue, %State{} = state, issue_id, attempt, metadata) do
     handle_retry_issue_lookup(issue, state, issue_id, attempt, metadata)
   end
@@ -1233,9 +1807,12 @@ defmodule SymphonyElixir.Orchestrator do
     sort_issues_for_dispatch(issues, %State{})
   end
 
-  def manual_issue_refresh_state_for_test(%State{} = state), do: maybe_schedule_manual_issue_refresh(state)
+  @spec manual_issue_refresh_state_for_test(State.t()) :: State.t()
+  def manual_issue_refresh_state_for_test(%State{} = state),
+    do: maybe_schedule_manual_issue_refresh(state)
 
   @doc false
+  @spec process_candidate_issues_for_test(State.t(), [Issue.t()]) :: State.t()
   def process_candidate_issues_for_test(%State{} = state, issues) when is_list(issues) do
     process_candidate_issues(state, issues)
   end
@@ -1260,6 +1837,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       match?({:error, _}, resolve_policy(issue, state)) ->
         Logger.info("Issue has invalid policy routing: #{issue_context(issue)} labels=#{inspect(Issue.label_names(issue))}; moving issue to #{@blocked_state}")
+
         block_issue_for_policy_conflict(state, issue)
 
       !issue_routable_to_worker?(issue) ->
@@ -1423,7 +2001,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp skipped_issue_entry(%Issue{} = issue, reason, %State{} = state) do
     workspace_path = Path.join(Config.workspace_root(), issue.identifier || issue.id || "issue")
     run_state = load_run_state(workspace_path, issue)
-    {policy_class, policy_source, policy_override} = policy_snapshot_values(issue, state, run_state)
+
+    {policy_class, policy_source, policy_override} =
+      policy_snapshot_values(issue, state, run_state)
 
     %{
       issue_id: issue.id,
@@ -1500,7 +2080,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp state_slots_available?(_issue, _running), do: false
 
-  defp company_slots_available?(%State{running: running}, %PolicyPack{} = pack) when is_map(running) do
+  defp company_slots_available?(%State{running: running}, %PolicyPack{} = pack)
+       when is_map(running) do
     case pack.max_concurrent_runs_per_company do
       limit when is_integer(limit) and limit > 0 ->
         map_size(running) < limit
@@ -1669,6 +2250,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
+
         state
 
       {:skip, %Issue{} = refreshed_issue} ->
@@ -1678,6 +2260,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
+
         state
     end
   end
@@ -1709,6 +2292,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; failed to acquire lease for #{issue_context(issue)}: #{inspect(reason)}")
+
         state
     end
   end
@@ -1793,7 +2377,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_passive_issue(%State{} = state, %Issue{} = issue, attempt) do
-    dispatch_passive_issue(state, issue, attempt, &LeaseManager.acquire/3, &do_spawn_passive_worker/4)
+    dispatch_passive_issue(
+      state,
+      issue,
+      attempt,
+      &LeaseManager.acquire/3,
+      &do_spawn_passive_worker/4
+    )
   end
 
   defp dispatch_passive_issue(%State{} = state, %Issue{} = issue, attempt, acquire_fun, spawn_fun)
@@ -1818,8 +2408,11 @@ defmodule SymphonyElixir.Orchestrator do
     case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
            workspace =
              case Workspace.create_for_issue(issue) do
-               {:ok, path} -> path
-               {:error, reason} -> raise RuntimeError, "Passive worker setup failed: #{inspect(reason)}"
+               {:ok, path} ->
+                 path
+
+               {:error, reason} ->
+                 raise RuntimeError, "Passive worker setup failed: #{inspect(reason)}"
              end
 
            case DeliveryEngine.run(
@@ -1963,14 +2556,18 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       state
       | retry_attempts:
-          Map.put(state.retry_attempts, issue_id, %{
-            attempt: next_attempt,
-            timer_ref: timer_ref,
-            due_at_ms: due_at_ms,
-            identifier: identifier,
-            error: error
-          }
-          |> Map.merge(Map.drop(metadata, [:identifier, :error])))
+          Map.put(
+            state.retry_attempts,
+            issue_id,
+            %{
+              attempt: next_attempt,
+              timer_ref: timer_ref,
+              due_at_ms: due_at_ms,
+              identifier: identifier,
+              error: error
+            }
+            |> Map.merge(Map.drop(metadata, [:identifier, :error]))
+          )
     }
   end
 
@@ -2125,16 +2722,19 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp release_issue_claim(%State{} = state, issue_id) do
     LeaseManager.release(issue_id, state.lease_owner)
+
     RunLedger.record("lease.released", %{
       issue_id: issue_id,
       actor_type: "system",
       actor_id: state.lease_owner,
       summary: "Lease released."
     })
+
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
-  defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
+  defp retry_delay(attempt, metadata)
+       when is_integer(attempt) and attempt > 0 and is_map(metadata) do
     case metadata[:delay_type] do
       :continuation when attempt == 1 ->
         @continuation_retry_delay_ms
@@ -2169,7 +2769,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp continuation_metadata_for_running_entry(%{identifier: identifier}) when is_binary(identifier) do
+  defp continuation_metadata_for_running_entry(%{identifier: identifier})
+       when is_binary(identifier) do
     case issue_run_state(identifier) do
       %{stage: "await_checks"} = run_state ->
         %{
@@ -2178,10 +2779,16 @@ defmodule SymphonyElixir.Orchestrator do
         }
 
       %{stage: "merge"} ->
-        %{delay_type: :passive_continuation, passive_delay_ms: @passive_continuation_retry_delay_ms}
+        %{
+          delay_type: :passive_continuation,
+          passive_delay_ms: @passive_continuation_retry_delay_ms
+        }
 
       %{stage: "post_merge"} ->
-        %{delay_type: :passive_continuation, passive_delay_ms: @passive_continuation_retry_delay_ms}
+        %{
+          delay_type: :passive_continuation,
+          passive_delay_ms: @passive_continuation_retry_delay_ms
+        }
 
       %{stage: "done"} ->
         %{delay_type: :none}
@@ -2231,7 +2838,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp merge_window_delay_ms(run_state) when is_map(run_state) do
     with %{} = wait <- Map.get(run_state, :merge_window_wait),
-         next_allowed_at when is_binary(next_allowed_at) <- Map.get(wait, :next_allowed_at) || Map.get(wait, "next_allowed_at"),
+         next_allowed_at when is_binary(next_allowed_at) <-
+           Map.get(wait, :next_allowed_at) || Map.get(wait, "next_allowed_at"),
          {:ok, next_allowed_at, _offset} <- DateTime.from_iso8601(next_allowed_at) do
       now = DateTime.utc_now()
 
@@ -2414,13 +3022,15 @@ defmodule SymphonyElixir.Orchestrator do
     reprioritize_issue(__MODULE__, issue_identifier, override_rank)
   end
 
-  @spec reprioritize_issue(GenServer.server(), String.t(), integer() | nil) :: map() | :unavailable
+  @spec reprioritize_issue(GenServer.server(), String.t(), integer() | nil) ::
+          map() | :unavailable
   def reprioritize_issue(server, issue_identifier, override_rank) do
     call_if_available(server, {:reprioritize_issue, issue_identifier, override_rank})
   end
 
   @spec approve_issue_for_merge(String.t()) :: map() | :unavailable
-  def approve_issue_for_merge(issue_identifier), do: approve_issue_for_merge(__MODULE__, issue_identifier)
+  def approve_issue_for_merge(issue_identifier),
+    do: approve_issue_for_merge(__MODULE__, issue_identifier)
 
   @spec approve_issue_for_merge(GenServer.server(), String.t()) :: map() | :unavailable
   def approve_issue_for_merge(server, issue_identifier) do
@@ -2437,7 +3047,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @spec approve_review_drafts(String.t()) :: map() | :unavailable
-  def approve_review_drafts(issue_identifier), do: approve_review_drafts(__MODULE__, issue_identifier)
+  def approve_review_drafts(issue_identifier),
+    do: approve_review_drafts(__MODULE__, issue_identifier)
 
   @spec approve_review_drafts(GenServer.server(), String.t()) :: map() | :unavailable
   def approve_review_drafts(server, issue_identifier) do
@@ -2445,7 +3056,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @spec reject_review_drafts(String.t()) :: map() | :unavailable
-  def reject_review_drafts(issue_identifier), do: reject_review_drafts(__MODULE__, issue_identifier)
+  def reject_review_drafts(issue_identifier),
+    do: reject_review_drafts(__MODULE__, issue_identifier)
 
   @spec reject_review_drafts(GenServer.server(), String.t()) :: map() | :unavailable
   def reject_review_drafts(server, issue_identifier) do
@@ -2470,7 +3082,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @spec resolve_review_threads(String.t()) :: map() | :unavailable
-  def resolve_review_threads(issue_identifier), do: resolve_review_threads(__MODULE__, issue_identifier)
+  def resolve_review_threads(issue_identifier),
+    do: resolve_review_threads(__MODULE__, issue_identifier)
 
   @spec resolve_review_threads(GenServer.server(), String.t()) :: map() | :unavailable
   def resolve_review_threads(server, issue_identifier) do
@@ -2536,7 +3149,10 @@ defmodule SymphonyElixir.Orchestrator do
     now = DateTime.utc_now()
     now_ms = System.monotonic_time(:millisecond)
 
-    running = Enum.map(state.running, fn {issue_id, metadata} -> running_snapshot_entry(issue_id, metadata, now, state) end)
+    running =
+      Enum.map(state.running, fn {issue_id, metadata} ->
+        running_snapshot_entry(issue_id, metadata, now, state)
+      end)
 
     retrying =
       state.retry_attempts
@@ -2596,12 +3212,15 @@ defmodule SymphonyElixir.Orchestrator do
          last_rejected_reason: Map.get(state, :github_webhook_last_rejected_reason),
          last_rejected_rule_id: Map.get(state, :github_webhook_last_rejected_rule_id)
        },
-        tracker_inbox:
-          TrackerEventInbox.stats()
-          |> Map.put(:last_drained_at, datetime_to_iso8601(Map.get(state, :inbox_last_drained_at))),
+       tracker_inbox:
+         TrackerEventInbox.stats()
+         |> Map.put(:last_drained_at, datetime_to_iso8601(Map.get(state, :inbox_last_drained_at))),
        github_inbox:
          GitHubEventInbox.stats()
-         |> Map.put(:last_drained_at, datetime_to_iso8601(Map.get(state, :github_inbox_last_drained_at))),
+         |> Map.put(
+           :last_drained_at,
+           datetime_to_iso8601(Map.get(state, :github_inbox_last_drained_at))
+         ),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          mode: state.current_poll_mode,
@@ -2691,7 +3310,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:approve_review_drafts, issue_identifier}, _from, state) do
-    {reply, state} = review_thread_action_runtime(state, issue_identifier, "approve_review_drafts")
+    {reply, state} =
+      review_thread_action_runtime(state, issue_identifier, "approve_review_drafts")
+
     notify_dashboard()
     {:reply, reply, state}
   end
@@ -2703,7 +3324,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:mark_review_threads_posted, issue_identifier}, _from, state) do
-    {reply, state} = review_thread_action_runtime(state, issue_identifier, "mark_review_threads_posted")
+    {reply, state} =
+      review_thread_action_runtime(state, issue_identifier, "mark_review_threads_posted")
+
     notify_dashboard()
     {:reply, reply, state}
   end
@@ -2715,7 +3338,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:resolve_review_threads, issue_identifier}, _from, state) do
-    {reply, state} = review_thread_action_runtime(state, issue_identifier, "resolve_review_threads")
+    {reply, state} =
+      review_thread_action_runtime(state, issue_identifier, "resolve_review_threads")
+
     notify_dashboard()
     {:reply, reply, state}
   end
@@ -2743,7 +3368,9 @@ defmodule SymphonyElixir.Orchestrator do
     workspace_path = Path.join(Config.workspace_root(), metadata.identifier || issue_id)
     inspection = RunInspector.inspect(workspace_path)
     run_state = load_run_state(workspace_path, metadata.issue)
-    {policy_class, policy_source, policy_override} = policy_snapshot_values(metadata.issue, state, run_state)
+
+    {policy_class, policy_source, policy_override} =
+      policy_snapshot_values(metadata.issue, state, run_state)
 
     %{
       issue_id: issue_id,
@@ -2887,9 +3514,14 @@ defmodule SymphonyElixir.Orchestrator do
         retry_attempts: state.retry_attempts
       )
       |> Enum.map(fn entry ->
-        workspace_path = Path.join(Config.workspace_root(), entry.identifier || entry.issue_id || "issue")
+        workspace_path =
+          Path.join(Config.workspace_root(), entry.identifier || entry.issue_id || "issue")
+
         run_state = load_run_state(workspace_path, entry.issue)
-        {policy_class, policy_source, policy_override} = policy_snapshot_values(entry.issue, state, run_state)
+
+        {policy_class, policy_source, policy_override} =
+          policy_snapshot_values(entry.issue, state, run_state)
+
         {last_rule_id, last_failure_class, last_decision_summary, next_human_action} =
           queue_policy_reason(entry.issue, state, run_state)
 
@@ -2981,7 +3613,11 @@ defmodule SymphonyElixir.Orchestrator do
           policy_class: policy_class,
           summary: "Paused issue from dashboard.",
           target_state: @paused_state,
-          metadata: %{action: "pause", policy_source: policy_source, policy_override: policy_override}
+          metadata: %{
+            action: "pause",
+            policy_source: policy_source,
+            policy_override: policy_override
+          }
         })
 
       state =
@@ -2993,10 +3629,23 @@ defmodule SymphonyElixir.Orchestrator do
           last_ledger_event_id: Map.get(ledger_event, :event_id)
         })
 
-      {%{ok: true, action: "pause", issue_identifier: issue.identifier, state: @paused_state, policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "pause",
+         issue_identifier: issue.identifier,
+         state: @paused_state,
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
-        {%{ok: false, action: "pause", issue_identifier: issue_identifier, error: inspect(reason)}, state}
+        {%{
+           ok: false,
+           action: "pause",
+           issue_identifier: issue_identifier,
+           error: inspect(reason)
+         }, state}
     end
   end
 
@@ -3005,7 +3654,13 @@ defmodule SymphonyElixir.Orchestrator do
       state
     else
       :ok = schedule_poll_cycle_start()
-      %{state | poll_check_in_progress: true, current_poll_mode: :discovery, next_poll_due_at_ms: nil}
+
+      %{
+        state
+        | poll_check_in_progress: true,
+          current_poll_mode: :discovery,
+          next_poll_due_at_ms: nil
+      }
     end
   end
 
@@ -3021,9 +3676,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp resume_issue_runtime(%State{} = state, issue_identifier) do
     with {:ok, paused_entry} <- paused_issue_entry(state, issue_identifier),
-         :ok <- IssueSource.update_issue_state(paused_issue_ref(paused_entry), paused_entry.resume_state) do
-      state = %{state | paused_issue_states: Map.delete(state.paused_issue_states, paused_entry.issue_id)}
+         :ok <-
+           IssueSource.update_issue_state(
+             paused_issue_ref(paused_entry),
+             paused_entry.resume_state
+           ) do
+      state = %{
+        state
+        | paused_issue_states: Map.delete(state.paused_issue_states, paused_entry.issue_id)
+      }
+
       :ok = schedule_tick(0)
+
       ledger_event =
         RunLedger.record("operator.action", %{
           issue_id: paused_entry.issue_id,
@@ -3035,16 +3699,31 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "resume", resume_state: paused_entry.resume_state}
         })
 
-      {%{ok: true, action: "resume", issue_identifier: paused_entry.identifier, state: paused_entry.resume_state, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "resume",
+         issue_identifier: paused_entry.identifier,
+         state: paused_entry.resume_state,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
-        {%{ok: false, action: "resume", issue_identifier: issue_identifier, error: inspect(reason)}, state}
+        {%{
+           ok: false,
+           action: "resume",
+           issue_identifier: issue_identifier,
+           error: inspect(reason)
+         }, state}
     end
   end
 
   defp stop_issue_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
-         :ok <- IssueSource.create_comment(issue, "## Symphony operator stop\n\nRule ID: operator.stop\n\nFailure class: policy\n\nStopped by dashboard control.\n\nUnblock action: Move the issue back to an active state when it should run again."),
+         :ok <-
+           IssueSource.create_comment(
+             issue,
+             "## Symphony operator stop\n\nRule ID: operator.stop\n\nFailure class: policy\n\nStopped by dashboard control.\n\nUnblock action: Move the issue back to an active state when it should run again."
+           ),
          :ok <- IssueSource.update_issue_state(issue, @blocked_state) do
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state)
 
@@ -3069,7 +3748,15 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "stop", policy_source: policy_source}
         })
 
-      {%{ok: true, action: "stop", issue_identifier: issue.identifier, state: @blocked_state, policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "stop",
+         issue_identifier: issue.identifier,
+         state: @blocked_state,
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
         {%{ok: false, action: "stop", issue_identifier: issue_identifier, error: inspect(reason)}, state}
@@ -3079,7 +3766,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp hold_issue_for_human_review_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          {policy_class, policy_source, _policy_override} <- policy_snapshot_values(issue, state),
-         approval_gate_state <- WorkflowProfile.approval_gate_state(policy_class, policy_pack: policy_pack_name(issue, state)),
+         approval_gate_state <-
+           WorkflowProfile.approval_gate_state(policy_class,
+             policy_pack: policy_pack_name(issue, state)
+           ),
          :ok <- IssueSource.update_issue_state(issue, approval_gate_state) do
       state =
         state
@@ -3099,13 +3789,30 @@ defmodule SymphonyElixir.Orchestrator do
           summary: "Placed issue in #{approval_gate_state}.",
           details: "Operator requested a manual review hold.",
           target_state: approval_gate_state,
-          metadata: %{action: "hold_for_human_review", policy_source: policy_source, approval_gate_state: approval_gate_state}
+          metadata: %{
+            action: "hold_for_human_review",
+            policy_source: policy_source,
+            approval_gate_state: approval_gate_state
+          }
         })
 
-      {%{ok: true, action: "hold_for_human_review", issue_identifier: issue.identifier, state: approval_gate_state, policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "hold_for_human_review",
+         issue_identifier: issue.identifier,
+         state: approval_gate_state,
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
-        {%{ok: false, action: "hold_for_human_review", issue_identifier: issue_identifier, error: inspect(reason)}, state}
+        {%{
+           ok: false,
+           action: "hold_for_human_review",
+           issue_identifier: issue_identifier,
+           error: inspect(reason)
+         }, state}
     end
   end
 
@@ -3124,7 +3831,8 @@ defmodule SymphonyElixir.Orchestrator do
           Map.has_key?(state.running, issue.id) ->
             state
 
-          retry_candidate_issue?(issue, terminal_state_set()) and dispatch_slots_available?(issue, state) ->
+          retry_candidate_issue?(issue, terminal_state_set()) and
+              dispatch_slots_available?(issue, state) ->
             dispatch_runtime_issue(state, issue, 1)
 
           true ->
@@ -3142,13 +3850,28 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "retry_now"}
         })
 
-      {%{ok: true, action: "retry_now", issue_identifier: issue.identifier, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "retry_now",
+         issue_identifier: issue.identifier,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       true ->
-        {%{ok: false, action: "retry_now", issue_identifier: issue_identifier, error: "issue is paused"}, state}
+        {%{
+           ok: false,
+           action: "retry_now",
+           issue_identifier: issue_identifier,
+           error: "issue is paused"
+         }, state}
 
       {:error, reason} ->
-        {%{ok: false, action: "retry_now", issue_identifier: issue_identifier, error: inspect(reason)}, state}
+        {%{
+           ok: false,
+           action: "retry_now",
+           issue_identifier: issue_identifier,
+           error: inspect(reason)
+         }, state}
     end
   end
 
@@ -3281,15 +4004,34 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp issue_state_for_stage(stage) when stage in ["checkout"], do: "Todo"
-  defp issue_state_for_stage(stage) when stage in ["implement", "validate", "verify"], do: "In Progress"
-  defp issue_state_for_stage(stage) when stage in ["publish", "await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"], do: "Merging"
+
+  defp issue_state_for_stage(stage) when stage in ["implement", "validate", "verify"],
+    do: "In Progress"
+
+  defp issue_state_for_stage(stage)
+       when stage in [
+              "publish",
+              "await_checks",
+              "merge",
+              "post_merge",
+              "deploy_preview",
+              "deploy_production",
+              "post_deploy_verify"
+            ],
+       do: "Merging"
+
   defp issue_state_for_stage(_stage), do: nil
 
   defp reprioritize_issue_runtime(%State{} = state, issue_identifier, override_rank) do
     identifier = issue_identifier |> to_string() |> String.trim()
 
     if identifier == "" do
-      {%{ok: false, action: "reprioritize", issue_identifier: issue_identifier, error: "blank issue identifier"}, state}
+      {%{
+         ok: false,
+         action: "reprioritize",
+         issue_identifier: issue_identifier,
+         error: "blank issue identifier"
+       }, state}
     else
       priority_overrides =
         case override_rank do
@@ -3377,13 +4119,31 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "approve_for_merge", policy_source: policy_source}
         })
 
-      {%{ok: true, action: "approve_for_merge", issue_identifier: issue.identifier, state: @merging_state, policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "approve_for_merge",
+         issue_identifier: issue.identifier,
+         state: @merging_state,
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       true ->
-        {%{ok: false, action: "approve_for_merge", issue_identifier: issue_identifier, error: "policy forbids automerge"}, state}
+        {%{
+           ok: false,
+           action: "approve_for_merge",
+           issue_identifier: issue_identifier,
+           error: "policy forbids automerge"
+         }, state}
 
       {:error, reason} ->
-        {%{ok: false, action: "approve_for_merge", issue_identifier: issue_identifier, error: inspect(reason)}, state}
+        {%{
+           ok: false,
+           action: "approve_for_merge",
+           issue_identifier: issue_identifier,
+           error: inspect(reason)
+         }, state}
     end
   end
 
@@ -3439,10 +4199,23 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "approve_for_deploy", policy_source: policy_source}
         })
 
-      {%{ok: true, action: "approve_for_deploy", issue_identifier: issue.identifier, state: "In Progress", policy_class: policy_class, policy_source: policy_source, ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "approve_for_deploy",
+         issue_identifier: issue.identifier,
+         state: "In Progress",
+         policy_class: policy_class,
+         policy_source: policy_source,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       {:error, reason} ->
-        {%{ok: false, action: "approve_for_deploy", issue_identifier: issue_identifier, error: inspect(reason)}, state}
+        {%{
+           ok: false,
+           action: "approve_for_deploy",
+           issue_identifier: issue_identifier,
+           error: inspect(reason)
+         }, state}
     end
   end
 
@@ -3450,8 +4223,10 @@ defmodule SymphonyElixir.Orchestrator do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          workspace <- Workspace.path_for_issue(issue.identifier),
          {:ok, run_state} <- RunStateStore.load(workspace),
-         review_threads when is_map(review_threads) and map_size(review_threads) > 0 <- Map.get(run_state, :review_threads, %{}),
-         {:ok, updated_threads, changed_count, summary, human_action} <- apply_review_thread_action(action, review_threads),
+         review_threads when is_map(review_threads) and map_size(review_threads) > 0 <-
+           Map.get(run_state, :review_threads, %{}),
+         {:ok, updated_threads, changed_count, summary, human_action} <-
+           apply_review_thread_action(action, review_threads),
          {:ok, _next_state} <-
            RunStateStore.update(workspace, fn persisted ->
              persisted
@@ -3478,13 +4253,28 @@ defmodule SymphonyElixir.Orchestrator do
        }, state}
     else
       %{} ->
-        {%{ok: false, action: action, issue_identifier: issue_identifier, error: "no review threads"}, state}
+        {%{
+           ok: false,
+           action: action,
+           issue_identifier: issue_identifier,
+           error: "no review threads"
+         }, state}
 
       {:error, :enoent} ->
-        {%{ok: false, action: action, issue_identifier: issue_identifier, error: "run state not found"}, state}
+        {%{
+           ok: false,
+           action: action,
+           issue_identifier: issue_identifier,
+           error: "run state not found"
+         }, state}
 
       {:error, :no_changes} ->
-        {%{ok: false, action: action, issue_identifier: issue_identifier, error: "no review threads matched the requested transition"}, state}
+        {%{
+           ok: false,
+           action: action,
+           issue_identifier: issue_identifier,
+           error: "no review threads matched the requested transition"
+         }, state}
 
       {:error, reason} ->
         {%{ok: false, action: action, issue_identifier: issue_identifier, error: inspect(reason)}, state}
@@ -3495,7 +4285,8 @@ defmodule SymphonyElixir.Orchestrator do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          workspace <- Workspace.path_for_issue(issue.identifier),
          {:ok, run_state} <- RunStateStore.load(workspace),
-         review_threads when is_map(review_threads) and map_size(review_threads) > 0 <- Map.get(run_state, :review_threads, %{}),
+         review_threads when is_map(review_threads) and map_size(review_threads) > 0 <-
+           Map.get(run_state, :review_threads, %{}),
          pr_url when is_binary(pr_url) and pr_url != "" <- Map.get(run_state, :pr_url),
          {:ok, updated_threads, %{posted_count: posted_count, skipped_count: skipped_count}} <-
            PRWatcher.post_approved_drafts(
@@ -3511,7 +4302,10 @@ defmodule SymphonyElixir.Orchestrator do
              persisted
              |> Map.put(:review_threads, updated_threads)
              |> Map.put(:last_decision_summary, "Posted approved PR review replies.")
-             |> Map.put(:next_human_action, "Resolve the review threads once the reply has been acknowledged.")
+             |> Map.put(
+               :next_human_action,
+               "Resolve the review threads once the reply has been acknowledged."
+             )
            end) do
       ledger_event =
         RunLedger.record("operator.action", %{
@@ -3520,7 +4314,11 @@ defmodule SymphonyElixir.Orchestrator do
           actor_type: "operator",
           actor_id: "dashboard",
           summary: "Posted approved PR review replies.",
-          metadata: %{action: "post_review_drafts", posted_threads: posted_count, skipped_threads: skipped_count}
+          metadata: %{
+            action: "post_review_drafts",
+            posted_threads: posted_count,
+            skipped_threads: skipped_count
+          }
         })
 
       {%{
@@ -3533,16 +4331,36 @@ defmodule SymphonyElixir.Orchestrator do
        }, state}
     else
       %{} ->
-        {%{ok: false, action: "post_review_drafts", issue_identifier: issue_identifier, error: "no review threads"}, state}
+        {%{
+           ok: false,
+           action: "post_review_drafts",
+           issue_identifier: issue_identifier,
+           error: "no review threads"
+         }, state}
 
       nil ->
-        {%{ok: false, action: "post_review_drafts", issue_identifier: issue_identifier, error: "pr url not found"}, state}
+        {%{
+           ok: false,
+           action: "post_review_drafts",
+           issue_identifier: issue_identifier,
+           error: "pr url not found"
+         }, state}
 
       {:error, :enoent} ->
-        {%{ok: false, action: "post_review_drafts", issue_identifier: issue_identifier, error: "run state not found"}, state}
+        {%{
+           ok: false,
+           action: "post_review_drafts",
+           issue_identifier: issue_identifier,
+           error: "run state not found"
+         }, state}
 
       {:error, reason} ->
-        {%{ok: false, action: "post_review_drafts", issue_identifier: issue_identifier, error: inspect(reason)}, state}
+        {%{
+           ok: false,
+           action: "post_review_drafts",
+           issue_identifier: issue_identifier,
+           error: inspect(reason)
+         }, state}
     end
   end
 
@@ -3620,7 +4438,12 @@ defmodule SymphonyElixir.Orchestrator do
     with false <- identifier == "",
          policy_atom when not is_nil(policy_atom) <- IssuePolicy.normalize_class(policy_class) do
       policy_string = IssuePolicy.class_to_string(policy_atom)
-      state = %{state | policy_overrides: Map.put(state.policy_overrides, identifier, policy_string)}
+
+      state = %{
+        state
+        | policy_overrides: Map.put(state.policy_overrides, identifier, policy_string)
+      }
+
       persist_policy_override_for_identifier(identifier, policy_string)
 
       ledger_event =
@@ -3633,18 +4456,41 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "set_policy_class", policy_source: "override"}
         })
 
-      {%{ok: true, action: "set_policy_class", issue_identifier: identifier, policy_class: policy_string, policy_source: "override", ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "set_policy_class",
+         issue_identifier: identifier,
+         policy_class: policy_string,
+         policy_source: "override",
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     else
       true ->
-        {%{ok: false, action: "set_policy_class", issue_identifier: issue_identifier, error: "blank issue identifier"}, state}
+        {%{
+           ok: false,
+           action: "set_policy_class",
+           issue_identifier: issue_identifier,
+           error: "blank issue identifier"
+         }, state}
 
       nil ->
-        {%{ok: false, action: "set_policy_class", issue_identifier: issue_identifier, error: "invalid policy class"}, state}
+        {%{
+           ok: false,
+           action: "set_policy_class",
+           issue_identifier: issue_identifier,
+           error: "invalid policy class"
+         }, state}
     end
   end
 
   defp dispatch_runtime_issue(%State{} = state, %Issue{} = issue, attempt) do
-    dispatch_runtime_issue(state, issue, attempt, &dispatch_active_issue/3, &dispatch_passive_issue/3)
+    dispatch_runtime_issue(
+      state,
+      issue,
+      attempt,
+      &dispatch_active_issue/3,
+      &dispatch_passive_issue/3
+    )
   end
 
   defp dispatch_runtime_issue(
@@ -3671,7 +4517,12 @@ defmodule SymphonyElixir.Orchestrator do
 
     case RunStateStore.load_checked(workspace, issue) do
       {:mismatch, _stale_state} ->
-        repair_stage(workspace, issue, "checkout", "Recovered from stale run state that belonged to a different issue.")
+        repair_stage(
+          workspace,
+          issue,
+          "checkout",
+          "Recovered from stale run state that belonged to a different issue."
+        )
 
       {:ok, %{stage: stage} = state} ->
         cond do
@@ -3714,7 +4565,12 @@ defmodule SymphonyElixir.Orchestrator do
             )
 
           missing_checkout_repair?(inspection, stage) ->
-            repair_stage(workspace, issue, "checkout", "Recovered from a workspace without a valid Git checkout.")
+            repair_stage(
+              workspace,
+              issue,
+              "checkout",
+              "Recovered from a workspace without a valid Git checkout."
+            )
 
           branch_mismatch_repair?(inspection, state, expected_branch) ->
             repair_stage(
@@ -3785,8 +4641,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp branch_mismatch_repair?(inspection, state, expected_branch) do
     stage = Map.get(state, :stage)
-    inspection.git? and not inspection.dirty? and stage in ["implement", "validate", "verify", "publish"] and
-      is_binary(expected_branch) and expected_branch != "" and inspection.branch != expected_branch and
+
+    inspection.git? and not inspection.dirty? and
+      stage in ["implement", "validate", "verify", "publish"] and
+      is_binary(expected_branch) and expected_branch != "" and
+      inspection.branch != expected_branch and
       normalize_pr_state(inspection.pr_state) not in ["MERGED", "CLOSED"]
   end
 
@@ -3795,14 +4654,17 @@ defmodule SymphonyElixir.Orchestrator do
     persisted_branch = Map.get(state, :branch)
     persisted_pr_url = Map.get(state, :pr_url)
 
-    inspection.git? and stage in ["implement", "validate", "verify", "publish", "await_checks", "merge"] and
+    inspection.git? and
+      stage in ["implement", "validate", "verify", "publish", "await_checks", "merge"] and
       is_binary(expected_branch) and expected_branch != "" and
-      is_binary(inspection.branch) and inspection.branch != "" and inspection.branch != expected_branch and
+      is_binary(inspection.branch) and inspection.branch != "" and
+      inspection.branch != expected_branch and
       normalize_pr_state(inspection.pr_state) not in ["MERGED", "CLOSED"] and
       (inspection.dirty? or
          (is_binary(inspection.pr_url) and inspection.pr_url != "") or
          (is_binary(persisted_pr_url) and persisted_pr_url != "") or
-         (is_binary(persisted_branch) and persisted_branch != "" and persisted_branch != expected_branch))
+         (is_binary(persisted_branch) and persisted_branch != "" and
+            persisted_branch != expected_branch))
   end
 
   defp normalize_pr_state(nil), do: nil
@@ -3818,7 +4680,12 @@ defmodule SymphonyElixir.Orchestrator do
     identifier = issue_identifier |> to_string() |> String.trim()
 
     if identifier == "" do
-      {%{ok: false, action: "clear_policy_override", issue_identifier: issue_identifier, error: "blank issue identifier"}, state}
+      {%{
+         ok: false,
+         action: "clear_policy_override",
+         issue_identifier: issue_identifier,
+         error: "blank issue identifier"
+       }, state}
     else
       state = %{state | policy_overrides: Map.delete(state.policy_overrides, identifier)}
       persist_policy_override_for_identifier(identifier, nil)
@@ -3832,12 +4699,20 @@ defmodule SymphonyElixir.Orchestrator do
           metadata: %{action: "clear_policy_override"}
         })
 
-      {%{ok: true, action: "clear_policy_override", issue_identifier: identifier, policy_class: nil, policy_source: "label_or_default", ledger_event_id: Map.get(ledger_event, :event_id)}, state}
+      {%{
+         ok: true,
+         action: "clear_policy_override",
+         issue_identifier: identifier,
+         policy_class: nil,
+         policy_source: "label_or_default",
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
     end
   end
 
   defp maybe_promote_review_ready_issues(%State{} = state, source_mode \\ :all) do
-    approval_gate_states = WorkflowProfile.approval_gate_states(policy_pack: Config.policy_pack_name())
+    approval_gate_states =
+      WorkflowProfile.approval_gate_states(policy_pack: Config.policy_pack_name())
 
     fetch_result =
       case source_mode do
@@ -3899,7 +4774,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp resolve_issue_for_control(%State{} = state, issue_identifier) when is_binary(issue_identifier) do
+  defp resolve_issue_for_control(%State{} = state, issue_identifier)
+       when is_binary(issue_identifier) do
     issue_identifier = String.trim(issue_identifier)
 
     cond do
@@ -4156,18 +5032,6 @@ defmodule SymphonyElixir.Orchestrator do
     :ok
   end
 
-  defp start_github_webhook_drain do
-    parent = self()
-
-    Task.start(fn ->
-      processed = drain_github_events_stateless()
-
-      send(parent, {:github_webhook_cycle_completed, %{drained_at: DateTime.utc_now(), processed: processed}})
-    end)
-
-    :ok
-  end
-
   defp next_poll_in_ms(nil, _now_ms), do: nil
 
   defp next_poll_in_ms(next_poll_due_at_ms, now_ms) when is_integer(next_poll_due_at_ms) do
@@ -4305,6 +5169,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           {:error, :missing} ->
             Logger.warning("Lease missing for running issue_id=#{issue_id}; terminating local worker")
+
             terminate_running_issue(state_acc, issue_id, false)
 
           {:error, reason} ->
@@ -4405,8 +5270,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp policy_snapshot_values(issue, state, run_state \\ %{})
 
-  defp policy_snapshot_values(%Issue{} = issue, %State{} = state, run_state) when is_map(run_state) do
-    override = Map.get(run_state, :policy_override) || Map.get(state.policy_overrides, issue.identifier)
+  defp policy_snapshot_values(%Issue{} = issue, %State{} = state, run_state)
+       when is_map(run_state) do
+    override =
+      Map.get(run_state, :policy_override) || Map.get(state.policy_overrides, issue.identifier)
+
     pack = PolicyPack.resolve(policy_pack_name(issue, state, run_state))
 
     case IssuePolicy.resolve(issue,
@@ -4429,7 +5297,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp policy_snapshot_values(_issue, _state, _run_state), do: {nil, nil, nil}
 
-  defp policy_pack_name(%Issue{} = issue, %State{} = state, run_state \\ %{}) when is_map(run_state) do
+  defp policy_pack_name(%Issue{} = issue, %State{} = state, run_state \\ %{})
+       when is_map(run_state) do
     Map.get(run_state, :policy_pack) ||
       Map.get(state.running[issue.id] || %{}, :policy_pack) ||
       Config.policy_pack_name()
@@ -4526,8 +5395,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp block_issue_for_policy_conflict(%State{} = state, %Issue{} = issue) do
     {:error, conflict} = resolve_policy(issue, state)
     rule_id = Map.get(conflict, :rule_id) || RuleCatalog.rule_id(:policy_invalid_labels)
-    failure_class = Map.get(conflict, :failure_class) || RuleCatalog.failure_class(:policy_invalid_labels)
+
+    failure_class =
+      Map.get(conflict, :failure_class) || RuleCatalog.failure_class(:policy_invalid_labels)
+
     summary = Map.get(conflict, :summary) || "Invalid policy configuration detected on the issue."
+
     details =
       Map.get(conflict, :details) ||
         case Map.get(conflict, :labels) do

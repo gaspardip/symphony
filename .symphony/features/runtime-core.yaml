@@ -1,7 +1,7 @@
 id: runtime-core
 title: Runtime Core
 status: active
-summary: Runtime-owned delivery stages, recovery, proof gates, and publish lifecycle.
+summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, and evidence-based review follow-up with non-actionable noise suppression.
 source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
@@ -9,7 +9,11 @@ source_paths:
 acceptance_signals:
   - Deterministic stage execution from checkout through post_merge
   - Auto-heal and block reasons are visible in operator payloads
+  - Fully autonomous runs can resume from GitHub review feedback without a manual poll loop
+  - Fully autonomous runs can pause in a passive review verification stage before reopening implementation
+  - Review claims, verification state, and return-stage context persist across webhook-triggered follow-up
+  - Review verification can enrich thread replies and resolution recommendations from collected evidence
+  - Fully autonomous runs stay in place when webhook review feedback is triaged as non-actionable
 dependencies:
   - harness
-last_updated_by_issue: seed
-
+last_updated_by_issue: CLZ-22

@@ -35,6 +35,18 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert state.last_rule_id == "implementation.invalid_turn_result"
   end
 
+  test "delivery engine returns bootstrap errors when Codex session startup fails for active stages" do
+    {workspace, issue} = implement_workspace!("bootstrap-failure")
+
+    configure_delivery_workflow!(
+      workspace,
+      "/definitely/missing-codex-#{System.unique_integer([:positive])} app-server"
+    )
+
+    assert {:error, reason} = DeliveryEngine.run(workspace, issue, nil)
+    assert inspect(reason) =~ "port_exit"
+  end
+
   test "delivery engine blocks implement turns that omit the turn-result tool call" do
     {workspace, issue} = implement_workspace!("missing-turn-result")
     issue_id = issue.id
@@ -119,6 +131,26 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert state.effective_policy_class == "fully_autonomous"
     assert state.effective_policy_source == "default"
     assert get_in(state, [:stop_reason, :code]) == "invalid_turn_result"
+  end
+
+  test "delivery engine initializes the agent harness before continuing from checkout" do
+    {workspace, issue} = checkout_workspace!("checkout-with-agent-harness")
+
+    write_agent_harness_yaml!(workspace)
+    configure_delivery_workflow!(workspace, fake_codex_binary!("checkout-with-agent-harness", :missing))
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil,
+               command_runner: &checkout_command_runner/3,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
+             )
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.harness_status in ["initialized", "ready"]
+    assert is_binary(state.last_harness_init)
+    assert get_in(state, [:last_harness_check, :status]) == "passed"
+    assert File.exists?(Path.join(workspace, ".symphony/progress/MT-RUNTIME.md"))
+    assert File.exists?(Path.join(workspace, ".symphony/knowledge/product.md"))
   end
 
   test "delivery engine advances from implement to validate after a real code change" do
@@ -212,6 +244,119 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert {:ok, state} = RunStateStore.load(workspace)
     assert Enum.any?(state.stage_history, &(&1.stage == "verify"))
     assert get_in(state, [:last_validation, :status]) == "passed"
+  end
+
+  test "delivery engine review_verification reopens implement when focused proof confirms a review claim" do
+    {workspace, issue} = review_verification_workspace!("review-claim-accepted")
+
+    assert {:stop, :review_verification_completed} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "implement"
+    assert get_in(state, [:review_claims, "review:91", "verification_status"]) == "verified_review_decision"
+    assert get_in(state, [:review_claims, "review:91", "disposition"]) == "accepted"
+    assert get_in(state, [:review_threads, "review:91", "verification_status"]) == "verified_review_decision"
+    assert get_in(state, [:review_threads, "review:91", "draft_reply"]) =~ "verified this concern locally"
+    assert get_in(state, [:review_threads, "review:91", "resolution_recommendation"]) == "keep_open_until_change"
+    assert get_in(state, [:resume_context, :review_claim_summary]) =~ "verified_review_decision"
+    assert get_in(state, [:resume_context, :next_objective]) =~ "Address the verified PR review claims"
+  end
+
+  test "delivery engine review_verification returns to the passive stage when focused proof contradicts a claim" do
+    {workspace, issue} = review_verification_workspace!("review-claim-contradicted")
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:review_claims, %{
+                 "comment:92" => %{
+                   "thread_key" => "comment:92",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 3,
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "pending"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:92" => %{
+                   "thread_key" => "comment:92",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 3,
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :review_verification_completed} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "await_checks"
+    assert get_in(state, [:review_claims, "comment:92", "verification_status"]) == "contradicted"
+    assert get_in(state, [:review_claims, "comment:92", "disposition"]) == "dismissed"
+    assert get_in(state, [:review_threads, "comment:92", "draft_reply"]) =~ "could not confirm the claim"
+    assert state.last_decision_summary =~ "did not find enough evidence"
+  end
+
+  test "delivery engine blocks deploy preview stage when the harness omits a preview command" do
+    {workspace, issue} = checkout_workspace!("deploy-preview-missing")
+    configure_delivery_workflow!(workspace, fake_codex_binary!("deploy-preview-missing", :missing))
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "deploy_preview", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier
+             })
+
+    assert {:stop, :deploy_preview_missing} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert get_in(state, [:stop_reason, :code]) == "deploy_preview_missing"
+  end
+
+  test "delivery engine blocks deploy production stage when the harness omits a production command" do
+    {workspace, issue} = checkout_workspace!("deploy-production-missing")
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("deploy-production-missing", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "deploy_production", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier
+             })
+
+    assert {:stop, :deploy_production_missing} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert get_in(state, [:stop_reason, :code]) == "deploy_production_missing"
+  end
+
+  test "delivery engine blocks post-deploy verification when the harness omits the verify command" do
+    {workspace, issue} = checkout_workspace!("post-deploy-verify-missing")
+    configure_delivery_workflow!(workspace, fake_codex_binary!("post-deploy-verify-missing", :missing))
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "post_deploy_verify", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               current_deploy_target: "preview"
+             })
+
+    assert {:stop, :post_deploy_failed} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert get_in(state, [:stop_reason, :code]) == "post_deploy_failed"
   end
 
   test "run inspector public helpers handle bare rollups and wrapper commands" do
@@ -438,6 +583,40 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     {workspace, issue}
   end
 
+  defp review_verification_workspace!(suffix) do
+    {workspace, issue} = implement_workspace!(suffix)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "review_verification", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               review_return_stage: "await_checks",
+               review_claims: %{
+                 "review:91" => %{
+                   "thread_key" => "review:91",
+                   "kind" => "review",
+                   "review_decision" => "CHANGES_REQUESTED",
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "pending"
+                 }
+               },
+               review_threads: %{
+                 "review:91" => %{
+                   "thread_key" => "review:91",
+                   "kind" => "review",
+                   "review_decision" => "CHANGES_REQUESTED",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               }
+             })
+
+    {workspace, issue}
+  end
+
   defp checkout_workspace!(suffix) do
     workspace = temp_workspace!("delivery-engine-#{suffix}")
     File.mkdir_p!(Path.join(workspace, ".git"))
@@ -632,6 +811,73 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
       """
       version: 1
       base_branch: main
+      preflight:
+        command:
+          - ./scripts/preflight.sh
+      validation:
+        command:
+          - ./scripts/validate.sh
+      smoke:
+        command:
+          - ./scripts/smoke.sh
+      post_merge:
+        command:
+          - ./scripts/post-merge.sh
+      artifacts:
+        command:
+          - ./scripts/artifacts.sh
+      pull_request:
+        required_checks:
+          - ci / validate
+      """
+    )
+  end
+
+  defp write_agent_harness_yaml!(workspace) do
+    File.write!(
+      RepoHarness.harness_file_path(workspace),
+      """
+      version: 1
+      base_branch: main
+      agent_harness:
+        scope: self_host_only
+        initializer:
+          enabled: true
+          max_turns: 1
+          refresh: missing
+        knowledge:
+          root: .symphony/knowledge
+          required_files:
+            - product.md
+            - architecture.md
+            - codebase-map.md
+            - delivery-loop.md
+            - testing-and-ops.md
+        progress:
+          root: .symphony/progress
+          pattern: "{{ issue.identifier }}.md"
+          required_sections:
+            - Goal
+            - Acceptance
+            - Plan
+            - Work Log
+            - Evidence
+            - Next Step
+        features:
+          root: .symphony/features
+          format: yaml
+          required_fields:
+            - id
+            - title
+            - status
+            - summary
+            - source_paths
+            - acceptance_signals
+            - dependencies
+            - last_updated_by_issue
+        publish_gate:
+          require_progress: true
+          require_feature_update_on_code_change: true
       preflight:
         command:
           - ./scripts/preflight.sh

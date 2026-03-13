@@ -3,7 +3,7 @@ defmodule SymphonyElixir.GitManager do
   Owns branch preparation, commits, pushes, and base-branch resets for delivery runs.
   """
 
-  alias SymphonyElixir.{AuthorProfile, Linear.Issue}
+  alias SymphonyElixir.{AuthorProfile, DebugArtifacts, Linear.Issue, Observability}
   alias SymphonyElixir.RunStateStore
 
   @spec prepare_issue_branch(Path.t(), Issue.t() | map(), map() | nil, keyword()) ::
@@ -125,15 +125,62 @@ defmodule SymphonyElixir.GitManager do
   end
 
   defp run_git_command(command_runner, workspace, args) do
-    case command_runner.("git", args, cd: workspace, stderr_to_stdout: true) do
-      {_output, status} = result when status == 0 ->
-        result
+    metadata = %{
+      workspace: workspace,
+      command: Enum.join(args, " "),
+      stage: current_stage(workspace)
+    }
 
-      {output, _status} = result ->
-        case maybe_recover_stale_index_lock(workspace, output) do
-          :recovered -> command_runner.("git", args, cd: workspace, stderr_to_stdout: true)
-          :no_recovery -> result
+    Observability.with_span("symphony.git.command", metadata, fn ->
+      start_time = System.monotonic_time()
+      Observability.emit([:symphony, :git, :command, :start], %{count: 1}, metadata)
+
+      result =
+        case command_runner.("git", args, cd: workspace, stderr_to_stdout: true) do
+          {_output, status} = result when status == 0 ->
+            result
+
+          {output, _status} = result ->
+            case maybe_recover_stale_index_lock(workspace, output) do
+              :recovered -> command_runner.("git", args, cd: workspace, stderr_to_stdout: true)
+              :no_recovery -> result
+            end
         end
+
+      emit_git_command_stop(result, metadata, start_time)
+      result
+    end)
+  end
+
+  defp emit_git_command_stop({output, status}, metadata, start_time)
+       when is_integer(status) do
+    artifact =
+      if status != 0 do
+        case DebugArtifacts.store_failure("git_command_failure", output, metadata) do
+          {:ok, artifact_ref} ->
+            Observability.emit_debug_artifact_reference("git_command_failure", artifact_ref, metadata)
+            artifact_ref
+
+          _ ->
+            nil
+        end
+      else
+        nil
+      end
+
+    Observability.emit(
+      [:symphony, :git, :command, :stop],
+      %{count: 1, duration: System.monotonic_time() - start_time, status: status},
+      metadata
+      |> Map.put(:outcome, if(status == 0, do: "ok", else: "error"))
+      |> Map.put(:artifact_id, artifact && artifact.artifact_id)
+    )
+  end
+
+  defp current_stage(workspace) when is_binary(workspace) do
+    case RunStateStore.load(workspace) do
+      {:ok, %{stage: stage}} when is_binary(stage) -> stage
+      _ -> nil
     end
   end
 

@@ -45,8 +45,16 @@ defmodule SymphonyElixir.PRWatcherTest do
 
     assert feedback.status == "ok"
     assert feedback.pending_drafts_count == 2
+    assert feedback.actionable_items_count == 1
     assert Enum.any?(feedback.items, &(&1.kind == :review and &1.resolution_recommendation == "keep_open_until_change"))
-    assert Enum.any?(feedback.items, &(&1.kind == :comment and &1.draft_state == "drafted"))
+
+    assert Enum.any?(feedback.items, fn item ->
+             item.kind == :review and item.disposition == "needs_verification" and item.actionable == true
+           end)
+
+    assert Enum.any?(feedback.items, fn item ->
+             item.kind == :comment and item.draft_state == "drafted" and item.disposition == "dismissed"
+           end)
   end
 
   test "review_feedback reuses persisted thread state when present" do

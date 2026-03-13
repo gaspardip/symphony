@@ -33,6 +33,7 @@ defmodule SymphonyElixir.GitHub.Webhook do
     repository = payload["repository"] || %{}
 
     pr_url = pull_request["html_url"]
+
     entity =
       case event_name do
         "pull_request_review" -> payload["review"] || %{}
@@ -99,10 +100,14 @@ defmodule SymphonyElixir.GitHub.Webhook do
   defp header(headers, key) do
     headers
     |> Enum.find_value(fn
-      {^key, value} -> value
+      {^key, value} ->
+        value
+
       {other, value} when is_binary(other) and is_binary(value) ->
         if String.downcase(other) == key, do: value, else: nil
-      _ -> nil
+
+      _ ->
+        nil
     end)
   end
 end

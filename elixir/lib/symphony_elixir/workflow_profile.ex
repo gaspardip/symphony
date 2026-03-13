@@ -143,9 +143,11 @@ defmodule SymphonyElixir.WorkflowProfile do
     |> Enum.uniq()
   end
 
+  @spec approval_gate_state?(String.t() | nil) :: boolean()
   @spec approval_gate_state?(String.t() | nil, keyword()) :: boolean()
   def approval_gate_state?(state, opts \\ [])
 
+  @spec approval_gate_state?(String.t() | nil, keyword()) :: boolean()
   def approval_gate_state?(state, opts) when is_binary(state) do
     normalized = normalize_state(state)
     Enum.any?(approval_gate_states(opts), &(normalize_state(&1) == normalized))

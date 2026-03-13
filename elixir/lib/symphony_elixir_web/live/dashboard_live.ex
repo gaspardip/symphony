@@ -1468,6 +1468,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
 
   @doc false
+  @spec helper_for_test(atom(), list()) :: term()
   def helper_for_test(:runtime_seconds_from_started_at, [started_at, now]),
     do: runtime_seconds_from_started_at(started_at, now)
 

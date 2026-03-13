@@ -82,6 +82,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert snapshot.runner.runner_health == "invalid"
     assert snapshot.runner.runner_health_rule_id == "runner.install_missing"
     assert snapshot.running == []
+
     assert snapshot.queue == [] or
              snapshot.queue == [%{error: "{:runner_health, \"runner.install_missing\"}"}]
   end
@@ -335,6 +336,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     manual_store_root = Path.join(workspace_root, "manual-store")
 
+    File.rm_rf(workspace_root)
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       workspace_root: workspace_root,
@@ -418,6 +425,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
   test "post review drafts posts approved inline replies when policy allows" do
     unique_suffix = System.unique_integer([:positive])
+
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -541,13 +549,14 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "verify", %{})
     {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{})
 
-    {:ok, _submitted_issue} = SymphonyElixir.ManualIssueStore.submit(%{
-      "id" => "retry-blocked",
-      "identifier" => issue.identifier,
-      "title" => issue.title,
-      "description" => issue.description,
-      "acceptance_criteria" => ["Resume blocked issue"]
-    })
+    {:ok, _submitted_issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "retry-blocked",
+        "identifier" => issue.identifier,
+        "title" => issue.title,
+        "description" => issue.description,
+        "acceptance_criteria" => ["Resume blocked issue"]
+      })
 
     :ok = SymphonyElixir.ManualIssueStore.update_issue_state(issue.id, "Blocked")
     :ok = SymphonyElixir.LeaseManager.release(issue.id)
@@ -844,6 +853,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     System.cmd("git", ["init"], cd: workspace)
     File.mkdir_p!(Path.join(workspace, ".symphony"))
+
     File.write!(Path.join(workspace, ".symphony/harness.yml"), """
     version: 1
     base_branch: main
@@ -1062,9 +1072,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     missing_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:ok, []} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:ok, []} end)
       end)
 
     assert missing_log =~
@@ -1073,9 +1081,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     stale_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "Done"}]} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "Done"}]} end)
       end)
 
     assert stale_log =~
@@ -1087,9 +1093,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     error_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:error, :boom} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:error, :boom} end)
       end)
 
     assert error_log =~
@@ -1503,6 +1507,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     workspace = Path.join(workspace_root, issue.identifier)
     init_git_workspace!(workspace, branch: "symphony/mt-runtime-passive")
+
     SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
       issue_id: issue.id,
       issue_identifier: issue.identifier

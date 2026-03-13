@@ -59,6 +59,7 @@ defmodule SymphonyElixir.AuthorProfile do
   @spec summarize(String.t(), :pr | :comment | :general) :: String.t()
   def summarize(text, kind \\ :general) when is_binary(text) do
     profile = load()
+
     max_length =
       case {kind, profile.terse_by_default} do
         {:comment, true} -> 120
@@ -77,12 +78,9 @@ defmodule SymphonyElixir.AuthorProfile do
       commit_tone: normalize_string(Map.get(decoded, "commit_tone"), "concise"),
       pr_tone: normalize_string(Map.get(decoded, "pr_tone"), "clear"),
       comment_tone: normalize_string(Map.get(decoded, "comment_tone"), "measured"),
-      certainty_language:
-        normalize_string(Map.get(decoded, "certainty_language"), "measured"),
-      terse_by_default:
-        normalize_boolean(Map.get(decoded, "terse_by_default"), true),
-      draft_replies_first:
-        normalize_boolean(Map.get(decoded, "draft_replies_first"), true)
+      certainty_language: normalize_string(Map.get(decoded, "certainty_language"), "measured"),
+      terse_by_default: normalize_boolean(Map.get(decoded, "terse_by_default"), true),
+      draft_replies_first: normalize_boolean(Map.get(decoded, "draft_replies_first"), true)
     }
   end
 

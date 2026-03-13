@@ -1251,20 +1251,14 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:error,
-              {:turn_failed,
-               %{reason: "implementation.command_output_budget_exceeded", scope: "per_command"}}} =
+      assert {:error, {:turn_failed, %{reason: "implementation.command_output_budget_exceeded", scope: "per_command"}}} =
                AppServer.run(workspace, "Handle command output budget", issue,
                  stage: "implement",
                  command_output_budget: %{per_command_bytes: 10, per_turn_bytes: 100, max_command_count: 12},
                  on_message: fn message -> send(parent, {:app_server_message, message}) end
                )
 
-      assert_receive {:app_server_message,
-                      %{event: :turn_ended_with_error,
-                        reason:
-                          {:turn_failed,
-                           %{reason: "implementation.command_output_budget_exceeded", scope: "per_command"}}}}
+      assert_receive {:app_server_message, %{event: :turn_ended_with_error, reason: {:turn_failed, %{reason: "implementation.command_output_budget_exceeded", scope: "per_command"}}}}
     after
       File.rm_rf(test_root)
     end
@@ -1325,20 +1319,14 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:error,
-              {:turn_failed,
-               %{reason: "implementation.stage_command_violation", command: "xcodebuild test"}}} =
+      assert {:error, {:turn_failed, %{reason: "implementation.stage_command_violation", command: "xcodebuild test"}}} =
                AppServer.run(workspace, "Handle stage command violation", issue,
                  stage: "implement",
                  forbidden_commands: ["xcodebuild", "./scripts/symphony-validate.sh"],
                  on_message: fn message -> send(parent, {:app_server_message, message}) end
                )
 
-      assert_receive {:app_server_message,
-                      %{event: :turn_ended_with_error,
-                        reason:
-                          {:turn_failed,
-                           %{reason: "implementation.stage_command_violation", command: "xcodebuild test"}}}}
+      assert_receive {:app_server_message, %{event: :turn_ended_with_error, reason: {:turn_failed, %{reason: "implementation.stage_command_violation", command: "xcodebuild test"}}}}
     after
       File.rm_rf(test_root)
     end
@@ -1399,19 +1387,13 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:error,
-              {:turn_failed,
-               %{reason: "implementation.broad_read_violation", command: "rg --files ."}}} =
+      assert {:error, {:turn_failed, %{reason: "implementation.broad_read_violation", command: "rg --files ."}}} =
                AppServer.run(workspace, "Handle broad read violation", issue,
                  stage: "implement",
                  on_message: fn message -> send(parent, {:app_server_message, message}) end
                )
 
-      assert_receive {:app_server_message,
-                      %{event: :turn_ended_with_error,
-                        reason:
-                          {:turn_failed,
-                           %{reason: "implementation.broad_read_violation", command: "rg --files ."}}}}
+      assert_receive {:app_server_message, %{event: :turn_ended_with_error, reason: {:turn_failed, %{reason: "implementation.broad_read_violation", command: "rg --files ."}}}}
     after
       File.rm_rf(test_root)
     end
@@ -1472,20 +1454,14 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:error,
-              {:turn_failed,
-               %{reason: "implementation.command_count_exceeded", count: 1}}} =
+      assert {:error, {:turn_failed, %{reason: "implementation.command_count_exceeded", count: 1}}} =
                AppServer.run(workspace, "Handle command count limit", issue,
                  stage: "implement",
                  command_output_budget: %{per_command_bytes: 10_000, per_turn_bytes: 100_000, max_command_count: 0},
                  on_message: fn message -> send(parent, {:app_server_message, message}) end
                )
 
-      assert_receive {:app_server_message,
-                      %{event: :turn_ended_with_error,
-                        reason:
-                          {:turn_failed,
-                           %{reason: "implementation.command_count_exceeded", count: 1}}}}
+      assert_receive {:app_server_message, %{event: :turn_ended_with_error, reason: {:turn_failed, %{reason: "implementation.command_count_exceeded", count: 1}}}}
     after
       File.rm_rf(test_root)
     end

@@ -120,6 +120,7 @@ defmodule SymphonyElixir.RiskClassifier do
 
   defp approval_class(%WorkflowProfile{merge_mode: :manual_only}, _deploy_change), do: "manual_gate"
   defp approval_class(%WorkflowProfile{merge_mode: :review_gate}, _deploy_change), do: "review_gate"
+
   defp approval_class(%WorkflowProfile{} = workflow_profile, true)
        when workflow_profile.production_deploy_mode not in [:disabled] do
     "deploy_gate"

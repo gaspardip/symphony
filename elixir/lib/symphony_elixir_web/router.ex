@@ -32,6 +32,8 @@ defmodule SymphonyElixirWeb.Router do
     match(:*, "/api/webhooks/linear", ObservabilityApiController, :method_not_allowed)
     post("/api/webhooks/github", GitHubWebhookController, :create)
     match(:*, "/api/webhooks/github", ObservabilityApiController, :method_not_allowed)
+    get("/metrics", ObservabilityApiController, :metrics)
+    match(:*, "/metrics", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/state", ObservabilityApiController, :state)
     get("/api/v1/portfolio", ObservabilityApiController, :portfolio)
     post("/api/v1/manual-runs", ObservabilityApiController, :manual_run)

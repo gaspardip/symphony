@@ -120,6 +120,7 @@ defmodule SymphonyElixir.RunnerPromotionTest do
     end)
 
     File.mkdir_p!(install_root)
+
     File.write!(
       Path.join(install_root, "metadata.json"),
       Jason.encode!(%{

@@ -95,9 +95,11 @@ defmodule SymphonyElixir.RunnerRuntime do
     runner_health(required_labels, install_root, metadata_result, current_link_target)
   end
 
+  @spec recent_history(Path.t()) :: [map()]
   @spec recent_history(Path.t(), pos_integer()) :: [map()]
   def recent_history(install_root, limit \\ @default_history_limit)
 
+  @spec recent_history(Path.t(), pos_integer()) :: [map()]
   def recent_history(install_root, limit)
       when is_binary(install_root) and is_integer(limit) and limit > 0 do
     install_root
@@ -167,9 +169,12 @@ defmodule SymphonyElixir.RunnerRuntime do
     end
   end
 
+  @spec effective_required_labels() :: [String.t()]
+  @spec effective_required_labels([String.t()] | nil) :: [String.t()]
   @spec effective_required_labels([String.t()] | nil, map() | nil) :: [String.t()]
   def effective_required_labels(workflow_required_labels \\ Config.linear_required_labels(), metadata \\ nil)
 
+  @spec effective_required_labels([String.t()] | nil, map() | nil) :: [String.t()]
   def effective_required_labels(workflow_required_labels, nil) do
     effective_required_labels(workflow_required_labels, load_metadata(Config.runner_install_root()))
   end
@@ -185,9 +190,9 @@ defmodule SymphonyElixir.RunnerRuntime do
         workflow_labels
 
       runner_mode(metadata) == "canary_active" ->
-      workflow_labels
-      |> Kernel.++(canary_required_labels(metadata))
-      |> normalize_labels()
+        workflow_labels
+        |> Kernel.++(canary_required_labels(metadata))
+        |> normalize_labels()
 
       true ->
         workflow_labels
