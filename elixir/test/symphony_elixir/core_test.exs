@@ -222,6 +222,58 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "UI proof: optional; mode=local"
   end
 
+  test "implement prompt switches to scoped review-fix mode for accepted review claims" do
+    issue = %Issue{
+      id: "issue-review-fix",
+      identifier: "MT-REVIEW",
+      title: "Address review comments",
+      description: "Large issue context that should not dominate the scoped review-fix turn."
+    }
+
+    state = %{
+      pr_url: "https://github.com/gaspardip/symphony/pull/1",
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/one.ex",
+          "line" => 10,
+          "body" => "First verified review claim."
+        },
+        "comment:2" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "failure_handling_risk",
+          "path" => "lib/two.ex",
+          "line" => 20,
+          "body" => "Second verified review claim."
+        },
+        "comment:3" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/three.ex",
+          "line" => 30,
+          "body" => "Third verified review claim."
+        }
+      },
+      resume_context: %{token_pressure: "high"}
+    }
+
+    prompt = SymphonyElixir.DeliveryEngine.implement_prompt_for_test(issue, state, [], 1, 3)
+
+    assert prompt =~ "This is a scoped review-fix turn. Do not rediscover the issue or rescan the repo."
+    assert prompt =~ "Scoped review claims for this turn:"
+    assert prompt =~ "lib/one.ex:10"
+    assert prompt =~ "lib/three.ex:30"
+    refute prompt =~ "lib/two.ex:20"
+    assert prompt =~ "Additional verified claims remain after this batch: 1"
+    assert prompt =~ "If you complete this claim batch but additional verified review claims remain"
+    refute prompt =~ "Issue brief:"
+    refute prompt =~ "Repo map:"
+  end
+
   test "existing workspace changes can advance to validation without a new diff" do
     turn_result = %SymphonyElixir.TurnResult{
       summary: "Existing diff is ready for validation",

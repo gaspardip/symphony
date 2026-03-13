@@ -138,15 +138,18 @@ defmodule SymphonyElixir.TurnResult do
         blocker_type = parse_blocker_type(value)
 
         cond do
-          blocker_type == :invalid ->
-            {:error, :invalid_blocker_type}
+          blocked == false and blocker_type == :invalid ->
+            {:ok, :none}
 
           blocker_type in @allowed_blockers ->
             if blocked == false and blocker_type != :none do
-              {:error, :unexpected_blocker_type}
+              {:ok, :none}
             else
               {:ok, blocker_type}
             end
+
+          blocked == false ->
+            {:ok, :none}
 
           true ->
             {:error, :invalid_blocker_type}

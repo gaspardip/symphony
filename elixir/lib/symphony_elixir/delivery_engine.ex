@@ -508,9 +508,9 @@ defmodule SymphonyElixir.DeliveryEngine do
                  Keyword.merge(
                    opts,
                    stage: "implement",
-                   effort: Config.codex_turn_effort("implement"),
+                   effort: implement_effort(state),
                    forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
-                   command_output_budget: implement_command_output_budget(),
+                   command_output_budget: implement_command_output_budget(state),
                    on_message: codex_message_handler(recipient, issue),
                    tool_executor: tool_executor(issue, opts)
                  )
@@ -1840,47 +1840,84 @@ defmodule SymphonyElixir.DeliveryEngine do
     token_pressure = token_pressure_note(state)
     repo_map = RepoMap.from_harness(inspection.harness)
     workflow_profile = WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
+    focused_review_claims = focused_review_claims(Map.get(state, :review_claims, %{}))
 
-    [
-      "You are implementing ticket `#{issue.identifier}`.",
-      "",
-      "Title: #{to_string(issue.title || "Untitled issue")}",
-      repo_platform_note(inspection),
-      "Current implementation turn: #{turn_number} of #{max_turns}.",
-      "",
-      "Issue brief:",
-      summarized_text(issue.description || "No description provided.", 2_500),
-      "",
-      "Resolved workflow profile: #{WorkflowProfile.name_string(workflow_profile)} (merge mode #{workflow_profile.merge_mode}).",
-      "",
-      RepoMap.prompt_block(repo_map),
-      "",
-      "Acceptance summary:",
-      summarized_text(acceptance.summary, 1_200),
-      maybe_acceptance_criteria_block(acceptance.criteria, resume_context),
-      "",
-      "Runtime-owned delivery rules:",
-      "- Symphony owns git branch creation, commit, push, PR publication, CI waiting, merge, and post-merge closure.",
-      "- Your job is limited to code changes in the checked out repo and reporting the structured turn result.",
-      "- Do not create commits, push branches, open PRs, merge PRs, or change issue states yourself.",
-      "- Do not run full validation, smoke, build, or test commands during `implement`.",
-      "- Do not run heavyweight commands such as `xcodebuild`, `make all`, full test suites, or repo-wide validation scripts from this turn.",
-      "- Do not inventory the entire repo or dump full diffs during `implement`: avoid `rg --files`, `fd`, `find .`, and full `git diff`; use targeted file reads and `git diff --stat` only.",
-      "- Limit shell usage to targeted inspection and editing support only: prefer `rg`, `sed -n`, narrow file reads, and small `git status` or `git diff --stat` commands.",
-      "- Keep command output small. Do not stream long logs or dump large files into the turn.",
-      "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
-      "- `files_touched` must list every path you changed this turn.",
-      "- Set `blocked=true` only for a true blocker you cannot resolve from the repo or local environment.",
-      "- Set `needs_another_turn=true` only when more implementation work is still required after this turn.",
-      "",
-      "Resume context:",
-      resume_context_block(resume_context),
-      token_pressure,
-      "",
-      "Exact next objective:",
-      resume_context[:next_objective] ||
-        "Advance the current diff toward validation with the smallest complete code change set possible."
-    ]
+    prompt_lines =
+      if focused_review_claims == [] do
+        [
+          "You are implementing ticket `#{issue.identifier}`.",
+          "",
+          "Title: #{to_string(issue.title || "Untitled issue")}",
+          repo_platform_note(inspection),
+          "Current implementation turn: #{turn_number} of #{max_turns}.",
+          "",
+          "Issue brief:",
+          summarized_text(issue.description || "No description provided.", 2_500),
+          "",
+          "Resolved workflow profile: #{WorkflowProfile.name_string(workflow_profile)} (merge mode #{workflow_profile.merge_mode}).",
+          "",
+          RepoMap.prompt_block(repo_map),
+          "",
+          "Acceptance summary:",
+          summarized_text(acceptance.summary, 1_200),
+          maybe_acceptance_criteria_block(acceptance.criteria, resume_context),
+          "",
+          "Runtime-owned delivery rules:",
+          "- Symphony owns git branch creation, commit, push, PR publication, CI waiting, merge, and post-merge closure.",
+          "- Your job is limited to code changes in the checked out repo and reporting the structured turn result.",
+          "- Do not create commits, push branches, open PRs, merge PRs, or change issue states yourself.",
+          "- Do not run full validation, smoke, build, or test commands during `implement`.",
+          "- Do not run heavyweight commands such as `xcodebuild`, `make all`, full test suites, or repo-wide validation scripts from this turn.",
+          "- Do not inventory the entire repo or dump full diffs during `implement`: avoid `rg --files`, `fd`, `find .`, and full `git diff`; use targeted file reads and `git diff --stat` only.",
+          "- Limit shell usage to targeted inspection and editing support only: prefer `rg`, `sed -n`, narrow file reads, and small `git status` or `git diff --stat` commands.",
+          "- Keep command output small. Do not stream long logs or dump large files into the turn.",
+          "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
+          "- `files_touched` must list every path you changed this turn.",
+          "- Set `blocked=true` only for a true blocker you cannot resolve from the repo or local environment.",
+          "- Set `needs_another_turn=true` only when more implementation work is still required after this turn.",
+          "",
+          "Resume context:",
+          resume_context_block(resume_context),
+          token_pressure,
+          "",
+          "Exact next objective:",
+          resume_context[:next_objective] ||
+            "Advance the current diff toward validation with the smallest complete code change set possible."
+        ]
+      else
+        [
+          "You are implementing ticket `#{issue.identifier}`.",
+          "",
+          "Title: #{to_string(issue.title || "Untitled issue")}",
+          repo_platform_note(inspection),
+          "Current implementation turn: #{turn_number} of #{max_turns}.",
+          "",
+          "This is a scoped review-fix turn. Do not rediscover the issue or rescan the repo.",
+          "Resolved workflow profile: #{WorkflowProfile.name_string(workflow_profile)} (merge mode #{workflow_profile.merge_mode}).",
+          maybe_named_line("PR under review", Map.get(state, :pr_url), 200),
+          "",
+          "Scoped review claims for this turn:",
+          focused_review_claim_block(focused_review_claims, Map.get(state, :review_claims, %{})),
+          token_pressure,
+          "",
+          "Review-fix rules:",
+          "- Touch only the files named in the scoped review claims unless a directly adjacent helper must change to make the fix compile.",
+          "- Do not rescan unrelated files, docs, or tests.",
+          "- Do not run full validation, smoke, build, or test commands during `implement`.",
+          "- Limit shell usage to narrow reads of the listed files and minimal diff/status checks.",
+          "- Keep command output small. Do not stream long logs or dump large files into the turn.",
+          "- If you complete this claim batch but additional verified review claims remain, set `needs_another_turn=true`.",
+          "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
+          "",
+          "Resume context:",
+          focused_resume_context_block(resume_context),
+          "",
+          "Exact next objective:",
+          focused_review_next_objective(focused_review_claims, Map.get(state, :review_claims, %{}))
+        ]
+      end
+
+    prompt_lines
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
     |> String.trim()
@@ -1930,6 +1967,8 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp fresh_resume_context(workspace, issue, state, inspection, overrides) do
+    focused_review_claims = focused_review_claims(Map.get(state, :review_claims, %{}))
+
     %{
       issue_identifier: issue.identifier,
       fingerprint: inspection.fingerprint,
@@ -1945,13 +1984,13 @@ defmodule SymphonyElixir.DeliveryEngine do
       last_blocking_rule: get_in(state, [:stop_reason, :code]) || Map.get(state, :last_rule_id),
       review_feedback_summary:
         Map.get(overrides, :review_feedback_summary) ||
-          review_feedback_summary(Map.get(state, :review_threads, %{})),
+          default_review_feedback_summary(state, focused_review_claims),
       review_claim_summary:
         Map.get(overrides, :review_claim_summary) ||
-          ReviewEvidenceCollector.summary(Map.get(state, :review_claims, %{})),
+          default_review_claim_summary(state, focused_review_claims),
       next_objective:
         Map.get(overrides, :next_objective) ||
-          "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
+          default_next_objective(state, focused_review_claims)
     }
     |> Map.merge(Enum.into(overrides, %{}))
   end
@@ -2009,6 +2048,19 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
+  defp focused_resume_context_block(resume_context) when is_map(resume_context) do
+    [
+      maybe_named_multiline("Scoped review claims", resume_context[:review_claim_summary]),
+      maybe_named_multiline("Scoped review feedback", resume_context[:review_feedback_summary]),
+      maybe_named_line("Last implementation summary", resume_context[:last_turn_summary], 300)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> "No focused review context recorded."
+      lines -> Enum.join(lines, "\n")
+    end
+  end
+
   defp token_pressure_note(state) do
     case get_in(state, [:resume_context, :token_pressure]) do
       "high" ->
@@ -2062,13 +2114,38 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp review_feedback_summary(_review_threads), do: nil
 
+  defp default_review_feedback_summary(state, []),
+    do: review_feedback_summary(Map.get(state, :review_threads, %{}))
+
+  defp default_review_feedback_summary(_state, focused_claims) do
+    focused_review_feedback_summary(focused_claims)
+  end
+
+  defp default_review_claim_summary(state, []),
+    do: ReviewEvidenceCollector.summary(Map.get(state, :review_claims, %{}))
+
+  defp default_review_claim_summary(_state, focused_claims) do
+    actionable_review_claim_summary_from_entries(focused_claims)
+  end
+
+  defp default_next_objective(_state, []),
+    do: "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
+
+  defp default_next_objective(state, focused_claims) do
+    focused_review_next_objective(focused_claims, Map.get(state, :review_claims, %{}))
+  end
+
   defp actionable_review_claim_summary(review_claims) when is_map(review_claims) do
-    review_claims
-    |> Enum.sort_by(fn {thread_key, _claim} -> thread_key end)
-    |> Enum.filter(fn {_thread_key, claim} ->
-      Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
-    end)
-    |> Enum.take(6)
+    entries = focused_review_claims(review_claims, 6)
+
+    case actionable_review_claim_summary_from_entries(entries) do
+      nil -> ReviewEvidenceCollector.summary(review_claims)
+      text -> text
+    end
+  end
+
+  defp actionable_review_claim_summary_from_entries(entries) when is_list(entries) do
+    entries
     |> Enum.map(fn {_thread_key, claim} ->
       claim_type = Map.get(claim, "claim_type") || "review_claim"
       verification_status = Map.get(claim, "verification_status") || "verified"
@@ -2084,34 +2161,126 @@ defmodule SymphonyElixir.DeliveryEngine do
     end)
     |> Enum.join("\n")
     |> case do
-      "" -> ReviewEvidenceCollector.summary(review_claims)
+      "" -> nil
       text -> text
     end
   end
 
   defp accepted_review_next_objective(review_claims) when is_map(review_claims) do
+    focused_review_next_objective(focused_review_claims(review_claims), review_claims)
+  end
+
+  defp focused_review_next_objective(focused_claims, all_review_claims)
+       when is_list(focused_claims) and is_map(all_review_claims) do
     files =
-      review_claims
+      focused_claims
       |> Enum.reduce([], fn {_thread_key, claim}, acc ->
-        if Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false) do
-          case Map.get(claim, "path") do
-            path when is_binary(path) and path != "" -> [path | acc]
-            _ -> acc
-          end
-        else
-          acc
+        case Map.get(claim, "path") do
+          path when is_binary(path) and path != "" -> [path | acc]
+          _ -> acc
         end
       end)
       |> Enum.uniq()
-      |> Enum.take(6)
       |> Enum.reverse()
+
+    remaining_count = max(0, accepted_actionable_claim_count(all_review_claims) - length(focused_claims))
 
     case files do
       [] ->
         "Address the verified PR review claims without rerunning the full repo validation in implement."
 
       _ ->
-        "Address only the verified PR review claims in #{Enum.join(files, ", ")}. Do not rescan unrelated files or docs, and stop once those scoped fixes are in place."
+        suffix =
+          if remaining_count > 0 do
+            " If you finish this batch, report `needs_another_turn=true` so Symphony can continue with the remaining #{remaining_count} verified claim(s)."
+          else
+            ""
+          end
+
+        "Address only the verified PR review claims in #{Enum.join(files, ", ")}. Do not rescan unrelated files or docs, and stop once those scoped fixes are in place." <>
+          suffix
+    end
+  end
+
+  defp focused_review_claims(review_claims, limit \\ 2)
+
+  defp focused_review_claims(review_claims, limit)
+       when is_map(review_claims) and is_integer(limit) and limit > 0 do
+    review_claims
+    |> Enum.sort_by(fn {thread_key, claim} ->
+      {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "", Map.get(claim, "line") || 0, thread_key}
+    end)
+    |> Enum.filter(fn {_thread_key, claim} ->
+      Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
+    end)
+    |> Enum.take(limit)
+  end
+
+  defp accepted_actionable_claim_count(review_claims) when is_map(review_claims) do
+    review_claims
+    |> Enum.count(fn {_thread_key, claim} ->
+      Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
+    end)
+  end
+
+  defp claim_priority_bucket("security_risk"), do: 0
+  defp claim_priority_bucket("critical_bug"), do: 0
+  defp claim_priority_bucket("correctness_risk"), do: 1
+  defp claim_priority_bucket("failure_handling_risk"), do: 2
+  defp claim_priority_bucket("maintainability"), do: 3
+  defp claim_priority_bucket(_claim_type), do: 4
+
+  defp focused_review_claim_block(focused_claims, all_review_claims)
+       when is_list(focused_claims) and is_map(all_review_claims) do
+    remaining_count = max(0, accepted_actionable_claim_count(all_review_claims) - length(focused_claims))
+
+    block =
+      focused_claims
+      |> Enum.map(fn {_thread_key, claim} ->
+        location =
+          case {Map.get(claim, "path"), Map.get(claim, "line")} do
+            {path, line} when is_binary(path) and is_integer(line) -> "#{path}:#{line}"
+            {path, _line} when is_binary(path) -> path
+            _ -> "review feedback"
+          end
+
+        detail =
+          claim
+          |> Map.get("body")
+          |> summarized_text(220)
+
+        "- #{Map.get(claim, "claim_type") || "review_claim"} #{location}: #{detail}"
+      end)
+      |> Enum.join("\n")
+
+    if remaining_count > 0 do
+      block <> "\n- Additional verified claims remain after this batch: #{remaining_count}"
+    else
+      block
+    end
+  end
+
+  defp focused_review_feedback_summary(focused_claims) when is_list(focused_claims) do
+    focused_claims
+    |> Enum.map(fn {_thread_key, claim} ->
+      location =
+        case {Map.get(claim, "path"), Map.get(claim, "line")} do
+          {path, line} when is_binary(path) and is_integer(line) -> "#{path}:#{line}"
+          {path, _line} when is_binary(path) -> path
+          _ -> "review feedback"
+        end
+
+      detail =
+        claim
+        |> Map.get("body")
+        |> summarized_text(180)
+
+      "- #{location}: #{detail}"
+    end)
+    |> Enum.join("\n")
+    |> case do
+      "" -> nil
+      text -> text
     end
   end
 
@@ -2254,13 +2423,30 @@ defmodule SymphonyElixir.DeliveryEngine do
     |> Enum.uniq()
   end
 
-  defp implement_command_output_budget do
-    %{
-      stage: "implement",
-      per_command_bytes: 8_192,
-      per_turn_bytes: 32_768,
-      max_command_count: 12
-    }
+  defp implement_effort(state) do
+    if focused_review_claims(Map.get(state, :review_claims, %{})) == [] do
+      Config.codex_turn_effort("implement")
+    else
+      "low"
+    end
+  end
+
+  defp implement_command_output_budget(state) do
+    if focused_review_claims(Map.get(state, :review_claims, %{})) == [] do
+      %{
+        stage: "implement",
+        per_command_bytes: 8_192,
+        per_turn_bytes: 32_768,
+        max_command_count: 12
+      }
+    else
+      %{
+        stage: "implement",
+        per_command_bytes: 6_144,
+        per_turn_bytes: 24_576,
+        max_command_count: 6
+      }
+    end
   end
 
   defp ensure_turn_progress(

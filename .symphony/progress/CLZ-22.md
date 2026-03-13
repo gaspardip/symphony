@@ -188,6 +188,12 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   accepted PR review claims now seed a scoped review-claim summary, file-targeted next objective, and `token_pressure=high` in resume context before returning to `implement`, so dogfood turns for PR comments start from a constrained fix scope instead of a generic implementation objective.
 - Latest focused review-handoff validation on March 13, 2026:
   `mix test test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs:249` passed with `1 test, 0 failures`, and `mix dialyzer --format short` remained clean after the narrowed handoff changes.
+- Scoped review-fix implement turns on March 13, 2026:
+  `SymphonyElixir.DeliveryEngine` now switches into a dedicated review-fix prompt when accepted actionable PR claims exist, limits each implement turn to a small batch of verified claims, lowers Codex effort to `low`, and shrinks the command-output budget so the canary can keep moving through PR comments without reloading the full issue brief every turn.
+- Turn-result contract hardening on March 13, 2026:
+  `SymphonyElixir.TurnResult.normalize/1` now coerces noisy non-blocking `blocker_type` values back to `:none` instead of failing the entire turn, which keeps useful review-fix edits from being discarded when the model emits an unnecessary blocker label while `blocked=false`.
+- Latest focused review-fix runtime validation on March 13, 2026:
+  `mix test test/symphony_elixir/utility_phase6_backfill_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed with `92 tests, 0 failures`.
 
 ## Next Step
-Restart the local stable and canary runners on the narrowed review-handoff patch, replay `CLZ-22`, and verify that the canary now stays under the per-turn input budget long enough to make the scoped PR-comment fixes. After that, continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests.
+Restart the local canary runner on the scoped review-fix and fail-soft turn-result patch, retry `CLZ-22`, and verify that the canary preserves the PR-comment edits instead of failing on `invalid_turn_result`. After that, continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests.

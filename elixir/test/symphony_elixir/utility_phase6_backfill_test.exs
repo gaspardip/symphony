@@ -75,12 +75,19 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     assert {:error, :invalid_turn_result} = TurnResult.normalize(:bad)
     assert {:error, :invalid_files_touched} = TurnResult.normalize(valid_turn_result(files_touched: :bad))
     assert {:error, {:invalid_boolean, :needs_another_turn}} = TurnResult.normalize(valid_turn_result(needs_another_turn: "yes"))
-    assert {:error, :unexpected_blocker_type} = TurnResult.normalize(valid_turn_result(blocker_type: "validation"))
     assert {:error, :invalid_blocker_type} = TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "unknown"))
 
     assert {:error, {:missing_keys, missing}} = TurnResult.normalize(%{})
     assert :summary in missing
     assert :files_touched in missing
+  end
+
+  test "turn result coerces noisy non-blocking blocker types to none" do
+    assert {:ok, %TurnResult{blocked: false, blocker_type: :none}} =
+             TurnResult.normalize(valid_turn_result(blocker_type: "validation"))
+
+    assert {:ok, %TurnResult{blocked: false, blocker_type: :none}} =
+             TurnResult.normalize(valid_turn_result(blocker_type: "unknown"))
   end
 
   test "turn result handles blank blocker types and invalid summary values" do
