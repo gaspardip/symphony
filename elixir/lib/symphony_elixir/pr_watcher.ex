@@ -102,44 +102,49 @@ defmodule SymphonyElixir.PRWatcher do
     watcher = status(pack)
     thread_states = normalize_thread_states(Keyword.get(opts, :thread_states, %{}))
     pr_url = Keyword.get(opts, :pr_url)
+    prefer_cached? = Keyword.get(opts, :prefer_cached, false)
 
     if watcher.enabled do
-      github_client = Keyword.get(opts, :github_client, configured_github_client())
-      github_opts = Keyword.merge(configured_github_client_opts(), Keyword.get(opts, :github_client_opts, []))
+      if prefer_cached? and map_size(thread_states) > 0 do
+        cached_feedback(thread_states, pr_url, :preferred_cached)
+      else
+        github_client = Keyword.get(opts, :github_client, configured_github_client())
+        github_opts = Keyword.merge(configured_github_client_opts(), Keyword.get(opts, :github_client_opts, []))
 
-      case review_feedback_for_source(github_client, workspace, pr_url, github_opts) do
-        {:ok, feedback} ->
-          items = build_feedback_items(feedback, thread_states, workspace)
-          review_count = Enum.count(items, &(&1.kind == :review))
-          comment_count = Enum.count(items, &(&1.kind == :comment))
-          actionable_items_count = Enum.count(items, &ReviewAdjudicator.actionable_feedback?/1)
-          dismissed_items_count = Enum.count(items, &(Map.get(&1, :disposition) == "dismissed"))
+        case review_feedback_for_source(github_client, workspace, pr_url, github_opts) do
+          {:ok, feedback} ->
+            items = build_feedback_items(feedback, thread_states, workspace)
+            review_count = Enum.count(items, &(&1.kind == :review))
+            comment_count = Enum.count(items, &(&1.kind == :comment))
+            actionable_items_count = Enum.count(items, &ReviewAdjudicator.actionable_feedback?/1)
+            dismissed_items_count = Enum.count(items, &(Map.get(&1, :disposition) == "dismissed"))
 
-          Observability.emit([:symphony, :review, :feedback_detected], %{count: length(items)}, %{
-            pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
-            review_count: review_count,
-            comment_count: comment_count,
-            actionable_items_count: actionable_items_count,
-            dismissed_items_count: dismissed_items_count
-          })
+            Observability.emit([:symphony, :review, :feedback_detected], %{count: length(items)}, %{
+              pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
+              review_count: review_count,
+              comment_count: comment_count,
+              actionable_items_count: actionable_items_count,
+              dismissed_items_count: dismissed_items_count
+            })
 
-          %{
-            status: "ok",
-            pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
-            review_decision: Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
-            pending_drafts_count: length(items),
-            actionable_items_count: actionable_items_count,
-            items: items
-          }
+            %{
+              status: "ok",
+              pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
+              review_decision: Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
+              pending_drafts_count: length(items),
+              actionable_items_count: actionable_items_count,
+              items: items
+            }
 
-        {:error, reason} ->
-          Observability.emit([:symphony, :review, :feedback_detected], %{count: 0}, %{
-            pr_url: pr_url,
-            outcome: "error",
-            reason: inspect(reason)
-          })
+          {:error, reason} ->
+            Observability.emit([:symphony, :review, :feedback_detected], %{count: 0}, %{
+              pr_url: pr_url,
+              outcome: "error",
+              reason: inspect(reason)
+            })
 
-          cached_feedback(thread_states, pr_url, reason)
+            cached_feedback(thread_states, pr_url, reason)
+        end
       end
     else
       %{status: "disabled", pending_drafts_count: 0, items: []}

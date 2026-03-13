@@ -21,6 +21,8 @@ acceptance_signals:
   - Issue dispatch respects the target runner channel so stable and canary pools do not steal each other's work
   - Operator snapshots surface lease age, TTL, reclaimability, and latest GitHub assignment state so webhook and routing skips are explainable
   - Operators can invoke inspect, promote, record-canary, and rollback runner actions through the observability API using the repo-owned promotion script
+  - Seeded manual run states with explicit policy metadata can synthesize a minimal issue shell and re-enter active review follow-up without a manual-store issue record
+  - Replay refresh drains GitHub inbox work even when runner metadata disables normal tracker dispatch
 dependencies:
   - harness
 last_updated_by_issue: CLZ-22

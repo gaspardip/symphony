@@ -88,6 +88,35 @@ defmodule SymphonyElixir.ReviewEvidenceCollectorTest do
     assert stats.accepted_count == 1
   end
 
+  test "collect verifies scoped claims against the current checkout for seeded workspaces" do
+    workspace = Path.join(System.tmp_dir!(), "review-evidence-seeded-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+
+    {updated_claims, stats} =
+      ReviewEvidenceCollector.collect(
+        %{
+          "comment:201" => %{
+            "thread_key" => "comment:201",
+            "kind" => "comment",
+            "path" => "elixir/lib/symphony_elixir_web/router.ex",
+            "line" => 36,
+            "claim_type" => "correctness_risk",
+            "disposition" => "needs_verification",
+            "actionable" => true,
+            "verification_status" => "pending"
+          }
+        },
+        workspace
+      )
+
+    claim = updated_claims["comment:201"]
+
+    assert claim["verification_status"] == "verified_scope"
+    assert claim["disposition"] == "accepted"
+    assert "workspace_scope_verified" in claim["proof_sources"]
+    assert stats.accepted_count == 1
+  end
+
   test "collect upgrades scoped claims when the referenced symbol exists in the file" do
     workspace = Path.join(System.tmp_dir!(), "review-evidence-symbol-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(workspace, "lib"))

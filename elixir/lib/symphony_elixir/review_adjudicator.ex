@@ -8,7 +8,7 @@ defmodule SymphonyElixir.ReviewAdjudicator do
   can use to suppress obvious noise before reopening implementation.
   """
 
-  alias SymphonyElixir.ReviewConsensus
+  alias SymphonyElixir.{ReviewConsensus, RunnerRuntime}
 
   @neutral_score 0.5
 
@@ -155,7 +155,24 @@ defmodule SymphonyElixir.ReviewAdjudicator do
       review_change_requested?(item) ->
         :correctness_risk
 
-      contains_any?(body, ["bug", "wrong", "ignored", "incorrect", "broken", "regression", "edge case"]) ->
+      contains_any?(body, [
+        "bug",
+        "wrong",
+        "ignored",
+        "incorrect",
+        "broken",
+        "regression",
+        "edge case",
+        "hard-coded",
+        "hard coded",
+        "will not affect",
+        "parsing error",
+        "parsing errors",
+        "parsed as a string",
+        "invalid numeric literal",
+        "break idempotency",
+        "breaks rendered links"
+      ]) ->
         :correctness_risk
 
       contains_any?(body, ["duplicate", "reuse", "shared helper", "extract", "refactor", "simplify"]) ->
@@ -196,10 +213,44 @@ defmodule SymphonyElixir.ReviewAdjudicator do
       claim_type == :style_or_nit ->
         0.10
 
-      contains_any?(body, ["because", "break", "ignored", "wrong", "missing", "before merge", "regression"]) and has_scope? ->
+      contains_any?(body, [
+        "because",
+        "break",
+        "ignored",
+        "wrong",
+        "missing",
+        "before merge",
+        "regression",
+        "hard-coded",
+        "hard coded",
+        "will not affect",
+        "parsing error",
+        "parsing errors",
+        "parsed as a string",
+        "invalid numeric literal",
+        "idempotency",
+        "rendered links"
+      ]) and has_scope? ->
         0.90
 
-      contains_any?(body, ["break", "ignored", "wrong", "missing", "bug", "edge case", "regression"]) ->
+      contains_any?(body, [
+        "break",
+        "ignored",
+        "wrong",
+        "missing",
+        "bug",
+        "edge case",
+        "regression",
+        "hard-coded",
+        "hard coded",
+        "will not affect",
+        "parsing error",
+        "parsing errors",
+        "parsed as a string",
+        "invalid numeric literal",
+        "idempotency",
+        "rendered links"
+      ]) ->
         0.75
 
       review_change_requested?(item) and String.length(body) >= 20 ->
@@ -363,27 +414,33 @@ defmodule SymphonyElixir.ReviewAdjudicator do
 
   defp file_exists?(workspace, relative_path)
        when is_binary(workspace) and is_binary(relative_path) do
-    workspace
-    |> Path.join(relative_path)
-    |> File.exists?()
+    Enum.any?(candidate_paths(workspace, relative_path), &File.exists?/1)
   end
 
   defp file_exists?(_workspace, _relative_path), do: false
 
   defp scope_exists?(workspace, relative_path, line)
        when is_binary(workspace) and is_binary(relative_path) and is_integer(line) and line > 0 do
-    file_path = Path.join(workspace, relative_path)
+    Enum.any?(candidate_paths(workspace, relative_path), fn file_path ->
+      case File.read(file_path) do
+        {:ok, contents} ->
+          length(String.split(contents, "\n")) >= line
 
-    case File.read(file_path) do
-      {:ok, contents} ->
-        length(String.split(contents, "\n")) >= line
-
-      _ ->
-        false
-    end
+        _ ->
+          false
+      end
+    end)
   end
 
   defp scope_exists?(_workspace, _relative_path, _line), do: false
+
+  defp candidate_paths(workspace, relative_path) do
+    [workspace, RunnerRuntime.current_checkout_root()]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&Path.join(&1, relative_path))
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+  end
 
   defp clamp_score(score) when score < 0.0, do: 0.0
   defp clamp_score(score) when score > 1.0, do: 1.0

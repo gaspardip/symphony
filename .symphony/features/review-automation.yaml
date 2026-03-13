@@ -26,6 +26,8 @@ acceptance_signals:
   - Operators can inspect GitHub webhook assignment state and lease reclaimability through the presenter and API payloads
   - Repeated low-signal review comments are tracked as stagnant feedback instead of repeatedly reopening implementation without new proof
   - Canary-targeted issues are skipped by stable runners and stay dispatchable on canary runners
+  - Seeded review workspaces can adjudicate scoped comments against the current checkout root instead of dismissing them as missing paths
+  - Replayed review feedback can promote previously dismissed claims back into pending verification and reopen seeded autonomous runs without a manual issue record
 dependencies:
   - runtime-core
 last_updated_by_issue: CLZ-22

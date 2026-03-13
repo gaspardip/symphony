@@ -23,6 +23,7 @@ defmodule SymphonyElixirWeb.Presenter do
   }
 
   alias SymphonyElixir.Linear.Issue
+  @dialyzer {:nowarn_function, pr_watcher_payload: 4}
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -170,7 +171,8 @@ defmodule SymphonyElixirWeb.Presenter do
                    nil,
                    workspace_path,
                    Map.get(payload, :review_thread_states, %{}),
-                   pr_url
+                   pr_url,
+                   prefer_cached: true
                  )
              })}
         end
@@ -1536,7 +1538,7 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp pr_watcher_payload(pack \\ nil, workspace_path \\ nil, thread_states \\ %{}, pr_url \\ nil) do
+  defp pr_watcher_payload(pack \\ nil, workspace_path \\ nil, thread_states \\ %{}, pr_url \\ nil, opts \\ []) do
     base = PRWatcher.status(pack)
 
     if is_binary(workspace_path) and File.dir?(workspace_path) do
@@ -1547,7 +1549,8 @@ defmodule SymphonyElixirWeb.Presenter do
           workspace_path,
           policy_pack: pack,
           thread_states: thread_states,
-          pr_url: pr_url
+          pr_url: pr_url,
+          prefer_cached: Keyword.get(opts, :prefer_cached, false)
         )
       )
     else

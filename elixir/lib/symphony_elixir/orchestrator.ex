@@ -57,6 +57,7 @@ defmodule SymphonyElixir.Orchestrator do
              persist_review_feedback_for_workspace: 4,
              review_thread_state: 2,
              issue_for_run_state: 1,
+             seeded_manual_issue_from_run_state: 1,
              issue_ref_for_run_state: 1,
              normalize_issue_source: 1,
              maybe_start_autonomous_review_follow_up: 8,
@@ -392,6 +393,26 @@ defmodule SymphonyElixir.Orchestrator do
     runner = RunnerRuntime.info()
 
     cond do
+      mode == :github_webhook ->
+        with :ok <- Config.validate!() do
+          state
+          |> maybe_note_tracker_backoff(mode)
+          |> reconcile_running_issues(:manual_only)
+          |> maybe_promote_review_ready_issues(:manual_only)
+          |> maybe_dispatch_mode(:github_webhook)
+          |> Map.put(
+            :candidate_fetch_error,
+            if(Map.get(runner, :dispatch_enabled, true),
+              do: nil,
+              else: {:runner_health, Map.get(runner, :runner_health_rule_id)}
+            )
+          )
+        else
+          {:error, reason} ->
+            Logger.error("Failed to run GitHub webhook dispatch cycle: #{inspect(reason)}")
+            %{state | skipped_issues: [], candidate_fetch_error: reason}
+        end
+
       not Map.get(runner, :dispatch_enabled, true) ->
         %{
           state
@@ -869,15 +890,7 @@ defmodule SymphonyElixir.Orchestrator do
             thread_key when is_binary(thread_key) ->
               persisted = Map.get(acc, thread_key, %{})
 
-              verification_status =
-                Map.get(
-                  persisted,
-                  "verification_status",
-                  if(Map.get(item, :disposition) == "needs_verification",
-                    do: "pending",
-                    else: "not_needed"
-                  )
-                )
+              verification_status = review_claim_verification_status(persisted, item)
 
               claim_state = %{
                 "thread_key" => Map.get(item, :thread_key),
@@ -1038,10 +1051,57 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp review_claim_verification_status(persisted, item)
+       when is_map(persisted) and is_map(item) do
+    persisted_status = Map.get(persisted, "verification_status")
+    disposition = Map.get(item, :disposition)
+
+    cond do
+      disposition == "needs_verification" and persisted_status in [nil, "", "not_needed", "contradicted"] ->
+        "pending"
+
+      is_binary(persisted_status) and persisted_status != "" ->
+        persisted_status
+
+      disposition == "needs_verification" ->
+        "pending"
+
+      true ->
+        "not_needed"
+    end
+  end
+
   defp issue_for_run_state(run_state) when is_map(run_state) do
     case IssueSource.fetch_issue(issue_ref_for_run_state(run_state)) do
       {:ok, %Issue{} = issue} -> issue
-      _ -> nil
+      _ -> seeded_manual_issue_from_run_state(run_state)
+    end
+  end
+
+  defp seeded_manual_issue_from_run_state(run_state) when is_map(run_state) do
+    source = normalize_issue_source(Map.get(run_state, :issue_source))
+    issue_id = Map.get(run_state, :issue_id)
+    issue_identifier = Map.get(run_state, :issue_identifier)
+    policy_class = Map.get(run_state, :effective_policy_class) || Map.get(run_state, :policy_class)
+
+    if source == :manual and is_binary(policy_class) and policy_class != "" and is_binary(issue_id) and
+         issue_id != "" and is_binary(issue_identifier) and
+         issue_identifier != "" do
+      %Issue{
+        id: issue_id,
+        external_id: issue_id,
+        canonical_identifier: issue_identifier,
+        identifier: issue_identifier,
+        title:
+          Map.get(run_state, :issue_title) ||
+            "Seeded local replay for #{issue_identifier}",
+        state: Map.get(run_state, :issue_state) || "In Progress",
+        source: :manual,
+        labels: List.wrap(Map.get(run_state, :issue_labels, [])),
+        assigned_to_worker: true
+      }
+    else
+      nil
     end
   end
 
@@ -3561,22 +3621,34 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call(:request_refresh, _from, state) do
-    already_due? =
+    poll_already_due? =
       is_integer(state.next_poll_due_at_ms) and
         state.next_poll_due_at_ms <= System.monotonic_time(:millisecond)
 
-    coalesced = state.poll_check_in_progress == true or already_due?
+    poll_coalesced = state.poll_check_in_progress == true or poll_already_due?
+    github_coalesced = state.github_webhook_check_in_progress == true
 
-    unless coalesced do
+    unless poll_coalesced do
       :ok = schedule_webhook_cycle_start()
     end
+
+    unless github_coalesced do
+      :ok = schedule_github_webhook_cycle_start()
+    end
+
+    state = %{
+      state
+      | poll_check_in_progress: state.poll_check_in_progress or not poll_coalesced,
+        current_poll_mode: if(poll_coalesced, do: state.current_poll_mode, else: :webhook),
+        github_webhook_check_in_progress: state.github_webhook_check_in_progress or not github_coalesced
+    }
 
     {:reply,
      %{
        queued: true,
-       coalesced: coalesced,
+       coalesced: poll_coalesced and github_coalesced,
        requested_at: DateTime.utc_now(),
-       operations: ["events", "reconcile"]
+       operations: ["events", "github_events", "reconcile"]
      }, state}
   end
 

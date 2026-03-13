@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.LeaseManager
+  alias SymphonyElixir.{GitHubEvent, GitHubEventInbox, LeaseManager, ManualIssueStore, RunStateStore}
   alias SymphonyElixir.Orchestrator.State
 
   defmodule PostingGitHubClient do
@@ -22,6 +22,51 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     @impl true
     def review_feedback(_workspace, _opts), do: {:error, :review_feedback_unavailable}
+
+    @impl true
+    def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+    @impl true
+    def post_review_comment_reply(_pr_url, comment_id, _body, _opts) do
+      {:ok, %{id: "reply-#{comment_id}", url: "https://github.com/example/reply/#{comment_id}", output: ""}}
+    end
+  end
+
+  defmodule ReviewFeedbackGitHubClient do
+    @behaviour SymphonyElixir.GitHubClient
+
+    @impl true
+    def existing_pull_request(_workspace, _opts), do: {:error, :missing_pr}
+
+    @impl true
+    def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+      do: {:error, :unsupported}
+
+    @impl true
+    def merge_pull_request(_workspace, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def review_feedback(_workspace, _opts) do
+      {:ok,
+       %{
+         pr_url: "https://github.com/gaspardip/events/pull/8",
+         review_decision: "COMMENTED",
+         reviews: [],
+         comments: [
+           %{
+             id: 91,
+             body: "Please tighten this conditional.",
+             path: "lib/example.ex",
+             line: 2,
+             created_at: "2026-03-11T12:01:00Z",
+             author: "copilot-pull-request-reviewer"
+           }
+         ]
+       }}
+    end
 
     @impl true
     def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
@@ -156,8 +201,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     refresh = Orchestrator.request_refresh(orchestrator_name)
     assert refresh.queued == true
-    assert refresh.coalesced == true
-    assert refresh.operations == ["events", "reconcile"]
+    assert refresh.coalesced == false
+    assert refresh.operations == ["events", "github_events", "reconcile"]
+
+    refreshed_state = :sys.get_state(pid)
+    assert refreshed_state.poll_check_in_progress == true
+    assert refreshed_state.github_webhook_check_in_progress == true
 
     snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
     assert [%{identifier: "MT-PAUSED", resume_state: "In Progress"}] = Map.get(snapshot, :paused)
@@ -173,6 +222,118 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
                label_gate_eligible: true
              }
            ] = snapshot.queue
+  end
+
+  test "github review inbox drains under invalid runner health when refreshing webhook follow-up" do
+    unique = System.unique_integer([:positive])
+    workspace_root = Path.join(System.tmp_dir!(), "orchestrator-github-drain-#{unique}")
+    manual_store_root = Path.join(workspace_root, "manual-store")
+    runner_root = Path.join(workspace_root, "missing-runner-install")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root,
+      max_concurrent_agents: 0,
+      tracker_kind: "memory",
+      tracker_required_labels: ["dogfood:symphony"],
+      runner_install_root: runner_root,
+      runner_instance_name: "canary-runner",
+      runner_channel: "canary"
+    )
+
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, ReviewFeedbackGitHubClient)
+    GitHubEventInbox.reset()
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "orchestrator-github-drain-#{unique}",
+        "identifier" => "MT-GH-DRAIN-#{unique}",
+        "title" => "Drain GitHub review inbox with invalid runner health",
+        "description" => "Review follow-up should still run when normal dispatch is disabled",
+        "acceptance_criteria" => [
+          "GitHub review feedback drains and updates the matching run state under degraded runner health"
+        ],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.mkdir_p!(workspace)
+
+    :ok =
+      RunStateStore.save(workspace, %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        stage: "await_checks",
+        effective_policy_class: "fully_autonomous",
+        pr_url: "https://github.com/gaspardip/events/pull/8",
+        review_threads: %{},
+        review_claims: %{},
+        stage_history: [%{stage: "publish"}, %{stage: "await_checks"}],
+        stage_transition_counts: %{"publish" => 1, "await_checks" => 1}
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :"GitHubDrainOrchestrator#{unique}")
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      GitHubEventInbox.reset()
+      File.rm_rf(workspace_root)
+    end)
+
+    {:ok, _enqueue_result} =
+      GitHubEventInbox.enqueue([
+        %GitHubEvent{
+          provider: "github",
+          event_id: "delivery-runner-health",
+          event_name: "pull_request_review",
+          action: "submitted",
+          entity_type: "review",
+          entity_id: "91",
+          pr_url: "https://github.com/gaspardip/events/pull/8",
+          repo_full_name: "gaspardip/events",
+          updated_at: ~U[2026-03-11 12:00:00Z],
+          raw: %{
+            "action" => "submitted",
+            "review" => %{"id" => 91, "body" => "Please tighten this conditional."},
+            "pull_request" => %{"html_url" => "https://github.com/gaspardip/events/pull/8"}
+          }
+        }
+      ])
+
+    :ok =
+      Orchestrator.notify_github_events(orchestrator_name, %{
+        accepted_at: DateTime.utc_now(),
+        accepted: 1,
+        duplicates: 0,
+        event_ids: ["delivery-runner-health"]
+      })
+
+    assert_eventually(
+      fn ->
+        snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+        {:ok, run_state} = RunStateStore.load(workspace)
+
+        assert get_in(snapshot, [:runner, :dispatch_enabled]) == false
+        assert get_in(snapshot, [:runner, :runner_health]) == "invalid"
+        assert get_in(snapshot, [:github_inbox, :last_drained_at]) != nil
+        assert get_in(snapshot, [:github_inbox, :depth]) == 0
+        assert get_in(snapshot, [:github_inbox, :last_assignment, :assignment_state]) == "processed"
+
+        assert get_in(snapshot, [:github_inbox, :last_assignment, :assignment_reason]) ==
+                 "review_feedback_persisted"
+
+        assert Map.get(run_state, :last_review_decision) == "COMMENTED"
+        assert Map.get(run_state, :last_decision_summary) =~ "non-actionable noise"
+        assert get_in(run_state, [:review_threads, "comment:91", "draft_state"]) == "drafted"
+        assert get_in(run_state, [:review_claims, "comment:91", "disposition"]) == "dismissed"
+      end,
+      60
+    )
   end
 
   test "pause and resume controls mutate orchestrator runtime state" do
@@ -1690,6 +1851,18 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       LeaseManager.release(issue_id)
     end)
   end
+
+  defp assert_eventually(fun, attempts \\ 60)
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    fun.()
+  rescue
+    ExUnit.AssertionError ->
+      Process.sleep(50)
+      assert_eventually(fun, attempts - 1)
+  end
+
+  defp assert_eventually(_fun, 0), do: flunk("condition not met in time")
 
   defp init_git_workspace!(workspace, opts \\ []) do
     branch = Keyword.get(opts, :branch, "main")

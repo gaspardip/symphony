@@ -255,27 +255,41 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
       not Map.get(claim, "hard_proof", false)
   end
 
-  defp file_exists?(workspace, path), do: File.exists?(Path.join(workspace, path))
+  defp file_exists?(workspace, path) do
+    Enum.any?(candidate_paths(workspace, path), &File.exists?/1)
+  end
 
   defp file_contains_symbol?(workspace, path, symbol) do
-    case File.read(Path.join(workspace, path)) do
-      {:ok, contents} ->
-        String.contains?(contents, symbol)
+    Enum.any?(candidate_paths(workspace, path), fn file_path ->
+      case File.read(file_path) do
+        {:ok, contents} ->
+          String.contains?(contents, symbol)
 
-      _ ->
-        false
-    end
+        _ ->
+          false
+      end
+    end)
   end
 
   defp line_exists?(workspace, path, line)
        when is_binary(workspace) and is_binary(path) and is_integer(line) and line > 0 do
-    case File.read(Path.join(workspace, path)) do
-      {:ok, contents} -> length(String.split(contents, "\n")) >= line
-      _ -> false
-    end
+    Enum.any?(candidate_paths(workspace, path), fn file_path ->
+      case File.read(file_path) do
+        {:ok, contents} -> length(String.split(contents, "\n")) >= line
+        _ -> false
+      end
+    end)
   end
 
   defp line_exists?(_workspace, _path, _line), do: false
+
+  defp candidate_paths(workspace, path) do
+    [workspace, SymphonyElixir.RunnerRuntime.current_checkout_root()]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&Path.join(&1, path))
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+  end
 
   defp normalized_review_decision(claim) do
     claim

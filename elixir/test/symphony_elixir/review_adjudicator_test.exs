@@ -50,6 +50,73 @@ defmodule SymphonyElixir.ReviewAdjudicatorTest do
     assert adjudication.consensus_summary =~ "correctness_risk"
   end
 
+  test "uses the current checkout as a fallback code root for seeded workspaces" do
+    workspace = temp_workspace("review-adjudicator-seeded")
+
+    adjudication =
+      ReviewAdjudicator.adjudicate(
+        %{
+          kind: :comment,
+          author: "Copilot",
+          body: "The metrics endpoint route is hard-coded and the config is ignored, which can break runtime behavior.",
+          path: "elixir/lib/symphony_elixir_web/router.ex",
+          line: 36,
+          state: nil,
+          review_decision: "COMMENTED"
+        },
+        workspace: workspace
+      )
+
+    assert adjudication.locality_score == 1.0
+    assert adjudication.contradiction_sources == []
+    assert adjudication.disposition == "needs_verification"
+    assert adjudication.actionable == true
+  end
+
+  test "treats hard-coded config mismatch comments as correctness risks" do
+    workspace = temp_workspace("review-adjudicator-config")
+
+    adjudication =
+      ReviewAdjudicator.adjudicate(
+        %{
+          kind: :comment,
+          author: "Copilot",
+          body: "The metrics endpoint route is hard-coded to `/metrics`, and changing `metrics_path` in config will not affect routing.",
+          path: "elixir/lib/symphony_elixir_web/router.ex",
+          line: 36,
+          state: nil,
+          review_decision: "COMMENTED"
+        },
+        workspace: workspace
+      )
+
+    assert adjudication.claim_type == "correctness_risk"
+    assert adjudication.evidence_quality_score >= 0.75
+    assert adjudication.disposition == "needs_verification"
+  end
+
+  test "treats parser-breakage comments as correctness risks" do
+    workspace = temp_workspace("review-adjudicator-parser")
+
+    adjudication =
+      ReviewAdjudicator.adjudicate(
+        %{
+          kind: :comment,
+          author: "Copilot",
+          body: "`max_block_bytes: 1_000_000` uses invalid numeric literal syntax in YAML and may be parsed as a string or cause parsing errors.",
+          path: "ops/observability/tempo/config.yml",
+          line: 16,
+          state: nil,
+          review_decision: "COMMENTED"
+        },
+        workspace: workspace
+      )
+
+    assert adjudication.claim_type == "correctness_risk"
+    assert adjudication.evidence_quality_score >= 0.75
+    assert adjudication.disposition == "needs_verification"
+  end
+
   defp temp_workspace(prefix) do
     path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
     File.mkdir_p!(path)
