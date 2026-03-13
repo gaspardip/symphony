@@ -747,7 +747,7 @@ defmodule SymphonyElixir.DeliveryEngine do
           {
             "implement",
             "Focused review verification confirmed #{stats.accepted_count} actionable PR review claim(s). Returning to implement.",
-            "Address the verified PR review claims without rerunning the full repo validation in implement."
+            accepted_review_next_objective(updated_claims)
           }
 
         stats.pending_count > 0 ->
@@ -807,9 +807,10 @@ defmodule SymphonyElixir.DeliveryEngine do
             state,
             inspection,
             %{
-              review_feedback_summary: review_feedback_summary(updated_threads),
-              review_claim_summary: ReviewEvidenceCollector.summary(updated_claims),
-              next_objective: next_objective
+              review_feedback_summary: actionable_review_claim_summary(updated_claims),
+              review_claim_summary: actionable_review_claim_summary(updated_claims),
+              next_objective: next_objective,
+              token_pressure: if(stats.accepted_count > 0, do: "high", else: nil)
             },
             opts
           )
@@ -2060,6 +2061,59 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp review_feedback_summary(_review_threads), do: nil
+
+  defp actionable_review_claim_summary(review_claims) when is_map(review_claims) do
+    review_claims
+    |> Enum.sort_by(fn {thread_key, _claim} -> thread_key end)
+    |> Enum.filter(fn {_thread_key, claim} ->
+      Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
+    end)
+    |> Enum.take(6)
+    |> Enum.map(fn {_thread_key, claim} ->
+      claim_type = Map.get(claim, "claim_type") || "review_claim"
+      verification_status = Map.get(claim, "verification_status") || "verified"
+
+      location =
+        case {Map.get(claim, "path"), Map.get(claim, "line")} do
+          {path, line} when is_binary(path) and is_integer(line) -> "#{path}:#{line}"
+          {path, _line} when is_binary(path) -> path
+          _ -> "review feedback"
+        end
+
+      "- #{claim_type} #{location}: #{verification_status}"
+    end)
+    |> Enum.join("\n")
+    |> case do
+      "" -> ReviewEvidenceCollector.summary(review_claims)
+      text -> text
+    end
+  end
+
+  defp accepted_review_next_objective(review_claims) when is_map(review_claims) do
+    files =
+      review_claims
+      |> Enum.reduce([], fn {_thread_key, claim}, acc ->
+        if Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false) do
+          case Map.get(claim, "path") do
+            path when is_binary(path) and path != "" -> [path | acc]
+            _ -> acc
+          end
+        else
+          acc
+        end
+      end)
+      |> Enum.uniq()
+      |> Enum.take(6)
+      |> Enum.reverse()
+
+    case files do
+      [] ->
+        "Address the verified PR review claims without rerunning the full repo validation in implement."
+
+      _ ->
+        "Address only the verified PR review claims in #{Enum.join(files, ", ")}. Do not rescan unrelated files or docs, and stop once those scoped fixes are in place."
+    end
+  end
 
   defp sync_review_claims_into_threads(review_threads, review_claims)
        when is_map(review_threads) and is_map(review_claims) do

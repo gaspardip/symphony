@@ -1,7 +1,7 @@
 id: runtime-core
 title: Runtime Core
 status: active
-summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, evidence-based review follow-up with non-actionable noise suppression, operator-visible lease and webhook assignment state, runner identity plus lease-backed channel-aware issue and webhook routing seams for stable ingress and isolated runner pools, a stable-ingress webhook relay bridge for healthy canary runners, and repo-native runner promotion controls.
+summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, evidence-based review follow-up with non-actionable noise suppression, operator-visible lease and webhook assignment state, runner identity plus lease-backed channel-aware issue and webhook routing seams for stable ingress and isolated runner pools, a stable-ingress webhook relay bridge for healthy canary runners, repo-native runner promotion controls, and token-aware resume context that narrows review-driven implement turns to the accepted PR claim scope.
 source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - elixir/lib/symphony_elixir/github_webhook_relay.ex

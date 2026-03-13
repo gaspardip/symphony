@@ -259,7 +259,10 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert get_in(state, [:review_threads, "review:91", "draft_reply"]) =~ "verified this concern locally"
     assert get_in(state, [:review_threads, "review:91", "resolution_recommendation"]) == "keep_open_until_change"
     assert get_in(state, [:resume_context, :review_claim_summary]) =~ "verified_review_decision"
-    assert get_in(state, [:resume_context, :next_objective]) =~ "Address the verified PR review claims"
+    assert get_in(state, [:resume_context, :review_claim_summary]) =~ "lib/example.ex:2"
+    assert get_in(state, [:resume_context, :review_feedback_summary]) =~ "lib/example.ex:2"
+    assert get_in(state, [:resume_context, :next_objective]) =~ "Address only the verified PR review claims"
+    assert get_in(state, [:resume_context, :token_pressure]) == "high"
   end
 
   test "delivery engine review_verification returns to the passive stage when focused proof contradicts a claim" do
@@ -585,6 +588,8 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
 
   defp review_verification_workspace!(suffix) do
     {workspace, issue} = implement_workspace!(suffix)
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join(workspace, "lib/example.ex"), "defmodule Example do\n  def ok, do: :ok\nend\n")
 
     assert {:ok, _state} =
              RunStateStore.transition(workspace, "review_verification", %{
@@ -595,6 +600,8 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
                  "review:91" => %{
                    "thread_key" => "review:91",
                    "kind" => "review",
+                   "path" => "lib/example.ex",
+                   "line" => 2,
                    "review_decision" => "CHANGES_REQUESTED",
                    "claim_type" => "correctness_risk",
                    "disposition" => "needs_verification",
@@ -606,6 +613,8 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
                  "review:91" => %{
                    "thread_key" => "review:91",
                    "kind" => "review",
+                   "path" => "lib/example.ex",
+                   "line" => 2,
                    "review_decision" => "CHANGES_REQUESTED",
                    "disposition" => "needs_verification",
                    "actionable" => true,

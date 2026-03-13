@@ -1,7 +1,7 @@
 id: review-automation
 title: Review Automation
 status: active
-summary: Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, historical precision and stagnation tracking, and runner plus lease-aware webhook and issue routing for noisy PR feedback, including stale-lease reclaim on autonomous review follow-up.
+summary: Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, historical precision and stagnation tracking, runner plus lease-aware webhook and issue routing for noisy PR feedback, stale-lease reclaim on autonomous review follow-up, and a narrowed review-to-implement handoff that scopes accepted PR claims before reopening implementation.
 source_paths:
   - elixir/lib/symphony_elixir/pr_watcher.ex
   - elixir/lib/symphony_elixir/review_adjudicator.ex
