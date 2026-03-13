@@ -14,6 +14,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.IssueSource
   alias SymphonyElixir.IssuePolicy
+  alias SymphonyElixir.ManualIssueSpec
   alias SymphonyElixir.Observability
   alias SymphonyElixir.PolicyPack
   alias SymphonyElixir.PullRequestManager
@@ -2850,10 +2851,16 @@ defmodule SymphonyElixir.DeliveryEngine do
     block_issue(workspace, issue, :checkout_failed, reason, @blocked_state)
   end
 
-  defp refresh_issue(%Issue{id: issue_id}, issue_state_fetcher) when is_binary(issue_id) do
+  defp refresh_issue(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} -> {:ok, refreshed_issue}
-      {:ok, []} -> {:done, :missing}
+      {:ok, []} ->
+        if ManualIssueSpec.runtime_issue_id?(issue_id) do
+          {:ok, issue}
+        else
+          {:done, :missing}
+        end
+
       {:error, reason} -> {:error, {:issue_state_refresh_failed, reason}}
     end
   end

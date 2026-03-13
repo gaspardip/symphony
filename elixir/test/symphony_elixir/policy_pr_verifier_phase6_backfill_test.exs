@@ -8,6 +8,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   alias SymphonyElixir.PullRequestManager
   alias SymphonyElixir.RepoHarness
   alias SymphonyElixir.RunInspector
+  alias SymphonyElixir.RunLedger
   alias SymphonyElixir.RunPolicy
   alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.VerifierResult
@@ -610,8 +611,82 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  codex_total_tokens: 130_000,
                  turn_started_input_tokens: 0
                })
+
+      assert %{
+               stage: "blocked",
+               last_rule_id: "budget.per_turn_input_exceeded",
+               resume_context: %{token_pressure: "high", review_fix_budget_retry_count: 1}
+             } = RunStateStore.load_or_default(workspace, issue)
     after
       File.rm_rf(workspace_root)
+    end
+  end
+
+  test "run policy relaxes legacy high-pressure review-fix retries after a prior budget stop in the ledger" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 150_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-ledger-budget-#{System.unique_integer([:positive])}"
+      )
+
+    log_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-ledger-log-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-review-budget-ledger", identifier: "MT-914F", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "implement", %{
+                 review_claims: %{
+                   "comment:1" => %{
+                     "disposition" => "accepted",
+                     "actionable" => true
+                   }
+                 },
+                 resume_context: %{token_pressure: "high"}
+               })
+
+      with_log_file_env(Path.join(log_root, "symphony.log"), fn ->
+        RunLedger.record("runtime.stopped", %{
+          issue_identifier: issue.identifier,
+          issue_id: issue.id,
+          actor_type: "runtime",
+          actor_id: "run_policy",
+          rule_id: "budget.per_turn_input_exceeded",
+          summary: "The run exceeded a configured token budget and was stopped."
+        })
+
+        assert :ok =
+                 RunPolicy.maybe_stop_for_token_budget(issue, %{
+                   stage: "implement",
+                   codex_input_tokens: 130_000,
+                   codex_output_tokens: 0,
+                   codex_total_tokens: 130_000,
+                   turn_started_input_tokens: 0
+                 })
+      end)
+    after
+      File.rm_rf(workspace_root)
+      File.rm_rf(log_root)
     end
   end
 
@@ -1481,6 +1556,21 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
   defp sh_escape(value) do
     String.replace(value, "'", "'\"'\"'")
+  end
+
+  defp with_log_file_env(value, fun) do
+    previous = Application.get_env(:symphony_elixir, :log_file)
+    Application.put_env(:symphony_elixir, :log_file, value)
+
+    try do
+      fun.()
+    after
+      if is_nil(previous) do
+        Application.delete_env(:symphony_elixir, :log_file)
+      else
+        Application.put_env(:symphony_elixir, :log_file, previous)
+      end
+    end
   end
 
   defp verifier_issue(id, identifier) do

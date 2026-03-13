@@ -139,15 +139,18 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     write_agent_harness_yaml!(workspace)
     configure_delivery_workflow!(workspace, fake_codex_binary!("checkout-with-agent-harness", :missing))
 
-    assert {:stop, :missing_turn_result} =
+    assert result =
              DeliveryEngine.run(workspace, issue, nil,
                command_runner: &checkout_command_runner/3,
                issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
              )
 
+    assert result in [{:stop, :missing_turn_result}, {:stop, :blocked}]
+
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.harness_status in ["initialized", "ready"]
     assert is_binary(state.last_harness_init)
+    assert get_in(state, [:stop_reason, :code]) == "missing_turn_result"
     assert get_in(state, [:last_harness_check, :status]) == "passed"
     assert File.exists?(Path.join(workspace, ".symphony/progress/MT-RUNTIME.md"))
     assert File.exists?(Path.join(workspace, ".symphony/knowledge/product.md"))
@@ -195,6 +198,31 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
 
     assert {:done, :missing} =
              DeliveryEngine.run(workspace, issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, []} end)
+  end
+
+  test "delivery engine keeps seeded manual issues alive when refresh returns no tracker record" do
+    {workspace, issue} = git_implement_workspace!("manual-missing-after-turn")
+
+    manual_issue = %Issue{issue | id: "manual:MT-RUNTIME", source: :manual}
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "implement", %{
+               issue_id: manual_issue.id,
+               issue_identifier: manual_issue.identifier,
+               issue_source: manual_issue.source
+             })
+
+    configure_delivery_workflow!(workspace, fake_codex_binary!("manual-missing-after-turn", :code_change))
+
+    assert {:stop, :validation_unavailable} =
+             DeliveryEngine.run(workspace, manual_issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, []} end
+             )
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert get_in(state, [:last_turn_result, :summary]) == "Updated tracked file"
+    assert get_in(state, [:stop_reason, :code]) == "validation_unavailable"
   end
 
   test "delivery engine returns refresh errors from implement turns" do

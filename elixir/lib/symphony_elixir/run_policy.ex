@@ -109,24 +109,25 @@ defmodule SymphonyElixir.RunPolicy do
   @spec maybe_stop_for_token_budget(map(), map()) :: :ok | {:stop, violation()}
   def maybe_stop_for_token_budget(issue, running_entry) do
     token_budget = Config.policy_token_budget()
-    stage_budget = current_stage_token_budget(issue, running_entry)
+    workspace = Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+    stage_budget = current_stage_token_budget(issue, running_entry, workspace)
     input_total = Map.get(running_entry, :codex_input_tokens, 0)
     output_total = Map.get(running_entry, :codex_output_tokens, 0)
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
     turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
     current_turn_input = max(0, input_total - turn_started_input)
 
-    maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget)
+    maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget, workspace)
 
     cond do
       budget_exceeded?(stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input], current_turn_input) ->
-        stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input))
+        stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
 
       budget_exceeded?(token_budget[:per_issue_total], total_tokens) ->
-        stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens))
+        stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
 
       budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-        stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total))
+        stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
 
       true ->
         :ok
@@ -491,7 +492,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp budget_exceeded?(nil, _observed), do: false
   defp budget_exceeded?(budget, observed) when is_integer(budget), do: observed > budget
 
-  defp current_stage_token_budget(issue, running_entry) do
+  defp current_stage_token_budget(issue, running_entry, workspace) do
     stage =
       Map.get(running_entry, :stage) ||
         current_stage(issue)
@@ -502,7 +503,7 @@ defmodule SymphonyElixir.RunPolicy do
         _ -> %{}
       end
 
-    maybe_relax_review_fix_budget(stage_budget, issue, stage)
+    maybe_relax_review_fix_budget(stage_budget, issue, stage, workspace)
   end
 
   defp current_stage(issue) do
@@ -514,61 +515,58 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget) do
+  defp maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget, workspace) do
     soft_budget = stage_budget[:per_turn_input_soft]
 
     if budget_exceeded?(soft_budget, current_turn_input) do
-      workspace = Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
-
       case RunStateStore.load_or_default(workspace, issue) do
-        %{resume_context: %{"token_pressure" => "high"}} ->
-          :ok
-
-        %{resume_context: %{token_pressure: "high"}} ->
-          :ok
-
         state when is_map(state) ->
-          review_fix_retry_count =
-            if review_fix_retry_tracking_candidate?(
-                 state,
-                 Map.get(running_entry, :stage) || Map.get(state, :stage)
-               ) do
+          stage = Map.get(running_entry, :stage) || Map.get(state, :stage)
+          issue_identifier = issue_identifier_for(issue, state)
+          existing_retry_count = review_fix_budget_retry_count(state, issue_identifier)
+          retry_tracking? = review_fix_retry_tracking_candidate?(state, stage)
+          needs_retry_count? = retry_tracking? and existing_retry_count == 0
+
+          if review_token_pressure_high?(state) and not needs_retry_count? do
+            :ok
+          else
+            review_fix_retry_count =
+              cond do
+                not retry_tracking? -> nil
+                needs_retry_count? -> 1
+                true -> min(existing_retry_count + 1, 2)
+              end
+
+            resume_context =
               state
-              |> review_fix_budget_retry_count()
-              |> Kernel.+(1)
-              |> min(2)
-            else
-              nil
-            end
+              |> Map.get(:resume_context, %{})
+              |> Enum.into(%{})
+              |> Map.put(:token_pressure, "high")
+              |> maybe_put_review_fix_retry_count(review_fix_retry_count)
 
-          resume_context =
-            state
-            |> Map.get(:resume_context, %{})
-            |> Enum.into(%{})
-            |> Map.put(:token_pressure, "high")
-            |> maybe_put_review_fix_retry_count(review_fix_retry_count)
+            _ =
+              RunStateStore.transition(workspace, Map.get(state, :stage, "checkout"), %{
+                resume_context: resume_context
+              })
 
-          _ =
-            RunStateStore.transition(workspace, Map.get(state, :stage, "checkout"), %{
-              resume_context: resume_context
-            })
+            _ =
+              RunLedger.record("policy.decided", %{
+                issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+                issue_identifier: issue_identifier,
+                actor_type: "runtime",
+                actor_id: "run_policy",
+                summary: "Turn entered soft token pressure.",
+                details: "Observed implement/verify input tokens #{current_turn_input} above soft budget #{soft_budget}.",
+                metadata: %{
+                  stage: stage,
+                  observed: current_turn_input,
+                  soft_budget: soft_budget,
+                  review_fix_budget_retry_count: review_fix_retry_count
+                }
+              })
 
-          _ =
-            RunLedger.record("policy.decided", %{
-              issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
-              issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
-              actor_type: "runtime",
-              actor_id: "run_policy",
-              summary: "Turn entered soft token pressure.",
-              details: "Observed implement/verify input tokens #{current_turn_input} above soft budget #{soft_budget}.",
-              metadata: %{
-                stage: Map.get(running_entry, :stage) || Map.get(state, :stage),
-                observed: current_turn_input,
-                soft_budget: soft_budget
-              }
-            })
-
-          :ok
+            :ok
+          end
 
         _ ->
           :ok
@@ -578,12 +576,12 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp maybe_relax_review_fix_budget(stage_budget, issue, stage) when is_map(stage_budget) do
-    workspace = Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
-
+  defp maybe_relax_review_fix_budget(stage_budget, issue, stage, workspace) when is_map(stage_budget) do
     case RunStateStore.load_or_default(workspace, issue) do
       state when is_map(state) ->
-        if review_fix_budget_candidate?(state, stage) and review_fix_budget_retry_count(state) > 0 do
+        issue_identifier = issue_identifier_for(issue, state)
+
+        if review_fix_budget_candidate?(state, stage) and review_fix_budget_retry_count(state, issue_identifier) > 0 do
           stage_budget
           |> Map.put(
             :per_turn_input_soft,
@@ -616,7 +614,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp review_token_pressure_high?(%{resume_context: %{token_pressure: "high"}}), do: true
   defp review_token_pressure_high?(_state), do: false
 
-  defp review_fix_budget_retry_count(state) when is_map(state) do
+  defp review_fix_budget_retry_count(state, issue_identifier) when is_map(state) do
     context =
       state
       |> Map.get(:resume_context, %{})
@@ -624,7 +622,7 @@ defmodule SymphonyElixir.RunPolicy do
 
     case Map.get(context, :review_fix_budget_retry_count) || Map.get(context, "review_fix_budget_retry_count") do
       count when is_integer(count) and count >= 0 -> count
-      _ -> 0
+      _ -> legacy_review_fix_retry_count(state, issue_identifier)
     end
   end
 
@@ -644,6 +642,62 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp relaxed_budget_value(nil, fallback), do: fallback
   defp relaxed_budget_value(value, fallback) when is_integer(value), do: max(value, fallback)
+
+  defp legacy_review_fix_retry_count(state, issue_identifier) do
+    if prior_review_fix_budget_stop?(state, issue_identifier) do
+      1
+    else
+      0
+    end
+  end
+
+  defp prior_review_fix_budget_stop?(state, issue_identifier) do
+    review_fix_budget_stop_reason?(state) or prior_review_fix_budget_stop_in_ledger?(issue_identifier)
+  end
+
+  defp review_fix_budget_stop_reason?(state) when is_map(state) do
+    last_rule_id = Map.get(state, :last_rule_id) || Map.get(state, "last_rule_id")
+
+    stop_reason =
+      state
+      |> Map.get(:stop_reason)
+      |> mapish()
+
+    resume_context =
+      state
+      |> Map.get(:resume_context)
+      |> mapish()
+
+    last_rule_id == "budget.per_turn_input_exceeded" or
+      Map.get(stop_reason, :rule_id) == "budget.per_turn_input_exceeded" or
+      Map.get(stop_reason, "rule_id") == "budget.per_turn_input_exceeded" or
+      Map.get(stop_reason, :code) == "per_turn_input_budget_exceeded" or
+      Map.get(stop_reason, "code") == "per_turn_input_budget_exceeded" or
+      Map.get(resume_context, :last_blocking_rule) == "budget.per_turn_input_exceeded" or
+      Map.get(resume_context, "last_blocking_rule") == "budget.per_turn_input_exceeded"
+  end
+
+  defp prior_review_fix_budget_stop_in_ledger?(issue_identifier) when is_binary(issue_identifier) do
+    RunLedger.recent_entries(200)
+    |> Enum.reverse()
+    |> Enum.any?(fn entry ->
+      Map.get(entry, "issue_identifier") == issue_identifier and
+        Map.get(entry, "event") == "runtime.stopped" and
+        Map.get(entry, "rule_id") == "budget.per_turn_input_exceeded"
+    end)
+  end
+
+  defp prior_review_fix_budget_stop_in_ledger?(_issue_identifier), do: false
+
+  defp issue_identifier_for(issue, state) do
+    Map.get(issue, :identifier) ||
+      Map.get(issue, "identifier") ||
+      Map.get(state, :issue_identifier) ||
+      Map.get(state, "issue_identifier")
+  end
+
+  defp mapish(value) when is_map(value), do: Enum.into(value, %{})
+  defp mapish(_value), do: %{}
 
   defp normalize_state(state) when is_binary(state) do
     state

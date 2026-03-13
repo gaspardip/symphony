@@ -194,6 +194,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   scoped PR-comment implement turns now drop the duplicate review-feedback block, shrink per-claim body summaries further, and reduce the accepted-claim batch size from two claims to one when `resume_context.token_pressure == "high"`, so retries spend fewer input tokens before making the next targeted edit.
 - Conditional review-fix budget fallback on March 13, 2026:
   `SymphonyElixir.RunPolicy` now records `review_fix_budget_retry_count` when a scoped implement turn first crosses the soft input budget, keeps the first retry on the original hard cap, and only relaxes `implement.per_turn_input_*` modestly for later review-fix retries that are still in high token pressure with accepted PR claims. Focused prompt context now carries the last blocking rule instead of the previous implementation summary.
+- Live review-fix budget persistence repair on March 13, 2026:
+  the real canary replay path was still dropping review-fix retry state because budget stops were not writing back into `run_state.json`, and legacy `token_pressure=high` states short-circuited before the new retry counter could be added. `SymphonyElixir.RunPolicy` now persists budget stops through the workspace state, backfills retry-count evidence from prior budget-stop signals or the run ledger, and the live canary ledger now records `policy.decided` with `review_fix_budget_retry_count: 2` for `CLZ-22` instead of re-entering the same blank retry state.
+- Seeded manual refresh continuity on March 13, 2026:
+  post-turn refresh for seeded/manual dogfood runs no longer exits as `{:done, :missing}` just because the manual issue is not present in `ManualIssueStore`. `SymphonyElixir.DeliveryEngine.refresh_issue/2` now keeps runtime-scoped manual issues alive and lets the run advance into its normal next stage after a successful scoped PR-comment edit turn.
 - Turn-result contract hardening on March 13, 2026:
   `SymphonyElixir.TurnResult.normalize/1` now coerces noisy non-blocking `blocker_type` values back to `:none` instead of failing the entire turn, which keeps useful review-fix edits from being discarded when the model emits an unnecessary blocker label while `blocked=false`.
 - Latest focused review-fix runtime validation on March 13, 2026:
@@ -202,6 +206,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `mix test test/symphony_elixir/core_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed with `78 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the prompt-trimming change.
 - Latest focused conditional-budget validation on March 13, 2026:
   `mix test test/symphony_elixir/core_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed with `124 tests, 0 failures`, and `mix dialyzer --format short` passed after normalizing non-stage token budgets before the review-fix budget helper.
+- Latest focused live-budget and manual-refresh validation on March 13, 2026:
+  `mix test test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs` passed with `76 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the live retry-state persistence repair and manual refresh fallback.
 - Seeded retry-state repair on March 13, 2026:
   synthesized manual issues now reflect `run_state.stage == "blocked"` as issue state `Blocked`, so `retry_now` resumes the stored stage instead of redispatching a still-blocked seeded run and exiting before any review-fix turn starts.
 - Latest focused seeded-retry validation on March 13, 2026:
@@ -212,4 +218,4 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs` passed with `51 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the seeded-manual fallback fix.
 
 ## Next Step
-Restart the local canary runner on the tightened review-fix budget controls and verify that `CLZ-22` can land the next scoped PR-comment edit batch without stopping on `budget.per_turn_input_exceeded`. After that, continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests.
+Let the patched canary finish the current `CLZ-22` scoped review-fix turn and confirm the next transition leaves `implement` through normal validation/review follow-up instead of another budget stop or `{:done, :missing}` termination. After that, continue `CLZ-22` by replacing the stable-ingress relay bridge with a durable scheduler/assignment seam so stable persists cross-runner work instead of forwarding raw webhook requests.
