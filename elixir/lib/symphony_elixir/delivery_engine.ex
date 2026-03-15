@@ -40,6 +40,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   @turn_runtime_error_key_prefix :symphony_turn_runtime_error
   @await_checks_missing_limit 6
   @codex_turn_error_methods ["codex/event/stream_error", "codex/event/error", "error"]
+  @review_fix_max_turns 6
   @passive_stages [
     "await_checks",
     "review_verification",
@@ -217,7 +218,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       |> maybe_sync_policy_override(workspace, opts)
 
     workflow_profile = WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
-    max_turns = workflow_profile.max_turns_override || max_turns
+    max_turns = effective_max_turns(workflow_profile.max_turns_override || max_turns, state)
 
     stage = Map.get(state, :stage, "checkout")
     inspection = RunInspector.inspect(workspace, opts)
@@ -2437,6 +2438,21 @@ defmodule SymphonyElixir.DeliveryEngine do
       "high" -> 1
       _ -> 2
     end
+  end
+
+  defp effective_max_turns(max_turns, state) when is_integer(max_turns) and is_map(state) do
+    if review_fix_turn_budget_candidate?(state) do
+      max(max_turns, @review_fix_max_turns)
+    else
+      max_turns
+    end
+  end
+
+  defp review_fix_turn_budget_candidate?(state) when is_map(state) do
+    get_in(state, [:resume_context, :token_pressure]) == "high" and
+      Enum.any?(Map.get(state, :review_claims, %{}), fn {_thread_key, claim} ->
+        Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
+      end)
   end
 
   defp ensure_turn_progress(

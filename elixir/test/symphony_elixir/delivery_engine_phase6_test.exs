@@ -345,6 +345,41 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
 
+  test "scoped review-fix implement turns get a higher turn budget than the default cap" do
+    {workspace, issue} = git_stage_workspace!("implement-review-fix-turn-budget")
+
+    RunStateStore.transition(workspace, "implement", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      implementation_turns: 1,
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/example.ex",
+          "line" => 10,
+          "body" => "Apply the scoped review fix."
+        }
+      },
+      resume_context: %{token_pressure: "high"}
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("implement-review-fix-turn-budget")
+    )
+
+    assert result =
+             DeliveryEngine.run(workspace, issue, nil,
+               max_turns: 1,
+               command_runner: &checkout_command_runner/3
+             )
+
+    refute result == {:stop, :turn_budget_exhausted}
+  end
+
   test "unknown stage returns an error" do
     {workspace, issue} = stage_workspace!("unknown")
 
