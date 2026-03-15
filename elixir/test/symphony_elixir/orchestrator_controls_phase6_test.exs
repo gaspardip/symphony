@@ -1826,6 +1826,85 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert metadata.passive_delay_ms == 30_000
   end
 
+  test "blocked review-fix budget stop with addressed claim progress auto-continues" do
+    identifier = "MT-REVIEW-FIX-AUTO-CONTINUE"
+    workspace = Workspace.path_for_issue(identifier)
+
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+               issue_id: "manual:auto-continue",
+               issue_identifier: identifier,
+               last_rule_id: "budget.per_turn_input_exceeded",
+               stop_reason: %{
+                 code: "per_turn_input_budget_exceeded",
+                 rule_id: "budget.per_turn_input_exceeded"
+               },
+               last_turn_result: %{
+                 blocked: false,
+                 needs_another_turn: true,
+                 summary: "Addressed one scoped review claim and need another turn."
+               },
+               review_claims: %{
+                 "comment:1" => %{
+                   "disposition" => "accepted",
+                   "actionable" => false,
+                   "implementation_status" => "addressed"
+                 },
+                 "comment:2" => %{
+                   "disposition" => "accepted",
+                   "actionable" => true
+                 }
+               }
+             })
+
+    metadata =
+      Orchestrator.continuation_metadata_for_running_entry_for_test(%{identifier: identifier})
+
+    assert metadata.delay_type == :continuation
+  end
+
+  test "blocked review-fix budget stop without claim progress stays blocked" do
+    identifier = "MT-REVIEW-FIX-HOLD"
+    workspace = Workspace.path_for_issue(identifier)
+
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+               issue_id: "manual:hold",
+               issue_identifier: identifier,
+               last_rule_id: "budget.per_turn_input_exceeded",
+               stop_reason: %{
+                 code: "per_turn_input_budget_exceeded",
+                 rule_id: "budget.per_turn_input_exceeded"
+               },
+               last_turn_result: %{
+                 blocked: false,
+                 needs_another_turn: true,
+                 summary: "Need another turn."
+               },
+               review_claims: %{
+                 "comment:1" => %{
+                   "disposition" => "accepted",
+                   "actionable" => true
+                 }
+               }
+             })
+
+    metadata =
+      Orchestrator.continuation_metadata_for_running_entry_for_test(%{identifier: identifier})
+
+    assert metadata.delay_type == :none
+  end
+
   test "passive dispatch reuses existing claim and marks running entry as passive" do
     issue = %Issue{
       id: "issue-passive-running",

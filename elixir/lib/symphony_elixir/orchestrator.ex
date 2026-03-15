@@ -3269,8 +3269,12 @@ defmodule SymphonyElixir.Orchestrator do
       %{stage: "done"} ->
         %{delay_type: :none}
 
-      %{stage: "blocked"} ->
-        %{delay_type: :none}
+      %{stage: "blocked"} = run_state ->
+        if auto_continue_review_fix_budget_stop?(run_state) do
+          %{delay_type: :continuation}
+        else
+          %{delay_type: :none}
+        end
 
       _ ->
         %{delay_type: :continuation}
@@ -3278,6 +3282,86 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp continuation_metadata_for_running_entry(_running_entry), do: %{delay_type: :continuation}
+
+  defp auto_continue_review_fix_budget_stop?(run_state) when is_map(run_state) do
+    blocked_review_fix_budget_stop?(run_state) and
+      review_fix_turn_requests_follow_up?(run_state) and
+      addressed_review_claims_present?(run_state) and
+      actionable_review_claims_present?(run_state)
+  end
+
+  defp blocked_review_fix_budget_stop?(run_state) when is_map(run_state) do
+    last_rule_id = Map.get(run_state, :last_rule_id) || Map.get(run_state, "last_rule_id")
+
+    stop_reason =
+      Map.get(run_state, :stop_reason) ||
+        Map.get(run_state, "stop_reason") ||
+        %{}
+
+    last_rule_id == "budget.per_turn_input_exceeded" or
+      Map.get(stop_reason, :rule_id) == "budget.per_turn_input_exceeded" or
+      Map.get(stop_reason, "rule_id") == "budget.per_turn_input_exceeded" or
+      Map.get(stop_reason, :code) == "per_turn_input_budget_exceeded" or
+      Map.get(stop_reason, "code") == "per_turn_input_budget_exceeded"
+  end
+
+  defp review_fix_turn_requests_follow_up?(run_state) when is_map(run_state) do
+    turn_result =
+      Map.get(run_state, :last_turn_result) ||
+        Map.get(run_state, "last_turn_result") ||
+        %{}
+
+    not truthy_map_value(turn_result, "blocked") and
+      truthy_map_value(turn_result, "needs_another_turn")
+  end
+
+  defp addressed_review_claims_present?(run_state) when is_map(run_state) do
+    run_state
+    |> review_claim_values()
+    |> Enum.any?(fn claim ->
+      map_value(claim, "implementation_status") == "addressed"
+    end)
+  end
+
+  defp actionable_review_claims_present?(run_state) when is_map(run_state) do
+    run_state
+    |> review_claim_values()
+    |> Enum.any?(fn claim ->
+      map_value(claim, "disposition") == "accepted" and
+        truthy_map_value(claim, "actionable") and
+        map_value(claim, "implementation_status") != "addressed"
+    end)
+  end
+
+  defp review_claim_values(run_state) when is_map(run_state) do
+    case Map.get(run_state, :review_claims) || Map.get(run_state, "review_claims") do
+      claims when is_map(claims) -> Map.values(claims)
+      _ -> []
+    end
+  end
+
+  defp map_value(map, key) when is_map(map) and is_binary(key) do
+    Map.get(map, key) || Map.get(map, known_map_atom_key(key))
+  end
+
+  defp map_value(_map, _key), do: nil
+
+  defp known_map_atom_key("implementation_status"), do: :implementation_status
+  defp known_map_atom_key("disposition"), do: :disposition
+  defp known_map_atom_key("actionable"), do: :actionable
+  defp known_map_atom_key("blocked"), do: :blocked
+  defp known_map_atom_key("needs_another_turn"), do: :needs_another_turn
+  defp known_map_atom_key(_key), do: nil
+
+  defp truthy_map_value(map, key) do
+    case map_value(map, key) do
+      true -> true
+      "true" -> true
+      1 -> true
+      "1" -> true
+      _ -> false
+    end
+  end
 
   defp issue_run_stage(identifier) when is_binary(identifier) do
     case issue_run_state(identifier) do
