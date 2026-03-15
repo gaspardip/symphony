@@ -3175,6 +3175,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
+    {state, issue} = maybe_resume_blocked_issue(state, issue)
+
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) do
       dispatch_fun =
@@ -4511,7 +4513,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_resume_blocked_issue(%State{} = state, %Issue{state: @blocked_state} = issue) do
+  defp maybe_resume_blocked_issue(%State{} = state, %Issue{} = issue) do
     workspace = Workspace.path_for_issue(issue.identifier)
     local_resume =
       fn resume_state ->
@@ -4524,7 +4526,7 @@ defmodule SymphonyElixir.Orchestrator do
         end
       end
 
-    with true <- File.dir?(workspace),
+    with true <- resumable_blocked_issue?(workspace, issue),
          run_state when is_map(run_state) <- RunStateStore.load_or_default(workspace, issue),
          {:ok, resume_stage} <- resumable_stage_from_run_state(run_state, issue),
          resume_state when is_binary(resume_state) <- issue_state_for_stage(resume_stage),
@@ -4575,7 +4577,21 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_resume_blocked_issue(%State{} = state, %Issue{} = issue), do: {state, issue}
+  defp resumable_blocked_issue?(workspace, %Issue{state: @blocked_state}) when is_binary(workspace) do
+    File.dir?(workspace)
+  end
+
+  defp resumable_blocked_issue?(workspace, %Issue{} = issue) when is_binary(workspace) do
+    File.dir?(workspace) and run_state_blocked_for_issue?(workspace, issue)
+  end
+
+  defp run_state_blocked_for_issue?(workspace, issue) when is_binary(workspace) do
+    case RunStateStore.load_or_default(workspace, issue) do
+      %{stage: "blocked"} -> true
+      %{"stage" => "blocked"} -> true
+      _ -> false
+    end
+  end
 
   defp resumable_stage_from_run_state(run_state, issue) when is_map(run_state) do
     resume_stage =

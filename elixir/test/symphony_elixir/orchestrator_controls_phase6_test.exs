@@ -964,6 +964,78 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert run_state.stop_reason == nil
   end
 
+  test "maybe_resume_blocked_issue resumes from blocked run state even when the issue snapshot is stale" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-stale-blocked-state-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    issue = %Issue{
+      id: "manual:stale-blocked-retry",
+      identifier: "MT-STALE-BLOCKED-RETRY",
+      title: "Retry stale blocked issue",
+      description: "resume from implement when persisted run state is blocked",
+      state: "In Progress",
+      source: :manual,
+      labels: ["policy:fully-autonomous"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-stale-blocked-retry")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        stop_reason: %{code: "per_turn_input_budget_exceeded"},
+        resume_context: %{
+          token_pressure: "high",
+          review_fix_budget_retry_count: 2
+        },
+        stage_history: [
+          %{stage: "implement"}
+        ]
+      })
+
+    {:ok, _submitted_issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "stale-blocked-retry",
+        "identifier" => issue.identifier,
+        "title" => issue.title,
+        "description" => issue.description,
+        "acceptance_criteria" => ["Resume implement from blocked run state"]
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryStaleBlockedStateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    {_state, resumed_issue} =
+      Orchestrator.maybe_resume_blocked_issue_for_test(:sys.get_state(pid), issue)
+
+    assert resumed_issue.state == "In Progress"
+
+    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.stage == "implement"
+    assert run_state.stop_reason == nil
+  end
+
   test "retry now sends verifier feedback with dirty workspace back to validate" do
     workspace_root =
       Path.join(
