@@ -4431,7 +4431,8 @@ defmodule SymphonyElixir.Orchestrator do
              last_rule_id: nil,
              last_failure_class: nil,
              last_decision_summary: nil,
-             next_human_action: nil
+             next_human_action: nil,
+             resume_context: retry_resume_context(run_state, resume_stage)
            }),
          :ok <- IssueSource.update_issue_state(issue, resume_state),
          {:ok, refreshed_issue} <- IssueSource.refresh_issue(issue) do
@@ -4523,6 +4524,33 @@ defmodule SymphonyElixir.Orchestrator do
       %RunInspector.Snapshot{git?: true, dirty?: true} -> true
       _ -> false
     end
+  end
+
+  defp retry_resume_context(run_state, resume_stage) when is_map(run_state) and is_binary(resume_stage) do
+    resume_context =
+      case Map.get(run_state, :resume_context) do
+        context when is_map(context) -> context
+        _ -> %{}
+      end
+
+    cond do
+      resume_stage == "implement" and scoped_review_retry_candidate?(run_state) ->
+        Map.put(resume_context, :implementation_turn_window_base, Map.get(run_state, :implementation_turns, 0))
+
+      true ->
+        resume_context
+    end
+  end
+
+  defp scoped_review_retry_candidate?(run_state) when is_map(run_state) do
+    get_in(run_state, [:resume_context, :token_pressure]) == "high" and
+      Enum.any?(Map.get(run_state, :review_claims, %{}), fn {_thread_key, claim} ->
+        claim_value(claim, :disposition) == "accepted" and claim_value(claim, :actionable, false)
+      end)
+  end
+
+  defp claim_value(claim, key, default \\ nil) when is_map(claim) and is_atom(key) do
+    Map.get(claim, key, Map.get(claim, Atom.to_string(key), default))
   end
 
   defp behavioral_proof_resume_stage(run_state, issue) when is_map(run_state) do

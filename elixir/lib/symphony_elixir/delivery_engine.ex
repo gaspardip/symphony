@@ -479,8 +479,9 @@ defmodule SymphonyElixir.DeliveryEngine do
          opts
        ) do
     implementation_turns = Map.get(state, :implementation_turns, 0)
+    effective_implementation_turns = effective_implementation_turns(state)
 
-    if implementation_turns >= max_turns do
+    if effective_implementation_turns >= max_turns do
       block_issue(
         workspace,
         issue,
@@ -498,7 +499,7 @@ defmodule SymphonyElixir.DeliveryEngine do
           workspace,
           before_snapshot,
           opts,
-          implementation_turns + 1,
+          effective_implementation_turns + 1,
           max_turns
         )
 
@@ -2012,7 +2013,15 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp preserved_resume_context(context) when is_map(context) do
     context
-    |> Map.take([:next_objective, :review_feedback_summary, :review_claim_summary, :review_feedback_pr_url])
+    |> Map.take([
+      :next_objective,
+      :review_feedback_summary,
+      :review_claim_summary,
+      :review_feedback_pr_url,
+      :token_pressure,
+      :review_fix_budget_retry_count,
+      :implementation_turn_window_base
+    ])
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
@@ -2035,7 +2044,17 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp repo_platform_note(_inspection), do: nil
 
   defp resume_context_attrs(workspace, issue, state, inspection, overrides, _opts) do
-    %{resume_context: fresh_resume_context(workspace, issue, state, inspection, overrides)}
+    %{resume_context: refreshed_resume_context(workspace, issue, state, inspection, overrides)}
+  end
+
+  defp refreshed_resume_context(workspace, issue, state, inspection, overrides) do
+    preserved =
+      state
+      |> Map.get(:resume_context, %{})
+      |> preserved_resume_context()
+
+    fresh_resume_context(workspace, issue, state, inspection, overrides)
+    |> Map.merge(preserved)
   end
 
   defp resume_context_block(resume_context) when is_map(resume_context) do
@@ -2453,6 +2472,25 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
+  defp effective_implementation_turns(state) when is_map(state) do
+    implementation_turns = Map.get(state, :implementation_turns, 0)
+    window_base = get_in(state, [:resume_context, :implementation_turn_window_base]) || 0
+
+    cond do
+      not is_integer(implementation_turns) ->
+        0
+
+      not is_integer(window_base) ->
+        implementation_turns
+
+      implementation_turns >= window_base ->
+        implementation_turns - window_base
+
+      true ->
+        implementation_turns
+    end
+  end
+
   defp effective_max_turns(max_turns, state) when is_integer(max_turns) and is_map(state) do
     if review_fix_turn_budget_candidate?(state) do
       max(max_turns, @review_fix_max_turns)
@@ -2464,8 +2502,12 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp review_fix_turn_budget_candidate?(state) when is_map(state) do
     get_in(state, [:resume_context, :token_pressure]) == "high" and
       Enum.any?(Map.get(state, :review_claims, %{}), fn {_thread_key, claim} ->
-        Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
+        claim_value(claim, :disposition) == "accepted" and claim_value(claim, :actionable, false)
       end)
+  end
+
+  defp claim_value(claim, key, default \\ nil) when is_map(claim) and is_atom(key) do
+    Map.get(claim, key, Map.get(claim, Atom.to_string(key), default))
   end
 
   defp ensure_turn_progress(
@@ -2657,7 +2699,8 @@ defmodule SymphonyElixir.DeliveryEngine do
          opts,
          reason
        ) do
-    attempts = Map.get(state, :implementation_turns, 0) + 1
+    attempts = effective_implementation_turns(state) + 1
+    total_implementation_turns = Map.get(state, :implementation_turns, 0) + 1
     summary = implementation_turn_error_summary(reason)
 
     with {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
@@ -2673,7 +2716,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       else
         {:ok, _state} =
           RunStateStore.transition(workspace, "implement", %{
-            implementation_turns: attempts,
+            implementation_turns: total_implementation_turns,
             last_implementation_error: %{
               summary: summary,
               reason: implementation_error_to_map(reason)

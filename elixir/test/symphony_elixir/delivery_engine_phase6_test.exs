@@ -380,6 +380,44 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     refute result == {:stop, :turn_budget_exhausted}
   end
 
+  test "scoped review-fix retries count implementation turns from the retry window base" do
+    {workspace, issue} = git_stage_workspace!("implement-review-fix-window-base")
+
+    RunStateStore.transition(workspace, "implement", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      implementation_turns: 6,
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/example.ex",
+          "line" => 10,
+          "body" => "Apply the scoped review fix."
+        }
+      },
+      resume_context: %{
+        token_pressure: "high",
+        implementation_turn_window_base: 6
+      }
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("implement-review-fix-window-base")
+    )
+
+    assert result =
+             DeliveryEngine.run(workspace, issue, nil,
+               max_turns: 1,
+               command_runner: &checkout_command_runner/3
+             )
+
+    refute result == {:stop, :turn_budget_exhausted}
+  end
+
   test "unknown stage returns an error" do
     {workspace, issue} = stage_workspace!("unknown")
 
