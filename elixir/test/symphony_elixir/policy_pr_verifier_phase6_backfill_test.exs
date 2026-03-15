@@ -792,15 +792,19 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      "actionable" => true
                    }
                  },
-                 resume_context: %{token_pressure: "high", review_fix_budget_retry_count: 2}
+                 resume_context: %{
+                   token_pressure: "high",
+                   review_fix_budget_retry_count: 2,
+                   implementation_turn_window_base: 6
+                 }
                })
 
       running_entry = %{
         dispatch_stage: "implement",
         workspace_path: workspace,
-        codex_input_tokens: 145_000,
+        codex_input_tokens: 210_000,
         codex_output_tokens: 0,
-        codex_total_tokens: 145_000,
+        codex_total_tokens: 210_000,
         turn_started_input_tokens: 0
       }
 
@@ -811,8 +815,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded}} =
                RunPolicy.maybe_stop_for_token_budget(mismatched_issue, %{
                  running_entry
-                 | codex_input_tokens: 155_000,
-                   codex_total_tokens: 155_000
+                 | codex_input_tokens: 225_000,
+                   codex_total_tokens: 225_000
                })
     after
       File.rm_rf(workspace_root)

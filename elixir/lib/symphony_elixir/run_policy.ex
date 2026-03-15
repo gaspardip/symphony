@@ -589,19 +589,39 @@ defmodule SymphonyElixir.RunPolicy do
   defp maybe_relax_review_fix_budget(stage_budget, issue, stage, _workspace, state)
        when is_map(stage_budget) and is_map(state) do
     issue_identifier = issue_identifier_for(issue, state)
+    retry_count = review_fix_budget_retry_count(state, issue_identifier)
 
-    if review_fix_budget_candidate?(state, stage) and review_fix_budget_retry_count(state, issue_identifier) > 0 do
-      stage_budget
-      |> Map.put(
-        :per_turn_input_soft,
-        relaxed_budget_value(stage_budget[:per_turn_input_soft], 85_000)
-      )
-      |> Map.put(
-        :per_turn_input_hard,
-        relaxed_budget_value(stage_budget[:per_turn_input_hard], 150_000)
-      )
+    if review_fix_budget_candidate?(state, stage) and retry_count > 0 do
+      review_fix_relaxed_stage_budget(stage_budget, retry_count, state)
     else
+      stage_budget
+    end
+  end
+
+  defp review_fix_relaxed_stage_budget(stage_budget, retry_count, state)
+       when is_map(stage_budget) and is_integer(retry_count) do
+    cond do
+      retry_count >= 2 and review_fix_turn_window_active?(state) ->
         stage_budget
+        |> Map.put(
+          :per_turn_input_soft,
+          relaxed_budget_value(stage_budget[:per_turn_input_soft], 110_000)
+        )
+        |> Map.put(
+          :per_turn_input_hard,
+          relaxed_budget_value(stage_budget[:per_turn_input_hard], 220_000)
+        )
+
+      true ->
+        stage_budget
+        |> Map.put(
+          :per_turn_input_soft,
+          relaxed_budget_value(stage_budget[:per_turn_input_soft], 85_000)
+        )
+        |> Map.put(
+          :per_turn_input_hard,
+          relaxed_budget_value(stage_budget[:per_turn_input_hard], 150_000)
+        )
     end
   end
 
@@ -609,6 +629,13 @@ defmodule SymphonyElixir.RunPolicy do
     stage == "implement" and
       review_token_pressure_high?(state) and
       accepted_review_claim_count(state) > 0
+  end
+
+  defp review_fix_turn_window_active?(state) when is_map(state) do
+    case get_in(state, [:resume_context, :implementation_turn_window_base]) do
+      value when is_integer(value) and value >= 0 -> true
+      _ -> false
+    end
   end
 
   defp review_fix_retry_tracking_candidate?(state, stage) do
