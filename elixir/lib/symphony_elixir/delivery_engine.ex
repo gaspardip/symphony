@@ -189,6 +189,10 @@ defmodule SymphonyElixir.DeliveryEngine do
       )
 
   @doc false
+  @spec implement_command_output_budget_for_test(map()) :: map()
+  def implement_command_output_budget_for_test(state), do: implement_command_output_budget(state)
+
+  @doc false
   @spec ensure_turn_progress_for_test(term(), term(), term()) :: term()
   def ensure_turn_progress_for_test(turn_result, before_snapshot, after_snapshot),
     do: ensure_turn_progress(turn_result, before_snapshot, after_snapshot)
@@ -2415,20 +2419,30 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp implement_command_output_budget(state) do
-    if focused_review_claims(Map.get(state, :review_claims, %{})) == [] do
-      %{
-        stage: "implement",
-        per_command_bytes: 8_192,
-        per_turn_bytes: 32_768,
-        max_command_count: 12
-      }
-    else
-      %{
-        stage: "implement",
-        per_command_bytes: 6_144,
-        per_turn_bytes: 24_576,
-        max_command_count: 6
-      }
+    cond do
+      focused_review_claims(Map.get(state, :review_claims, %{})) == [] ->
+        %{
+          stage: "implement",
+          per_command_bytes: 8_192,
+          per_turn_bytes: 32_768,
+          max_command_count: 12
+        }
+
+      get_in(state, [:resume_context, :token_pressure]) == "high" ->
+        %{
+          stage: "implement",
+          per_command_bytes: 4_096,
+          per_turn_bytes: 12_288,
+          max_command_count: 4
+        }
+
+      true ->
+        %{
+          stage: "implement",
+          per_command_bytes: 6_144,
+          per_turn_bytes: 24_576,
+          max_command_count: 6
+        }
     end
   end
 

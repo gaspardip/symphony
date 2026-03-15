@@ -343,6 +343,29 @@ defmodule SymphonyElixir.CoreTest do
     refute prompt =~ "Last implementation summary:"
   end
 
+  test "high-pressure scoped review turns use a tighter command budget" do
+    state = %{
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/one.ex",
+          "line" => 10,
+          "body" => "First verified review claim."
+        }
+      },
+      resume_context: %{token_pressure: "high"}
+    }
+
+    assert SymphonyElixir.DeliveryEngine.implement_command_output_budget_for_test(state) == %{
+             stage: "implement",
+             per_command_bytes: 4_096,
+             per_turn_bytes: 12_288,
+             max_command_count: 4
+           }
+  end
+
   test "existing workspace changes can advance to validation without a new diff" do
     turn_result = %SymphonyElixir.TurnResult{
       summary: "Existing diff is ready for validation",
