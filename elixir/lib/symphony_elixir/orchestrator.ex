@@ -3291,9 +3291,37 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp auto_continue_review_fix_budget_stop?(run_state) when is_map(run_state) do
     blocked_review_fix_budget_stop?(run_state) and
-      review_fix_turn_requests_follow_up?(run_state) and
-      addressed_review_claims_present?(run_state) and
-      actionable_review_claims_present?(run_state)
+      actionable_review_claims_present?(run_state) and
+      (addressed_review_claims_present?(run_state) or
+         review_fix_retry_budget_active?(run_state))
+  end
+
+  defp review_fix_retry_budget_active?(run_state) when is_map(run_state) do
+    review_fix_budget_retry_count(run_state) > 0 and
+      resume_context_token_pressure(run_state) == "high"
+  end
+
+  defp review_fix_budget_retry_count(run_state) when is_map(run_state) do
+    run_state
+    |> resume_context_map()
+    |> map_value("review_fix_budget_retry_count")
+    |> case do
+      value when is_integer(value) and value > 0 -> value
+      _ -> 0
+    end
+  end
+
+  defp resume_context_token_pressure(run_state) when is_map(run_state) do
+    run_state
+    |> resume_context_map()
+    |> map_value("token_pressure")
+  end
+
+  defp resume_context_map(run_state) when is_map(run_state) do
+    case Map.get(run_state, :resume_context) || Map.get(run_state, "resume_context") do
+      context when is_map(context) -> context
+      _ -> %{}
+    end
   end
 
   defp blocked_review_fix_budget_stop?(run_state) when is_map(run_state) do
@@ -3309,16 +3337,6 @@ defmodule SymphonyElixir.Orchestrator do
       Map.get(stop_reason, "rule_id") == "budget.per_turn_input_exceeded" or
       Map.get(stop_reason, :code) == "per_turn_input_budget_exceeded" or
       Map.get(stop_reason, "code") == "per_turn_input_budget_exceeded"
-  end
-
-  defp review_fix_turn_requests_follow_up?(run_state) when is_map(run_state) do
-    turn_result =
-      Map.get(run_state, :last_turn_result) ||
-        Map.get(run_state, "last_turn_result") ||
-        %{}
-
-    not truthy_map_value(turn_result, "blocked") and
-      truthy_map_value(turn_result, "needs_another_turn")
   end
 
   defp addressed_review_claims_present?(run_state) when is_map(run_state) do

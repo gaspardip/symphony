@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{GitHubEvent, GitHubEventInbox, LeaseManager, ManualIssueStore, RunStateStore}
+  alias SymphonyElixir.{GitHubEvent, GitHubEventInbox, LeaseManager, ManualIssueStore, RunStateStore, Workspace}
   alias SymphonyElixir.Orchestrator.State
 
   defmodule PostingGitHubClient do
@@ -1966,6 +1966,131 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
                  blocked: false,
                  needs_another_turn: true,
                  summary: "Addressed one scoped review claim and need another turn."
+               }
+             })
+
+    running_entry = %{
+      issue: issue,
+      identifier: issue.identifier,
+      workspace_path: workspace,
+      stage: "implement",
+      codex_input_tokens: 248_759,
+      codex_output_tokens: 0,
+      codex_total_tokens: 248_759,
+      turn_started_input_tokens: 0
+    }
+
+    state =
+      Orchestrator.maybe_stop_issue_for_token_budget_for_test(
+        %State{running: %{issue.id => running_entry}, lease_owner: "test-owner"},
+        issue.id,
+        running_entry
+      )
+
+    retry_entry = Map.fetch!(state.retry_attempts, issue.id)
+    assert retry_entry.attempt == 1
+    assert retry_entry.identifier == issue.identifier
+    assert retry_entry.delay_type == :continuation
+    assert retry_entry.issue == issue
+  end
+
+  test "blocked review-fix budget stop auto-continues when retry budget state persists" do
+    identifier = "MT-REVIEW-FIX-RETRY-BUDGET"
+    workspace = Workspace.path_for_issue(identifier)
+
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+               issue_id: "manual:retry-budget",
+               issue_identifier: identifier,
+               last_rule_id: "budget.per_turn_input_exceeded",
+               stop_reason: %{
+                 code: "per_turn_input_budget_exceeded",
+                 rule_id: "budget.per_turn_input_exceeded"
+               },
+               resume_context: %{
+                 token_pressure: "high",
+                 review_fix_budget_retry_count: 2
+               },
+               review_claims: %{
+                 "comment:1" => %{
+                   "disposition" => "accepted",
+                   "actionable" => false,
+                   "implementation_status" => "addressed"
+                 },
+                 "comment:2" => %{
+                   "disposition" => "accepted",
+                   "actionable" => true
+                 }
+               }
+             })
+
+    metadata =
+      Orchestrator.continuation_metadata_for_running_entry_for_test(%{identifier: identifier})
+
+    assert metadata.delay_type == :continuation
+  end
+
+  test "budget-stopped review-fix runs schedule a continuation retry from persisted retry budget state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-budget-stop-retry-state-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      policy_token_budget: %{
+        per_turn_input: 250_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 220_000
+          }
+        }
+      }
+    )
+
+    issue = %Issue{
+      id: "manual:budget-retry-state",
+      identifier: "MT-BUDGET-RETRY-STATE",
+      title: "Budget retry state",
+      description: "keep moving after a persisted review-fix budget stop",
+      state: "In Progress",
+      source: :manual
+    }
+
+    workspace = Workspace.path_for_issue(issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               review_claims: %{
+                 "comment:1" => %{
+                   "disposition" => "accepted",
+                   "actionable" => false,
+                   "implementation_status" => "addressed"
+                 },
+                 "comment:2" => %{
+                   "disposition" => "accepted",
+                   "actionable" => true
+                 }
+               },
+               resume_context: %{
+                 token_pressure: "high",
+                 review_fix_budget_retry_count: 2,
+                 implementation_turn_window_base: 12
                }
              })
 
