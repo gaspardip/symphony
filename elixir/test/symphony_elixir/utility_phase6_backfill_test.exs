@@ -106,6 +106,37 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: 123))
   end
 
+  test "turn result downgrades runtime-owned git blockers and preserves follow-up intent" do
+    assert {:ok, %TurnResult{} = result} =
+             TurnResult.normalize(
+               valid_turn_result(
+                 blocked: true,
+                 blocker_type: "implementation",
+                 summary:
+                   "Updated observability metadata normalization. Commit could not be created because git metadata for this worktree is outside the writable sandbox and escalation is disallowed in this session. One additional verified review claim remains for a subsequent turn."
+               )
+             )
+
+    assert result.blocked == false
+    assert result.blocker_type == :none
+    assert result.needs_another_turn == true
+  end
+
+  test "turn result keeps real implementation blockers intact" do
+    assert {:ok, %TurnResult{} = result} =
+             TurnResult.normalize(
+               valid_turn_result(
+                 blocked: true,
+                 blocker_type: "implementation",
+                 summary: "The referenced module still fails to compile due to an undefined function."
+               )
+             )
+
+    assert result.blocked == true
+    assert result.blocker_type == :implementation
+    assert result.needs_another_turn == false
+  end
+
   test "log file configure creates the directory and tolerates repeated setup" do
     previous_log_file = Application.get_env(:symphony_elixir, :log_file)
     previous_max_bytes = Application.get_env(:symphony_elixir, :log_file_max_bytes)
