@@ -2749,6 +2749,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
+    workspace = Workspace.path_for_issue(issue)
+    dispatch_stage = normalize_dispatch_stage(issue)
 
     case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
@@ -2795,6 +2797,8 @@ defmodule SymphonyElixir.Orchestrator do
             turn_count: 0,
             recent_codex_updates: [],
             retry_attempt: normalize_retry_attempt(attempt),
+            workspace_path: workspace,
+            dispatch_stage: dispatch_stage,
             policy_override: policy_override,
             policy_class: policy_class,
             policy_source: policy_source,
@@ -2878,6 +2882,8 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, pid} ->
         ref = Process.monitor(pid)
         {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state)
+        workspace = Workspace.path_for_issue(issue)
+        dispatch_stage = normalize_dispatch_stage(issue)
 
         Logger.info("Dispatching issue to passive runtime worker: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
@@ -2918,6 +2924,8 @@ defmodule SymphonyElixir.Orchestrator do
             turn_count: 0,
             recent_codex_updates: [],
             retry_attempt: normalize_retry_attempt(attempt),
+            workspace_path: workspace,
+            dispatch_stage: dispatch_stage,
             policy_override: policy_override,
             policy_class: policy_class,
             policy_source: policy_source,

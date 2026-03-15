@@ -109,15 +109,19 @@ defmodule SymphonyElixir.RunPolicy do
   @spec maybe_stop_for_token_budget(map(), map()) :: :ok | {:stop, violation()}
   def maybe_stop_for_token_budget(issue, running_entry) do
     token_budget = Config.policy_token_budget()
-    workspace = Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
-    stage_budget = current_stage_token_budget(issue, running_entry, workspace)
+    workspace =
+      Map.get(running_entry, :workspace_path) ||
+        Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+
+    run_state = RunStateStore.load_or_default(workspace, issue)
+    stage_budget = current_stage_token_budget(issue, running_entry, workspace, run_state)
     input_total = Map.get(running_entry, :codex_input_tokens, 0)
     output_total = Map.get(running_entry, :codex_output_tokens, 0)
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
     turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
     current_turn_input = max(0, input_total - turn_started_input)
 
-    maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget, workspace)
+    maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget, workspace, run_state)
 
     cond do
       budget_exceeded?(stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input], current_turn_input) ->
@@ -492,10 +496,11 @@ defmodule SymphonyElixir.RunPolicy do
   defp budget_exceeded?(nil, _observed), do: false
   defp budget_exceeded?(budget, observed) when is_integer(budget), do: observed > budget
 
-  defp current_stage_token_budget(issue, running_entry, workspace) do
+  defp current_stage_token_budget(issue, running_entry, workspace, run_state) do
     stage =
-      Map.get(running_entry, :stage) ||
-        current_stage(issue)
+      Map.get(running_entry, :dispatch_stage) ||
+        Map.get(running_entry, :stage) ||
+        current_stage(issue, workspace, run_state)
 
     stage_budget =
       case Config.policy_stage_token_budget(stage) do
@@ -503,23 +508,28 @@ defmodule SymphonyElixir.RunPolicy do
         _ -> %{}
       end
 
-    maybe_relax_review_fix_budget(stage_budget, issue, stage, workspace)
+    maybe_relax_review_fix_budget(stage_budget, issue, stage, workspace, run_state)
   end
 
-  defp current_stage(issue) do
-    workspace = Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+  defp current_stage(issue, workspace, run_state) when is_binary(workspace) and is_map(run_state) do
+    case run_state do
+      %{stage: stage} when is_binary(stage) -> stage
+      _ -> current_stage(issue, workspace)
+    end
+  end
 
+  defp current_stage(issue, workspace) when is_binary(workspace) do
     case RunStateStore.load_or_default(workspace, issue) do
       %{stage: stage} when is_binary(stage) -> stage
       _ -> nil
     end
   end
 
-  defp maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget, workspace) do
+  defp maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget, workspace, run_state) do
     soft_budget = stage_budget[:per_turn_input_soft]
 
     if budget_exceeded?(soft_budget, current_turn_input) do
-      case RunStateStore.load_or_default(workspace, issue) do
+      case run_state do
         state when is_map(state) ->
           stage = Map.get(running_entry, :stage) || Map.get(state, :stage)
           issue_identifier = issue_identifier_for(issue, state)
@@ -576,26 +586,21 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp maybe_relax_review_fix_budget(stage_budget, issue, stage, workspace) when is_map(stage_budget) do
-    case RunStateStore.load_or_default(workspace, issue) do
-      state when is_map(state) ->
-        issue_identifier = issue_identifier_for(issue, state)
+  defp maybe_relax_review_fix_budget(stage_budget, issue, stage, _workspace, state)
+       when is_map(stage_budget) and is_map(state) do
+    issue_identifier = issue_identifier_for(issue, state)
 
-        if review_fix_budget_candidate?(state, stage) and review_fix_budget_retry_count(state, issue_identifier) > 0 do
-          stage_budget
-          |> Map.put(
-            :per_turn_input_soft,
-            relaxed_budget_value(stage_budget[:per_turn_input_soft], 85_000)
-          )
-          |> Map.put(
-            :per_turn_input_hard,
-            relaxed_budget_value(stage_budget[:per_turn_input_hard], 150_000)
-          )
-        else
-          stage_budget
-        end
-
-      _ ->
+    if review_fix_budget_candidate?(state, stage) and review_fix_budget_retry_count(state, issue_identifier) > 0 do
+      stage_budget
+      |> Map.put(
+        :per_turn_input_soft,
+        relaxed_budget_value(stage_budget[:per_turn_input_soft], 85_000)
+      )
+      |> Map.put(
+        :per_turn_input_hard,
+        relaxed_budget_value(stage_budget[:per_turn_input_hard], 150_000)
+      )
+    else
         stage_budget
     end
   end

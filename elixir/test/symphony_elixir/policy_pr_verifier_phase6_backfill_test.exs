@@ -758,6 +758,67 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     end
   end
 
+  test "run policy honors running-entry workspace and dispatch stage for relaxed review-fix budgets" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 150_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-running-entry-budget-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-review-budget-running-entry", identifier: "MT-914G", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "implement", %{
+                 review_claims: %{
+                   "comment:1" => %{
+                     "disposition" => "accepted",
+                     "actionable" => true
+                   }
+                 },
+                 resume_context: %{token_pressure: "high", review_fix_budget_retry_count: 2}
+               })
+
+      running_entry = %{
+        dispatch_stage: "implement",
+        workspace_path: workspace,
+        codex_input_tokens: 145_000,
+        codex_output_tokens: 0,
+        codex_total_tokens: 145_000,
+        turn_started_input_tokens: 0
+      }
+
+      mismatched_issue = %{issue | identifier: "MT-MISMATCH"}
+
+      assert :ok = RunPolicy.maybe_stop_for_token_budget(mismatched_issue, running_entry)
+
+      assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded}} =
+               RunPolicy.maybe_stop_for_token_budget(mismatched_issue, %{
+                 running_entry
+                 | codex_input_tokens: 155_000,
+                   codex_total_tokens: 155_000
+               })
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "run policy ignores malformed token budget values" do
     configure_memory_tracker!(policy_token_budget: %{per_turn_input: "ten", per_issue_total: %{}, per_issue_total_output: []})
 
