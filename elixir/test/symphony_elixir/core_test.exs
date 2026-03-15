@@ -314,6 +314,44 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Additional verified claims remain after this batch: 1"
   end
 
+  test "implement prompt skips review claims already addressed in prior turns" do
+    issue = %Issue{
+      id: "issue-review-fix-addressed",
+      identifier: "MT-REVIEW-ADDRESSED",
+      title: "Continue remaining review comments",
+      description: "Move on to the next verified claim."
+    }
+
+    state = %{
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => false,
+          "implementation_status" => "addressed",
+          "claim_type" => "correctness_risk",
+          "path" => "lib/one.ex",
+          "line" => 10,
+          "body" => "Already addressed review claim."
+        },
+        "comment:2" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/two.ex",
+          "line" => 20,
+          "body" => "Next verified review claim."
+        }
+      },
+      resume_context: %{token_pressure: "high"}
+    }
+
+    prompt = SymphonyElixir.DeliveryEngine.implement_prompt_for_test(issue, state, [], 1, 3)
+
+    refute prompt =~ "lib/one.ex:10"
+    assert prompt =~ "lib/two.ex:20"
+    refute prompt =~ "Additional verified claims remain after this batch: 1"
+  end
+
   test "implement prompt keeps the last blocking rule in focused review context" do
     issue = %Issue{
       id: "issue-review-fix-rule",

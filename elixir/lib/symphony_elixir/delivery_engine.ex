@@ -480,6 +480,11 @@ defmodule SymphonyElixir.DeliveryEngine do
        ) do
     implementation_turns = Map.get(state, :implementation_turns, 0)
     effective_implementation_turns = effective_implementation_turns(state)
+    focused_claims =
+      focused_review_claims(
+        Map.get(state, :review_claims, %{}),
+        focused_review_claim_limit(state)
+      )
 
     if effective_implementation_turns >= max_turns do
       block_issue(
@@ -528,6 +533,17 @@ defmodule SymphonyElixir.DeliveryEngine do
              :ok <- ensure_issue_still_active(refreshed_issue),
              {:ok, next_stage} <-
                implement_next_stage(turn_result, before_snapshot, after_snapshot),
+             updated_review_claims =
+               advance_review_claims_after_turn(
+                 Map.get(state, :review_claims, %{}),
+                 focused_claims,
+                 turn_result
+               ),
+             updated_review_threads =
+               sync_review_claims_into_threads(
+                 Map.get(state, :review_threads, %{}),
+                 updated_review_claims
+               ),
              {:ok, _state} <-
                RunStateStore.transition(
                  workspace,
@@ -535,6 +551,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                  Map.merge(
                    %{
                      implementation_turns: implementation_turns + 1,
+                     review_claims: updated_review_claims,
+                     review_threads: updated_review_threads,
                      last_turn_result: TurnResult.to_map(turn_result),
                      branch: after_snapshot.branch || Map.get(state, :branch),
                      pr_url: after_snapshot.pr_url || Map.get(state, :pr_url)
@@ -546,7 +564,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                      after_snapshot,
                      %{
                        last_turn_summary: turn_result.summary,
-                       next_objective: next_objective_for_stage(next_stage, turn_result)
+                       next_objective:
+                         next_objective_for_stage(next_stage, turn_result, updated_review_claims)
                      },
                      opts
                    )
@@ -2240,17 +2259,13 @@ defmodule SymphonyElixir.DeliveryEngine do
     |> Enum.sort_by(fn {thread_key, claim} ->
       {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "", Map.get(claim, "line") || 0, thread_key}
     end)
-    |> Enum.filter(fn {_thread_key, claim} ->
-      Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
-    end)
+    |> Enum.filter(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
     |> Enum.take(limit)
   end
 
   defp accepted_actionable_claim_count(review_claims) when is_map(review_claims) do
     review_claims
-    |> Enum.count(fn {_thread_key, claim} ->
-      Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
-    end)
+    |> Enum.count(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
   end
 
   defp claim_priority_bucket("security_risk"), do: 0
@@ -2313,6 +2328,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         |> Map.put("stagnation_state", Map.get(claim, "stagnation_state"))
         |> Map.put("repeated_feedback_count", Map.get(claim, "repeated_feedback_count", 1))
         |> Map.put("verification_status", Map.get(claim, "verification_status"))
+        |> Map.put("implementation_status", Map.get(claim, "implementation_status"))
+        |> Map.put("addressed_summary", Map.get(claim, "addressed_summary"))
         |> Map.put("verification_attempts", Map.get(claim, "verification_attempts", 0))
         |> Map.put("evidence_refs", Map.get(claim, "evidence_refs", []))
         |> Map.put("evidence_summary", Map.get(claim, "evidence_summary"))
@@ -2322,6 +2339,53 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp sync_review_claims_into_threads(review_threads, _review_claims), do: review_threads
+
+  defp claim_pending_review_fix?(claim) when is_map(claim) do
+    claim_value(claim, :disposition) == "accepted" and
+      claim_value(claim, :actionable, false) and
+      claim_value(claim, :implementation_status) != "addressed"
+  end
+
+  defp advance_review_claims_after_turn(review_claims, focused_claims, %TurnResult{} = turn_result)
+       when is_map(review_claims) and is_list(focused_claims) do
+    touched_paths =
+      turn_result.files_touched
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+      |> MapSet.new()
+
+    resolved_without_edit? =
+      MapSet.size(touched_paths) == 0 and resolved_review_claim_summary?(turn_result.summary)
+
+    if MapSet.size(touched_paths) == 0 and not resolved_without_edit? do
+      review_claims
+    else
+      Enum.reduce(focused_claims, review_claims, fn {thread_key, claim}, acc ->
+        claim_path = claim_value(claim, :path)
+
+        if (is_binary(claim_path) and MapSet.member?(touched_paths, claim_path)) or resolved_without_edit? do
+          Map.update(acc, thread_key, claim, fn existing ->
+            existing
+            |> Map.put("implementation_status", "addressed")
+            |> Map.put("actionable", false)
+            |> Map.put("addressed_summary", turn_result.summary)
+          end)
+        else
+          acc
+        end
+      end)
+    end
+  end
+
+  defp resolved_review_claim_summary?(summary) when is_binary(summary) do
+    normalized = String.downcase(summary)
+
+    String.contains?(normalized, "already resolved") or
+      String.contains?(normalized, "verified and retained") or
+      String.contains?(normalized, "verified the scoped review claim")
+  end
+
+  defp resolved_review_claim_summary?(_summary), do: false
 
   defp maybe_put_reply_plan(thread_state, draft_state, _reply_plan)
        when draft_state in ["approved_to_post", "posted"] do
@@ -2383,6 +2447,17 @@ defmodule SymphonyElixir.DeliveryEngine do
       text -> text
     end
   end
+
+  defp next_objective_for_stage("implement", %TurnResult{} = turn_result, review_claims)
+       when is_map(review_claims) do
+    case accepted_actionable_claim_count(review_claims) do
+      count when count > 0 -> accepted_review_next_objective(review_claims)
+      _ -> next_objective_for_stage("implement", turn_result)
+    end
+  end
+
+  defp next_objective_for_stage(stage, turn_result, _review_claims) when is_binary(stage),
+    do: next_objective_for_stage(stage, turn_result)
 
   defp next_objective_for_stage("implement", %TurnResult{summary: summary})
        when is_binary(summary) do

@@ -232,6 +232,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `mix test test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `49 tests, 0 failures`, and `mix dialyzer --format short` remained clean after counting scoped review-fix retries from a per-retry turn window instead of the lifetime issue turn total.
 - Latest focused third-stage budget validation on March 15, 2026:
   `mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs` passed with `48 tests, 0 failures`, and `mix dialyzer --format short` remained clean after adding the bounded `110k/220k` review-fix budget tier for retries that already have an active scoped turn window.
+- Review-claim progression repair on March 15, 2026:
+  repeated live canary retries were still re-targeting the already-addressed docs claim because successful scoped review-fix turns never retired the focused claim from `review_claims`. `SymphonyElixir.DeliveryEngine` now marks focused accepted claims as `implementation_status = "addressed"` and `actionable = false` whenever the turn touches the claim path or explicitly reports that the scoped claim was verified and retained, syncs that state into `review_threads`, and computes the next objective from the remaining actionable claims instead of the stale batch.
+- Latest focused claim-progression validation on March 15, 2026:
+  `mix test test/symphony_elixir/core_test.exs test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `102 tests, 0 failures`, and `mix dialyzer --format short` remained clean after teaching successful scoped review-fix turns to retire addressed claims from the next focused prompt.
 - Seeded retry-state repair on March 13, 2026:
   synthesized manual issues now reflect `run_state.stage == "blocked"` as issue state `Blocked`, so `retry_now` resumes the stored stage instead of redispatching a still-blocked seeded run and exiting before any review-fix turn starts.
 - Latest focused seeded-retry validation on March 13, 2026:
@@ -242,4 +246,4 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs` passed with `51 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the seeded-manual fallback fix.
 
 ## Next Step
-Restart canary on the third-stage review-fix budget patch, trigger `CLZ-22` again, and confirm the live run now clears all three prior blockers in sequence: the old `60,000` soft-budget regression, the inherited `implementation.turn_budget_exhausted` stop, and the `170,325` repeated input-cap stop. If the run still blocks, capture the next live ledger event and continue narrowing only the remaining live bottleneck until the canary finishes the open GitHub review claims end to end.
+Restart canary on the review-claim progression patch, trigger `CLZ-22` again, and confirm the live run advances off the already-addressed docs claim onto the next accepted GitHub review claim instead of reloading the same batch. If the run still blocks, capture the next live ledger event and continue narrowing only the remaining live bottleneck until the canary finishes the open GitHub review claims end to end.
