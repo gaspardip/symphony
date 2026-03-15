@@ -152,11 +152,15 @@ defmodule SymphonyElixir.TurnResult do
             {:ok, :none}
 
           true ->
-            {:error, :invalid_blocker_type}
+            {:ok, :implementation}
         end
 
       _ ->
-        {:error, :invalid_blocker_type}
+        if blocked == false do
+          {:ok, :none}
+        else
+          {:ok, :implementation}
+        end
     end
   end
 

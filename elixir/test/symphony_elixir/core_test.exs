@@ -273,6 +273,7 @@ defmodule SymphonyElixir.CoreTest do
     refute prompt =~ "Issue brief:"
     refute prompt =~ "Repo map:"
     refute prompt =~ "Scoped review feedback:"
+    assert String.split(prompt, "Scoped review claims") |> length() == 2
     refute prompt =~ "Last implementation summary:"
   end
 

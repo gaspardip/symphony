@@ -2061,7 +2061,6 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp focused_resume_context_block(resume_context) when is_map(resume_context) do
     [
-      maybe_named_multiline("Scoped review claims", resume_context[:review_claim_summary]),
       maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200)
     ]
     |> Enum.reject(&is_nil/1)
@@ -2255,7 +2254,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         detail =
           claim
           |> Map.get("body")
-          |> summarized_text(140)
+          |> summarized_text(90)
 
         "- #{Map.get(claim, "claim_type") || "review_claim"} #{location}: #{detail}"
       end)

@@ -75,7 +75,8 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     assert {:error, :invalid_turn_result} = TurnResult.normalize(:bad)
     assert {:error, :invalid_files_touched} = TurnResult.normalize(valid_turn_result(files_touched: :bad))
     assert {:error, {:invalid_boolean, :needs_another_turn}} = TurnResult.normalize(valid_turn_result(needs_another_turn: "yes"))
-    assert {:error, :invalid_blocker_type} = TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "unknown"))
+    assert {:ok, %TurnResult{blocked: true, blocker_type: :implementation}} =
+             TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "unknown"))
 
     assert {:error, {:missing_keys, missing}} = TurnResult.normalize(%{})
     assert :summary in missing
@@ -98,10 +99,10 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     assert {:ok, %TurnResult{blocker_type: :none, blocked: true}} =
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "   "))
 
-    assert {:error, :invalid_blocker_type} =
+    assert {:ok, %TurnResult{blocker_type: :implementation, blocked: true}} =
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "ok"))
 
-    assert {:error, :invalid_blocker_type} =
+    assert {:ok, %TurnResult{blocker_type: :implementation, blocked: true}} =
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: 123))
   end
 

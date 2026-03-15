@@ -736,12 +736,21 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  turn_started_input_tokens: 0
                })
 
+      assert :ok =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 stage: "implement",
+                 codex_input_tokens: 145_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 145_000,
+                 turn_started_input_tokens: 0
+               })
+
       assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded}} =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
-                 codex_input_tokens: 140_000,
+                 codex_input_tokens: 155_000,
                  codex_output_tokens: 0,
-                 codex_total_tokens: 140_000,
+                 codex_total_tokens: 155_000,
                  turn_started_input_tokens: 0
                })
     after

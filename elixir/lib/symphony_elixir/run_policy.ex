@@ -585,11 +585,11 @@ defmodule SymphonyElixir.RunPolicy do
           stage_budget
           |> Map.put(
             :per_turn_input_soft,
-            relaxed_budget_value(stage_budget[:per_turn_input_soft], 75_000)
+            relaxed_budget_value(stage_budget[:per_turn_input_soft], 85_000)
           )
           |> Map.put(
             :per_turn_input_hard,
-            relaxed_budget_value(stage_budget[:per_turn_input_hard], 135_000)
+            relaxed_budget_value(stage_budget[:per_turn_input_hard], 150_000)
           )
         else
           stage_budget
