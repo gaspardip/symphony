@@ -115,6 +115,7 @@ defmodule SymphonyElixir.RunPolicy do
 
     run_state = RunStateStore.load_or_default(workspace, issue)
     stage_budget = current_stage_token_budget(issue, running_entry, workspace, run_state)
+    total_budget = current_total_token_budget(token_budget, issue, running_entry, run_state)
     input_total = Map.get(running_entry, :codex_input_tokens, 0)
     output_total = Map.get(running_entry, :codex_output_tokens, 0)
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
@@ -127,7 +128,7 @@ defmodule SymphonyElixir.RunPolicy do
       budget_exceeded?(stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input], current_turn_input) ->
         stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
 
-      budget_exceeded?(token_budget[:per_issue_total], total_tokens) ->
+      budget_exceeded?(total_budget, total_tokens) ->
         stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
 
       budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
@@ -511,6 +512,19 @@ defmodule SymphonyElixir.RunPolicy do
     maybe_relax_review_fix_budget(stage_budget, issue, stage, workspace, run_state)
   end
 
+  defp current_total_token_budget(token_budget, issue, running_entry, run_state)
+       when is_map(token_budget) and is_map(run_state) do
+    total_budget = Map.get(token_budget, :per_issue_total)
+    stage = Map.get(running_entry, :dispatch_stage) || Map.get(running_entry, :stage)
+
+    maybe_relax_review_fix_total_budget(total_budget, issue, stage, run_state)
+  end
+
+  defp current_total_token_budget(token_budget, _issue, _running_entry, _run_state)
+       when is_map(token_budget) do
+    Map.get(token_budget, :per_issue_total)
+  end
+
   defp current_stage(issue, workspace, run_state) when is_binary(workspace) and is_map(run_state) do
     case run_state do
       %{stage: stage} when is_binary(stage) -> stage
@@ -631,6 +645,39 @@ defmodule SymphonyElixir.RunPolicy do
       accepted_review_claim_count(state) > 0
   end
 
+  defp maybe_relax_review_fix_total_budget(total_budget, issue, stage, state)
+       when is_integer(total_budget) and is_map(state) do
+    issue_identifier = issue_identifier_for(issue, state)
+    retry_count = review_fix_budget_retry_count(state, issue_identifier)
+
+    if review_fix_total_budget_candidate?(state, stage) and retry_count > 0 do
+      total_budget + review_fix_total_budget_extension(state, retry_count)
+    else
+      total_budget
+    end
+  end
+
+  defp maybe_relax_review_fix_total_budget(total_budget, _issue, _stage, _state), do: total_budget
+
+  defp review_fix_total_budget_candidate?(state, stage) do
+    review_fix_budget_candidate?(state, stage) and
+      addressed_review_claim_count(state) > 0
+  end
+
+  defp review_fix_total_budget_extension(state, retry_count) when is_map(state) and is_integer(retry_count) do
+    actionable_count = accepted_review_claim_count(state)
+
+    per_claim_extension =
+      cond do
+        retry_count >= 2 and review_fix_turn_window_active?(state) -> 110_000
+        true -> 80_000
+      end
+
+    actionable_count
+    |> Kernel.*(per_claim_extension)
+    |> min(320_000)
+  end
+
   defp review_fix_turn_window_active?(state) when is_map(state) do
     case get_in(state, [:resume_context, :implementation_turn_window_base]) do
       value when is_integer(value) and value >= 0 -> true
@@ -669,6 +716,14 @@ defmodule SymphonyElixir.RunPolicy do
     |> Map.get(:review_claims, %{})
     |> Enum.count(fn {_thread_key, claim} ->
       Map.get(claim, "disposition") == "accepted" and Map.get(claim, "actionable", false)
+    end)
+  end
+
+  defp addressed_review_claim_count(state) when is_map(state) do
+    state
+    |> Map.get(:review_claims, %{})
+    |> Enum.count(fn {_thread_key, claim} ->
+      Map.get(claim, "implementation_status") == "addressed"
     end)
   end
 

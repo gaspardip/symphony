@@ -2102,6 +2102,12 @@ defmodule SymphonyElixir.Orchestrator do
   def continuation_metadata_for_running_entry_for_test(running_entry),
     do: continuation_metadata_for_running_entry(running_entry)
 
+  @spec maybe_stop_issue_for_token_budget_for_test(State.t(), String.t(), map()) :: State.t()
+  def maybe_stop_issue_for_token_budget_for_test(%State{} = state, issue_id, running_entry)
+      when is_binary(issue_id) and is_map(running_entry) do
+    maybe_stop_issue_for_token_budget(state, issue_id, running_entry)
+  end
+
   @doc false
   @spec dispatch_passive_issue_for_test(State.t(), Issue.t(), keyword()) :: term()
   def dispatch_passive_issue_for_test(%State{} = state, %Issue{} = issue, opts \\ [])
@@ -5906,7 +5912,28 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:stop, _violation} ->
-        terminate_running_issue(state, issue_id, false)
+        continuation = continuation_metadata_for_running_entry(running_entry)
+        continuation_delay_type = Map.get(continuation, :delay_type, :none)
+
+        state = terminate_running_issue(state, issue_id, false)
+
+        case continuation_delay_type do
+          :none ->
+            state
+
+          delay_type ->
+            schedule_issue_retry(
+              state,
+              issue_id,
+              1,
+              %{
+                identifier: Map.get(running_entry, :identifier),
+                delay_type: delay_type,
+                issue: Map.get(running_entry, :issue)
+              }
+              |> Map.merge(Map.drop(continuation, [:delay_type]))
+            )
+        end
     end
   end
 

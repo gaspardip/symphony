@@ -1845,6 +1845,45 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "review claim progression retires claims touched with absolute workspace paths" do
+    review_claims = %{
+      "comment:1" => %{
+        "disposition" => "accepted",
+        "actionable" => true,
+        "claim_type" => "correctness_risk",
+        "path" => "elixir/lib/symphony_elixir/observability.ex"
+      }
+    }
+
+    focused_claims = [{"comment:1", Map.fetch!(review_claims, "comment:1")}]
+
+    turn_result = %SymphonyElixir.TurnResult{
+      summary: "Patched observability metadata sanitization.",
+      blocked: false,
+      needs_another_turn: true,
+      blocker_type: "none",
+      files_touched: [
+        Path.join(
+          Config.workspace_root(),
+          "CLZ-22/elixir/lib/symphony_elixir/observability.ex"
+        )
+      ]
+    }
+
+    updated_claims =
+      SymphonyElixir.DeliveryEngine.advance_review_claims_after_turn_for_test(
+        review_claims,
+        focused_claims,
+        turn_result
+      )
+
+    assert %{
+             "actionable" => false,
+             "implementation_status" => "addressed",
+             "addressed_summary" => "Patched observability metadata sanitization."
+           } = updated_claims["comment:1"]
+  end
+
   test "app server starts with workspace cwd and expected startup command" do
     test_root =
       Path.join(

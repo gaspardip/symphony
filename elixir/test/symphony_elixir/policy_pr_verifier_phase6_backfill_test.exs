@@ -823,6 +823,141 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     end
   end
 
+  test "run policy extends the total issue budget for progressing scoped review-fix runs" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 250_000,
+        per_issue_total: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 220_000
+          }
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-total-budget-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-review-total-budget", identifier: "MT-914H", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "implement", %{
+                 review_claims: %{
+                   "comment:1" => %{
+                     "disposition" => "accepted",
+                     "actionable" => true
+                   },
+                   "comment:2" => %{
+                     "disposition" => "accepted",
+                     "actionable" => true
+                   },
+                   "comment:3" => %{
+                     "disposition" => "accepted",
+                     "actionable" => false,
+                     "implementation_status" => "addressed"
+                   }
+                 },
+                 resume_context: %{
+                   token_pressure: "high",
+                   review_fix_budget_retry_count: 2,
+                   implementation_turn_window_base: 9
+                 }
+               })
+
+      assert :ok =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 stage: "implement",
+                 workspace_path: workspace,
+                 codex_input_tokens: 160_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 690_000,
+                 turn_started_input_tokens: 0
+               })
+
+      assert {:stop, %RunPolicy.Violation{code: :per_issue_total_budget_exceeded}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 stage: "implement",
+                 workspace_path: workspace,
+                 codex_input_tokens: 160_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 730_000,
+                 turn_started_input_tokens: 0
+               })
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "run policy keeps the base total budget when review-fix progress is absent" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 250_000,
+        per_issue_total: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 220_000
+          }
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-total-budget-base-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-review-total-budget-base", identifier: "MT-914I", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "implement", %{
+                 review_claims: %{
+                   "comment:1" => %{
+                     "disposition" => "accepted",
+                     "actionable" => true
+                   },
+                   "comment:2" => %{
+                     "disposition" => "accepted",
+                     "actionable" => true
+                   }
+                 },
+                 resume_context: %{
+                   token_pressure: "high",
+                   review_fix_budget_retry_count: 2,
+                   implementation_turn_window_base: 9
+                 }
+               })
+
+      assert {:stop, %RunPolicy.Violation{code: :per_issue_total_budget_exceeded}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 stage: "implement",
+                 workspace_path: workspace,
+                 codex_input_tokens: 160_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 510_000,
+                 turn_started_input_tokens: 0
+               })
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "run policy ignores malformed token budget values" do
     configure_memory_tracker!(policy_token_budget: %{per_turn_input: "ten", per_issue_total: %{}, per_issue_total_output: []})
 

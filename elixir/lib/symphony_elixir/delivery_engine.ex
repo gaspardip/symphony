@@ -192,6 +192,10 @@ defmodule SymphonyElixir.DeliveryEngine do
   @spec implement_command_output_budget_for_test(map()) :: map()
   def implement_command_output_budget_for_test(state), do: implement_command_output_budget(state)
 
+  @spec advance_review_claims_after_turn_for_test(map(), list(), TurnResult.t()) :: map()
+  def advance_review_claims_after_turn_for_test(review_claims, focused_claims, %TurnResult{} = turn_result),
+    do: advance_review_claims_after_turn(review_claims, focused_claims, turn_result)
+
   @doc false
   @spec ensure_turn_progress_for_test(term(), term(), term()) :: term()
   def ensure_turn_progress_for_test(turn_result, before_snapshot, after_snapshot),
@@ -2352,6 +2356,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       turn_result.files_touched
       |> List.wrap()
       |> Enum.filter(&is_binary/1)
+      |> Enum.map(&normalize_review_claim_path/1)
       |> MapSet.new()
 
     resolved_without_edit? =
@@ -2363,7 +2368,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       Enum.reduce(focused_claims, review_claims, fn {thread_key, claim}, acc ->
         claim_path = claim_value(claim, :path)
 
-        if (is_binary(claim_path) and MapSet.member?(touched_paths, claim_path)) or resolved_without_edit? do
+        if (is_binary(claim_path) and review_claim_touched?(claim_path, touched_paths)) or resolved_without_edit? do
           Map.update(acc, thread_key, claim, fn existing ->
             existing
             |> Map.put("implementation_status", "addressed")
@@ -2386,6 +2391,43 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp resolved_review_claim_summary?(_summary), do: false
+
+  defp review_claim_touched?(claim_path, touched_paths)
+       when is_binary(claim_path) and is_struct(touched_paths, MapSet) do
+    normalized_claim_path = normalize_review_claim_path(claim_path)
+
+    Enum.any?(touched_paths, fn touched_path ->
+      touched_path == normalized_claim_path or
+        String.ends_with?(touched_path, "/" <> normalized_claim_path) or
+        String.ends_with?(normalized_claim_path, "/" <> touched_path)
+    end)
+  end
+
+  defp review_claim_touched?(_claim_path, _touched_paths), do: false
+
+  defp normalize_review_claim_path(path) when is_binary(path) do
+    path
+    |> String.trim()
+    |> String.replace("\\", "/")
+    |> String.trim_leading("./")
+    |> case do
+      "" = blank ->
+        blank
+
+      normalized ->
+        workspace_root = Config.workspace_root() |> String.replace("\\", "/")
+
+        cond do
+          String.starts_with?(normalized, workspace_root <> "/") ->
+            String.replace_prefix(normalized, workspace_root <> "/", "")
+
+          true ->
+            normalized
+        end
+    end
+  end
+
+  defp normalize_review_claim_path(path), do: path
 
   defp maybe_put_reply_plan(thread_state, draft_state, _reply_plan)
        when draft_state in ["approved_to_post", "posted"] do
