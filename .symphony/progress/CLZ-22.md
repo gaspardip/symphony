@@ -304,6 +304,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   live canary still regressed into `implementation.turn_budget_exhausted` even after a successful scoped review-fix turn because the next `implement` entry checked the turn cap before noticing that there were no accepted actionable claims left and the workspace already contained retained code changes ready for validation. `SymphonyElixir.DeliveryEngine.handle_implement/9` now inspects the workspace before the turn-budget gate and transitions directly to `validate` when the last turn completed cleanly, no focused review claims remain, and the retained workspace diff is already ready for the validation contract.
 - Latest focused retained-diff resume validation on March 16, 2026:
   `mix test test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `50 tests, 0 failures`, and `mix dialyzer --format short` remained clean after adding the retained-diff resume regression.
+- Portable observability proof fix on March 16, 2026:
+  the new Tempo-config behavioral proof originally depended on checkout-specific paths, which passed on the branch but failed inside the live canary workspace. `test/symphony_elixir/observability_test.exs` now resolves `ops/observability/tempo/config.yml` relative to `__DIR__`, so the same proof works in both the branch checkout and isolated dogfood workspaces.
+- Latest focused portable-proof validation on March 16, 2026:
+  `mix test test/symphony_elixir/observability_test.exs` passed with `6 tests, 0 failures` on both `/Users/gaspar/src/symphony-clz-22` and the live canary workspace after switching the Tempo-config proof to a repo-relative path.
 
 ## Next Step
 Commit the retained-diff resume fix, rotate the local stable/canary topology onto the new head, and re-run the live `CLZ-22` canary cycle to confirm the run advances from `implement` into `validate` instead of re-blocking on `implementation.turn_budget_exhausted`.

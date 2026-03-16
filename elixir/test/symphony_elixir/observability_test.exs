@@ -166,7 +166,7 @@ defmodule SymphonyElixir.ObservabilityTest do
 
   test "tempo config keeps max_block_bytes as a YAML integer" do
     config_path =
-      "/Users/gaspar/src/symphony-clz-22/ops/observability/tempo/config.yml"
+      Path.expand("../../../ops/observability/tempo/config.yml", __DIR__)
 
     assert {:ok, parsed} = YamlElixir.read_from_file(config_path)
 
