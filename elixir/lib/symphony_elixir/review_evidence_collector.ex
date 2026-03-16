@@ -13,7 +13,8 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
   @spec collect(map(), Path.t()) :: {map(), map()}
   def collect(review_claims, workspace) when is_map(review_claims) and is_binary(workspace) do
     Enum.reduce(review_claims, {%{}, stats_template()}, fn {thread_key, claim}, {acc, stats} ->
-      updated_claim = collect_claim(Map.put_new(claim, "thread_key", to_string(thread_key)), workspace)
+      updated_claim =
+        collect_claim(Map.put_new(claim, "thread_key", to_string(thread_key)), workspace)
 
       {
         Map.put(acc, to_string(thread_key), updated_claim),
@@ -56,10 +57,20 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     evidence_summary = Map.get(claim, "evidence_summary") |> to_string() |> String.trim()
     consensus_summary = Map.get(claim, "consensus_summary") |> to_string() |> String.trim()
     disposition = Map.get(claim, "disposition")
+    implementation_status = Map.get(claim, "implementation_status")
+    addressed_summary = Map.get(claim, "addressed_summary") |> to_string() |> String.trim()
 
     draft_reply =
       cond do
-        verification_status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+        implementation_status == "addressed" ->
+          "I addressed this concern locally and will include it in the next branch update. #{addressed_summary}"
+
+        verification_status in [
+          "verified_review_decision",
+          "verified_scope",
+          "verified_symbol_scope",
+          "verified_local_pattern"
+        ] ->
           "I verified this concern locally and it is actionable. #{evidence_summary} I will address it in the next change."
 
         verification_status == "contradicted" ->
@@ -77,6 +88,9 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         disposition == "deferred" ->
           "I agree this may be worthwhile, but I am deferring it for now to avoid churn on the current PR."
 
+        disposition == "dismissed" ->
+          "I reviewed this feedback and I am not making a change from it right now because I could not establish enough concrete local evidence to justify one. #{consensus_summary}"
+
         true ->
           "I reviewed this feedback and will either address it in code or reply with stronger evidence before resolving it."
       end
@@ -85,13 +99,24 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
 
     resolution_recommendation =
       cond do
-        verification_status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+        implementation_status == "addressed" ->
+          "resolve_after_change"
+
+        verification_status in [
+          "verified_review_decision",
+          "verified_scope",
+          "verified_symbol_scope",
+          "verified_local_pattern"
+        ] ->
           "keep_open_until_change"
 
         verification_status in ["contradicted", "consensus_supported", "insufficient_evidence"] ->
           "keep_open_until_confirmed"
 
         verification_status == "stagnant_feedback" ->
+          "keep_open_until_confirmed"
+
+        disposition == "dismissed" ->
           "keep_open_until_confirmed"
 
         disposition == "deferred" ->
@@ -109,6 +134,21 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     verification_attempts = Map.get(claim, "verification_attempts", 0) + 1
 
     cond do
+      targeted_claim_verified?(claim, workspace) ->
+        claim
+        |> Map.put("verification_attempts", verification_attempts)
+        |> Map.put("verification_status", "verified_local_pattern")
+        |> Map.put("disposition", "accepted")
+        |> Map.put("actionable", true)
+        |> Map.put("hard_proof", true)
+        |> Map.put("evidence_refs", targeted_evidence_refs(claim))
+        |> Map.put(
+          "evidence_summary",
+          "Focused review verification matched the exact local code pattern described by the review claim."
+        )
+        |> append_proof_source("workspace_pattern_verified")
+        |> ensure_contradiction_sources()
+
       disposition != "needs_verification" ->
         claim
         |> Map.put("verification_attempts", verification_attempts)
@@ -134,7 +174,10 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         |> Map.put("disposition", "dismissed")
         |> Map.put("actionable", false)
         |> Map.put("evidence_refs", contradiction_evidence_refs(claim, workspace))
-        |> Map.put("evidence_summary", "Focused review verification contradicted the claim in the local workspace.")
+        |> Map.put(
+          "evidence_summary",
+          "Focused review verification contradicted the claim in the local workspace."
+        )
         |> append_proof_source("focused_review_verification")
 
       symbol_scope_verified?(claim, workspace) ->
@@ -145,7 +188,10 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         |> Map.put("actionable", true)
         |> Map.put("hard_proof", true)
         |> Map.put("evidence_refs", symbol_evidence_refs(claim))
-        |> Map.put("evidence_summary", "Focused review verification confirmed the referenced symbol exists in the scoped file.")
+        |> Map.put(
+          "evidence_summary",
+          "Focused review verification confirmed the referenced symbol exists in the scoped file."
+        )
         |> append_proof_source("workspace_symbol_verified")
         |> ensure_contradiction_sources()
 
@@ -157,7 +203,10 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         |> Map.put("actionable", true)
         |> Map.put("hard_proof", true)
         |> Map.put("evidence_refs", ["review_decision:changes_requested"])
-        |> Map.put("evidence_summary", "Focused review verification confirmed the GitHub review decision still requests changes.")
+        |> Map.put(
+          "evidence_summary",
+          "Focused review verification confirmed the GitHub review decision still requests changes."
+        )
         |> append_proof_source("github_review_decision")
         |> ensure_contradiction_sources()
 
@@ -169,7 +218,10 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         |> Map.put("actionable", true)
         |> Map.put("hard_proof", true)
         |> Map.put("evidence_refs", scoped_evidence_refs(claim))
-        |> Map.put("evidence_summary", "Focused review verification confirmed the referenced file scope exists locally.")
+        |> Map.put(
+          "evidence_summary",
+          "Focused review verification confirmed the referenced file scope exists locally."
+        )
         |> append_proof_source("workspace_scope_verified")
         |> ensure_contradiction_sources()
 
@@ -217,7 +269,8 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
   end
 
   defp review_decision_confirmed?(claim) do
-    Map.get(claim, "kind") == "review" and normalized_review_decision(claim) == "changes_requested"
+    Map.get(claim, "kind") == "review" and
+      normalized_review_decision(claim) == "changes_requested"
   end
 
   defp symbol_scope_verified?(claim, workspace) do
@@ -246,7 +299,21 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     line = Map.get(claim, "line")
 
     consensus_score >= 0.70 and evidence_quality_score >= 0.70 and locality_score >= 0.80 and
-      is_binary(path) and file_exists?(workspace, path) and (is_nil(line) or line_exists?(workspace, path, line))
+      is_binary(path) and file_exists?(workspace, path) and
+      (is_nil(line) or line_exists?(workspace, path, line))
+  end
+
+  defp targeted_claim_verified?(claim, workspace) do
+    path = Map.get(claim, "path")
+    body = Map.get(claim, "body") |> to_string() |> String.downcase()
+
+    case file_contents(workspace, path) do
+      contents when is_binary(contents) ->
+        tracker_dedupe_regression?(body, contents) or truthy_atom_regression?(body, contents)
+
+      _ ->
+        false
+    end
   end
 
   defp stagnant_feedback?(claim, verification_attempts) do
@@ -270,6 +337,18 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
       end
     end)
   end
+
+  defp file_contents(workspace, path) when is_binary(workspace) and is_binary(path) do
+    candidate_paths(workspace, path)
+    |> Enum.find_value(fn file_path ->
+      case File.read(file_path) do
+        {:ok, contents} -> contents
+        _ -> nil
+      end
+    end)
+  end
+
+  defp file_contents(_workspace, _path), do: nil
 
   defp line_exists?(workspace, path, line)
        when is_binary(workspace) and is_binary(path) and is_integer(line) and line > 0 do
@@ -323,6 +402,23 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     end
   end
 
+  defp targeted_evidence_refs(claim) do
+    path = Map.get(claim, "path")
+    line = Map.get(claim, "line")
+    body = Map.get(claim, "body") |> to_string() |> String.downcase()
+
+    cond do
+      contains_any?(body, ["deduplication", "different key", "completely different key"]) ->
+        ["pattern:dedupe_prefix_hex_encoded", "file_scope:#{path}:#{line}"]
+
+      contains_any?(body, ["dropped support", "treated as false", "runtime behavior"]) ->
+        ["pattern:truthy_atom_support_dropped", "file_scope:#{path}:#{line}"]
+
+      true ->
+        scoped_evidence_refs(claim)
+    end
+  end
+
   defp symbol_evidence_refs(claim) do
     case {Map.get(claim, "path"), referenced_symbol(claim)} do
       {path, symbol} when is_binary(path) and is_binary(symbol) and symbol != "" ->
@@ -368,6 +464,39 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
 
   defp ensure_contradiction_sources(claim) do
     Map.put_new(claim, "contradiction_sources", [])
+  end
+
+  defp tracker_dedupe_regression?(body, contents)
+       when is_binary(body) and is_binary(contents) do
+    contains_any?(body, ["deduplication", "different key", "completely different key"]) and
+      String.contains?(contents, ~s(("tracker-event:" <>)) and
+      String.contains?(contents, "Base.encode16")
+  end
+
+  defp tracker_dedupe_regression?(_body, _contents), do: false
+
+  defp truthy_atom_regression?(body, contents) when is_binary(body) and is_binary(contents) do
+    contains_any?(body, ["dropped support", "treated as false", "runtime behavior"]) and
+      truthy_atom_support_dropped?(contents)
+  end
+
+  defp truthy_atom_regression?(_body, _contents), do: false
+
+  defp truthy_atom_support_dropped?(contents) when is_binary(contents) do
+    case Regex.run(~r/defp\s+truthy\?\(value\),\s+do:\s+value\s+in\s+\[(.*?)\]/s, contents) do
+      [_, list_contents] ->
+        list_text = String.replace(list_contents, ~r/\s+/, "")
+
+        String.contains?(list_text, "true") and String.contains?(list_text, "\"true\"") and
+          not String.contains?(list_text, ":true")
+
+      _ ->
+        false
+    end
+  end
+
+  defp contains_any?(body, needles) when is_binary(body) and is_list(needles) do
+    Enum.any?(needles, &String.contains?(body, &1))
   end
 
   defp stats_template do

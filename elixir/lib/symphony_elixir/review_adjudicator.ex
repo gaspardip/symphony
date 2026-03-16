@@ -63,6 +63,7 @@ defmodule SymphonyElixir.ReviewAdjudicator do
       ]
       |> Enum.sum()
       |> maybe_adjust_for_review_decision(item)
+      |> maybe_adjust_for_hard_proof(hard_proof_sources)
       |> maybe_adjust_for_stagnation(stagnation_score, claim_type, hard_proof_sources)
       |> clamp_score()
       |> round_score()
@@ -165,6 +166,14 @@ defmodule SymphonyElixir.ReviewAdjudicator do
         "edge case",
         "hard-coded",
         "hard coded",
+        "dropped support",
+        "treated as false",
+        "runtime behavior",
+        "different key",
+        "completely different key",
+        "deduplication",
+        "backfill logic",
+        "semantics",
         "will not affect",
         "parsing error",
         "parsing errors",
@@ -337,11 +346,22 @@ defmodule SymphonyElixir.ReviewAdjudicator do
     end
   end
 
+  defp hard_proof_sources(item, workspace, :correctness_risk) do
+    item
+    |> targeted_correctness_proof_source(workspace)
+    |> List.wrap()
+  end
+
   defp hard_proof_sources(_item, _workspace, _claim_type), do: []
 
   defp maybe_adjust_for_review_decision(score, item) do
     if review_change_requested?(item), do: score + 0.10, else: score
   end
+
+  defp maybe_adjust_for_hard_proof(score, hard_proof_sources) when hard_proof_sources != [],
+    do: score + 0.05
+
+  defp maybe_adjust_for_hard_proof(score, _hard_proof_sources), do: score
 
   defp maybe_adjust_for_stagnation(score, stagnation_score, claim_type, hard_proof_sources)
        when hard_proof_sources == [] and stagnation_score >= 0.70 and
@@ -440,6 +460,55 @@ defmodule SymphonyElixir.ReviewAdjudicator do
     |> Enum.map(&Path.join(&1, relative_path))
     |> Enum.map(&Path.expand/1)
     |> Enum.uniq()
+  end
+
+  defp targeted_correctness_proof_source(item, workspace) do
+    path = Map.get(item, :path)
+    body = normalized_body(item)
+
+    cond do
+      not is_binary(path) ->
+        nil
+
+      contains_any?(body, ["deduplication", "different key", "completely different key"]) and
+        is_binary(file_contents(workspace, path)) and
+        String.contains?(file_contents(workspace, path), ~s(("tracker-event:" <>)) and
+          String.contains?(file_contents(workspace, path), "Base.encode16") ->
+        :dedupe_prefix_hex_encoded
+
+      contains_any?(body, ["dropped support", "treated as false", "runtime behavior"]) and
+        is_binary(file_contents(workspace, path)) and truthy_atom_support_dropped?(file_contents(workspace, path)) ->
+        :truthy_atom_support_dropped
+
+      true ->
+        nil
+    end
+  end
+
+  defp file_contents(workspace, relative_path)
+       when is_binary(workspace) and is_binary(relative_path) do
+    candidate_paths(workspace, relative_path)
+    |> Enum.find_value(fn file_path ->
+      case File.read(file_path) do
+        {:ok, contents} -> contents
+        _ -> nil
+      end
+    end)
+  end
+
+  defp file_contents(_workspace, _relative_path), do: nil
+
+  defp truthy_atom_support_dropped?(contents) when is_binary(contents) do
+    case Regex.run(~r/defp\s+truthy\?\(value\),\s+do:\s+value\s+in\s+\[(.*?)\]/s, contents) do
+      [_, list_contents] ->
+        list_text = String.replace(list_contents, ~r/\s+/, "")
+
+        String.contains?(list_text, "true") and String.contains?(list_text, "\"true\"") and
+          not String.contains?(list_text, ":true")
+
+      _ ->
+        false
+    end
   end
 
   defp clamp_score(score) when score < 0.0, do: 0.0

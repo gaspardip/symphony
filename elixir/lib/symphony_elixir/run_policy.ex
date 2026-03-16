@@ -7,12 +7,32 @@ defmodule SymphonyElixir.RunPolicy do
 
   require Logger
 
-  alias SymphonyElixir.{Config, IssueSource, RepoCompatibility, RuleCatalog, RunInspector, RunLedger, RunStateStore, RunnerRuntime, WorkflowProfile, Workspace}
+  alias SymphonyElixir.{
+    Config,
+    IssueSource,
+    RepoCompatibility,
+    RuleCatalog,
+    RunInspector,
+    RunLedger,
+    RunStateStore,
+    RunnerRuntime,
+    WorkflowProfile,
+    Workspace
+  }
 
   defmodule Violation do
     @moduledoc false
 
-    defstruct [:code, :rule_id, :failure_class, :summary, :details, :human_action, :target_state, metadata: %{}]
+    defstruct [
+      :code,
+      :rule_id,
+      :failure_class,
+      :summary,
+      :details,
+      :human_action,
+      :target_state,
+      metadata: %{}
+    ]
   end
 
   @blocked_state "Blocked"
@@ -37,7 +57,11 @@ defmodule SymphonyElixir.RunPolicy do
         stop_issue(issue, missing_checkout_violation(workspace), workspace)
 
       Config.policy_require_validation?() and inspection.harness_error not in [nil, :missing] ->
-        stop_issue(issue, harness_validation_violation(workspace, inspection.harness_error), workspace)
+        stop_issue(
+          issue,
+          harness_validation_violation(workspace, inspection.harness_error),
+          workspace
+        )
 
       Config.policy_require_validation?() and is_nil(inspection.harness) ->
         stop_issue(issue, missing_harness_violation(workspace), workspace)
@@ -84,7 +108,14 @@ defmodule SymphonyElixir.RunPolicy do
           keyword()
         ) ::
           {:ok, non_neg_integer()} | {:stop, violation()}
-  def evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, noop_turns, opts \\ []) do
+  def evaluate_after_turn(
+        issue,
+        refreshed_issue,
+        before_snapshot,
+        after_snapshot,
+        noop_turns,
+        opts \\ []
+      ) do
     cond do
       require_pr_before_review_violation?(refreshed_issue, after_snapshot) ->
         stop_issue(issue, missing_pr_for_review_violation())
@@ -109,6 +140,7 @@ defmodule SymphonyElixir.RunPolicy do
   @spec maybe_stop_for_token_budget(map(), map()) :: :ok | {:stop, violation()}
   def maybe_stop_for_token_budget(issue, running_entry) do
     token_budget = Config.policy_token_budget()
+
     workspace =
       Map.get(running_entry, :workspace_path) ||
         Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
@@ -122,17 +154,31 @@ defmodule SymphonyElixir.RunPolicy do
     turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
     current_turn_input = max(0, input_total - turn_started_input)
 
-    maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget, workspace, run_state)
+    maybe_record_soft_budget_pressure(
+      issue,
+      running_entry,
+      current_turn_input,
+      stage_budget,
+      workspace,
+      run_state
+    )
 
     cond do
-      budget_exceeded?(stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input], current_turn_input) ->
+      budget_exceeded?(
+        stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+        current_turn_input
+      ) ->
         stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
 
       budget_exceeded?(total_budget, total_tokens) ->
         stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
 
       budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-        stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
+        stop_issue(
+          issue,
+          token_budget_violation(:per_issue_total_output, output_total),
+          workspace
+        )
 
       true ->
         :ok
@@ -145,7 +191,10 @@ defmodule SymphonyElixir.RunPolicy do
       :ok
     else
       if normalize_state(state) == "todo" do
-        case IssueSource.update_issue_state(%{id: issue_id, source: Map.get(issue, :source)}, @in_progress_state) do
+        case IssueSource.update_issue_state(
+               %{id: issue_id, source: Map.get(issue, :source)},
+               @in_progress_state
+             ) do
           :ok ->
             :ok
 
@@ -200,7 +249,8 @@ defmodule SymphonyElixir.RunPolicy do
   defp approval_gate_state?(_issue), do: false
 
   defp noop_turn?(before_snapshot, after_snapshot) do
-    not RunInspector.code_changed?(before_snapshot, after_snapshot) and is_nil(after_snapshot.pr_url)
+    not RunInspector.code_changed?(before_snapshot, after_snapshot) and
+      is_nil(after_snapshot.pr_url)
   end
 
   defp workload_violation(issue) do
@@ -525,7 +575,8 @@ defmodule SymphonyElixir.RunPolicy do
     Map.get(token_budget, :per_issue_total)
   end
 
-  defp current_stage(issue, workspace, run_state) when is_binary(workspace) and is_map(run_state) do
+  defp current_stage(issue, workspace, run_state)
+       when is_binary(workspace) and is_map(run_state) do
     case run_state do
       %{stage: stage} when is_binary(stage) -> stage
       _ -> current_stage(issue, workspace)
@@ -539,7 +590,14 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp maybe_record_soft_budget_pressure(issue, running_entry, current_turn_input, stage_budget, workspace, run_state) do
+  defp maybe_record_soft_budget_pressure(
+         issue,
+         running_entry,
+         current_turn_input,
+         stage_budget,
+         workspace,
+         run_state
+       ) do
     soft_budget = stage_budget[:per_turn_input_soft]
 
     if budget_exceeded?(soft_budget, current_turn_input) do
@@ -664,7 +722,8 @@ defmodule SymphonyElixir.RunPolicy do
       addressed_review_claim_count(state) > 0
   end
 
-  defp review_fix_total_budget_extension(state, retry_count) when is_map(state) and is_integer(retry_count) do
+  defp review_fix_total_budget_extension(state, retry_count)
+       when is_map(state) and is_integer(retry_count) do
     actionable_count = accepted_review_claim_count(state)
 
     per_claim_extension =
@@ -699,7 +758,8 @@ defmodule SymphonyElixir.RunPolicy do
       |> Map.get(:resume_context, %{})
       |> Enum.into(%{})
 
-    case Map.get(context, :review_fix_budget_retry_count) || Map.get(context, "review_fix_budget_retry_count") do
+    case Map.get(context, :review_fix_budget_retry_count) ||
+           Map.get(context, "review_fix_budget_retry_count") do
       count when is_integer(count) and count >= 0 -> count
       _ -> legacy_review_fix_retry_count(state, issue_identifier)
     end
@@ -739,7 +799,8 @@ defmodule SymphonyElixir.RunPolicy do
   end
 
   defp prior_review_fix_budget_stop?(state, issue_identifier) do
-    review_fix_budget_stop_reason?(state) or prior_review_fix_budget_stop_in_ledger?(issue_identifier)
+    review_fix_budget_stop_reason?(state) or
+      prior_review_fix_budget_stop_in_ledger?(issue_identifier)
   end
 
   defp review_fix_budget_stop_reason?(state) when is_map(state) do
@@ -764,7 +825,8 @@ defmodule SymphonyElixir.RunPolicy do
       Map.get(resume_context, "last_blocking_rule") == "budget.per_turn_input_exceeded"
   end
 
-  defp prior_review_fix_budget_stop_in_ledger?(issue_identifier) when is_binary(issue_identifier) do
+  defp prior_review_fix_budget_stop_in_ledger?(issue_identifier)
+       when is_binary(issue_identifier) do
     RunLedger.recent_entries(200)
     |> Enum.reverse()
     |> Enum.any?(fn entry ->

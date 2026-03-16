@@ -222,9 +222,7 @@ defmodule SymphonyElixir.TurnResult do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
 
-  defp normalize_runtime_owned_blocker(
-         %__MODULE__{blocked: true, blocker_type: blocker_type, summary: summary} = turn_result
-       )
+  defp normalize_runtime_owned_blocker(%__MODULE__{blocked: true, blocker_type: blocker_type, summary: summary} = turn_result)
        when blocker_type in [:implementation, :publish, :merge, :review] and is_binary(summary) do
     if runtime_owned_blocker_summary?(summary) do
       %{

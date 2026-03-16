@@ -18,6 +18,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.Observability
   alias SymphonyElixir.PolicyPack
   alias SymphonyElixir.PullRequestManager
+  alias SymphonyElixir.PRWatcher
   alias SymphonyElixir.ReviewEvidenceCollector
   alias SymphonyElixir.RepoMap
   alias SymphonyElixir.RepoHarness
@@ -193,8 +194,12 @@ defmodule SymphonyElixir.DeliveryEngine do
   def implement_command_output_budget_for_test(state), do: implement_command_output_budget(state)
 
   @spec advance_review_claims_after_turn_for_test(map(), list(), TurnResult.t()) :: map()
-  def advance_review_claims_after_turn_for_test(review_claims, focused_claims, %TurnResult{} = turn_result),
-    do: advance_review_claims_after_turn(review_claims, focused_claims, turn_result)
+  def advance_review_claims_after_turn_for_test(
+        review_claims,
+        focused_claims,
+        %TurnResult{} = turn_result
+      ),
+      do: advance_review_claims_after_turn(review_claims, focused_claims, turn_result)
 
   @doc false
   @spec ensure_turn_progress_for_test(term(), term(), term()) :: term()
@@ -482,8 +487,33 @@ defmodule SymphonyElixir.DeliveryEngine do
          _inspection,
          opts
        ) do
+    preflight_review_threads =
+      sync_review_claims_into_threads(
+        Map.get(state, :review_threads, %{}),
+        Map.get(state, :review_claims, %{})
+      )
+      |> maybe_post_autonomous_review_replies(
+        workspace,
+        Map.get(state, :pr_url),
+        state,
+        opts
+      )
+
+    state =
+      if preflight_review_threads != Map.get(state, :review_threads, %{}) do
+        {:ok, persisted_state} =
+          RunStateStore.update(workspace, fn persisted ->
+            Map.put(persisted, :review_threads, preflight_review_threads)
+          end)
+
+        persisted_state
+      else
+        state
+      end
+
     implementation_turns = Map.get(state, :implementation_turns, 0)
     effective_implementation_turns = effective_implementation_turns(state)
+
     focused_claims =
       focused_review_claims(
         Map.get(state, :review_claims, %{}),
@@ -547,6 +577,12 @@ defmodule SymphonyElixir.DeliveryEngine do
                sync_review_claims_into_threads(
                  Map.get(state, :review_threads, %{}),
                  updated_review_claims
+               )
+               |> maybe_post_autonomous_review_replies(
+                 workspace,
+                 after_snapshot.pr_url || Map.get(state, :pr_url),
+                 state,
+                 opts
                ),
              {:ok, _state} <-
                RunStateStore.transition(
@@ -568,8 +604,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      after_snapshot,
                      %{
                        last_turn_summary: turn_result.summary,
-                       next_objective:
-                         next_objective_for_stage(next_stage, turn_result, updated_review_claims)
+                       next_objective: next_objective_for_stage(next_stage, turn_result, updated_review_claims)
                      },
                      opts
                    )
@@ -768,7 +803,15 @@ defmodule SymphonyElixir.DeliveryEngine do
     {updated_claims, stats} =
       ReviewEvidenceCollector.collect(Map.get(state, :review_claims, %{}), workspace)
 
-    updated_threads = sync_review_claims_into_threads(Map.get(state, :review_threads, %{}), updated_claims)
+    updated_threads =
+      sync_review_claims_into_threads(Map.get(state, :review_threads, %{}), updated_claims)
+      |> maybe_post_autonomous_review_replies(
+        workspace,
+        Map.get(state, :pr_url),
+        state,
+        opts
+      )
+
     return_stage = Map.get(state, :review_return_stage) || "await_checks"
 
     {target_stage, summary, next_objective} =
@@ -1948,7 +1991,10 @@ defmodule SymphonyElixir.DeliveryEngine do
           focused_resume_context_block(resume_context),
           "",
           "Exact next objective:",
-          focused_review_next_objective(focused_review_claims, Map.get(state, :review_claims, %{}))
+          focused_review_next_objective(
+            focused_review_claims,
+            Map.get(state, :review_claims, %{})
+          )
         ]
       end
 
@@ -2236,7 +2282,8 @@ defmodule SymphonyElixir.DeliveryEngine do
       |> Enum.uniq()
       |> Enum.reverse()
 
-    remaining_count = max(0, accepted_actionable_claim_count(all_review_claims) - length(focused_claims))
+    remaining_count =
+      max(0, accepted_actionable_claim_count(all_review_claims) - length(focused_claims))
 
     case files do
       [] ->
@@ -2281,7 +2328,8 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp focused_review_claim_block(focused_claims, all_review_claims)
        when is_list(focused_claims) and is_map(all_review_claims) do
-    remaining_count = max(0, accepted_actionable_claim_count(all_review_claims) - length(focused_claims))
+    remaining_count =
+      max(0, accepted_actionable_claim_count(all_review_claims) - length(focused_claims))
 
     block =
       focused_claims
@@ -2350,7 +2398,11 @@ defmodule SymphonyElixir.DeliveryEngine do
       claim_value(claim, :implementation_status) != "addressed"
   end
 
-  defp advance_review_claims_after_turn(review_claims, focused_claims, %TurnResult{} = turn_result)
+  defp advance_review_claims_after_turn(
+         review_claims,
+         focused_claims,
+         %TurnResult{} = turn_result
+       )
        when is_map(review_claims) and is_list(focused_claims) do
     touched_paths =
       turn_result.files_touched
@@ -2368,7 +2420,8 @@ defmodule SymphonyElixir.DeliveryEngine do
       Enum.reduce(focused_claims, review_claims, fn {thread_key, claim}, acc ->
         claim_path = claim_value(claim, :path)
 
-        if (is_binary(claim_path) and review_claim_touched?(claim_path, touched_paths)) or resolved_without_edit? do
+        if (is_binary(claim_path) and review_claim_touched?(claim_path, touched_paths)) or
+             resolved_without_edit? do
           Map.update(acc, thread_key, claim, fn existing ->
             existing
             |> Map.put("implementation_status", "addressed")
@@ -2439,6 +2492,87 @@ defmodule SymphonyElixir.DeliveryEngine do
     |> Map.put("draft_reply", Map.get(reply_plan, :draft_reply))
     |> Map.put("resolution_recommendation", Map.get(reply_plan, :resolution_recommendation))
   end
+
+  defp maybe_post_autonomous_review_replies(review_threads, workspace, pr_url, state, opts)
+       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
+    pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
+    prepared_threads = promote_autonomous_review_drafts(review_threads, pack)
+
+    cond do
+      not PolicyPack.external_comment_posting_allowed?(pack) ->
+        prepared_threads
+
+      not is_binary(pr_url) or String.trim(pr_url) == "" ->
+        prepared_threads
+
+      not has_postable_review_drafts?(prepared_threads) ->
+        prepared_threads
+
+      true ->
+        watcher_opts =
+          [policy_pack: pack, repo_url: Map.get(state, :repo_url)]
+          |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
+          |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
+
+        case PRWatcher.post_approved_drafts(workspace, pr_url, prepared_threads, watcher_opts) do
+          {:ok, updated_threads, _stats} -> updated_threads
+          {:error, :no_postable_review_threads} -> prepared_threads
+          {:error, _reason} -> prepared_threads
+        end
+    end
+  end
+
+  defp maybe_post_autonomous_review_replies(review_threads, _workspace, _pr_url, _state, _opts),
+    do: review_threads
+
+  defp promote_autonomous_review_drafts(review_threads, %PolicyPack{})
+       when is_map(review_threads) do
+    Enum.reduce(review_threads, review_threads, fn {thread_key, thread_state}, acc ->
+      if autonomous_review_postable_thread?(thread_key, thread_state) do
+        Map.update!(acc, thread_key, &Map.put(&1, "draft_state", "approved_to_post"))
+      else
+        acc
+      end
+    end)
+  end
+
+  defp autonomous_review_postable_thread?(thread_key, thread_state)
+       when is_map(thread_state) do
+    draft_state = Map.get(thread_state, "draft_state", "drafted")
+    disposition = Map.get(thread_state, "disposition")
+    implementation_status = Map.get(thread_state, "implementation_status")
+    verification_status = Map.get(thread_state, "verification_status")
+
+    draft_state == "drafted" and
+      present_review_thread_reply?(Map.get(thread_state, "draft_reply")) and
+      String.starts_with?(to_string(thread_key), "comment:") and
+      (implementation_status == "addressed" or
+         (disposition in ["dismissed", "deferred"] and
+            verification_status in [
+              "contradicted",
+              "insufficient_evidence",
+              "stagnant_feedback",
+              "not_needed"
+            ]))
+  end
+
+  defp autonomous_review_postable_thread?(_thread_key, _thread_state), do: false
+
+  defp has_postable_review_drafts?(review_threads) when is_map(review_threads) do
+    Enum.any?(review_threads, fn {thread_key, thread_state} ->
+      String.starts_with?(to_string(thread_key), "comment:") and
+        Map.get(thread_state, "draft_state") == "approved_to_post" and
+        present_review_thread_reply?(Map.get(thread_state, "draft_reply"))
+    end)
+  end
+
+  defp has_postable_review_drafts?(_review_threads), do: false
+
+  defp present_review_thread_reply?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_review_thread_reply?(_value), do: false
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp maybe_named_list(_label, [], _limit), do: nil
 
@@ -3040,9 +3174,12 @@ defmodule SymphonyElixir.DeliveryEngine do
     block_issue(workspace, issue, :checkout_failed, reason, @blocked_state)
   end
 
-  defp refresh_issue(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
+  defp refresh_issue(%Issue{id: issue_id} = issue, issue_state_fetcher)
+       when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
-      {:ok, [%Issue{} = refreshed_issue | _]} -> {:ok, refreshed_issue}
+      {:ok, [%Issue{} = refreshed_issue | _]} ->
+        {:ok, refreshed_issue}
+
       {:ok, []} ->
         if ManualIssueSpec.runtime_issue_id?(issue_id) do
           {:ok, issue}
@@ -3050,7 +3187,8 @@ defmodule SymphonyElixir.DeliveryEngine do
           {:done, :missing}
         end
 
-      {:error, reason} -> {:error, {:issue_state_refresh_failed, reason}}
+      {:error, reason} ->
+        {:error, {:issue_state_refresh_failed, reason}}
     end
   end
 

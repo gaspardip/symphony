@@ -117,6 +117,77 @@ defmodule SymphonyElixir.ReviewAdjudicatorTest do
     assert adjudication.disposition == "needs_verification"
   end
 
+  test "treats dedupe-key semantic regressions as correctness risks with hard proof" do
+    workspace = temp_workspace("review-adjudicator-tracker-dedupe")
+    file_path = Path.join(workspace, "elixir/lib/symphony_elixir/tracker_event.ex")
+    File.mkdir_p!(Path.dirname(file_path))
+
+    File.write!(
+      file_path,
+      """
+      defmodule Example do
+        def dedupe_key(hash) do
+          ("tracker-event:" <> hash)
+          |> Base.encode16(case: :lower)
+        end
+      end
+      """
+    )
+
+    adjudication =
+      ReviewAdjudicator.adjudicate(
+        %{
+          kind: :comment,
+          author: "Copilot",
+          body: "`dedupe_key/1` now produces a completely different key and may break deduplication/backfill logic.",
+          path: "elixir/lib/symphony_elixir/tracker_event.ex",
+          line: 3,
+          state: nil,
+          review_decision: "COMMENTED"
+        },
+        workspace: workspace
+      )
+
+    assert adjudication.claim_type == "correctness_risk"
+    assert adjudication.hard_proof == true
+    assert "dedupe_prefix_hex_encoded" in adjudication.proof_sources
+    assert adjudication.disposition == "accepted"
+  end
+
+  test "treats dropped truthy atom support as correctness risk with hard proof" do
+    workspace = temp_workspace("review-adjudicator-truthy")
+    file_path = Path.join(workspace, "elixir/lib/symphony_elixir/delivery_engine.ex")
+    File.mkdir_p!(Path.dirname(file_path))
+
+    File.write!(
+      file_path,
+      """
+      defmodule Example do
+        defp truthy?(value), do: value in [true, "true", true, 1, "1"]
+      end
+      """
+    )
+
+    adjudication =
+      ReviewAdjudicator.adjudicate(
+        %{
+          kind: :comment,
+          author: "Copilot",
+          body: "`truthy?/1` appears to have accidentally dropped support for the atom `:true`, which can change runtime behavior.",
+          path: "elixir/lib/symphony_elixir/delivery_engine.ex",
+          line: 2,
+          state: nil,
+          review_decision: "COMMENTED"
+        },
+        workspace: workspace
+      )
+
+    assert adjudication.claim_type == "correctness_risk"
+    assert adjudication.hard_proof == true
+    assert "truthy_atom_support_dropped" in adjudication.proof_sources
+    assert adjudication.disposition == "accepted"
+  end
+
   defp temp_workspace(prefix) do
     path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
     File.mkdir_p!(path)

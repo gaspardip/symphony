@@ -662,7 +662,13 @@ defmodule SymphonyElixir.Orchestrator do
             if Map.get(run_state, :pr_url) != pr_url do
               {state_acc, outcomes_acc}
             else
-              process_github_workspace_match(state_acc, workspace, run_state, pr_url, outcomes_acc)
+              process_github_workspace_match(
+                state_acc,
+                workspace,
+                run_state,
+                pr_url,
+                outcomes_acc
+              )
             end
 
           _ ->
@@ -784,10 +790,17 @@ defmodule SymphonyElixir.Orchestrator do
     {state, outcomes}
   end
 
-  defp summarize_github_assignment(%GitHubEvent{} = event, pr_url, outcomes) when is_list(outcomes) do
+  defp summarize_github_assignment(%GitHubEvent{} = event, pr_url, outcomes)
+       when is_list(outcomes) do
     preferred_outcome =
       Enum.find_value(
-        ["stale_lease_reclaimable", "processed", "leased_elsewhere", "routed_to_other_runner", "lease_lookup_error"],
+        [
+          "stale_lease_reclaimable",
+          "processed",
+          "leased_elsewhere",
+          "routed_to_other_runner",
+          "lease_lookup_error"
+        ],
         fn target_state ->
           Enum.find(outcomes, &(Map.get(&1, :assignment_state) == target_state))
         end
@@ -817,7 +830,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp record_github_assignment(%State{} = state, %GitHubEvent{} = event, attrs) when is_map(attrs) do
+  defp record_github_assignment(%State{} = state, %GitHubEvent{} = event, attrs)
+       when is_map(attrs) do
     assignment =
       attrs
       |> Map.put_new(:event_id, Map.get(event, :event_id))
@@ -853,7 +867,8 @@ defmodule SymphonyElixir.Orchestrator do
               owner == state.lease_owner ->
                 :ok
 
-              LeaseManager.reclaimable?(lease) or same_runner_instance_lease_reclaimable?(run_state) ->
+              LeaseManager.reclaimable?(lease) or
+                  same_runner_instance_lease_reclaimable?(run_state) ->
                 {:reclaimable, owner}
 
               true ->
@@ -1057,7 +1072,8 @@ defmodule SymphonyElixir.Orchestrator do
     disposition = Map.get(item, :disposition)
 
     cond do
-      disposition == "needs_verification" and persisted_status in [nil, "", "not_needed", "contradicted"] ->
+      disposition == "needs_verification" and
+          persisted_status in [nil, "", "not_needed", "contradicted"] ->
         "pending"
 
       is_binary(persisted_status) and persisted_status != "" ->
@@ -1082,9 +1098,12 @@ defmodule SymphonyElixir.Orchestrator do
     source = normalize_issue_source(Map.get(run_state, :issue_source))
     issue_id = Map.get(run_state, :issue_id)
     issue_identifier = Map.get(run_state, :issue_identifier)
-    policy_class = Map.get(run_state, :effective_policy_class) || Map.get(run_state, :policy_class)
 
-    if source == :manual and is_binary(policy_class) and policy_class != "" and is_binary(issue_id) and
+    policy_class =
+      Map.get(run_state, :effective_policy_class) || Map.get(run_state, :policy_class)
+
+    if source == :manual and is_binary(policy_class) and policy_class != "" and
+         is_binary(issue_id) and
          issue_id != "" and is_binary(issue_identifier) and
          issue_identifier != "" do
       %Issue{
@@ -1193,7 +1212,8 @@ defmodule SymphonyElixir.Orchestrator do
          review_threads,
          review_claims
        ) do
-    if autonomous_review_follow_up?(state, issue, run_state) and PRWatcher.actionable_feedback?(feedback) do
+    if autonomous_review_follow_up?(state, issue, run_state) and
+         PRWatcher.actionable_feedback?(feedback) do
       target_stage = PRWatcher.follow_up_stage(feedback)
 
       next_objective =
@@ -1331,6 +1351,7 @@ defmodule SymphonyElixir.Orchestrator do
 
             {:error, reason} ->
               Logger.warning("Failed to persist non-actionable review triage for #{pr_url}: #{inspect(reason)}")
+
               :not_autonomous
           end
 
@@ -1419,7 +1440,13 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
-  defp review_resume_context(current_context, pr_url, review_threads, review_claims, next_objective) do
+  defp review_resume_context(
+         current_context,
+         pr_url,
+         review_threads,
+         review_claims,
+         next_objective
+       ) do
     context =
       case current_context do
         value when is_map(value) -> value
@@ -1931,7 +1958,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @doc false
   @spec issue_target_runner_channel_for_test(Issue.t()) :: String.t()
-  def issue_target_runner_channel_for_test(%Issue{} = issue), do: issue_target_runner_channel(issue)
+  def issue_target_runner_channel_for_test(%Issue{} = issue),
+    do: issue_target_runner_channel(issue)
 
   @doc false
   @spec seeded_manual_issue_from_run_state_for_test(map()) :: Issue.t() | nil
@@ -2218,7 +2246,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @spec ensure_review_follow_up_lease_for_test(State.t(), map()) :: term()
-  def ensure_review_follow_up_lease_for_test(%State{} = state, run_state) when is_map(run_state) do
+  def ensure_review_follow_up_lease_for_test(%State{} = state, run_state)
+      when is_map(run_state) do
     ensure_review_follow_up_lease(state, run_state)
   end
 
@@ -2228,7 +2257,8 @@ defmodule SymphonyElixir.Orchestrator do
     release_review_follow_up_lease(state, run_state, workspace)
   end
 
-  @spec persist_live_issue_lease_for_test(State.t(), Path.t(), map()) :: {:ok, map()} | {:error, term()}
+  @spec persist_live_issue_lease_for_test(State.t(), Path.t(), map()) ::
+          {:ok, map()} | {:error, term()}
   def persist_live_issue_lease_for_test(%State{} = state, workspace, issue)
       when is_binary(workspace) and is_map(issue) do
     persist_live_issue_lease(state, workspace, issue)
@@ -4515,6 +4545,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_resume_blocked_issue(%State{} = state, %Issue{} = issue) do
     workspace = Workspace.path_for_issue(issue.identifier)
+
     local_resume =
       fn resume_state ->
         cond do
@@ -4577,7 +4608,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp resumable_blocked_issue?(workspace, %Issue{state: @blocked_state}) when is_binary(workspace) do
+  defp resumable_blocked_issue?(workspace, %Issue{state: @blocked_state})
+       when is_binary(workspace) do
     File.dir?(workspace)
   end
 
@@ -4650,7 +4682,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp retry_resume_context(run_state, resume_stage) when is_map(run_state) and is_binary(resume_stage) do
+  defp retry_resume_context(run_state, resume_stage)
+       when is_map(run_state) and is_binary(resume_stage) do
     resume_context =
       case Map.get(run_state, :resume_context) do
         context when is_map(context) -> context
@@ -4659,7 +4692,11 @@ defmodule SymphonyElixir.Orchestrator do
 
     cond do
       resume_stage == "implement" and scoped_review_retry_candidate?(run_state) ->
-        Map.put(resume_context, :implementation_turn_window_base, Map.get(run_state, :implementation_turns, 0))
+        Map.put(
+          resume_context,
+          :implementation_turn_window_base,
+          Map.get(run_state, :implementation_turns, 0)
+        )
 
       true ->
         resume_context
@@ -6342,8 +6379,13 @@ defmodule SymphonyElixir.Orchestrator do
 
     ttl_ms = LeaseManager.ttl_ms()
     lease_owner = lease_field(live_lease, "owner") || Map.get(run_state, :lease_owner)
-    lease_updated_at = lease_field(live_lease, "updated_at") || Map.get(run_state, :lease_updated_at)
-    lease_acquired_at = lease_field(live_lease, "acquired_at") || Map.get(run_state, :lease_acquired_at)
+
+    lease_updated_at =
+      lease_field(live_lease, "updated_at") || Map.get(run_state, :lease_updated_at)
+
+    lease_acquired_at =
+      lease_field(live_lease, "acquired_at") || Map.get(run_state, :lease_acquired_at)
+
     lease_epoch = lease_field(live_lease, "epoch") || Map.get(run_state, :lease_epoch)
     reclaimable? = lease_reclaimable?(live_lease, lease_updated_at, ttl_ms, now)
 
@@ -6386,10 +6428,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp lease_field(nil, _key), do: nil
-  defp lease_field(lease, "owner") when is_map(lease), do: Map.get(lease, "owner") || Map.get(lease, :owner)
-  defp lease_field(lease, "updated_at") when is_map(lease), do: Map.get(lease, "updated_at") || Map.get(lease, :updated_at)
-  defp lease_field(lease, "acquired_at") when is_map(lease), do: Map.get(lease, "acquired_at") || Map.get(lease, :acquired_at)
-  defp lease_field(lease, "epoch") when is_map(lease), do: Map.get(lease, "epoch") || Map.get(lease, :epoch)
+
+  defp lease_field(lease, "owner") when is_map(lease),
+    do: Map.get(lease, "owner") || Map.get(lease, :owner)
+
+  defp lease_field(lease, "updated_at") when is_map(lease),
+    do: Map.get(lease, "updated_at") || Map.get(lease, :updated_at)
+
+  defp lease_field(lease, "acquired_at") when is_map(lease),
+    do: Map.get(lease, "acquired_at") || Map.get(lease, :acquired_at)
+
+  defp lease_field(lease, "epoch") when is_map(lease),
+    do: Map.get(lease, "epoch") || Map.get(lease, :epoch)
+
   defp lease_field(_lease, _key), do: nil
 
   defp lease_reclaimable?(lease, _updated_at, ttl_ms, now) when is_map(lease) do
@@ -6398,7 +6449,8 @@ defmodule SymphonyElixir.Orchestrator do
     ArgumentError -> false
   end
 
-  defp lease_reclaimable?(_lease, updated_at, ttl_ms, %DateTime{} = now) when is_binary(updated_at) do
+  defp lease_reclaimable?(_lease, updated_at, ttl_ms, %DateTime{} = now)
+       when is_binary(updated_at) do
     case DateTime.from_iso8601(updated_at) do
       {:ok, timestamp, _offset} -> DateTime.diff(now, timestamp, :millisecond) > ttl_ms
       _ -> true
@@ -6430,16 +6482,37 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp lease_age_ms(_lease, _updated_at, _now), do: nil
 
-  defp lease_owner_from_entry(entry), do: get_in(entry, [:lease, :lease_owner]) || Map.get(entry, :lease_owner)
-  defp lease_status_from_entry(entry), do: get_in(entry, [:lease, :lease_status]) || Map.get(entry, :lease_status)
-  defp lease_owner_instance_id_from_entry(entry), do: get_in(entry, [:lease, :lease_owner_instance_id]) || Map.get(entry, :lease_owner_instance_id)
-  defp lease_owner_channel_from_entry(entry), do: get_in(entry, [:lease, :lease_owner_channel]) || Map.get(entry, :lease_owner_channel)
-  defp lease_acquired_at_from_entry(entry), do: get_in(entry, [:lease, :lease_acquired_at]) || Map.get(entry, :lease_acquired_at)
-  defp lease_updated_at_from_entry(entry), do: get_in(entry, [:lease, :lease_updated_at]) || Map.get(entry, :lease_updated_at)
-  defp lease_epoch_from_entry(entry), do: get_in(entry, [:lease, :lease_epoch]) || Map.get(entry, :lease_epoch)
-  defp lease_age_ms_from_entry(entry), do: get_in(entry, [:lease, :lease_age_ms]) || Map.get(entry, :lease_age_ms)
-  defp lease_ttl_ms_from_entry(entry), do: get_in(entry, [:lease, :lease_ttl_ms]) || Map.get(entry, :lease_ttl_ms)
-  defp lease_reclaimable_from_entry(entry), do: get_in(entry, [:lease, :lease_reclaimable]) || Map.get(entry, :lease_reclaimable, false)
+  defp lease_owner_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_owner]) || Map.get(entry, :lease_owner)
+
+  defp lease_status_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_status]) || Map.get(entry, :lease_status)
+
+  defp lease_owner_instance_id_from_entry(entry),
+    do:
+      get_in(entry, [:lease, :lease_owner_instance_id]) ||
+        Map.get(entry, :lease_owner_instance_id)
+
+  defp lease_owner_channel_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_owner_channel]) || Map.get(entry, :lease_owner_channel)
+
+  defp lease_acquired_at_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_acquired_at]) || Map.get(entry, :lease_acquired_at)
+
+  defp lease_updated_at_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_updated_at]) || Map.get(entry, :lease_updated_at)
+
+  defp lease_epoch_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_epoch]) || Map.get(entry, :lease_epoch)
+
+  defp lease_age_ms_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_age_ms]) || Map.get(entry, :lease_age_ms)
+
+  defp lease_ttl_ms_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_ttl_ms]) || Map.get(entry, :lease_ttl_ms)
+
+  defp lease_reclaimable_from_entry(entry),
+    do: get_in(entry, [:lease, :lease_reclaimable]) || Map.get(entry, :lease_reclaimable, false)
 
   defp ensure_review_follow_up_lease(%State{} = state, run_state) when is_map(run_state) do
     issue_ref = issue_ref_for_run_state(run_state)
@@ -6459,7 +6532,8 @@ defmodule SymphonyElixir.Orchestrator do
               owner == state.lease_owner ->
                 {:ok, lease_snapshot_for_state(lease), false}
 
-              LeaseManager.reclaimable?(lease) or same_runner_instance_lease_reclaimable?(run_state) ->
+              LeaseManager.reclaimable?(lease) or
+                  same_runner_instance_lease_reclaimable?(run_state) ->
                 with :ok <-
                        reclaim_review_follow_up_lease(
                          issue_id,
@@ -6568,8 +6642,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_clear_persisted_lease(workspace) when is_binary(workspace) do
     if File.exists?(RunStateStore.state_path(workspace)) do
       case RunStateStore.clear_lease(workspace) do
-        {:ok, _run_state} -> :ok
-        {:error, reason} -> Logger.warning("Failed to clear persisted lease metadata for workspace=#{workspace}: #{inspect(reason)}")
+        {:ok, _run_state} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("Failed to clear persisted lease metadata for workspace=#{workspace}: #{inspect(reason)}")
       end
     end
   end

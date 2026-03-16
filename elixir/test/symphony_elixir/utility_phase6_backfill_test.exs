@@ -73,8 +73,13 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
 
   test "turn result rejects malformed contracts" do
     assert {:error, :invalid_turn_result} = TurnResult.normalize(:bad)
-    assert {:error, :invalid_files_touched} = TurnResult.normalize(valid_turn_result(files_touched: :bad))
-    assert {:error, {:invalid_boolean, :needs_another_turn}} = TurnResult.normalize(valid_turn_result(needs_another_turn: "yes"))
+
+    assert {:error, :invalid_files_touched} =
+             TurnResult.normalize(valid_turn_result(files_touched: :bad))
+
+    assert {:error, {:invalid_boolean, :needs_another_turn}} =
+             TurnResult.normalize(valid_turn_result(needs_another_turn: "yes"))
+
     assert {:ok, %TurnResult{blocked: true, blocker_type: :implementation}} =
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "unknown"))
 
@@ -94,7 +99,9 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
   test "turn result handles blank blocker types and invalid summary values" do
     assert {:error, :empty_summary} = TurnResult.normalize(valid_turn_result(summary: "   "))
     assert {:error, :invalid_summary} = TurnResult.normalize(valid_turn_result(summary: 123))
-    assert {:error, {:invalid_boolean, :blocked}} = TurnResult.normalize(valid_turn_result(blocked: "no"))
+
+    assert {:error, {:invalid_boolean, :blocked}} =
+             TurnResult.normalize(valid_turn_result(blocked: "no"))
 
     assert {:ok, %TurnResult{blocker_type: :none, blocked: true}} =
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "   "))
@@ -195,7 +202,9 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
       end)
 
     assert log =~ "Failed to configure rotating log file handler"
-    assert {:error, {:not_found, :symphony_disk_log}} = :logger.get_handler_config(:symphony_disk_log)
+
+    assert {:error, {:not_found, :symphony_disk_log}} =
+             :logger.get_handler_config(:symphony_disk_log)
   end
 
   test "specs check handles direct files, ignores non-elixir files, and raises on parse errors" do
@@ -289,7 +298,10 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     end
     """)
 
-    assert Enum.map(SpecsCheck.missing_public_specs([module_path]), &SpecsCheck.finding_identifier/1) == [
+    assert Enum.map(
+             SpecsCheck.missing_public_specs([module_path]),
+             &SpecsCheck.finding_identifier/1
+           ) == [
              "ResetSpec.dropped/1"
            ]
   end
@@ -429,6 +441,7 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     assert :ok = Adapter.attach_link("issue-1", "Spec", "https://example.test/spec")
 
     assert_receive {:graphql_called, attachment_query, %{issueId: "issue-1", title: "Spec", url: "https://example.test/spec"}}
+
     assert attachment_query =~ "attachmentCreate"
 
     Process.put(
