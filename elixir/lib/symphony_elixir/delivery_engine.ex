@@ -486,24 +486,33 @@ defmodule SymphonyElixir.DeliveryEngine do
          state,
          _inspection,
          opts
-       ) do
+      ) do
+    preflight_review_claims =
+      maybe_refresh_preflight_review_claims(
+        Map.get(state, :review_claims, %{}),
+        workspace
+      )
+
     preflight_review_threads =
       sync_review_claims_into_threads(
         Map.get(state, :review_threads, %{}),
-        Map.get(state, :review_claims, %{})
+        preflight_review_claims
       )
       |> maybe_post_autonomous_review_replies(
         workspace,
         Map.get(state, :pr_url),
-        state,
+        Map.put(state, :review_claims, preflight_review_claims),
         opts
       )
 
     state =
-      if preflight_review_threads != Map.get(state, :review_threads, %{}) do
+      if preflight_review_threads != Map.get(state, :review_threads, %{}) or
+           preflight_review_claims != Map.get(state, :review_claims, %{}) do
         {:ok, persisted_state} =
           RunStateStore.update(workspace, fn persisted ->
-            Map.put(persisted, :review_threads, preflight_review_threads)
+            persisted
+            |> Map.put(:review_claims, preflight_review_claims)
+            |> Map.put(:review_threads, preflight_review_threads)
           end)
 
         persisted_state
@@ -516,7 +525,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     focused_claims =
       focused_review_claims(
-        Map.get(state, :review_claims, %{}),
+        preflight_review_claims,
         focused_review_claim_limit(state)
       )
 
@@ -569,7 +578,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                implement_next_stage(turn_result, before_snapshot, after_snapshot),
              updated_review_claims =
                advance_review_claims_after_turn(
-                 Map.get(state, :review_claims, %{}),
+                 preflight_review_claims,
                  focused_claims,
                  turn_result
                ),
@@ -2318,6 +2327,26 @@ defmodule SymphonyElixir.DeliveryEngine do
     review_claims
     |> Enum.count(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
   end
+
+  defp maybe_refresh_preflight_review_claims(review_claims, workspace)
+       when is_map(review_claims) and is_binary(workspace) do
+    pending_verification_claims =
+      review_claims
+      |> Enum.filter(fn {_thread_key, claim} ->
+        claim_value(claim, :implementation_status) != "addressed" and
+          claim_value(claim, :disposition) == "needs_verification"
+      end)
+      |> Map.new()
+
+    if map_size(pending_verification_claims) == 0 do
+      review_claims
+    else
+      {refreshed_claims, _stats} = ReviewEvidenceCollector.collect(pending_verification_claims, workspace)
+      Map.merge(review_claims, refreshed_claims)
+    end
+  end
+
+  defp maybe_refresh_preflight_review_claims(review_claims, _workspace), do: review_claims
 
   defp claim_priority_bucket("security_risk"), do: 0
   defp claim_priority_bucket("critical_bug"), do: 0

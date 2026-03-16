@@ -626,6 +626,73 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert get_in(state, [:review_threads, "comment:96", "draft_state"]) == "posted"
   end
 
+  test "delivery engine refreshes pending review claims from local proof before implement" do
+    {workspace, issue} = implement_workspace!("review-claim-preflight-pattern-refresh")
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-preflight-pattern-refresh", :missing)
+    )
+
+    tracker_file = Path.join(workspace, "elixir/lib/symphony_elixir/tracker_event.ex")
+    File.mkdir_p!(Path.dirname(tracker_file))
+
+    File.write!(
+      tracker_file,
+      """
+      defmodule Example do
+        def dedupe_key(hash) do
+          ("tracker-event:" <> hash)
+          |> Base.encode16(case: :lower)
+        end
+      end
+      """
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:97" => %{
+                   "thread_key" => "comment:97",
+                   "kind" => "comment",
+                   "body" =>
+                     "`dedupe_key/1` now produces a completely different key and may break deduplication/backfill logic.",
+                   "path" => "elixir/lib/symphony_elixir/tracker_event.ex",
+                   "line" => 3,
+                   "claim_type" => "unclear",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "insufficient_evidence"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:97" => %{
+                   "thread_key" => "comment:97",
+                   "kind" => "comment",
+                   "path" => "elixir/lib/symphony_elixir/tracker_event.ex",
+                   "line" => 3,
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end
+             )
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert get_in(state, [:review_claims, "comment:97", "verification_status"]) == "verified_local_pattern"
+    assert get_in(state, [:review_claims, "comment:97", "disposition"]) == "accepted"
+    assert get_in(state, [:review_claims, "comment:97", "hard_proof"]) == true
+  end
+
   test "delivery engine blocks deploy preview stage when the harness omits a preview command" do
     {workspace, issue} = checkout_workspace!("deploy-preview-missing")
 
