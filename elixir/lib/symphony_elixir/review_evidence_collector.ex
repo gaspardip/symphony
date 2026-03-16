@@ -69,7 +69,8 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
           "verified_review_decision",
           "verified_scope",
           "verified_symbol_scope",
-          "verified_local_pattern"
+          "verified_local_pattern",
+          "verified_existing_proof"
         ] ->
           "I verified this concern locally and it is actionable. #{evidence_summary} I will address it in the next change."
 
@@ -106,7 +107,8 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
           "verified_review_decision",
           "verified_scope",
           "verified_symbol_scope",
-          "verified_local_pattern"
+          "verified_local_pattern",
+          "verified_existing_proof"
         ] ->
           "keep_open_until_change"
 
@@ -147,6 +149,21 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
           "Focused review verification matched the exact local code pattern described by the review claim."
         )
         |> append_proof_source("workspace_pattern_verified")
+        |> ensure_contradiction_sources()
+
+      low_cost_hard_proof_override?(claim) ->
+        claim
+        |> Map.put("verification_attempts", verification_attempts)
+        |> Map.put("verification_status", "verified_existing_proof")
+        |> Map.put("disposition", "accepted")
+        |> Map.put("actionable", true)
+        |> Map.put("hard_proof", true)
+        |> Map.put("evidence_refs", existing_proof_evidence_refs(claim))
+        |> Map.put(
+          "evidence_summary",
+          "Focused review verification found existing deterministic proof and a low-cost, low-risk fix path, so this claim can be addressed directly."
+        )
+        |> append_proof_source("existing_proof_override")
         |> ensure_contradiction_sources()
 
       contradiction?(claim, workspace) ->
@@ -427,6 +444,16 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     end
   end
 
+  defp existing_proof_evidence_refs(claim) do
+    refs =
+      claim
+      |> Map.get("proof_sources", [])
+      |> List.wrap()
+      |> Enum.map(&"proof:#{&1}")
+
+    if refs == [], do: scoped_evidence_refs(claim), else: refs
+  end
+
   defp symbol_evidence_refs(claim) do
     case {Map.get(claim, "path"), referenced_symbol(claim)} do
       {path, symbol} when is_binary(path) and is_binary(symbol) and symbol != "" ->
@@ -494,6 +521,12 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
   end
 
   defp elixir_boolean_atom_alias_false_positive?(_body, _workspace, _path), do: false
+
+  defp low_cost_hard_proof_override?(claim) do
+    Map.get(claim, "hard_proof", false) and
+      Map.get(claim, "change_cost") == "low" and
+      Map.get(claim, "semantic_risk") == "low"
+  end
 
   defp contains_any?(body, needles) when is_binary(body) and is_list(needles) do
     Enum.any?(needles, &String.contains?(body, &1))

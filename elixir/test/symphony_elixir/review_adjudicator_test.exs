@@ -189,6 +189,46 @@ defmodule SymphonyElixir.ReviewAdjudicatorTest do
     assert adjudication.disposition == "dismissed"
   end
 
+  test "accepts low-cost hard-proof grafana exposure findings" do
+    workspace = temp_workspace("review-adjudicator-grafana")
+    file_path = Path.join(workspace, "ops/observability/docker-compose.yml")
+    File.mkdir_p!(Path.dirname(file_path))
+
+    File.write!(
+      file_path,
+      """
+      services:
+        grafana:
+          ports:
+            - "3000:3000"
+          environment:
+            GF_AUTH_ANONYMOUS_ENABLED: "true"
+            GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      """
+    )
+
+    adjudication =
+      ReviewAdjudicator.adjudicate(
+        %{
+          kind: :comment,
+          author: "Copilot",
+          body: "Grafana is exposed on a host port with anonymous admin enabled, which is an unsafe default even for dogfood stacks.",
+          path: "ops/observability/docker-compose.yml",
+          line: 4,
+          state: nil,
+          review_decision: "COMMENTED"
+        },
+        workspace: workspace
+      )
+
+    assert adjudication.claim_type == "security_risk"
+    assert adjudication.hard_proof == true
+    assert adjudication.change_cost == "low"
+    assert adjudication.semantic_risk == "low"
+    assert "grafana_anonymous_admin_exposed" in adjudication.proof_sources
+    assert adjudication.disposition == "accepted"
+  end
+
   defp temp_workspace(prefix) do
     path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
     File.mkdir_p!(path)

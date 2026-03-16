@@ -14,8 +14,7 @@ defmodule SymphonyElixir.ReviewAdjudicator do
 
   @type disposition :: :accepted | :needs_verification | :deferred | :dismissed
   @type claim_type ::
-          :critical_bug
-          | :correctness_risk
+          :correctness_risk
           | :security_risk
           | :performance_risk
           | :failure_handling_risk
@@ -32,6 +31,8 @@ defmodule SymphonyElixir.ReviewAdjudicator do
     claim_type = claim_type(item)
     contradictions = contradiction_sources(item, workspace)
     hard_proof_sources = hard_proof_sources(item, workspace, claim_type)
+    change_cost = change_cost(item, claim_type, hard_proof_sources)
+    semantic_risk = semantic_risk(item, claim_type, hard_proof_sources)
     reproducibility_score = reproducibility_score(claim_type, contradictions, hard_proof_sources)
     evidence_quality_score = evidence_quality_score(item, claim_type)
     locality_score = locality_score(item, workspace)
@@ -73,12 +74,16 @@ defmodule SymphonyElixir.ReviewAdjudicator do
         claim_type,
         veracity_score,
         hard_proof_sources != [],
-        contradictions != []
+        contradictions != [],
+        change_cost,
+        semantic_risk
       )
 
     %{
       source_class: Atom.to_string(source_class),
       claim_type: Atom.to_string(claim_type),
+      change_cost: Atom.to_string(change_cost),
+      semantic_risk: Atom.to_string(semantic_risk),
       veracity_score: veracity_score,
       reproducibility_score: round_score(reproducibility_score),
       evidence_quality_score: round_score(evidence_quality_score),
@@ -356,6 +361,12 @@ defmodule SymphonyElixir.ReviewAdjudicator do
     |> List.wrap()
   end
 
+  defp hard_proof_sources(item, workspace, :security_risk) do
+    item
+    |> targeted_security_proof_source(workspace)
+    |> List.wrap()
+  end
+
   defp hard_proof_sources(_item, _workspace, _claim_type), do: []
 
   defp maybe_adjust_for_review_decision(score, item) do
@@ -376,26 +387,52 @@ defmodule SymphonyElixir.ReviewAdjudicator do
   defp maybe_adjust_for_stagnation(score, _stagnation_score, _claim_type, _hard_proof_sources),
     do: score
 
-  defp disposition(_claim_type, _score, _hard_proof?, true), do: :dismissed
+  defp disposition(_claim_type, _score, _hard_proof?, true, _change_cost, _semantic_risk),
+    do: :dismissed
 
-  defp disposition(claim_type, score, hard_proof?, false) do
+  defp disposition(claim_type, score, hard_proof?, false, change_cost, semantic_risk) do
     case claim_type do
-      type when type in [:critical_bug, :security_risk] ->
+      :security_risk ->
         cond do
-          score >= 0.85 and hard_proof? -> :accepted
-          score >= 0.65 -> :needs_verification
-          true -> :dismissed
+          low_cost_low_risk_hard_proof?(hard_proof?, change_cost, semantic_risk) and score >= 0.70 ->
+            :accepted
+
+          score >= 0.85 and hard_proof? ->
+            :accepted
+
+          score >= 0.65 ->
+            :needs_verification
+
+          true ->
+            :dismissed
         end
 
       type when type in [:correctness_risk, :failure_handling_risk, :performance_risk, :policy_violation, :test_gap, :unclear] ->
         cond do
-          score >= 0.80 and hard_proof? -> :accepted
-          score >= 0.60 -> :needs_verification
-          true -> :dismissed
+          low_cost_low_risk_hard_proof?(hard_proof?, change_cost, semantic_risk) and score >= 0.65 ->
+            :accepted
+
+          score >= 0.80 and hard_proof? ->
+            :accepted
+
+          score >= 0.60 ->
+            :needs_verification
+
+          true ->
+            :dismissed
         end
 
       :maintainability ->
-        if score >= 0.50, do: :deferred, else: :dismissed
+        cond do
+          low_cost_low_risk_hard_proof?(hard_proof?, change_cost, semantic_risk) and score >= 0.60 ->
+            :accepted
+
+          score >= 0.50 ->
+            :deferred
+
+          true ->
+            :dismissed
+        end
 
       :style_or_nit ->
         if score >= 0.70, do: :deferred, else: :dismissed
@@ -469,16 +506,47 @@ defmodule SymphonyElixir.ReviewAdjudicator do
   defp targeted_correctness_proof_source(item, workspace) do
     path = Map.get(item, :path)
     body = normalized_body(item)
+    contents = file_contents(workspace, path)
 
     cond do
       not is_binary(path) ->
         nil
 
       contains_any?(body, ["deduplication", "different key", "completely different key"]) and
-        is_binary(file_contents(workspace, path)) and
-        String.contains?(file_contents(workspace, path), ~s(("tracker-event:" <>)) and
-          String.contains?(file_contents(workspace, path), "Base.encode16") ->
+        is_binary(contents) and
+        String.contains?(contents, ~s(("tracker-event:" <>)) and
+          String.contains?(contents, "Base.encode16") ->
         :dedupe_prefix_hex_encoded
+
+      contains_any?(body, ["metrics_path", "config is ignored", "will not affect routing"]) and
+        is_binary(contents) and
+          String.contains?(contents, ~s(get "/metrics")) ->
+        :metrics_path_route_ignored
+
+      contains_any?(body, ["invalid numeric literal", "parsed as a string", "parsing error"]) and
+        is_binary(contents) and Regex.match?(~r/\b\d+_\d+\b/, contents) ->
+        :yaml_numeric_literal_invalid
+
+      true ->
+        nil
+    end
+  end
+
+  defp targeted_security_proof_source(item, workspace) do
+    path = Map.get(item, :path)
+    body = normalized_body(item)
+    contents = file_contents(workspace, path)
+
+    cond do
+      not is_binary(path) ->
+        nil
+
+      contains_any?(body, ["anonymous", "admin", "grafana"]) and
+        is_binary(contents) and
+        String.contains?(contents, ~s(GF_AUTH_ANONYMOUS_ENABLED: "true")) and
+        String.contains?(contents, "GF_AUTH_ANONYMOUS_ORG_ROLE: Admin") and
+          String.contains?(contents, ~s("3000:3000")) ->
+        :grafana_anonymous_admin_exposed
 
       true ->
         nil
@@ -507,6 +575,65 @@ defmodule SymphonyElixir.ReviewAdjudicator do
   end
 
   defp elixir_boolean_atom_alias_false_positive?(_body, _workspace, _path), do: false
+
+  defp change_cost(item, _claim_type, hard_proof_sources) do
+    body = normalized_body(item)
+    path = Map.get(item, :path)
+    line = Map.get(item, :line)
+
+    cond do
+      contains_any?(body, ["migration", "schema", "api", "all callers", "cross-cutting", "across the codebase"]) ->
+        :high
+
+      hard_proof_sources != [] and localized_proof_source?(hard_proof_sources) ->
+        :low
+
+      is_binary(path) and is_integer(line) ->
+        :low
+
+      is_binary(path) ->
+        :medium
+
+      true ->
+        :high
+    end
+  end
+
+  defp semantic_risk(item, claim_type, hard_proof_sources) do
+    body = normalized_body(item)
+
+    cond do
+      contains_any?(body, ["migration", "schema", "api contract", "public api", "backward compatibility"]) ->
+        :high
+
+      hard_proof_sources != [] and localized_proof_source?(hard_proof_sources) ->
+        :low
+
+      claim_type == :security_risk ->
+        :medium
+
+      claim_type in [:correctness_risk, :policy_violation] and is_binary(Map.get(item, :path)) ->
+        :medium
+
+      true ->
+        :high
+    end
+  end
+
+  defp low_cost_low_risk_hard_proof?(true, :low, :low), do: true
+  defp low_cost_low_risk_hard_proof?(_hard_proof?, _change_cost, _semantic_risk), do: false
+
+  defp localized_proof_source?(sources) do
+    Enum.all?(sources, fn source ->
+      source in [
+        :dedupe_prefix_hex_encoded,
+        :metrics_path_route_ignored,
+        :yaml_numeric_literal_invalid,
+        :repo_config_reference,
+        :grafana_anonymous_admin_exposed
+      ]
+    end)
+  end
 
   defp clamp_score(score) when score < 0.0, do: 0.0
   defp clamp_score(score) when score > 1.0, do: 1.0

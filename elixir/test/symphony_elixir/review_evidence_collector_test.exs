@@ -324,6 +324,39 @@ defmodule SymphonyElixir.ReviewEvidenceCollectorTest do
     assert stats.contradicted_count == 1
   end
 
+  test "collect upgrades deferred low-cost hard-proof claims into accepted work" do
+    {updated_claims, stats} =
+      ReviewEvidenceCollector.collect(
+        %{
+          "comment:150" => %{
+            "thread_key" => "comment:150",
+            "kind" => "comment",
+            "body" => "Grafana is exposed with anonymous admin access.",
+            "path" => "ops/observability/docker-compose.yml",
+            "line" => 4,
+            "claim_type" => "security_risk",
+            "disposition" => "deferred",
+            "actionable" => false,
+            "verification_status" => "not_needed",
+            "hard_proof" => true,
+            "proof_sources" => ["grafana_anonymous_admin_exposed"],
+            "change_cost" => "low",
+            "semantic_risk" => "low"
+          }
+        },
+        System.tmp_dir!()
+      )
+
+    claim = updated_claims["comment:150"]
+
+    assert claim["verification_status"] == "verified_existing_proof"
+    assert claim["disposition"] == "accepted"
+    assert claim["actionable"] == true
+    assert "proof:grafana_anonymous_admin_exposed" in claim["evidence_refs"]
+    assert "existing_proof_override" in claim["proof_sources"]
+    assert stats.accepted_count == 1
+  end
+
   test "collect defers repeated stagnant feedback without reopening implementation" do
     workspace =
       Path.join(
