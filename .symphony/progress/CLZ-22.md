@@ -293,6 +293,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `SymphonyElixir.GitHubCLIClient` now preserves PR review thread replies when normalizing `gh api repos/.../pulls/:number/comments`, and `SymphonyElixir.PRWatcher` now rehydrates persisted `posted_reply_id`, `posted_reply_url`, `draft_reply`, and `posted_at` from live GitHub reply data when the same thread already has a known posted reply. That gives the runtime a trustworthy source of current public reply state before deciding whether to refresh a thread in place.
 - Latest focused reconciliation validation on March 16, 2026:
   `mix test test/symphony_elixir/github_cli_client_test.exs test/symphony_elixir/pr_watcher_test.exs` passed with `19 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the reply-reconciliation helpers and comment-reply normalization changes.
+- Delivery-engine stage reconciliation on March 16, 2026:
+  `SymphonyElixir.DeliveryEngine` now rehydrates live PR review feedback at stage entry for `implement`, `validate`, and `review_verification`, persists refreshed `review_threads` and `review_claims` back into `run_state.json`, and updates `resume_context.review_feedback_summary` / `review_claim_summary` before the stage continues. That closes the gap where an already-running canary loop kept mutating stale local thread state after the initial webhook import.
+- Latest focused stage-reconciliation validation on March 16, 2026:
+  `mix test test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/github_cli_client_test.exs` passed with `55 tests, 0 failures`, and `mix dialyzer --format short` passed clean afterward (`Total errors: 165, Skipped: 165, Unnecessary Skips: 7`).
 
 ## Next Step
-Commit the reply-reconciliation slice, then trigger another live canary PR-review cycle and verify that already-posted GitHub replies are imported back into `review_threads` before the runtime decides whether to refresh them.
+Commit the delivery-engine reconciliation slice, rotate the local stable/canary topology onto the new head, and re-run the live `CLZ-22` canary PR-review cycle to confirm already-posted GitHub replies are imported before the runtime refreshes them in place.

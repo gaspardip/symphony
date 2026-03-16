@@ -42,6 +42,10 @@ defmodule SymphonyElixir.DeliveryEngine do
   @await_checks_missing_limit 6
   @codex_turn_error_methods ["codex/event/stream_error", "codex/event/error", "error"]
   @review_fix_max_turns 6
+  @dialyzer {:nowarn_function, refreshed_review_claims: 3}
+  @dialyzer {:nowarn_function, refreshed_review_threads: 3}
+  @dialyzer {:nowarn_function, refreshed_review_thread_state: 2}
+  @dialyzer {:nowarn_function, refreshed_review_claim_verification_status: 2}
   @passive_stages [
     "await_checks",
     "review_verification",
@@ -487,6 +491,8 @@ defmodule SymphonyElixir.DeliveryEngine do
          _inspection,
          opts
        ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
+
     preflight_review_claims =
       maybe_refresh_preflight_review_claims(
         Map.get(state, :review_claims, %{}),
@@ -716,6 +722,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          inspection,
          opts
        ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
     result = RunInspector.run_validation(workspace, inspection.harness, opts)
     validation_attempts = Map.get(state, :validation_attempts, 0) + 1
 
@@ -809,6 +816,8 @@ defmodule SymphonyElixir.DeliveryEngine do
          inspection,
          opts
        ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
+
     {updated_claims, stats} =
       ReviewEvidenceCollector.collect(Map.get(state, :review_claims, %{}), workspace)
 
@@ -2349,6 +2358,226 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp maybe_refresh_preflight_review_claims(review_claims, _workspace), do: review_claims
+
+  defp maybe_persist_reconciled_review_feedback(state, workspace, opts)
+       when is_map(state) and is_binary(workspace) do
+    reconciled_state = maybe_reconcile_live_review_feedback(state, workspace, opts)
+
+    if review_feedback_state_changed?(state, reconciled_state) do
+      {:ok, persisted_state} =
+        RunStateStore.update(workspace, fn persisted ->
+          persisted
+          |> Map.put(:review_claims, Map.get(reconciled_state, :review_claims, %{}))
+          |> Map.put(:review_threads, Map.get(reconciled_state, :review_threads, %{}))
+          |> Map.put(:last_review_decision, Map.get(reconciled_state, :last_review_decision))
+          |> Map.update(:resume_context, %{}, fn context ->
+            context
+            |> Map.put(
+              :review_feedback_summary,
+              review_feedback_summary(Map.get(reconciled_state, :review_threads, %{}))
+            )
+            |> Map.put(
+              :review_claim_summary,
+              ReviewEvidenceCollector.summary(Map.get(reconciled_state, :review_claims, %{}))
+            )
+            |> Map.put(:review_feedback_pr_url, Map.get(reconciled_state, :pr_url))
+          end)
+        end)
+
+      persisted_state
+    else
+      state
+    end
+  end
+
+  defp maybe_persist_reconciled_review_feedback(state, _workspace, _opts), do: state
+
+  defp review_feedback_state_changed?(state, reconciled_state)
+       when is_map(state) and is_map(reconciled_state) do
+    Map.get(state, :review_threads, %{}) != Map.get(reconciled_state, :review_threads, %{}) or
+      Map.get(state, :review_claims, %{}) != Map.get(reconciled_state, :review_claims, %{}) or
+      Map.get(state, :last_review_decision) != Map.get(reconciled_state, :last_review_decision)
+  end
+
+  defp review_feedback_state_changed?(_state, _reconciled_state), do: false
+
+  defp maybe_reconcile_live_review_feedback(state, workspace, opts)
+       when is_map(state) and is_binary(workspace) do
+    pr_url = Map.get(state, :pr_url)
+    review_threads = Map.get(state, :review_threads, %{})
+    review_claims = Map.get(state, :review_claims, %{})
+
+    cond do
+      not is_binary(pr_url) or String.trim(pr_url) == "" ->
+        state
+
+      map_size(review_threads) == 0 and map_size(review_claims) == 0 ->
+        state
+
+      true ->
+        watcher_opts =
+          [policy_pack: Map.get(state, :policy_pack) || Config.policy_pack_name(), pr_url: pr_url, thread_states: review_threads]
+          |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
+          |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
+
+        case PRWatcher.review_feedback(workspace, watcher_opts) do
+          %{status: "ok", items: items} = feedback when is_list(items) ->
+            if items == [] do
+              state
+            else
+              state
+              |> Map.put(:review_claims, refreshed_review_claims(items, review_claims, pr_url))
+              |> Map.put(:review_threads, refreshed_review_threads(items, review_threads, pr_url))
+              |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
+            end
+
+          _ ->
+            state
+        end
+    end
+  end
+
+  defp maybe_reconcile_live_review_feedback(state, _workspace, _opts), do: state
+
+  defp refreshed_review_claims(items, persisted_claims, pr_url)
+       when is_list(items) and is_map(persisted_claims) do
+    Enum.reduce(items, persisted_claims, fn item, acc ->
+      case Map.get(item, :thread_key) do
+        thread_key when is_binary(thread_key) ->
+          persisted = Map.get(acc, thread_key, %{})
+
+          claim_state = %{
+            "thread_key" => Map.get(item, :thread_key),
+            "id" => Map.get(item, :id),
+            "kind" => Map.get(item, :kind) |> to_string(),
+            "author" => Map.get(item, :author),
+            "body" => Map.get(item, :body),
+            "path" => Map.get(item, :path),
+            "line" => Map.get(item, :line),
+            "state" => Map.get(item, :state),
+            "review_decision" => Map.get(item, :review_decision),
+            "submitted_at" => Map.get(item, :submitted_at),
+            "source_class" => Map.get(item, :source_class),
+            "claim_type" => Map.get(item, :claim_type),
+            "veracity_score" => Map.get(item, :veracity_score),
+            "reproducibility_score" => Map.get(item, :reproducibility_score),
+            "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+            "locality_score" => Map.get(item, :locality_score),
+            "source_precision_score" => Map.get(item, :source_precision_score),
+            "consensus_score" => Map.get(item, :consensus_score),
+            "consensus_state" => Map.get(item, :consensus_state),
+            "consensus_summary" => Map.get(item, :consensus_summary),
+            "consensus_reasons" => Map.get(item, :consensus_reasons, []),
+            "historical_precision_score" => Map.get(item, :historical_precision_score),
+            "stagnation_score" => Map.get(item, :stagnation_score),
+            "stagnation_state" => Map.get(item, :stagnation_state),
+            "repeated_feedback_count" => Map.get(item, :repeated_feedback_count, 1),
+            "hard_proof" => Map.get(item, :hard_proof, false),
+            "proof_sources" => Map.get(item, :proof_sources, []),
+            "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+            "disposition" => Map.get(item, :disposition),
+            "actionable" => Map.get(item, :actionable, false),
+            "adjudication_summary" => Map.get(item, :adjudication_summary),
+            "verification_status" => refreshed_review_claim_verification_status(persisted, item),
+            "verification_attempts" => Map.get(persisted, "verification_attempts", 0),
+            "evidence_refs" => Map.get(persisted, "evidence_refs", []),
+            "evidence_summary" => Map.get(persisted, "evidence_summary"),
+            "implementation_status" => Map.get(persisted, "implementation_status"),
+            "addressed_summary" => Map.get(persisted, "addressed_summary"),
+            "pr_url" => pr_url
+          }
+
+          Map.put(acc, thread_key, claim_state)
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp refreshed_review_claims(_items, persisted_claims, _pr_url), do: persisted_claims
+
+  defp refreshed_review_threads(items, persisted_threads, pr_url)
+       when is_list(items) and is_map(persisted_threads) do
+    Enum.reduce(items, persisted_threads, fn item, acc ->
+      case Map.get(item, :thread_key) do
+        thread_key when is_binary(thread_key) ->
+          Map.put(acc, thread_key, refreshed_review_thread_state(item, pr_url))
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp refreshed_review_threads(_items, persisted_threads, _pr_url), do: persisted_threads
+
+  defp refreshed_review_thread_state(item, pr_url) when is_map(item) do
+    %{
+      "thread_key" => Map.get(item, :thread_key),
+      "id" => Map.get(item, :id),
+      "kind" => Map.get(item, :kind) |> to_string(),
+      "author" => Map.get(item, :author),
+      "body" => Map.get(item, :body),
+      "path" => Map.get(item, :path),
+      "line" => Map.get(item, :line),
+      "state" => Map.get(item, :state),
+      "review_decision" => Map.get(item, :review_decision),
+      "submitted_at" => Map.get(item, :submitted_at),
+      "draft_state" => Map.get(item, :draft_state, "drafted"),
+      "draft_reply" => Map.get(item, :draft_reply),
+      "resolution_recommendation" => Map.get(item, :resolution_recommendation),
+      "source_class" => Map.get(item, :source_class),
+      "claim_type" => Map.get(item, :claim_type),
+      "veracity_score" => Map.get(item, :veracity_score),
+      "reproducibility_score" => Map.get(item, :reproducibility_score),
+      "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+      "locality_score" => Map.get(item, :locality_score),
+      "source_precision_score" => Map.get(item, :source_precision_score),
+      "consensus_score" => Map.get(item, :consensus_score),
+      "consensus_state" => Map.get(item, :consensus_state),
+      "consensus_summary" => Map.get(item, :consensus_summary),
+      "consensus_reasons" => Map.get(item, :consensus_reasons, []),
+      "historical_precision_score" => Map.get(item, :historical_precision_score),
+      "stagnation_score" => Map.get(item, :stagnation_score),
+      "stagnation_state" => Map.get(item, :stagnation_state),
+      "repeated_feedback_count" => Map.get(item, :repeated_feedback_count, 1),
+      "hard_proof" => Map.get(item, :hard_proof, false),
+      "proof_sources" => Map.get(item, :proof_sources, []),
+      "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+      "disposition" => Map.get(item, :disposition),
+      "actionable" => Map.get(item, :actionable, false),
+      "adjudication_summary" => Map.get(item, :adjudication_summary),
+      "posted_reply_id" => Map.get(item, :posted_reply_id),
+      "posted_reply_url" => Map.get(item, :posted_reply_url),
+      "posted_at" => Map.get(item, :posted_at),
+      "reply_refresh_needed" => Map.get(item, :reply_refresh_needed, false),
+      "pr_url" => pr_url
+    }
+  end
+
+  defp refreshed_review_claim_verification_status(persisted, item)
+       when is_map(persisted) and is_map(item) do
+    persisted_status = Map.get(persisted, "verification_status")
+    disposition = Map.get(item, :disposition)
+
+    cond do
+      disposition == "needs_verification" and
+          persisted_status in [nil, "", "not_needed", "contradicted"] ->
+        "pending"
+
+      is_binary(persisted_status) and persisted_status != "" ->
+        persisted_status
+
+      disposition == "needs_verification" ->
+        "pending"
+
+      true ->
+        "not_needed"
+    end
+  end
+
+  defp refreshed_review_claim_verification_status(_persisted, _item), do: "not_needed"
 
   defp claim_priority_bucket("security_risk"), do: 0
   defp claim_priority_bucket("critical_bug"), do: 0

@@ -681,6 +681,67 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert get_in(state, [:review_threads, "comment:97", "reply_refresh_needed"]) == false
   end
 
+  test "delivery engine reconciles stale posted inline replies from live GitHub feedback before implement" do
+    {workspace, issue} = implement_workspace!("review-claim-live-reconcile")
+    issue_id = issue.id
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-live-reconcile", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:98" => %{
+                   "thread_key" => "comment:98",
+                   "kind" => "comment",
+                   "body" => "Please harden the local-only default.",
+                   "path" => "ops/observability/docker-compose.yml",
+                   "line" => 56,
+                   "claim_type" => "maintainability",
+                   "disposition" => "deferred",
+                   "actionable" => false,
+                   "verification_status" => "not_needed"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:98" => %{
+                   "thread_key" => "comment:98",
+                   "kind" => "comment",
+                   "path" => "ops/observability/docker-compose.yml",
+                   "line" => 56,
+                   "disposition" => "deferred",
+                   "actionable" => false,
+                   "draft_state" => "posted",
+                   "draft_reply" => "Old local reply.",
+                   "posted_reply_id" => "reply-98",
+                   "posted_reply_url" => "https://github.com/example/repo/pull/42#discussion_rreply-98",
+                   "reply_refresh_needed" => true
+                 }
+               })
+             end)
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+               github_client: __MODULE__.ReconcilingGitHubClient
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert get_in(state, [:review_threads, "comment:98", "draft_state"]) in ["posted", "approved_to_update"]
+    refute get_in(state, [:review_threads, "comment:98", "draft_reply"]) == "Old local reply."
+    assert get_in(state, [:review_threads, "comment:98", "posted_reply_id"]) == "reply-98"
+    assert get_in(state, [:review_threads, "comment:98", "posted_at"]) == "2026-03-16T12:06:00Z"
+    assert get_in(state, [:resume_context, :review_feedback_summary]) =~ "docker-compose.yml:56"
+  end
+
   test "delivery engine refreshes pending review claims from local proof before implement" do
     {workspace, issue} = implement_workspace!("review-claim-preflight-pattern-refresh")
 
@@ -1119,6 +1180,64 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
       send(self(), {:updated_review_reply, pr_url, to_string(comment_id), body})
       {:ok, %{id: to_string(comment_id), url: "#{pr_url}#reply-#{comment_id}", output: ""}}
     end
+  end
+
+  defmodule ReconcilingGitHubClient do
+    @behaviour SymphonyElixir.GitHubClient
+
+    @impl true
+    def existing_pull_request(_workspace, _opts), do: {:error, :missing_pr}
+
+    @impl true
+    def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+      do: {:error, :unsupported}
+
+    @impl true
+    def merge_pull_request(_workspace, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def review_feedback(_workspace, _opts) do
+      {:ok,
+       %{
+         pr_url: "https://github.com/example/repo/pull/42",
+         review_decision: "COMMENTED",
+         reviews: [],
+         comments: [
+           %{
+             id: "98",
+             user: %{login: "Copilot"},
+             body: "Please harden the local-only default.",
+             path: "ops/observability/docker-compose.yml",
+             line: 56,
+             created_at: "2026-03-16T12:00:00Z",
+             replies: [
+               %{
+                 id: "reply-98",
+                 url: "https://github.com/example/repo/pull/42#discussion_rreply-98",
+                 body: "I agree this may be worthwhile, but I am deferring it for now to avoid churn on the current PR.",
+                 created_at: "2026-03-16T12:05:00Z",
+                 updated_at: "2026-03-16T12:06:00Z"
+               }
+             ]
+           }
+         ]
+       }}
+    end
+
+    @impl true
+    def review_feedback_by_pr_url(_pr_url, _opts), do: review_feedback(nil, nil)
+
+    @impl true
+    def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+    @impl true
+    def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def edit_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
   end
 
   defp checkout_workspace!(suffix) do
