@@ -549,7 +549,7 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
              "resolve_after_change"
   end
 
-  test "delivery engine auto-posts deferred and dismissed inline review replies before implement" do
+  test "delivery engine keeps deferred and insufficient-evidence inline review replies as drafts before implement" do
     {workspace, issue} = implement_workspace!("review-claim-non-actionable-preflight-posted")
     issue_id = issue.id
 
@@ -616,14 +616,69 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
              )
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
-    assert_receive {:posted_review_reply, "https://github.com/example/repo/pull/42", "95", body95}
-    assert_receive {:posted_review_reply, "https://github.com/example/repo/pull/42", "96", body96}
-    assert body95 =~ "deferring it for now"
-    assert body96 =~ "not making a change"
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert get_in(state, [:review_threads, "comment:95", "draft_state"]) == "drafted"
+    assert get_in(state, [:review_threads, "comment:96", "draft_state"]) == "drafted"
+  end
+
+  test "delivery engine refreshes stale posted inline replies when the reply plan changes" do
+    {workspace, issue} = implement_workspace!("review-claim-posted-refresh")
+    issue_id = issue.id
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-posted-refresh", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:97" => %{
+                   "thread_key" => "comment:97",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 1,
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "dismissed",
+                   "actionable" => false,
+                   "verification_status" => "contradicted"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:97" => %{
+                   "thread_key" => "comment:97",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 1,
+                   "disposition" => "dismissed",
+                   "actionable" => false,
+                   "draft_state" => "posted",
+                   "draft_reply" => "Old reply.",
+                   "posted_reply_id" => "reply-97",
+                   "posted_reply_url" => "https://github.com/example/repo/pull/42#reply-97"
+                 }
+               })
+             end)
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+               github_client: __MODULE__.PostingGitHubClient
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+
+    assert_receive {:updated_review_reply, "https://github.com/example/repo/pull/42", "reply-97", body}
+
+    assert body =~ "could not confirm the claim"
 
     assert {:ok, state} = RunStateStore.load(workspace)
-    assert get_in(state, [:review_threads, "comment:95", "draft_state"]) == "posted"
-    assert get_in(state, [:review_threads, "comment:96", "draft_state"]) == "posted"
+    assert get_in(state, [:review_threads, "comment:97", "draft_state"]) == "posted"
+    assert get_in(state, [:review_threads, "comment:97", "reply_refresh_needed"]) == false
   end
 
   test "delivery engine refreshes pending review claims from local proof before implement" do
@@ -685,7 +740,10 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
              DeliveryEngine.run(workspace, issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end)
 
     assert {:ok, state} = RunStateStore.load(workspace)
-    assert get_in(state, [:review_claims, "comment:97", "verification_status"]) == "verified_local_pattern"
+
+    assert get_in(state, [:review_claims, "comment:97", "verification_status"]) ==
+             "verified_local_pattern"
+
     assert get_in(state, [:review_claims, "comment:97", "disposition"]) == "accepted"
     assert get_in(state, [:review_claims, "comment:97", "hard_proof"]) == true
   end
@@ -1054,6 +1112,12 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     def post_review_comment_reply(pr_url, comment_id, body, _opts) do
       send(self(), {:posted_review_reply, pr_url, to_string(comment_id), body})
       {:ok, %{id: "reply-#{comment_id}", url: "#{pr_url}#reply-#{comment_id}", output: ""}}
+    end
+
+    @impl true
+    def edit_review_comment_reply(pr_url, comment_id, body, _opts) do
+      send(self(), {:updated_review_reply, pr_url, to_string(comment_id), body})
+      {:ok, %{id: to_string(comment_id), url: "#{pr_url}#reply-#{comment_id}", output: ""}}
     end
   end
 

@@ -109,7 +109,12 @@ defmodule SymphonyElixir.PRWatcher do
         cached_feedback(thread_states, pr_url, :preferred_cached)
       else
         github_client = Keyword.get(opts, :github_client, configured_github_client())
-        github_opts = Keyword.merge(configured_github_client_opts(), Keyword.get(opts, :github_client_opts, []))
+
+        github_opts =
+          Keyword.merge(
+            configured_github_client_opts(),
+            Keyword.get(opts, :github_client_opts, [])
+          )
 
         case review_feedback_for_source(github_client, workspace, pr_url, github_opts) do
           {:ok, feedback} ->
@@ -119,13 +124,17 @@ defmodule SymphonyElixir.PRWatcher do
             actionable_items_count = Enum.count(items, &ReviewAdjudicator.actionable_feedback?/1)
             dismissed_items_count = Enum.count(items, &(Map.get(&1, :disposition) == "dismissed"))
 
-            Observability.emit([:symphony, :review, :feedback_detected], %{count: length(items)}, %{
-              pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
-              review_count: review_count,
-              comment_count: comment_count,
-              actionable_items_count: actionable_items_count,
-              dismissed_items_count: dismissed_items_count
-            })
+            Observability.emit(
+              [:symphony, :review, :feedback_detected],
+              %{count: length(items)},
+              %{
+                pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
+                review_count: review_count,
+                comment_count: comment_count,
+                actionable_items_count: actionable_items_count,
+                dismissed_items_count: dismissed_items_count
+              }
+            )
 
             %{
               status: "ok",
@@ -160,7 +169,8 @@ defmodule SymphonyElixir.PRWatcher do
 
   @spec actionable_feedback?(map()) :: boolean()
   def actionable_feedback?(feedback) when is_map(feedback) do
-    Map.get(feedback, :actionable_items_count, 0) > 0 or Map.get(feedback, "actionable_items_count", 0) > 0
+    Map.get(feedback, :actionable_items_count, 0) > 0 or
+      Map.get(feedback, "actionable_items_count", 0) > 0
   end
 
   @spec follow_up_stage(map()) :: String.t()
@@ -332,7 +342,10 @@ defmodule SymphonyElixir.PRWatcher do
 
     base_item
     |> Map.merge(adjudication)
-    |> Map.put(:draft_reply, Map.get(persisted, "draft_reply", draft_reply(base_item, adjudication, persisted)))
+    |> Map.put(
+      :draft_reply,
+      Map.get(persisted, "draft_reply", draft_reply(base_item, adjudication, persisted))
+    )
     |> Map.put(
       :resolution_recommendation,
       Map.get(
@@ -356,7 +369,12 @@ defmodule SymphonyElixir.PRWatcher do
 
     stagnation_state =
       if repeated_feedback_count >= 3 and
-           verification_status in ["pending", "insufficient_evidence", "consensus_supported", "stagnant_feedback"] and
+           verification_status in [
+             "pending",
+             "insufficient_evidence",
+             "consensus_supported",
+             "stagnant_feedback"
+           ] and
            disposition in ["needs_verification", "dismissed", "deferred"] do
         "stagnant_feedback"
       else
@@ -401,7 +419,8 @@ defmodule SymphonyElixir.PRWatcher do
 
   defp historical_precision_score(persisted) when is_map(persisted) do
     case Map.get(persisted, "verification_status") do
-      status when status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+      status
+      when status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
         0.85
 
       "contradicted" ->
@@ -432,7 +451,11 @@ defmodule SymphonyElixir.PRWatcher do
 
     base =
       cond do
-        verification_status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+        verification_status in [
+          "verified_review_decision",
+          "verified_scope",
+          "verified_symbol_scope"
+        ] ->
           "I verified this concern locally and it is actionable. #{to_string(evidence_summary)} I will address it in the follow-up change."
 
         verification_status == "contradicted" ->
@@ -473,7 +496,11 @@ defmodule SymphonyElixir.PRWatcher do
     verification_status = Map.get(persisted, "verification_status")
 
     cond do
-      verification_status in ["verified_review_decision", "verified_scope", "verified_symbol_scope"] ->
+      verification_status in [
+        "verified_review_decision",
+        "verified_scope",
+        "verified_symbol_scope"
+      ] ->
         "keep_open_until_change"
 
       disposition == "dismissed" ->
@@ -521,7 +548,8 @@ defmodule SymphonyElixir.PRWatcher do
         {:ok, feedback}
 
       {:error, _reason} = error ->
-        if is_binary(pr_url) and pr_url != "" and function_exported?(github_client, :review_feedback_by_pr_url, 2) do
+        if is_binary(pr_url) and pr_url != "" and
+             function_exported?(github_client, :review_feedback_by_pr_url, 2) do
           github_client.review_feedback_by_pr_url(pr_url, github_opts)
         else
           error
@@ -573,7 +601,10 @@ defmodule SymphonyElixir.PRWatcher do
                  pr_url,
                  thread_states,
                  Keyword.get(opts, :github_client, configured_github_client()),
-                 Keyword.merge(configured_github_client_opts(), Keyword.get(opts, :github_client_opts, []))
+                 Keyword.merge(
+                   configured_github_client_opts(),
+                   Keyword.get(opts, :github_client_opts, [])
+                 )
                ),
              true <- posted_count > 0 do
           {:ok, updated_threads, %{posted_count: posted_count, skipped_count: skipped_count}}
@@ -584,30 +615,59 @@ defmodule SymphonyElixir.PRWatcher do
     end
   end
 
-  defp do_post_approved_drafts(workspace, pr_url, thread_states, github_client, github_opts) do
+  defp do_post_approved_drafts(_workspace, pr_url, thread_states, github_client, github_opts) do
     Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state}, {acc, posted, skipped} ->
       draft_state = thread_state |> Map.get("draft_state", "drafted") |> to_string()
       draft_reply = Map.get(thread_state, "draft_reply")
 
       cond do
-        draft_state != "approved_to_post" or not present?(draft_reply) ->
+        draft_state not in ["approved_to_post", "approved_to_update"] or not present?(draft_reply) ->
           {acc, posted, skipped}
 
         String.starts_with?(to_string(thread_key), "comment:") ->
-          comment_id =
-            thread_key
-            |> to_string()
-            |> String.split(":", parts: 2)
-            |> List.last()
+          target_comment_id =
+            if draft_state == "approved_to_update" do
+              Map.get(thread_state, "posted_reply_id")
+            else
+              thread_key
+              |> to_string()
+              |> String.split(":", parts: 2)
+              |> List.last()
+            end
 
-          case github_client.post_review_comment_reply(pr_url, comment_id, draft_reply, github_opts) do
+          post_result =
+            if draft_state == "approved_to_update" do
+              if function_exported?(github_client, :edit_review_comment_reply, 4) do
+                github_client.edit_review_comment_reply(
+                  pr_url,
+                  target_comment_id,
+                  draft_reply,
+                  github_opts
+                )
+              else
+                {:error, :review_reply_update_unsupported}
+              end
+            else
+              github_client.post_review_comment_reply(
+                pr_url,
+                target_comment_id,
+                draft_reply,
+                github_opts
+              )
+            end
+
+          case post_result do
             {:ok, reply} ->
               updated =
                 thread_state
                 |> Map.put("draft_state", "posted")
-                |> Map.put("posted_at", DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+                |> Map.put(
+                  "posted_at",
+                  DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+                )
                 |> Map.put("posted_reply_id", Map.get(reply, :id))
                 |> Map.put("posted_reply_url", Map.get(reply, :url))
+                |> Map.put("reply_refresh_needed", false)
 
               {Map.put(acc, thread_key, updated), posted + 1, skipped}
 

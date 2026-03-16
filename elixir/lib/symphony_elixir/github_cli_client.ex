@@ -54,7 +54,18 @@ defmodule SymphonyElixir.GitHubCLIClient do
 
     case runner.(
            "gh",
-           ["pr", "create", "--title", title, "--body-file", body_file, "--base", base_branch, "--head", branch],
+           [
+             "pr",
+             "create",
+             "--title",
+             title,
+             "--body-file",
+             body_file,
+             "--base",
+             base_branch,
+             "--head",
+             branch
+           ],
            cd: workspace,
            stderr_to_stdout: true
          ) do
@@ -72,7 +83,13 @@ defmodule SymphonyElixir.GitHubCLIClient do
 
     case existing_pull_request(workspace, opts) do
       {:ok, %{url: url, state: state}} when state in ["MERGED", "merged"] ->
-        {:ok, %{merged: true, url: url, output: "Pull request already merged.", status: :already_merged}}
+        {:ok,
+         %{
+           merged: true,
+           url: url,
+           output: "Pull request already merged.",
+           status: :already_merged
+         }}
 
       {:ok, %{url: url, state: state}} when state in ["CLOSED", "closed"] ->
         {:error, {:pr_closed, url}}
@@ -127,7 +144,13 @@ defmodule SymphonyElixir.GitHubCLIClient do
              stderr_to_stdout: true
            ),
          {:ok, comments_payload} <- Jason.decode(comments_output) do
-      {:ok, normalize_review_feedback(url, pr_payload["reviewDecision"], reviews_payload, comments_payload)}
+      {:ok,
+       normalize_review_feedback(
+         url,
+         pr_payload["reviewDecision"],
+         reviews_payload,
+         comments_payload
+       )}
     else
       {_output, _status} -> {:error, :review_feedback_unavailable}
       _ -> {:error, :review_feedback_unavailable}
@@ -225,6 +248,44 @@ defmodule SymphonyElixir.GitHubCLIClient do
     end
   end
 
+  @impl true
+  def edit_review_comment_reply(pr_url, comment_id, body, opts)
+      when is_binary(pr_url) and is_binary(comment_id) and is_binary(body) do
+    runner = command_runner(opts)
+
+    with {:ok, %{owner: owner, repo: repo, number: _number}} <- parse_pr_identity(pr_url),
+         {output, 0} <-
+           runner.(
+             "gh",
+             [
+               "api",
+               "--method",
+               "PATCH",
+               "repos/#{owner}/#{repo}/pulls/comments/#{comment_id}",
+               "-f",
+               "body=#{body}"
+             ],
+             stderr_to_stdout: true
+           ),
+         {:ok, payload} <- Jason.decode(output) do
+      {:ok,
+       %{
+         id: payload["id"] && to_string(payload["id"]),
+         url: payload["html_url"],
+         output: output
+       }}
+    else
+      {output, status} when is_integer(status) ->
+        {:error, {:review_reply_update_failed, status, output}}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _ ->
+        {:error, :review_reply_update_failed}
+    end
+  end
+
   defp normalize_pr_create_output(output, workspace, opts) do
     url =
       output
@@ -249,8 +310,11 @@ defmodule SymphonyElixir.GitHubCLIClient do
     case URI.parse(url) do
       %URI{host: "github.com", path: path} ->
         case String.split(path || "", "/", trim: true) do
-          [owner, repo, "pull", number | _rest] -> {:ok, %{owner: owner, repo: repo, number: number}}
-          _ -> {:error, :invalid_pr_url}
+          [owner, repo, "pull", number | _rest] ->
+            {:ok, %{owner: owner, repo: repo, number: number}}
+
+          _ ->
+            {:error, :invalid_pr_url}
         end
 
       _ ->

@@ -46,14 +46,20 @@ defmodule SymphonyElixir.PRWatcherTest do
     assert feedback.status == "ok"
     assert feedback.pending_drafts_count == 2
     assert feedback.actionable_items_count == 1
-    assert Enum.any?(feedback.items, &(&1.kind == :review and &1.resolution_recommendation == "keep_open_until_change"))
+
+    assert Enum.any?(
+             feedback.items,
+             &(&1.kind == :review and &1.resolution_recommendation == "keep_open_until_change")
+           )
 
     assert Enum.any?(feedback.items, fn item ->
-             item.kind == :review and item.disposition == "needs_verification" and item.actionable == true
+             item.kind == :review and item.disposition == "needs_verification" and
+               item.actionable == true
            end)
 
     assert Enum.any?(feedback.items, fn item ->
-             item.kind == :comment and item.draft_state == "drafted" and item.disposition == "dismissed"
+             item.kind == :comment and item.draft_state == "drafted" and
+               item.disposition == "dismissed"
            end)
   end
 
@@ -162,6 +168,29 @@ defmodule SymphonyElixir.PRWatcherTest do
     assert get_in(updated_threads, ["review:1", "draft_state"]) == "approved_to_post"
   end
 
+  test "post_approved_drafts updates approved stale inline replies when policy allows" do
+    {:ok, updated_threads, stats} =
+      PRWatcher.post_approved_drafts(
+        "/tmp/symphony-pr-feedback",
+        "https://github.com/example/repo/pull/42",
+        %{
+          "comment:2" => %{
+            "draft_state" => "approved_to_update",
+            "draft_reply" => "Updated reply text.",
+            "posted_reply_id" => "reply-2"
+          }
+        },
+        policy_pack: :private_autopilot,
+        github_client: __MODULE__.PostingGitHubClient
+      )
+
+    assert stats.posted_count == 1
+    assert stats.skipped_count == 0
+    assert get_in(updated_threads, ["comment:2", "draft_state"]) == "posted"
+    assert get_in(updated_threads, ["comment:2", "posted_reply_id"]) == "reply-2"
+    assert get_in(updated_threads, ["comment:2", "reply_refresh_needed"]) == false
+  end
+
   test "post_approved_drafts is forbidden in client safe shadow mode" do
     assert {:error, {:external_comment_posting_forbidden, "client_safe_shadow"}} =
              PRWatcher.post_approved_drafts(
@@ -201,10 +230,21 @@ defmodule SymphonyElixir.PRWatcherTest do
          pr_url: "https://github.com/example/repo/pull/42",
          review_decision: "CHANGES_REQUESTED",
          reviews: [
-           %{id: 1, body: "Please fix this edge case before merge.", state: "CHANGES_REQUESTED", author: "reviewer"}
+           %{
+             id: 1,
+             body: "Please fix this edge case before merge.",
+             state: "CHANGES_REQUESTED",
+             author: "reviewer"
+           }
          ],
          comments: [
-           %{id: 2, body: "nit: tighten this copy", path: "lib/example.ex", line: 12, author: "reviewer"}
+           %{
+             id: 2,
+             body: "nit: tighten this copy",
+             path: "lib/example.ex",
+             line: 12,
+             author: "reviewer"
+           }
          ]
        }}
     end
@@ -214,6 +254,9 @@ defmodule SymphonyElixir.PRWatcherTest do
 
     @impl true
     def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def edit_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
   end
 
   defmodule FallbackGitHubClient do
@@ -242,10 +285,21 @@ defmodule SymphonyElixir.PRWatcherTest do
          pr_url: "https://github.com/example/repo/pull/42",
          review_decision: "CHANGES_REQUESTED",
          reviews: [
-           %{id: 1, body: "Please fix this edge case before merge.", state: "CHANGES_REQUESTED", author: "reviewer"}
+           %{
+             id: 1,
+             body: "Please fix this edge case before merge.",
+             state: "CHANGES_REQUESTED",
+             author: "reviewer"
+           }
          ],
          comments: [
-           %{id: 2, body: "nit: tighten this copy", path: "lib/example.ex", line: 12, author: "reviewer"}
+           %{
+             id: 2,
+             body: "nit: tighten this copy",
+             path: "lib/example.ex",
+             line: 12,
+             author: "reviewer"
+           }
          ]
        }}
     end
@@ -255,6 +309,9 @@ defmodule SymphonyElixir.PRWatcherTest do
 
     @impl true
     def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def edit_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
   end
 
   defmodule UnavailableGitHubClient do
@@ -281,6 +338,9 @@ defmodule SymphonyElixir.PRWatcherTest do
 
     @impl true
     def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def edit_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
   end
 
   defmodule PostingGitHubClient do
@@ -307,7 +367,22 @@ defmodule SymphonyElixir.PRWatcherTest do
 
     @impl true
     def post_review_comment_reply(_pr_url, comment_id, _body, _opts) do
-      {:ok, %{id: "reply-#{comment_id}", url: "https://github.com/example/reply/#{comment_id}", output: ""}}
+      {:ok,
+       %{
+         id: "reply-#{comment_id}",
+         url: "https://github.com/example/reply/#{comment_id}",
+         output: ""
+       }}
+    end
+
+    @impl true
+    def edit_review_comment_reply(_pr_url, comment_id, _body, _opts) do
+      {:ok,
+       %{
+         id: to_string(comment_id),
+         url: "https://github.com/example/reply/#{comment_id}",
+         output: ""
+       }}
     end
   end
 end

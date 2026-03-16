@@ -2341,7 +2341,9 @@ defmodule SymphonyElixir.DeliveryEngine do
     if map_size(pending_verification_claims) == 0 do
       review_claims
     else
-      {refreshed_claims, _stats} = ReviewEvidenceCollector.collect(pending_verification_claims, workspace)
+      {refreshed_claims, _stats} =
+        ReviewEvidenceCollector.collect(pending_verification_claims, workspace)
+
       Map.merge(review_claims, refreshed_claims)
     end
   end
@@ -2512,8 +2514,24 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_review_claim_path(path), do: path
 
   defp maybe_put_reply_plan(thread_state, draft_state, _reply_plan)
-       when draft_state in ["approved_to_post", "posted"] do
+       when draft_state == "approved_to_post" do
     thread_state
+  end
+
+  defp maybe_put_reply_plan(thread_state, "posted", reply_plan) do
+    next_reply = Map.get(reply_plan, :draft_reply)
+    existing_reply = Map.get(thread_state, "draft_reply")
+
+    if present_review_thread_reply?(next_reply) and
+         String.trim(to_string(next_reply)) != String.trim(to_string(existing_reply)) do
+      thread_state
+      |> Map.put("draft_reply", next_reply)
+      |> Map.put("resolution_recommendation", Map.get(reply_plan, :resolution_recommendation))
+      |> Map.put("reply_refresh_needed", true)
+    else
+      thread_state
+      |> Map.put("resolution_recommendation", Map.get(reply_plan, :resolution_recommendation))
+    end
   end
 
   defp maybe_put_reply_plan(thread_state, _draft_state, reply_plan) do
@@ -2557,10 +2575,15 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp promote_autonomous_review_drafts(review_threads, %PolicyPack{})
        when is_map(review_threads) do
     Enum.reduce(review_threads, review_threads, fn {thread_key, thread_state}, acc ->
-      if autonomous_review_postable_thread?(thread_key, thread_state) do
-        Map.update!(acc, thread_key, &Map.put(&1, "draft_state", "approved_to_post"))
-      else
-        acc
+      cond do
+        autonomous_review_postable_thread?(thread_key, thread_state) ->
+          Map.update!(acc, thread_key, &Map.put(&1, "draft_state", "approved_to_post"))
+
+        autonomous_review_refreshable_thread?(thread_key, thread_state) ->
+          Map.update!(acc, thread_key, &Map.put(&1, "draft_state", "approved_to_update"))
+
+        true ->
+          acc
       end
     end)
   end
@@ -2576,21 +2599,26 @@ defmodule SymphonyElixir.DeliveryEngine do
       present_review_thread_reply?(Map.get(thread_state, "draft_reply")) and
       String.starts_with?(to_string(thread_key), "comment:") and
       (implementation_status == "addressed" or
-         (disposition in ["dismissed", "deferred"] and
-            verification_status in [
-              "contradicted",
-              "insufficient_evidence",
-              "stagnant_feedback",
-              "not_needed"
-            ]))
+         (disposition == "dismissed" and verification_status == "contradicted"))
   end
 
   defp autonomous_review_postable_thread?(_thread_key, _thread_state), do: false
 
+  defp autonomous_review_refreshable_thread?(thread_key, thread_state)
+       when is_map(thread_state) do
+    Map.get(thread_state, "draft_state") == "posted" and
+      Map.get(thread_state, "reply_refresh_needed") == true and
+      is_binary(Map.get(thread_state, "posted_reply_id")) and
+      present_review_thread_reply?(Map.get(thread_state, "draft_reply")) and
+      String.starts_with?(to_string(thread_key), "comment:")
+  end
+
+  defp autonomous_review_refreshable_thread?(_thread_key, _thread_state), do: false
+
   defp has_postable_review_drafts?(review_threads) when is_map(review_threads) do
     Enum.any?(review_threads, fn {thread_key, thread_state} ->
       String.starts_with?(to_string(thread_key), "comment:") and
-        Map.get(thread_state, "draft_state") == "approved_to_post" and
+        Map.get(thread_state, "draft_state") in ["approved_to_post", "approved_to_update"] and
         present_review_thread_reply?(Map.get(thread_state, "draft_reply"))
     end)
   end
