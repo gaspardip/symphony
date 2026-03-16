@@ -149,6 +149,19 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
         |> append_proof_source("workspace_pattern_verified")
         |> ensure_contradiction_sources()
 
+      contradiction?(claim, workspace) ->
+        claim
+        |> Map.put("verification_attempts", verification_attempts)
+        |> Map.put("verification_status", "contradicted")
+        |> Map.put("disposition", "dismissed")
+        |> Map.put("actionable", false)
+        |> Map.put("evidence_refs", contradiction_evidence_refs(claim, workspace))
+        |> Map.put(
+          "evidence_summary",
+          "Focused review verification contradicted the claim in the local workspace."
+        )
+        |> append_proof_source("focused_review_verification")
+
       disposition != "needs_verification" ->
         claim
         |> Map.put("verification_attempts", verification_attempts)
@@ -166,19 +179,6 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
           "Repeated low-signal review feedback has not produced new local proof. Waiting for stronger evidence before reopening implementation."
         )
         |> ensure_contradiction_sources()
-
-      contradiction?(claim, workspace) ->
-        claim
-        |> Map.put("verification_attempts", verification_attempts)
-        |> Map.put("verification_status", "contradicted")
-        |> Map.put("disposition", "dismissed")
-        |> Map.put("actionable", false)
-        |> Map.put("evidence_refs", contradiction_evidence_refs(claim, workspace))
-        |> Map.put(
-          "evidence_summary",
-          "Focused review verification contradicted the claim in the local workspace."
-        )
-        |> append_proof_source("focused_review_verification")
 
       symbol_scope_verified?(claim, workspace) ->
         claim
@@ -252,10 +252,14 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
   defp contradiction?(claim, workspace) do
     path = Map.get(claim, "path")
     line = Map.get(claim, "line")
+    body = Map.get(claim, "body") |> to_string() |> String.downcase()
 
     cond do
       not is_binary(path) ->
         false
+
+      elixir_boolean_atom_alias_false_positive?(body, workspace, path) ->
+        true
 
       not file_exists?(workspace, path) ->
         true
@@ -309,7 +313,7 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
 
     case file_contents(workspace, path) do
       contents when is_binary(contents) ->
-        tracker_dedupe_regression?(body, contents) or truthy_atom_regression?(body, contents)
+        tracker_dedupe_regression?(body, contents)
 
       _ ->
         false
@@ -389,6 +393,13 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
       is_binary(path) and is_integer(line) and not line_exists?(workspace, path, line) ->
         ["missing_line:#{path}:#{line}"]
 
+      elixir_boolean_atom_alias_false_positive?(
+        Map.get(claim, "body") |> to_string() |> String.downcase(),
+        workspace,
+        path
+      ) ->
+        ["semantic_contradiction:elixir_boolean_atom_alias"]
+
       true ->
         []
     end
@@ -410,9 +421,6 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     cond do
       contains_any?(body, ["deduplication", "different key", "completely different key"]) ->
         ["pattern:dedupe_prefix_hex_encoded", "file_scope:#{path}:#{line}"]
-
-      contains_any?(body, ["dropped support", "treated as false", "runtime behavior"]) ->
-        ["pattern:truthy_atom_support_dropped", "file_scope:#{path}:#{line}"]
 
       true ->
         scoped_evidence_refs(claim)
@@ -475,25 +483,17 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
 
   defp tracker_dedupe_regression?(_body, _contents), do: false
 
-  defp truthy_atom_regression?(body, contents) when is_binary(body) and is_binary(contents) do
-    contains_any?(body, ["dropped support", "treated as false", "runtime behavior"]) and
-      truthy_atom_support_dropped?(contents)
+  defp elixir_boolean_atom_alias_false_positive?(body, workspace, path)
+       when is_binary(body) and is_binary(workspace) and is_binary(path) do
+    contains_any?(body, ["atom `:true`", "atom :true"]) and
+      String.ends_with?(path, ".ex") and
+      case file_contents(workspace, path) do
+        contents when is_binary(contents) -> String.contains?(contents, "defp truthy?")
+        _ -> false
+      end
   end
 
-  defp truthy_atom_regression?(_body, _contents), do: false
-
-  defp truthy_atom_support_dropped?(contents) when is_binary(contents) do
-    case Regex.run(~r/defp\s+truthy\?\(value\),\s+do:\s+value\s+in\s+\[(.*?)\]/s, contents) do
-      [_, list_contents] ->
-        list_text = String.replace(list_contents, ~r/\s+/, "")
-
-        String.contains?(list_text, "true") and String.contains?(list_text, "\"true\"") and
-          not String.contains?(list_text, ":true")
-
-      _ ->
-        false
-    end
-  end
+  defp elixir_boolean_atom_alias_false_positive?(_body, _workspace, _path), do: false
 
   defp contains_any?(body, needles) when is_binary(body) and is_list(needles) do
     Enum.any?(needles, &String.contains?(body, &1))

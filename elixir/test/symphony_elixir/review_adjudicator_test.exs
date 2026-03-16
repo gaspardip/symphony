@@ -154,7 +154,7 @@ defmodule SymphonyElixir.ReviewAdjudicatorTest do
     assert adjudication.disposition == "accepted"
   end
 
-  test "treats dropped truthy atom support as correctness risk with hard proof" do
+  test "dismisses truthy atom-support feedback as an Elixir boolean-atom false positive" do
     workspace = temp_workspace("review-adjudicator-truthy")
     file_path = Path.join(workspace, "elixir/lib/symphony_elixir/delivery_engine.ex")
     File.mkdir_p!(Path.dirname(file_path))
@@ -183,9 +183,10 @@ defmodule SymphonyElixir.ReviewAdjudicatorTest do
       )
 
     assert adjudication.claim_type == "correctness_risk"
-    assert adjudication.hard_proof == true
-    assert "truthy_atom_support_dropped" in adjudication.proof_sources
-    assert adjudication.disposition == "accepted"
+    assert adjudication.hard_proof == false
+    assert adjudication.proof_sources == []
+    assert "elixir_boolean_atom_alias" in adjudication.contradiction_sources
+    assert adjudication.disposition == "dismissed"
   end
 
   defp temp_workspace(prefix) do

@@ -278,7 +278,7 @@ defmodule SymphonyElixir.ReviewEvidenceCollectorTest do
     assert stats.accepted_count == 1
   end
 
-  test "collect upgrades deferred truthy regressions from local code patterns" do
+  test "collect contradicts truthy atom-support feedback as an Elixir boolean alias false positive" do
     workspace =
       Path.join(
         System.tmp_dir!(),
@@ -317,11 +317,11 @@ defmodule SymphonyElixir.ReviewEvidenceCollectorTest do
 
     claim = updated_claims["comment:141"]
 
-    assert claim["verification_status"] == "verified_local_pattern"
-    assert claim["disposition"] == "accepted"
-    assert claim["actionable"] == true
-    assert "pattern:truthy_atom_support_dropped" in claim["evidence_refs"]
-    assert stats.accepted_count == 1
+    assert claim["verification_status"] == "contradicted"
+    assert claim["disposition"] == "dismissed"
+    assert claim["actionable"] == false
+    assert "semantic_contradiction:elixir_boolean_atom_alias" in claim["evidence_refs"]
+    assert stats.contradicted_count == 1
   end
 
   test "collect defers repeated stagnant feedback without reopening implementation" do

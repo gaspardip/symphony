@@ -319,10 +319,14 @@ defmodule SymphonyElixir.ReviewAdjudicator do
   defp contradiction_sources(item, workspace) do
     path = Map.get(item, :path)
     line = Map.get(item, :line)
+    body = normalized_body(item)
 
     cond do
       not is_binary(path) ->
         []
+
+      elixir_boolean_atom_alias_false_positive?(body, workspace, path) ->
+        [:elixir_boolean_atom_alias]
 
       not file_exists?(workspace, path) ->
         [:missing_path]
@@ -476,10 +480,6 @@ defmodule SymphonyElixir.ReviewAdjudicator do
           String.contains?(file_contents(workspace, path), "Base.encode16") ->
         :dedupe_prefix_hex_encoded
 
-      contains_any?(body, ["dropped support", "treated as false", "runtime behavior"]) and
-        is_binary(file_contents(workspace, path)) and truthy_atom_support_dropped?(file_contents(workspace, path)) ->
-        :truthy_atom_support_dropped
-
       true ->
         nil
     end
@@ -498,18 +498,15 @@ defmodule SymphonyElixir.ReviewAdjudicator do
 
   defp file_contents(_workspace, _relative_path), do: nil
 
-  defp truthy_atom_support_dropped?(contents) when is_binary(contents) do
-    case Regex.run(~r/defp\s+truthy\?\(value\),\s+do:\s+value\s+in\s+\[(.*?)\]/s, contents) do
-      [_, list_contents] ->
-        list_text = String.replace(list_contents, ~r/\s+/, "")
-
-        String.contains?(list_text, "true") and String.contains?(list_text, "\"true\"") and
-          not String.contains?(list_text, ":true")
-
-      _ ->
-        false
-    end
+  defp elixir_boolean_atom_alias_false_positive?(body, workspace, path)
+       when is_binary(body) and is_binary(path) do
+    contains_any?(body, ["atom `:true`", "atom :true"]) and
+      String.ends_with?(path, ".ex") and
+      is_binary(file_contents(workspace, path)) and
+      String.contains?(file_contents(workspace, path), "defp truthy?")
   end
+
+  defp elixir_boolean_atom_alias_false_positive?(_body, _workspace, _path), do: false
 
   defp clamp_score(score) when score < 0.0, do: 0.0
   defp clamp_score(score) when score > 1.0, do: 1.0
