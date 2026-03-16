@@ -220,6 +220,16 @@ defmodule SymphonyElixir.DeliveryEngine do
   def handle_checkout_error_for_test(workspace, issue, reason),
     do: handle_checkout_error(workspace, issue, reason)
 
+  @doc false
+  @spec should_resume_validation_from_retained_changes_for_test(map(), list(), term()) ::
+          boolean()
+  def should_resume_validation_from_retained_changes_for_test(
+        state,
+        focused_claims,
+        before_snapshot
+      ),
+      do: should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot)
+
   defp do_run(
          app_session,
          workspace,
@@ -528,6 +538,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     implementation_turns = Map.get(state, :implementation_turns, 0)
     effective_implementation_turns = effective_implementation_turns(state)
+    before_snapshot = RunInspector.inspect(workspace, opts)
 
     focused_claims =
       focused_review_claims(
@@ -535,16 +546,44 @@ defmodule SymphonyElixir.DeliveryEngine do
         focused_review_claim_limit(state)
       )
 
-    if effective_implementation_turns >= max_turns do
-      block_issue(
-        workspace,
-        issue,
-        :turn_budget_exhausted,
-        "Reached #{max_turns} implementation turns without a mergeable result.",
-        @blocked_state
-      )
-    else
-      before_snapshot = RunInspector.inspect(workspace, opts)
+    cond do
+      should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot) ->
+        {:ok, _state} =
+          RunStateStore.transition(
+            workspace,
+            "validate",
+            Map.merge(
+              %{
+                review_claims: preflight_review_claims,
+                review_threads: preflight_review_threads,
+                branch: before_snapshot.branch || Map.get(state, :branch),
+                pr_url: before_snapshot.pr_url || Map.get(state, :pr_url)
+              },
+              resume_context_attrs(
+                workspace,
+                issue,
+                state,
+                before_snapshot,
+                %{
+                  next_objective: "Stop editing and let Symphony run the official validation contract."
+                },
+                opts
+              )
+            )
+          )
+
+        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+
+      effective_implementation_turns >= max_turns ->
+        block_issue(
+          workspace,
+          issue,
+          :turn_budget_exhausted,
+          "Reached #{max_turns} implementation turns without a mergeable result.",
+          @blocked_state
+        )
+
+      true ->
 
       prompt =
         implement_prompt(
@@ -3129,6 +3168,27 @@ defmodule SymphonyElixir.DeliveryEngine do
        do: true
 
   defp retained_workspace_changes_present?(_snapshot), do: false
+
+  defp should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot)
+       when is_map(state) and is_list(focused_claims) do
+    focused_claims == [] and
+      retained_workspace_changes_present?(before_snapshot) and
+      last_turn_completed_without_follow_up?(Map.get(state, :last_turn_result))
+  end
+
+  defp should_resume_validation_from_retained_changes?(_state, _focused_claims, _before_snapshot),
+    do: false
+
+  defp last_turn_completed_without_follow_up?(%TurnResult{} = turn_result) do
+    turn_result.blocked == false and turn_result.needs_another_turn == false
+  end
+
+  defp last_turn_completed_without_follow_up?(turn_result) when is_map(turn_result) do
+    claim_value(turn_result, :blocked, false) == false and
+      claim_value(turn_result, :needs_another_turn, false) == false
+  end
+
+  defp last_turn_completed_without_follow_up?(_turn_result), do: false
 
   defp ensure_issue_still_active(%Issue{} = issue) do
     if active_issue_state?(issue.state) do

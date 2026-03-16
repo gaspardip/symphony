@@ -418,6 +418,30 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     refute result == {:stop, :turn_budget_exhausted}
   end
 
+  test "retained scoped review-fix changes resume at validate instead of blocking on turn budget" do
+    before_snapshot = %SymphonyElixir.RunInspector.Snapshot{
+      workspace: "/tmp/workspace",
+      dirty?: true,
+      changed_files: 1,
+      pr_url: nil
+    }
+
+    state = %{
+      implementation_turns: 23,
+      last_turn_result: %{
+        "blocked" => false,
+        "needs_another_turn" => false,
+        "summary" => "Scoped review fix applied."
+      }
+    }
+
+    assert DeliveryEngine.should_resume_validation_from_retained_changes_for_test(
+             state,
+             [],
+             before_snapshot
+           )
+  end
+
   test "unknown stage returns an error" do
     {workspace, issue} = stage_workspace!("unknown")
 
