@@ -24,6 +24,8 @@ defmodule SymphonyElixir.PRWatcher do
   @dialyzer {:nowarn_function, draft_reply: 3}
   @dialyzer {:nowarn_function, resolution_recommendation: 3}
   @dialyzer {:nowarn_function, review_history: 2}
+  @dialyzer {:nowarn_function, reconcile_posted_reply: 3}
+  @dialyzer {:nowarn_function, matched_live_reply: 2}
   @dialyzer {:nowarn_function, same_feedback_claim?: 2}
   @dialyzer {:nowarn_function, normalize_feedback_signature: 1}
   @dialyzer {:nowarn_function, historical_precision_score: 1}
@@ -321,7 +323,8 @@ defmodule SymphonyElixir.PRWatcher do
       state: nil,
       review_decision: review_decision,
       submitted_at: Map.get(comment, :created_at) || Map.get(comment, "created_at"),
-      draft_state: Map.get(persisted, "draft_state", "drafted")
+      draft_state: Map.get(persisted, "draft_state", "drafted"),
+      replies: Map.get(comment, :replies) || Map.get(comment, "replies") || []
     }
 
     merge_adjudication(base_item, persisted, workspace)
@@ -354,7 +357,43 @@ defmodule SymphonyElixir.PRWatcher do
         resolution_recommendation(base_item, adjudication, persisted)
       )
     )
+    |> reconcile_posted_reply(base_item, persisted)
   end
+
+  defp reconcile_posted_reply(item, base_item, persisted)
+       when is_map(item) and is_map(base_item) and is_map(persisted) do
+    case matched_live_reply(base_item, persisted) do
+      nil ->
+        item
+
+      reply ->
+        item
+        |> Map.put(:draft_state, "posted")
+        |> Map.put(:draft_reply, Map.get(reply, :body) || Map.get(item, :draft_reply))
+        |> Map.put(:posted_reply_id, Map.get(reply, :id))
+        |> Map.put(:posted_reply_url, Map.get(reply, :url))
+        |> Map.put(:posted_at, Map.get(reply, :updated_at) || Map.get(reply, :created_at))
+        |> Map.put(:reply_refresh_needed, false)
+    end
+  end
+
+  defp reconcile_posted_reply(item, _base_item, _persisted), do: item
+
+  defp matched_live_reply(base_item, persisted) when is_map(base_item) and is_map(persisted) do
+    replies = Map.get(base_item, :replies, [])
+    persisted_reply_id = Map.get(persisted, "posted_reply_id")
+    persisted_reply_url = normalize_pr_url(Map.get(persisted, "posted_reply_url"))
+
+    Enum.find(replies, fn reply ->
+      reply_id = Map.get(reply, :id) || Map.get(reply, "id")
+      reply_url = normalize_pr_url(Map.get(reply, :url) || Map.get(reply, "url"))
+
+      (is_binary(persisted_reply_id) and persisted_reply_id != "" and reply_id == persisted_reply_id) or
+        (is_binary(persisted_reply_url) and persisted_reply_url != "" and reply_url == persisted_reply_url)
+    end)
+  end
+
+  defp matched_live_reply(_base_item, _persisted), do: nil
 
   defp review_history(persisted, item) when is_map(persisted) and is_map(item) do
     repeated_feedback_count =

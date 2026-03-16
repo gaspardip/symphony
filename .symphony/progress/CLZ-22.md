@@ -289,6 +289,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `mix test test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs` passed with `46 tests, 0 failures`, and `mix dialyzer --format short` remained clean after tightening autonomous public reply posting and adding stale-reply refresh coverage.
 - Remote PR alignment on March 16, 2026:
   pushed `codex/clz-22-observability` through commit `937a30c`, then corrected the previously posted stale GitHub replies for the Grafana hardening comment and the Elixir `true`/`:true` false positive so the live PR thread history matches the stricter adjudication policy.
+- GitHub reply reconciliation on March 16, 2026:
+  `SymphonyElixir.GitHubCLIClient` now preserves PR review thread replies when normalizing `gh api repos/.../pulls/:number/comments`, and `SymphonyElixir.PRWatcher` now rehydrates persisted `posted_reply_id`, `posted_reply_url`, `draft_reply`, and `posted_at` from live GitHub reply data when the same thread already has a known posted reply. That gives the runtime a trustworthy source of current public reply state before deciding whether to refresh a thread in place.
+- Latest focused reconciliation validation on March 16, 2026:
+  `mix test test/symphony_elixir/github_cli_client_test.exs test/symphony_elixir/pr_watcher_test.exs` passed with `19 tests, 0 failures`, and `mix dialyzer --format short` remained clean after the reply-reconciliation helpers and comment-reply normalization changes.
 
 ## Next Step
-Commit the stricter public-reply trust patch, rerun the live canary review cycle against PR `#1`, and confirm stale or contradicted inline threads are refreshed in place while deferred low-confidence comments stay local drafts until stronger proof appears.
+Commit the reply-reconciliation slice, then trigger another live canary PR-review cycle and verify that already-posted GitHub replies are imported back into `review_threads` before the runtime decides whether to refresh them.

@@ -162,7 +162,15 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
 
                  "gh", ["api", "repos/example/repo/pulls/42/comments"], _opts ->
                    {Jason.encode!([
-                      %{"id" => 2, "body" => "nit: rename this", "path" => "lib/example.ex", "line" => 12, "created_at" => "2026-03-11T10:01:00Z", "user" => %{"login" => "reviewer"}}
+                      %{"id" => 2, "body" => "nit: rename this", "path" => "lib/example.ex", "line" => 12, "created_at" => "2026-03-11T10:01:00Z", "user" => %{"login" => "reviewer"}},
+                      %{
+                        "id" => 3,
+                        "body" => "I fixed this locally.",
+                        "in_reply_to_id" => 2,
+                        "created_at" => "2026-03-11T10:02:00Z",
+                        "html_url" => "https://github.com/example/repo/pull/42#discussion_r3",
+                        "user" => %{"login" => "gaspardip"}
+                      }
                     ]), 0}
                end
              )
@@ -170,7 +178,15 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
     assert feedback.pr_url == "https://github.com/example/repo/pull/42"
     assert feedback.review_decision == "CHANGES_REQUESTED"
     assert [%{author: "reviewer", state: "CHANGES_REQUESTED"}] = feedback.reviews
-    assert [%{author: "reviewer", path: "lib/example.ex", line: 12}] = feedback.comments
+
+    assert [
+             %{
+               author: "reviewer",
+               path: "lib/example.ex",
+               line: 12,
+               replies: [%{id: "3", author: "gaspardip"}]
+             }
+           ] = feedback.comments
   end
 
   test "review_feedback_by_pr_url loads reviews and inline comments without a workspace checkout" do

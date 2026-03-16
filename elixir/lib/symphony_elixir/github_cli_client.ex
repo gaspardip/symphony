@@ -346,21 +346,52 @@ defmodule SymphonyElixir.GitHubCLIClient do
   defp normalize_reviews(_), do: []
 
   defp normalize_review_comments(comments) when is_list(comments) do
-    Enum.map(comments, fn comment ->
+    replies_by_parent =
+      comments
+      |> Enum.filter(&present_reply_parent?/1)
+      |> Enum.group_by(&to_string(comment_reply_parent_id(&1)), &normalize_review_reply/1)
+
+    comments
+    |> Enum.reject(&present_reply_parent?/1)
+    |> Enum.map(fn comment ->
+      id = comment["id"]
+
       %{
-        id: comment["id"],
+        id: id,
         body: blank_to_nil(comment["body"]),
         path: blank_to_nil(comment["path"]),
         line: comment["line"] || comment["original_line"],
         created_at: blank_to_nil(comment["created_at"]),
         updated_at: blank_to_nil(comment["updated_at"]),
         url: blank_to_nil(comment["html_url"]),
-        author: get_in(comment, ["user", "login"])
+        author: get_in(comment, ["user", "login"]),
+        replies: Map.get(replies_by_parent, to_string(id), [])
       }
     end)
   end
 
   defp normalize_review_comments(_), do: []
+
+  defp normalize_review_reply(comment) when is_map(comment) do
+    %{
+      id: comment["id"] && to_string(comment["id"]),
+      body: blank_to_nil(comment["body"]),
+      created_at: blank_to_nil(comment["created_at"]),
+      updated_at: blank_to_nil(comment["updated_at"]),
+      url: blank_to_nil(comment["html_url"]),
+      author: get_in(comment, ["user", "login"]),
+      in_reply_to_id: comment_reply_parent_id(comment) && to_string(comment_reply_parent_id(comment))
+    }
+  end
+
+  defp present_reply_parent?(comment) when is_map(comment),
+    do: not is_nil(comment_reply_parent_id(comment))
+
+  defp present_reply_parent?(_comment), do: false
+
+  defp comment_reply_parent_id(comment) when is_map(comment) do
+    comment["in_reply_to_id"] || comment["reply_to_id"]
+  end
 
   defp blank_to_nil(nil), do: nil
 

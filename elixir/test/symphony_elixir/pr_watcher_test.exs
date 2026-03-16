@@ -85,6 +85,31 @@ defmodule SymphonyElixir.PRWatcherTest do
     assert review_item.resolution_recommendation == "resolve_after_change"
   end
 
+  test "review_feedback reconciles posted inline replies from live GitHub thread data" do
+    feedback =
+      PRWatcher.review_feedback(
+        "/tmp/symphony-pr-feedback",
+        policy_pack: :private_autopilot,
+        github_client: __MODULE__.FakeGitHubClient,
+        thread_states: %{
+          "comment:2" => %{
+            "draft_state" => "posted",
+            "draft_reply" => "Old local reply.",
+            "posted_reply_id" => "3",
+            "posted_reply_url" => "https://github.com/example/repo/pull/42#discussion_r3"
+          }
+        }
+      )
+
+    comment_item = Enum.find(feedback.items, &(&1.thread_key == "comment:2"))
+
+    assert comment_item.draft_state == "posted"
+    assert comment_item.posted_reply_id == "3"
+    assert comment_item.posted_reply_url == "https://github.com/example/repo/pull/42#discussion_r3"
+    assert comment_item.draft_reply == "I fixed this locally."
+    assert comment_item.reply_refresh_needed == false
+  end
+
   test "review_feedback falls back to pr_url when workspace lookup is unavailable" do
     feedback =
       PRWatcher.review_feedback(
@@ -243,7 +268,17 @@ defmodule SymphonyElixir.PRWatcherTest do
              body: "nit: tighten this copy",
              path: "lib/example.ex",
              line: 12,
-             author: "reviewer"
+             author: "reviewer",
+             replies: [
+               %{
+                 id: "3",
+                 body: "I fixed this locally.",
+                 url: "https://github.com/example/repo/pull/42#discussion_r3",
+                 author: "gaspardip",
+                 created_at: "2026-03-11T10:02:00Z",
+                 updated_at: "2026-03-11T10:03:00Z"
+               }
+             ]
            }
          ]
        }}
@@ -298,7 +333,8 @@ defmodule SymphonyElixir.PRWatcherTest do
              body: "nit: tighten this copy",
              path: "lib/example.ex",
              line: 12,
-             author: "reviewer"
+             author: "reviewer",
+             replies: []
            }
          ]
        }}
