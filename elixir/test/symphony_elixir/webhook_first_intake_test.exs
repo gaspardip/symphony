@@ -692,6 +692,10 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       max_concurrent_agents: 0
     )
 
+    resolved_manual_store_root = SymphonyElixir.Config.manual_store_root()
+    File.rm_rf!(resolved_manual_store_root)
+    File.mkdir_p!(resolved_manual_store_root)
+
     Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubNoiseClient)
 
     orchestrator_name =
@@ -1447,6 +1451,30 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     assert payload["received_runner_channel"] == "stable"
     assert payload["assigned_runner_instance_id"] == "canary:dogfood-runner"
     assert payload["assignment_state"] == "routed_to_other_runner"
+  end
+
+  test "github and tracker event dedupe fallbacks prefix the raw payload hash once" do
+    github_event = %GitHubEvent{
+      provider: nil,
+      event_name: nil,
+      action: nil,
+      raw: %{"review" => %{"id" => 91}}
+    }
+
+    tracker_event = %TrackerEvent{
+      provider: nil,
+      entity_type: nil,
+      action: nil,
+      raw: %{"data" => %{"id" => "issue-1"}}
+    }
+
+    github_key = GitHubEvent.dedupe_key(github_event)
+    tracker_key = TrackerEvent.dedupe_key(tracker_event)
+
+    assert github_key =~ ~r/^github-event:[0-9a-f]{64}$/
+    assert tracker_key =~ ~r/^tracker-event:[0-9a-f]{64}$/
+    refute String.contains?(github_key, "github-event:github-event:")
+    refute String.contains?(tracker_key, "tracker-event:tracker-event:")
   end
 
   test "orchestrator records ignored webhook notices in runtime state" do

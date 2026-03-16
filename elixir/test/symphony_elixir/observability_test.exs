@@ -124,4 +124,52 @@ defmodule SymphonyElixir.ObservabilityTest do
       :telemetry.detach(handler_id)
     end
   end
+
+  test "emit sanitizes dynamic metadata keys without creating atoms" do
+    test_pid = self()
+    handler_id = "observability-dynamic-key-#{System.unique_integer([:positive])}"
+    dynamic_key = "dynamic-key-#{System.unique_integer([:positive])}"
+    normalized_key = String.replace(dynamic_key, "-", "_")
+
+    assert_raise ArgumentError, fn ->
+      String.to_existing_atom(normalized_key)
+    end
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:symphony, :observability, :dynamic_key],
+        fn _event_name, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry_metadata, metadata})
+        end,
+        nil
+      )
+
+    try do
+      SymphonyElixir.Observability.emit(
+        [:symphony, :observability, :dynamic_key],
+        %{count: 1},
+        %{dynamic_key => "value", existing_key: :ok}
+      )
+
+      assert_receive {:telemetry_metadata, metadata}, 1_000
+      assert metadata[normalized_key] == "value"
+      assert metadata[:existing_key] == "ok"
+
+      assert_raise ArgumentError, fn ->
+        String.to_existing_atom(normalized_key)
+      end
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  test "tempo config keeps max_block_bytes as a YAML integer" do
+    config_path =
+      "/Users/gaspar/src/symphony-clz-22/ops/observability/tempo/config.yml"
+
+    assert {:ok, parsed} = YamlElixir.read_from_file(config_path)
+
+    assert get_in(parsed, ["ingester", "max_block_bytes"]) == 1_000_000
+  end
 end

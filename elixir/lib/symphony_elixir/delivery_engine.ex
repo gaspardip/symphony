@@ -584,169 +584,168 @@ defmodule SymphonyElixir.DeliveryEngine do
         )
 
       true ->
+        prompt =
+          implement_prompt(
+            issue,
+            state,
+            workspace,
+            before_snapshot,
+            opts,
+            effective_implementation_turns + 1,
+            max_turns
+          )
 
-      prompt =
-        implement_prompt(
-          issue,
-          state,
-          workspace,
-          before_snapshot,
-          opts,
-          effective_implementation_turns + 1,
-          max_turns
-        )
-
-      clear_turn_result(issue)
-      clear_turn_runtime_errors(issue)
-
-      try do
-        with {:ok, _turn_session} <-
-               AppServer.run_turn(
-                 app_session,
-                 prompt,
-                 issue,
-                 Keyword.merge(
-                   opts,
-                   stage: "implement",
-                   effort: implement_effort(state),
-                   forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
-                   command_output_budget: implement_command_output_budget(state),
-                   on_message: codex_message_handler(recipient, issue),
-                   tool_executor: tool_executor(issue, opts)
-                 )
-               ),
-             {:ok, turn_result} <- fetch_turn_result(issue),
-             after_snapshot <- RunInspector.inspect(workspace, opts),
-             {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
-             :ok <- ensure_issue_still_active(refreshed_issue),
-             {:ok, next_stage} <-
-               implement_next_stage(turn_result, before_snapshot, after_snapshot),
-             updated_review_claims =
-               advance_review_claims_after_turn(
-                 preflight_review_claims,
-                 focused_claims,
-                 turn_result
-               ),
-             updated_review_threads =
-               sync_review_claims_into_threads(
-                 Map.get(state, :review_threads, %{}),
-                 updated_review_claims
-               )
-               |> maybe_post_autonomous_review_replies(
-                 workspace,
-                 after_snapshot.pr_url || Map.get(state, :pr_url),
-                 state,
-                 opts
-               ),
-             {:ok, _state} <-
-               RunStateStore.transition(
-                 workspace,
-                 next_stage,
-                 Map.merge(
-                   %{
-                     implementation_turns: implementation_turns + 1,
-                     review_claims: updated_review_claims,
-                     review_threads: updated_review_threads,
-                     last_turn_result: TurnResult.to_map(turn_result),
-                     branch: after_snapshot.branch || Map.get(state, :branch),
-                     pr_url: after_snapshot.pr_url || Map.get(state, :pr_url)
-                   },
-                   resume_context_attrs(
-                     workspace,
-                     refreshed_issue,
-                     state,
-                     after_snapshot,
-                     %{
-                       last_turn_summary: turn_result.summary,
-                       next_objective: next_objective_for_stage(next_stage, turn_result, updated_review_claims)
-                     },
-                     opts
-                   )
-                 )
-               ) do
-          do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
-        else
-          {:error, {:turn_runtime_error, reason}} ->
-            handle_implementation_turn_error(
-              app_session,
-              workspace,
-              issue,
-              recipient,
-              fetcher,
-              max_turns,
-              state,
-              opts,
-              reason
-            )
-
-          {:error, {:invalid_turn_result, reason}} ->
-            block_issue(workspace, issue, :invalid_turn_result, inspect(reason), @blocked_state)
-
-          {:error, :missing_turn_result} ->
-            block_issue(
-              workspace,
-              issue,
-              :missing_turn_result,
-              "The agent did not report `report_agent_turn_result` before the turn ended.",
-              @blocked_state
-            )
-
-          {:error, {:noop_turn, _summary}} ->
-            block_issue(
-              workspace,
-              issue,
-              :noop_turn,
-              "The turn produced no code change and no PR.",
-              @blocked_state
-            )
-
-          {:error, {:agent_blocked, %TurnResult{} = turn_result}} ->
-            block_issue(
-              workspace,
-              issue,
-              turn_result.blocker_type,
-              turn_result.summary,
-              @blocked_state
-            )
-
-          {:done, finished_issue} ->
-            {:done, finished_issue}
-
-          {:skip, finished_issue} ->
-            {:done, finished_issue}
-
-          {:error, reason} ->
-            cond do
-              retryable_implementation_error?(reason) ->
-                handle_implementation_turn_error(
-                  app_session,
-                  workspace,
-                  issue,
-                  recipient,
-                  fetcher,
-                  max_turns,
-                  state,
-                  opts,
-                  reason
-                )
-
-              non_retryable_implementation_error?(reason) ->
-                block_issue(
-                  workspace,
-                  issue,
-                  implementation_error_code(reason),
-                  implementation_turn_error_summary(reason),
-                  @blocked_state
-                )
-
-              true ->
-                {:error, reason}
-            end
-        end
-      after
         clear_turn_result(issue)
         clear_turn_runtime_errors(issue)
-      end
+
+        try do
+          with {:ok, _turn_session} <-
+                 AppServer.run_turn(
+                   app_session,
+                   prompt,
+                   issue,
+                   Keyword.merge(
+                     opts,
+                     stage: "implement",
+                     effort: implement_effort(state),
+                     forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
+                     command_output_budget: implement_command_output_budget(state),
+                     on_message: codex_message_handler(recipient, issue),
+                     tool_executor: tool_executor(issue, opts)
+                   )
+                 ),
+               {:ok, turn_result} <- fetch_turn_result(issue),
+               after_snapshot <- RunInspector.inspect(workspace, opts),
+               {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
+               :ok <- ensure_issue_still_active(refreshed_issue),
+               {:ok, next_stage} <-
+                 implement_next_stage(turn_result, before_snapshot, after_snapshot),
+               updated_review_claims =
+                 advance_review_claims_after_turn(
+                   preflight_review_claims,
+                   focused_claims,
+                   turn_result
+                 ),
+               updated_review_threads =
+                 sync_review_claims_into_threads(
+                   Map.get(state, :review_threads, %{}),
+                   updated_review_claims
+                 )
+                 |> maybe_post_autonomous_review_replies(
+                   workspace,
+                   after_snapshot.pr_url || Map.get(state, :pr_url),
+                   state,
+                   opts
+                 ),
+               {:ok, _state} <-
+                 RunStateStore.transition(
+                   workspace,
+                   next_stage,
+                   Map.merge(
+                     %{
+                       implementation_turns: implementation_turns + 1,
+                       review_claims: updated_review_claims,
+                       review_threads: updated_review_threads,
+                       last_turn_result: TurnResult.to_map(turn_result),
+                       branch: after_snapshot.branch || Map.get(state, :branch),
+                       pr_url: after_snapshot.pr_url || Map.get(state, :pr_url)
+                     },
+                     resume_context_attrs(
+                       workspace,
+                       refreshed_issue,
+                       state,
+                       after_snapshot,
+                       %{
+                         last_turn_summary: turn_result.summary,
+                         next_objective: next_objective_for_stage(next_stage, turn_result, updated_review_claims)
+                       },
+                       opts
+                     )
+                   )
+                 ) do
+            do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
+          else
+            {:error, {:turn_runtime_error, reason}} ->
+              handle_implementation_turn_error(
+                app_session,
+                workspace,
+                issue,
+                recipient,
+                fetcher,
+                max_turns,
+                state,
+                opts,
+                reason
+              )
+
+            {:error, {:invalid_turn_result, reason}} ->
+              block_issue(workspace, issue, :invalid_turn_result, inspect(reason), @blocked_state)
+
+            {:error, :missing_turn_result} ->
+              block_issue(
+                workspace,
+                issue,
+                :missing_turn_result,
+                "The agent did not report `report_agent_turn_result` before the turn ended.",
+                @blocked_state
+              )
+
+            {:error, {:noop_turn, _summary}} ->
+              block_issue(
+                workspace,
+                issue,
+                :noop_turn,
+                "The turn produced no code change and no PR.",
+                @blocked_state
+              )
+
+            {:error, {:agent_blocked, %TurnResult{} = turn_result}} ->
+              block_issue(
+                workspace,
+                issue,
+                turn_result.blocker_type,
+                turn_result.summary,
+                @blocked_state
+              )
+
+            {:done, finished_issue} ->
+              {:done, finished_issue}
+
+            {:skip, finished_issue} ->
+              {:done, finished_issue}
+
+            {:error, reason} ->
+              cond do
+                retryable_implementation_error?(reason) ->
+                  handle_implementation_turn_error(
+                    app_session,
+                    workspace,
+                    issue,
+                    recipient,
+                    fetcher,
+                    max_turns,
+                    state,
+                    opts,
+                    reason
+                  )
+
+                non_retryable_implementation_error?(reason) ->
+                  block_issue(
+                    workspace,
+                    issue,
+                    implementation_error_code(reason),
+                    implementation_turn_error_summary(reason),
+                    @blocked_state
+                  )
+
+                true ->
+                  {:error, reason}
+              end
+          end
+        after
+          clear_turn_result(issue)
+          clear_turn_runtime_errors(issue)
+        end
     end
   end
 

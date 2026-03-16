@@ -46,6 +46,23 @@ defmodule SymphonyElixir.HttpRouterPhase6BackfillTest do
            }
   end
 
+  test "router exposes metrics routes at the configured path and rejects non-get methods" do
+    metrics_routes =
+      SymphonyElixirWeb.Router.__routes__()
+      |> Enum.filter(&(&1.path == "/metrics"))
+
+    assert Enum.any?(metrics_routes, &(&1.verb == :get and &1.plug_opts == :metrics))
+    assert Enum.any?(metrics_routes, &(&1.verb == :* and &1.plug_opts == :method_not_allowed))
+
+    orchestrator_name = Module.concat(__MODULE__, :MetricsRouteOrchestrator)
+    start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: empty_snapshot()})
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert json_response(post(build_conn(), "/metrics", %{}), 405) == %{
+             "error" => %{"code" => "method_not_allowed", "message" => "Method not allowed"}
+           }
+  end
+
   test "http server bound_port is nil when the endpoint has no running server" do
     orchestrator_name = Module.concat(__MODULE__, :BoundPortNilOrchestrator)
     start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: empty_snapshot()})
