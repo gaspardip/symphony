@@ -486,7 +486,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          state,
          _inspection,
          opts
-      ) do
+       ) do
     preflight_review_claims =
       maybe_refresh_preflight_review_claims(
         Map.get(state, :review_claims, %{}),

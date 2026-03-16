@@ -75,7 +75,7 @@ That gives Symphony a practical time machine for â€œwhy did it behave this way?â
 
 ## Local Self-Hosted Stack
 
-Repo-owned assets live under [ops/observability](/Users/gaspar/src/symphony-clz-22/ops/observability):
+Repo-owned assets live under [ops/observability](../ops/observability):
 
 - Docker Compose
 - Prometheus config
@@ -84,25 +84,27 @@ Repo-owned assets live under [ops/observability](/Users/gaspar/src/symphony-clz-
 - Tempo config
 - Grafana datasources
 - starter Grafana dashboard
-- local stable/canary bootstrap via [ops/local-topology.sh](/Users/gaspar/src/symphony-clz-22/ops/local-topology.sh)
+- local stable/canary bootstrap via [ops/local-topology.sh](../ops/local-topology.sh)
 
 Bring the stack up with:
 
 ```bash
-cd /Users/gaspar/src/symphony-clz-22
+cd <repo-root>
 docker compose -f ops/observability/docker-compose.yml up -d
 ```
 
 Run Symphony against it with:
 
 ```bash
-cd /Users/gaspar/src/symphony-clz-22/elixir
+cd <repo-root>/elixir
 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 mise exec -- mix phx.server
 ```
 
-Prometheus scrapes the host Symphony process at `http://host.docker.internal:4040/metrics`. If Symphony runs on a different port, update [ops/observability/prometheus/prometheus.yml](/Users/gaspar/src/symphony-clz-22/ops/observability/prometheus/prometheus.yml) before starting the stack.
+All links above are repo-relative. In the commands above, replace `<repo-root>` with the path to your local checkout of this repository.
 
-For local dogfooding with both stable and canary runners, use [LOCAL_DOGFOOD_TOPOLOGY.md](/Users/gaspar/src/symphony-clz-22/docs/LOCAL_DOGFOOD_TOPOLOGY.md). The repo-owned Prometheus and Promtail configs are now set up to observe both local runner ports and nested log roots.
+Prometheus scrapes the host Symphony process at `http://host.docker.internal:4040/metrics`. If Symphony runs on a different port, update [ops/observability/prometheus/prometheus.yml](../ops/observability/prometheus/prometheus.yml) before starting the stack.
+
+For local dogfooding with both stable and canary runners, use [LOCAL_DOGFOOD_TOPOLOGY.md](./LOCAL_DOGFOOD_TOPOLOGY.md). The repo-owned Prometheus and Promtail configs are now set up to observe both local runner ports and nested log roots.
 
 ## Rollout Order
 

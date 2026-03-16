@@ -659,8 +659,7 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
                  "comment:97" => %{
                    "thread_key" => "comment:97",
                    "kind" => "comment",
-                   "body" =>
-                     "`dedupe_key/1` now produces a completely different key and may break deduplication/backfill logic.",
+                   "body" => "`dedupe_key/1` now produces a completely different key and may break deduplication/backfill logic.",
                    "path" => "elixir/lib/symphony_elixir/tracker_event.ex",
                    "line" => 3,
                    "claim_type" => "unclear",
@@ -683,9 +682,7 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
              end)
 
     assert {:stop, :missing_turn_result} =
-             DeliveryEngine.run(workspace, issue, nil,
-               issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end
-             )
+             DeliveryEngine.run(workspace, issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert get_in(state, [:review_claims, "comment:97", "verification_status"]) == "verified_local_pattern"

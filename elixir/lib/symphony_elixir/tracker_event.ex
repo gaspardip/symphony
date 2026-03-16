@@ -49,9 +49,9 @@ defmodule SymphonyElixir.TrackerEvent do
       |> Enum.join(":")
 
     if base == "" do
-      ("tracker-event:" <>
-         :crypto.hash(:sha256, Jason.encode!(event.raw)))
-      |> Base.encode16(case: :lower)
+      "tracker-event:" <>
+        (:crypto.hash(:sha256, Jason.encode!(event.raw))
+         |> Base.encode16(case: :lower))
     else
       base
     end

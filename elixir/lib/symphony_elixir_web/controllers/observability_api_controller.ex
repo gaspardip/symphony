@@ -26,9 +26,15 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec metrics(Conn.t(), map()) :: Conn.t()
   def metrics(conn, _params) do
-    conn
-    |> put_resp_content_type("text/plain")
-    |> send_resp(200, Metrics.scrape())
+    case safe_metrics_scrape() do
+      {:ok, metrics} ->
+        conn
+        |> put_resp_content_type("text/plain")
+        |> send_resp(200, metrics)
+
+      {:error, :unavailable} ->
+        error_response(conn, 503, "metrics_unavailable", "Metrics collector is unavailable")
+    end
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()
@@ -118,6 +124,13 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   @spec not_found(Conn.t(), map()) :: Conn.t()
   def not_found(conn, _params) do
     error_response(conn, 404, "not_found", "Route not found")
+  end
+
+  defp safe_metrics_scrape do
+    {:ok, Metrics.scrape()}
+  rescue
+    UndefinedFunctionError -> {:error, :unavailable}
+    ErlangError -> {:error, :unavailable}
   end
 
   defp error_response(conn, status, code, message) do

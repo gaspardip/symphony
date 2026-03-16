@@ -213,7 +213,7 @@ defmodule SymphonyElixir.Observability do
     metadata
     |> sanitize_metadata()
     |> Enum.map(fn {key, value} ->
-      {"symphony." <> Atom.to_string(key), value}
+      {"symphony." <> normalize_key_name(key), value}
     end)
   end
 
@@ -256,11 +256,22 @@ defmodule SymphonyElixir.Observability do
     |> String.trim("_")
     |> case do
       "" -> :metadata
-      normalized -> String.to_atom(normalized)
+      normalized -> existing_atom_or_string(normalized)
     end
   end
 
   defp normalize_key(key), do: normalize_key(to_string(key))
+
+  defp normalize_key_name(key) when is_atom(key), do: Atom.to_string(key)
+  defp normalize_key_name(key) when is_binary(key), do: key
+  defp normalize_key_name(key), do: to_string(key)
+
+  # Preserve existing atom keys without creating new ones from untrusted input.
+  defp existing_atom_or_string(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> key
+  end
 
   defp normalize_value(value) when is_binary(value), do: String.slice(value, 0, @max_reason_length)
   defp normalize_value(value) when is_integer(value) or is_float(value) or is_boolean(value), do: value
