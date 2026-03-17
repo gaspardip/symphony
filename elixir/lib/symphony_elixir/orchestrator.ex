@@ -2683,6 +2683,7 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
+    |> MapSet.put(normalize_issue_state(@merging_state))
   end
 
   defp normalize_labels(labels) do
@@ -3000,10 +3001,15 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if retry_candidate_issue?(refreshed_issue, terminal_states) do
-          {:ok, refreshed_issue}
-        else
-          {:skip, refreshed_issue}
+        cond do
+          retry_candidate_issue?(refreshed_issue, terminal_states) ->
+            {:ok, refreshed_issue}
+
+          manual_dispatch_resume_override?(issue, refreshed_issue, terminal_states) ->
+            {:ok, %{refreshed_issue | state: issue.state, blocked_by: Map.get(issue, :blocked_by, [])}}
+
+          true ->
+            {:skip, refreshed_issue}
         end
 
       {:ok, []} ->
@@ -3015,6 +3021,21 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
+
+  defp manual_dispatch_resume_override?(
+         %Issue{source: :manual, state: issue_state} = issue,
+         %Issue{source: :manual, state: refreshed_state} = refreshed_issue,
+         terminal_states
+       )
+       when is_binary(issue_state) and is_binary(refreshed_state) do
+    issue.identifier == refreshed_issue.identifier and
+      active_issue_state?(issue_state, active_state_set()) and
+      retry_candidate_issue?(issue, terminal_states) and
+      refreshed_state == @blocked_state and
+      not retry_candidate_issue?(refreshed_issue, terminal_states)
+  end
+
+  defp manual_dispatch_resume_override?(_issue, _refreshed_issue, _terminal_states), do: false
 
   defp missing_issue_dispatch_fallback(%Issue{source: :manual} = issue, terminal_states) do
     if retry_candidate_issue?(issue, terminal_states) do

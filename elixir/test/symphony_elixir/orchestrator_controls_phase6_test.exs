@@ -1338,6 +1338,16 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
                {:ok, []}
              end)
 
+    assert {:ok, %Issue{state: "Merging"} = resumed_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(
+               %{manual_issue | state: "Merging"},
+               fn [_id] ->
+                 {:ok, [%{manual_issue | state: "Blocked"}]}
+               end
+             )
+
+    assert resumed_issue.identifier == manual_issue.identifier
+
     assert {:skip, %Issue{state: "Done"}} =
              Orchestrator.revalidate_issue_for_dispatch_for_test(eligible_issue, fn [_id] ->
                {:ok, [%{eligible_issue | state: "Done"}]}

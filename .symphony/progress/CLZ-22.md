@@ -312,6 +312,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `SymphonyElixir.DeliveryEngine` now rehydrates live GitHub review state at `publish` and `await_checks`, refreshes stale addressed inline replies from “next branch update” wording to “included on the branch,” and hands posted addressed threads to `SymphonyElixir.PRWatcher` for real GitHub thread resolution after publish. `SymphonyElixir.GitHubCLIClient` now resolves review threads through GitHub GraphQL by mapping root review comment ids back to review-thread ids.
 - Latest focused publish-finalization validation on March 16, 2026:
   `mix test test/symphony_elixir/github_cli_client_test.exs test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `72 tests, 0 failures` after adding publish-time reply refresh and thread-resolution coverage.
+- Resumed publish dispatch repair on March 16, 2026:
+  live `retry_now` requests could resume `CLZ-22` into `publish`, but the orchestrator immediately filtered the resumed manual issue back out because `Merging` was not treated as an active dispatch state and stale manual-store refreshes overwrote the resumed issue shell with the blocked snapshot. `SymphonyElixir.Orchestrator` now treats `Merging` as active for dispatch and preserves resumed manual issue state when the refreshed manual snapshot is only the stale blocked record.
+- Latest focused resumed-publish dispatch validation on March 16, 2026:
+  `mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs` passed with `38 tests, 0 failures`, and `mix dialyzer --format short` remained clean after adding the manual resumed-`Merging` revalidation regression.
 
 ## Next Step
-Restart the local stable/canary topology on the latest pushed head, rerun the live `CLZ-22` canary cycle through publish, and verify that addressed inline replies are refreshed and safe threads resolve automatically on GitHub.
+Push the resumed-publish dispatch fix, rerun the live `CLZ-22` canary cycle through publish, and verify that addressed inline replies refresh and safe threads resolve automatically on GitHub instead of stalling in a passive publish state.
