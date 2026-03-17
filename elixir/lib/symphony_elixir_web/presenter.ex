@@ -1185,7 +1185,11 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp lease_payload(entry) when is_map(entry) do
-    raw_lease = Map.get(entry, :lease, %{})
+    raw_lease =
+      case Map.get(entry, :lease) do
+        %{} = lease -> lease
+        _ -> %{}
+      end
 
     %{
       owner: Map.get(raw_lease, :lease_owner) || Map.get(entry, :lease_owner),

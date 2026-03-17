@@ -1217,6 +1217,25 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.operator_summary.failure_class == "coordination"
   end
 
+  test "presenter state payload tolerates skipped entries with nil lease state" do
+    orchestrator_name = Module.concat(__MODULE__, :PresenterNilLeaseOrchestrator)
+
+    snapshot = %{
+      empty_snapshot()
+      | skipped: [%{rich_skipped_entry() | lease: nil}]
+    }
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: snapshot})
+
+    state_payload = Presenter.state_payload(orchestrator_name, 50)
+
+    assert state_payload.counts == %{running: 0, retrying: 0, paused: 0, queue: 0, skipped: 1}
+    assert [%{issue_identifier: "MT-SKIP", lease: lease}] = state_payload.skipped
+    assert lease.owner == nil
+    assert lease.owner_channel == nil
+    assert lease.reclaimable == false
+  end
+
   test "presenter control payload covers remaining actions and tuple errors" do
     orchestrator_name = Module.concat(__MODULE__, :PresenterControlActionsOrchestrator)
 
