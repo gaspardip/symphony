@@ -479,7 +479,7 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
     assert_receive {:posted_review_reply, "https://github.com/example/repo/pull/42", "93", body}
     assert body =~ "addressed this concern locally"
-    assert body =~ "next branch update"
+    assert body =~ "included on the branch"
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert get_in(state, [:review_claims, "comment:93", "implementation_status"]) == "addressed"
