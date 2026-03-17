@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -290,6 +291,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.dir?(Path.join(workspace, ".git"))
       assert File.read!(Path.join(workspace, "README.md")) == "bootstrapped\n"
       refute File.exists?(Path.join(workspace, "tmp/scratch.txt"))
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace recreates stale directories that belong to a different runtime instance" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-runtime-reset-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        runner_instance_name: "dogfood-main",
+        runner_channel: "canary"
+      )
+
+      workspace = Path.join(workspace_root, "MT-RUNTIME-RESET")
+      File.mkdir_p!(workspace)
+      File.write!(Path.join(workspace, "local-progress.txt"), "stale\n")
+
+      :ok =
+        RunStateStore.save(workspace, %{
+          issue_id: "issue-runtime-reset",
+          issue_identifier: "MT-RUNTIME-RESET",
+          issue_source: "manual",
+          runner_instance_id: "canary:other-runner",
+          runner_workspace_root: workspace_root,
+          stage: "implement"
+        })
+
+      assert {:ok, recreated_workspace} = Workspace.create_for_issue("MT-RUNTIME-RESET")
+      assert recreated_workspace == workspace
+      refute File.exists?(Path.join(workspace, "local-progress.txt"))
     after
       File.rm_rf(workspace_root)
     end

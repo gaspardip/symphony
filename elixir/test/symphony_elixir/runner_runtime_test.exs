@@ -77,6 +77,7 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
       assert info.channel == "canary"
       assert info.install_root == runner_root
       assert info.workspace_root == Config.workspace_root()
+      assert info.current_checkout_root == release_path
       assert info.current_link_target == release_path
       assert info.promoted_release_sha == "promoted123"
       assert info.previous_release_sha == "previous456"
@@ -102,6 +103,39 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
                ["dogfood:symphony"],
                %{"runner_mode" => "stable", "canary_required_labels" => ["canary:symphony"]}
              ) == ["dogfood:symphony"]
+    after
+      File.rm_rf(runner_root)
+    end
+  end
+
+  test "active checkout root prefers the promoted release while current checkout root stays on cwd" do
+    runner_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runner-runtime-active-root-#{System.unique_integer([:positive])}"
+      )
+
+    release_path = Path.join(runner_root, "releases/promoted123")
+
+    try do
+      File.mkdir_p!(release_path)
+      File.ln_s!(release_path, Path.join(runner_root, "current"))
+
+      File.write!(
+        RunnerRuntime.metadata_path(runner_root),
+        Jason.encode!(%{
+          "promoted_release_sha" => "promoted123",
+          "promoted_release_path" => release_path,
+          "runner_mode" => "stable"
+        })
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(), runner_install_root: runner_root)
+
+      File.cd!(runner_root, fn ->
+        assert RunnerRuntime.current_checkout_root() == Path.expand(File.cwd!())
+        assert RunnerRuntime.active_checkout_root() == release_path
+      end)
     after
       File.rm_rf(runner_root)
     end

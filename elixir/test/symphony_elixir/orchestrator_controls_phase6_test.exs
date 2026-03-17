@@ -336,6 +336,137 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     )
   end
 
+  test "github review inbox ignores archived non-canonical workspaces during follow-up refresh" do
+    unique = System.unique_integer([:positive])
+    workspace_root = Path.join(System.tmp_dir!(), "orchestrator-github-archived-#{unique}")
+    manual_store_root = Path.join(workspace_root, "manual-store")
+    runner_root = Path.join(workspace_root, "missing-runner-install")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root,
+      max_concurrent_agents: 0,
+      tracker_kind: "memory",
+      tracker_required_labels: ["dogfood:symphony"],
+      runner_install_root: runner_root,
+      runner_instance_name: "canary-runner",
+      runner_channel: "canary"
+    )
+
+    Application.put_env(:symphony_elixir, :pr_watcher_github_client, ReviewFeedbackGitHubClient)
+    GitHubEventInbox.reset()
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "orchestrator-github-archived-#{unique}",
+        "identifier" => "MT-GH-ARCHIVED-#{unique}",
+        "title" => "Ignore archived non-canonical workspaces",
+        "description" => "Webhook follow-up should not touch archived suffixed workspaces",
+        "acceptance_criteria" => [
+          "Only the canonical issue workspace should receive refreshed GitHub review state"
+        ],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    archived_workspace = Path.join(workspace_root, "#{issue.identifier}.base-branch-blocked")
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(archived_workspace)
+
+    canonical_pr_url = "https://github.com/gaspardip/events/pull/88"
+
+    :ok =
+      RunStateStore.save(workspace, %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        stage: "await_checks",
+        effective_policy_class: "fully_autonomous",
+        pr_url: canonical_pr_url,
+        review_threads: %{},
+        review_claims: %{}
+      })
+
+    :ok =
+      RunStateStore.save(archived_workspace, %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        stage: "await_checks",
+        effective_policy_class: "fully_autonomous",
+        pr_url: canonical_pr_url,
+        review_threads: %{"comment:91" => %{"draft_state" => "posted"}},
+        review_claims: %{}
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :"GitHubArchivedOrchestrator#{unique}")
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      GitHubEventInbox.reset()
+      File.rm_rf(workspace_root)
+    end)
+
+    {:ok, _enqueue_result} =
+      GitHubEventInbox.enqueue([
+        %GitHubEvent{
+          provider: "github",
+          event_id: "delivery-archived-#{unique}",
+          event_name: "pull_request_review",
+          action: "submitted",
+          entity_type: "review",
+          entity_id: "91",
+          pr_url: canonical_pr_url,
+          repo_full_name: "gaspardip/events",
+          updated_at: ~U[2026-03-17 20:00:00Z],
+          raw: %{
+            "action" => "submitted",
+            "review" => %{"id" => 91, "body" => "Please tighten this conditional."},
+            "pull_request" => %{"html_url" => canonical_pr_url}
+          }
+        }
+      ])
+
+    :ok =
+      Orchestrator.notify_github_events(orchestrator_name, %{
+        accepted_at: DateTime.utc_now(),
+        accepted: 1,
+        duplicates: 0,
+        event_ids: ["delivery-archived-#{unique}"]
+      })
+
+    assert_eventually(
+      fn ->
+        {:ok, canonical_state} = RunStateStore.load(workspace)
+        {:ok, archived_state} = RunStateStore.load(archived_workspace)
+
+        assert get_in(canonical_state, [:review_threads, "comment:91", "draft_state"]) == "drafted"
+        assert get_in(archived_state, [:review_threads, "comment:91", "draft_state"]) == "posted"
+      end,
+      60
+    )
+  end
+
+  test "snapshot issue metadata falls back to persisted run state when live issue metadata is missing" do
+    run_state = %{
+      issue_id: "manual:runstate-only",
+      issue_identifier: "MT-RUNSTATE-ONLY",
+      issue_source: "manual",
+      stage: "validate"
+    }
+
+    assert %{
+             source: "manual",
+             state: "validate",
+             labels: [],
+             label_gate_eligible: true
+           } = Orchestrator.snapshot_issue_metadata_for_test(nil, run_state)
+  end
+
   test "pause and resume controls mutate orchestrator runtime state" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 

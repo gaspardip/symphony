@@ -693,16 +693,16 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(pr_url) and pr_url != "" do
     {next_state, outcomes} =
       Config.workspace_root()
-      |> list_workspace_paths()
+      |> active_workspace_states()
       |> Enum.reduce({state, []}, fn workspace, {state_acc, outcomes_acc} ->
-        case RunStateStore.load(workspace) do
-          {:ok, run_state} ->
+        case Map.get(workspace, :run_state) do
+          %{} = run_state ->
             if Map.get(run_state, :pr_url) != pr_url do
               {state_acc, outcomes_acc}
             else
               process_github_workspace_match(
                 state_acc,
-                workspace,
+                Map.get(workspace, :path),
                 run_state,
                 pr_url,
                 outcomes_acc
@@ -739,16 +739,16 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(pr_url) and pr_url != "" do
     {next_state, outcomes} =
       Config.workspace_root()
-      |> list_workspace_paths()
+      |> active_workspace_states()
       |> Enum.reduce({state, []}, fn workspace, {state_acc, outcomes_acc} ->
-        case RunStateStore.load(workspace) do
-          {:ok, run_state} ->
+        case Map.get(workspace, :run_state) do
+          %{} = run_state ->
             if Map.get(run_state, :pr_url) != pr_url do
               {state_acc, outcomes_acc}
             else
               process_github_ci_workspace_match(
                 state_acc,
-                workspace,
+                Map.get(workspace, :path),
                 run_state,
                 pr_url,
                 event,
@@ -2340,6 +2340,17 @@ defmodule SymphonyElixir.Orchestrator do
   def seeded_manual_issue_from_run_state_for_test(run_state)
       when is_map(run_state),
       do: seeded_manual_issue_from_run_state(run_state)
+
+  @doc false
+  @spec snapshot_issue_metadata_for_test(map() | nil, map()) :: map()
+  def snapshot_issue_metadata_for_test(issue, run_state) when is_map(run_state) do
+    %{
+      source: snapshot_issue_source(issue, run_state),
+      state: snapshot_issue_state(issue, run_state),
+      labels: issue_labels(issue),
+      label_gate_eligible: issue_matches_required_labels?(issue)
+    }
+  end
 
   @doc false
   @spec resolve_issue_for_control_for_test(State.t(), String.t()) ::
@@ -4631,9 +4642,9 @@ defmodule SymphonyElixir.Orchestrator do
     run_state = load_run_state(workspace_path, metadata.issue)
     lease = stateful_lease_details(issue_id, run_state, now)
     inspection = apply_persisted_review_state(inspection, run_state)
+    snapshot_issue = metadata.issue
 
-    {policy_class, policy_source, policy_override} =
-      policy_snapshot_values(metadata.issue, state, run_state)
+    {policy_class, policy_source, policy_override} = policy_snapshot_values(snapshot_issue, state, run_state)
 
     budget_runtime =
       RunPolicy.budget_runtime(metadata.issue, %{
@@ -4650,8 +4661,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       issue_id: issue_id,
       identifier: metadata.identifier,
-      source: metadata.issue.source,
-      state: metadata.issue.state,
+      source: snapshot_issue_source(snapshot_issue, run_state),
+      state: snapshot_issue_state(snapshot_issue, run_state),
       session_id: metadata.session_id,
       codex_app_server_pid: metadata.codex_app_server_pid,
       codex_input_tokens: metadata.codex_input_tokens,
@@ -4688,8 +4699,8 @@ defmodule SymphonyElixir.Orchestrator do
       publish_required_checks: (inspection.harness && inspection.harness.publish_required_checks) || [],
       ci_required_checks: (inspection.harness && inspection.harness.ci_required_checks) || [],
       required_labels: routing_required_labels(),
-      labels: issue_labels(metadata.issue),
-      label_gate_eligible: issue_matches_required_labels?(metadata.issue),
+      labels: issue_labels(snapshot_issue),
+      label_gate_eligible: issue_matches_required_labels?(snapshot_issue),
       policy_class: policy_class,
       policy_source: policy_source,
       policy_override: policy_override,
@@ -6892,6 +6903,33 @@ defmodule SymphonyElixir.Orchestrator do
         []
     end
   end
+
+  defp active_workspace_states(root) when is_binary(root) do
+    root
+    |> list_workspace_paths()
+    |> Enum.reduce([], fn workspace, acc ->
+      case RunStateStore.load(workspace) do
+        {:ok, run_state} when is_map(run_state) ->
+          if RunStateStore.canonical_workspace_for_current_runtime?(workspace, run_state) do
+            [%{path: workspace, run_state: run_state} | acc]
+          else
+            acc
+          end
+
+        _ ->
+          acc
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  defp snapshot_issue_source(%Issue{source: source}, _run_state), do: source
+  defp snapshot_issue_source(%{source: source}, _run_state) when not is_nil(source), do: source
+  defp snapshot_issue_source(_issue, run_state), do: Map.get(run_state, :issue_source)
+
+  defp snapshot_issue_state(%Issue{state: state}, _run_state), do: state
+  defp snapshot_issue_state(%{state: state}, _run_state) when not is_nil(state), do: state
+  defp snapshot_issue_state(_issue, run_state), do: Map.get(run_state, :stage) || "unknown"
 
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(nil), do: false

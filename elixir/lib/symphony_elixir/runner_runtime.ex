@@ -18,7 +18,7 @@ defmodule SymphonyElixir.RunnerRuntime do
   @spec info() :: map()
   def info do
     install_root = Config.runner_install_root()
-    current_root = current_checkout_root()
+    current_root = active_checkout_root()
     metadata_result = read_metadata(install_root)
     metadata = metadata_from_result(metadata_result)
     history = recent_history(install_root, @default_history_limit)
@@ -121,7 +121,7 @@ defmodule SymphonyElixir.RunnerRuntime do
 
   @spec runtime_version() :: String.t() | nil
   def runtime_version do
-    current_version_sha(current_checkout_root()) ||
+    current_version_sha(active_checkout_root()) ||
       Map.get(load_metadata(Config.runner_install_root()), "current_version_sha")
   end
 
@@ -241,6 +241,25 @@ defmodule SymphonyElixir.RunnerRuntime do
 
   def recent_history(_install_root, _limit), do: []
 
+  @spec active_checkout_root() :: Path.t()
+  def active_checkout_root do
+    install_root = Config.runner_install_root()
+
+    cond do
+      release_exists?(current_link_target(install_root)) ->
+        current_link_target(install_root) |> Path.expand()
+
+      release_exists?(normalize_path(Map.get(load_metadata(install_root), "promoted_release_path"))) ->
+        load_metadata(install_root)
+        |> Map.get("promoted_release_path")
+        |> normalize_path()
+        |> Path.expand()
+
+      true ->
+        current_checkout_root()
+    end
+  end
+
   @spec current_checkout_root() :: Path.t()
   def current_checkout_root do
     cwd = File.cwd!()
@@ -253,7 +272,7 @@ defmodule SymphonyElixir.RunnerRuntime do
 
   @spec protected_paths() :: [Path.t()]
   def protected_paths do
-    [Config.runner_install_root(), current_checkout_root()]
+    [Config.runner_install_root(), current_checkout_root(), active_checkout_root()]
     |> Enum.filter(&is_binary/1)
     |> Enum.map(&Path.expand/1)
     |> Enum.uniq()

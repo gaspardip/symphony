@@ -18,6 +18,9 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Validate with the harness contract, tests, lint, and smoke coverage, then prepare the PR.
 
 ## Work Log
+- Hardened live dogfood runtime state on March 17, 2026 after the first merged-main telemetry pass exposed three real operator failures: the runner now reports the promoted release checkout instead of the launcher cwd when an active release exists, webhook follow-up scans only canonical issue workspaces for the current runner/root instead of archived suffixed directories, and workspace reuse now resets stale directories that belong to another runtime instance instead of carrying them forward silently.
+- Added focused regressions on March 17, 2026 for those exact failures: `runner_runtime_test.exs` now proves `active_checkout_root/0` prefers the promoted release while `current_checkout_root/0` stays cwd-based for normal dev flows, `workspace_and_config_test.exs` proves a stale runtime-owned workspace gets recreated cleanly, and `orchestrator_controls_phase6_test.exs` proves archived non-canonical workspaces are ignored during GitHub review follow-up and that snapshot issue metadata can fall back to persisted run state when live issue metadata is missing.
+- Re-ran the focused dogfood-hardening suites and Dialyzer on March 17, 2026 from the isolated `codex/dogfood-hardening` worktree, then re-ran `mix harness.check`; the full `./scripts/symphony-validate.sh` contract again reached the existing `make coverage -> mix coverage.audit` stall after setup, harness, build, format, and lint, so the repo-wide tail behavior remains unchanged by this slice.
 - Added a repo-owned telemetry smoke test on March 17, 2026 that emits real stage, token, and debug-artifact telemetry, then proves `/metrics`, `/api/v1/state`, and `/api/v1/reports/delivery` stay usable operator surfaces during dogfood runs.
 - Added `docs/OBSERVABILITY_RUNBOOK.md` plus agent-index and harness-doc updates so agents can find dashboard/API endpoints, workspace `run_state.json`, metrics, and debug artifact roots without rediscovery.
 - Added an operator-facing `refresh_merge_readiness` control on March 17, 2026 so the dashboard can rerun PR hygiene without a full `retry_now`: the presenter forwards the new action, the orchestrator restarts passive merge-side work back at `merge_readiness`, and focused control coverage now proves the run-state transition through the real operator surface.
@@ -124,6 +127,14 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `cd elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/delivery_engine_phase6_test.exs` -> `127 tests, 0 failures`
 - Merge-readiness Dialyzer on March 17, 2026:
   `cd elixir && mise exec -- mix dialyzer --format short` -> passed
+- Dogfood hardening regressions on March 17, 2026:
+  `cd elixir && mise exec -- mix test test/symphony_elixir/runner_runtime_test.exs test/symphony_elixir/workspace_and_config_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs` -> `99 tests, 0 failures`
+- Dogfood hardening Dialyzer on March 17, 2026:
+  `cd elixir && mise exec -- mix dialyzer --format short` -> passed
+- Dogfood hardening harness check on March 17, 2026:
+  `cd elixir && mise exec -- mix harness.check` -> `harness.check: self-development harness is valid`
+- Dogfood hardening repo contract on March 17, 2026:
+  `./scripts/symphony-validate.sh` again reached `make coverage -> mix coverage.audit` after setup, `harness.check`, build, `fmt-check`, and lint with no new failing assertions before the existing coverage tail stall
 - Runtime foundation commit: `2458ae5`
 - Local stack assets: `ops/observability/docker-compose.yml` and Grafana/Prometheus/Loki/Promtail/Tempo configs
 - Compose validation: `docker compose -f ops/observability/docker-compose.yml config`

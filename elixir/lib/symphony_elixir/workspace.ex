@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, RunStateStore}
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
   @bootstrap_metadata_entries MapSet.new([".symphony"])
@@ -50,8 +50,12 @@ defmodule SymphonyElixir.Workspace do
         prepare_bootstrap_workspace(workspace)
 
       File.dir?(workspace) ->
-        clean_tmp_artifacts(workspace)
-        {:ok, %{after_create?: false, preserved_metadata_dir: nil}}
+        if reset_required?(workspace) do
+          create_workspace(workspace)
+        else
+          clean_tmp_artifacts(workspace)
+          {:ok, %{after_create?: false, preserved_metadata_dir: nil}}
+        end
 
       File.exists?(workspace) ->
         File.rm_rf!(workspace)
@@ -66,6 +70,16 @@ defmodule SymphonyElixir.Workspace do
     File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
     {:ok, %{after_create?: true, preserved_metadata_dir: nil}}
+  end
+
+  defp reset_required?(workspace) when is_binary(workspace) do
+    case RunStateStore.load(workspace) do
+      {:ok, run_state} ->
+        not RunStateStore.canonical_workspace_for_current_runtime?(workspace, run_state)
+
+      _ ->
+        false
+    end
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
