@@ -548,9 +548,7 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     stats
     |> bump_stat(if(disposition == "accepted", do: :accepted_count, else: nil))
     |> bump_stat(if(verification_status == "contradicted", do: :contradicted_count, else: nil))
-    |> bump_stat(
-      if(verification_status == "insufficient_evidence", do: :insufficient_count, else: nil)
-    )
+    |> bump_stat(if(verification_status == "insufficient_evidence", do: :insufficient_count, else: nil))
     |> bump_stat(if(disposition == "needs_verification", do: :pending_count, else: nil))
   end
 

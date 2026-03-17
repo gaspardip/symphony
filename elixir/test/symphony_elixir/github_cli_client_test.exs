@@ -41,8 +41,7 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
   end
 
   test "edit and create pull request propagate gh failures and fallback paths" do
-    assert {:ok,
-            %{url: "https://github.com/example/repo/pull/2", state: "OPEN", output: "updated"}} =
+    assert {:ok, %{url: "https://github.com/example/repo/pull/2", state: "OPEN", output: "updated"}} =
              GitHubCLIClient.edit_pull_request("/tmp/workspace", "Title", "/tmp/body.md",
                gh_runner: fn
                  "gh", ["pr", "view", "--json", "url,state"], _opts ->
@@ -390,9 +389,7 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
 
                    {Jason.encode!(payload), 0}
 
-                 "gh",
-                 ["api", "graphql", "-f", mutation_arg, "-F", "threadId=THREAD_123"],
-                 _opts ->
+                 "gh", ["api", "graphql", "-f", mutation_arg, "-F", "threadId=THREAD_123"], _opts ->
                    assert String.starts_with?(mutation_arg, "query=")
 
                    payload = %{

@@ -11,8 +11,7 @@ defmodule SymphonyElixir.GitHubClient do
   @callback create_pull_request(Path.t(), String.t(), String.t(), String.t(), Path.t(), keyword()) ::
               {:ok, %{url: String.t(), state: String.t() | nil}} | {:error, term()}
   @callback merge_pull_request(Path.t(), keyword()) ::
-              {:ok,
-               %{merged: boolean(), url: String.t() | nil, output: String.t(), status: atom()}}
+              {:ok, %{merged: boolean(), url: String.t() | nil, output: String.t(), status: atom()}}
               | {:error, term()}
   @callback review_feedback(Path.t(), keyword()) ::
               {:ok,

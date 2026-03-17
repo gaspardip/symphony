@@ -68,20 +68,14 @@ defmodule SymphonyElixir.DeliveryEngine do
     stage = current_stage(workspace, issue)
 
     if passive_stage?(stage) do
-      Logger.info(
-        "Skipping Codex session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}"
-      )
+      Logger.info("Skipping Codex session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}")
 
       do_run(nil, workspace, issue, codex_update_recipient, issue_state_fetcher, max_turns, opts)
     else
-      Logger.info(
-        "Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}"
-      )
+      Logger.info("Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}")
 
       with {:ok, app_session} <- AppServer.start_session(workspace) do
-        Logger.info(
-          "Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}"
-        )
+        Logger.info("Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}")
 
         try do
           do_run(
@@ -98,9 +92,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         end
       else
         {:error, reason} = error ->
-          Logger.error(
-            "Codex session bootstrap failed for #{issue.identifier}: #{inspect(reason)}"
-          )
+          Logger.error("Codex session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
 
           error
       end
@@ -498,8 +490,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                 last_harness_init: Map.merge(attrs, %{status: "passed"}),
                 last_harness_check: %{
                   status: "passed",
-                  checked_at:
-                    DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+                  checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
                 },
                 harness_status: "ready",
                 harness_attempts: Map.get(state, :harness_attempts, 0) + 1
@@ -596,8 +587,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                 state,
                 before_snapshot,
                 %{
-                  next_objective:
-                    "Stop editing and let Symphony run the official validation contract."
+                  next_objective: "Stop editing and let Symphony run the official validation contract."
                 },
                 opts
               )
@@ -834,8 +824,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                 inspection,
                 %{
                   last_validation_summary: summarized_command_output(result.output, 800),
-                  next_objective:
-                    "Review validation output and confirm behavior against acceptance criteria."
+                  next_objective: "Review validation output and confirm behavior against acceptance criteria."
                 },
                 opts
               )
@@ -864,8 +853,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                   inspection,
                   %{
                     last_validation_summary: summarized_command_output(result.output, 800),
-                    next_objective:
-                      "Address the latest validation failure without rerunning the full repo validation in implement."
+                    next_objective: "Address the latest validation failure without rerunning the full repo validation in implement."
                   },
                   opts
                 )
@@ -1683,8 +1671,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                   issue_identifier: issue.identifier,
                   issue_source: issue.source,
                   current_deploy_target: "preview",
-                  last_decision_summary:
-                    "Preview deployment completed. Running post-deploy verification."
+                  last_decision_summary: "Preview deployment completed. Running post-deploy verification."
                 })
 
               :ok
@@ -1754,8 +1741,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                     issue_identifier: issue.identifier,
                     issue_source: issue.source,
                     current_deploy_target: "production",
-                    last_decision_summary:
-                      "Production deployment completed. Running post-deploy verification."
+                    last_decision_summary: "Production deployment completed. Running post-deploy verification."
                   })
 
                 :ok
@@ -1978,8 +1964,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             issue_id: issue.id,
             issue_identifier: issue.identifier,
             issue_source: issue.source,
-            last_decision_summary:
-              "Post-deploy verification passed. Starting production deployment.",
+            last_decision_summary: "Post-deploy verification passed. Starting production deployment.",
             effective_policy_class: Map.get(state, :effective_policy_class),
             current_deploy_target: "production"
           })
@@ -2178,8 +2163,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       issue_identifier: issue.identifier,
       fingerprint: inspection.fingerprint,
       last_turn_summary: get_in(state, [:last_turn_result, :summary]),
-      last_validation_summary:
-        summarized_command_output(get_in(state, [:last_validation, :output]), 800),
+      last_validation_summary: summarized_command_output(get_in(state, [:last_validation, :output]), 800),
       last_verifier_summary:
         summarized_text(
           get_in(state, [:last_verifier, :summary]) || get_in(state, [:last_verifier, :output]),
@@ -2349,8 +2333,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp default_next_objective(_state, []),
-    do:
-      "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
+    do: "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
 
   defp default_next_objective(state, focused_claims) do
     focused_review_next_objective(focused_claims, Map.get(state, :review_claims, %{}))
@@ -2430,8 +2413,7 @@ defmodule SymphonyElixir.DeliveryEngine do
        when is_map(review_claims) and is_integer(limit) and limit > 0 do
     review_claims
     |> Enum.sort_by(fn {thread_key, claim} ->
-      {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "",
-       Map.get(claim, "line") || 0, thread_key}
+      {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "", Map.get(claim, "line") || 0, thread_key}
     end)
     |> Enum.filter(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
     |> Enum.take(limit)
@@ -3803,8 +3785,7 @@ defmodule SymphonyElixir.DeliveryEngine do
     %{
       verdict: Map.get(result, :verdict) || Map.get(result, "verdict"),
       summary: Map.get(result, :summary) || Map.get(result, "summary"),
-      acceptance_gaps:
-        Map.get(result, :acceptance_gaps) || Map.get(result, "acceptance_gaps") || [],
+      acceptance_gaps: Map.get(result, :acceptance_gaps) || Map.get(result, "acceptance_gaps") || [],
       risky_areas: Map.get(result, :risky_areas) || Map.get(result, "risky_areas") || [],
       evidence: Map.get(result, :evidence) || Map.get(result, "evidence") || [],
       output: Map.get(result, :raw_output) || Map.get(result, "raw_output"),

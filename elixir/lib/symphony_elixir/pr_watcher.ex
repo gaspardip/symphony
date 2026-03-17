@@ -141,8 +141,7 @@ defmodule SymphonyElixir.PRWatcher do
             %{
               status: "ok",
               pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
-              review_decision:
-                Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
+              review_decision: Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
               pending_drafts_count: length(items),
               actionable_items_count: actionable_items_count,
               items: items
@@ -258,8 +257,7 @@ defmodule SymphonyElixir.PRWatcher do
       submitted_at: nil,
       draft_state: Map.get(persisted, "draft_state", "drafted"),
       draft_reply: Map.get(persisted, "draft_reply"),
-      resolution_recommendation:
-        Map.get(persisted, "resolution_recommendation", "keep_open_until_confirmed"),
+      resolution_recommendation: Map.get(persisted, "resolution_recommendation", "keep_open_until_confirmed"),
       source_class: Map.get(persisted, "source_class", "unknown"),
       claim_type: Map.get(persisted, "claim_type", "unclear"),
       veracity_score: Map.get(persisted, "veracity_score", 0.0),
@@ -659,8 +657,7 @@ defmodule SymphonyElixir.PRWatcher do
   end
 
   defp do_post_approved_drafts(_workspace, pr_url, thread_states, github_client, github_opts) do
-    Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state},
-                                                         {acc, posted, skipped} ->
+    Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state}, {acc, posted, skipped} ->
       draft_state = thread_state |> Map.get("draft_state", "drafted") |> to_string()
       draft_reply = Map.get(thread_state, "draft_reply")
 
@@ -767,8 +764,7 @@ defmodule SymphonyElixir.PRWatcher do
   end
 
   defp do_resolve_posted_threads(pr_url, thread_states, github_client, github_opts) do
-    Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state},
-                                                         {acc, resolved, skipped} ->
+    Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state}, {acc, resolved, skipped} ->
       draft_state = thread_state |> Map.get("draft_state", "drafted") |> to_string()
       resolution_recommendation = Map.get(thread_state, "resolution_recommendation")
       implementation_status = Map.get(thread_state, "implementation_status")

@@ -419,8 +419,7 @@ defmodule SymphonyElixir.GitHubCLIClient do
       updated_at: blank_to_nil(comment["updated_at"]),
       url: blank_to_nil(comment["html_url"]),
       author: get_in(comment, ["user", "login"]),
-      in_reply_to_id:
-        comment_reply_parent_id(comment) && to_string(comment_reply_parent_id(comment))
+      in_reply_to_id: comment_reply_parent_id(comment) && to_string(comment_reply_parent_id(comment))
     }
   end
 
