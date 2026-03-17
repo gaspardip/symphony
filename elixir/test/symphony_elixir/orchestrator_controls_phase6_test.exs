@@ -1036,6 +1036,68 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert run_state.stop_reason == nil
   end
 
+  test "maybe_resume_blocked_issue resumes seeded manual publish state even when the issue snapshot is no longer blocked" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-seeded-publish-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    issue = %Issue{
+      id: "manual:seeded-publish-retry",
+      identifier: "MT-SEEDED-PUBLISH-RETRY",
+      title: "Retry seeded publish issue",
+      description: "resume publish from persisted state",
+      state: "In Progress",
+      source: :manual,
+      labels: ["policy:fully-autonomous"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-seeded-publish-retry")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "publish", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: :manual,
+        effective_policy_class: "fully_autonomous",
+        stop_reason: %{code: "harness_publish_gate_failed"},
+        last_rule_id: "harness.publish_gate_failed",
+        next_human_action: "Update the progress artifact before retrying."
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RetrySeededPublishOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    {_state, resumed_issue} =
+      Orchestrator.maybe_resume_blocked_issue_for_test(:sys.get_state(pid), issue)
+
+    assert resumed_issue.state == "Merging"
+
+    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert run_state.stage == "publish"
+    assert run_state.stop_reason == nil
+    assert run_state.last_rule_id == nil
+    assert run_state.next_human_action == nil
+  end
+
   test "retry now sends verifier feedback with dirty workspace back to validate" do
     workspace_root =
       Path.join(

@@ -4578,7 +4578,7 @@ defmodule SymphonyElixir.Orchestrator do
         end
       end
 
-    with true <- resumable_blocked_issue?(workspace, issue),
+    with true <- resumable_retry_issue?(workspace, issue),
          run_state when is_map(run_state) <- RunStateStore.load_or_default(workspace, issue),
          {:ok, resume_stage} <- resumable_stage_from_run_state(run_state, issue),
          resume_state when is_binary(resume_state) <- issue_state_for_stage(resume_stage),
@@ -4629,6 +4629,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp resumable_retry_issue?(workspace, %Issue{} = issue) when is_binary(workspace) do
+    resumable_blocked_issue?(workspace, issue) or resumable_seeded_manual_issue?(workspace, issue)
+  end
+
   defp resumable_blocked_issue?(workspace, %Issue{state: @blocked_state})
        when is_binary(workspace) do
     File.dir?(workspace)
@@ -4645,6 +4649,19 @@ defmodule SymphonyElixir.Orchestrator do
       _ -> false
     end
   end
+
+  defp resumable_seeded_manual_issue?(workspace, %Issue{source: :manual})
+       when is_binary(workspace) do
+    with true <- File.dir?(workspace),
+         {:ok, run_state} <- RunStateStore.load(workspace),
+         stage when is_binary(stage) <- resumable_current_stage(run_state) do
+      stage not in ["checkout", "done"]
+    else
+      _ -> false
+    end
+  end
+
+  defp resumable_seeded_manual_issue?(_workspace, _issue), do: false
 
   defp resumable_stage_from_run_state(run_state, issue) when is_map(run_state) do
     resume_stage =

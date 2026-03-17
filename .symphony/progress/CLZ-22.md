@@ -316,6 +316,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   live `retry_now` requests could resume `CLZ-22` into `publish`, but the orchestrator immediately filtered the resumed manual issue back out because `Merging` was not treated as an active dispatch state and stale manual-store refreshes overwrote the resumed issue shell with the blocked snapshot. `SymphonyElixir.Orchestrator` now treats `Merging` as active for dispatch and preserves resumed manual issue state when the refreshed manual snapshot is only the stale blocked record.
 - Latest focused resumed-publish dispatch validation on March 16, 2026:
   `mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs` passed with `38 tests, 0 failures`, and `mix dialyzer --format short` remained clean after adding the manual resumed-`Merging` revalidation regression.
+- Seeded manual retry-state recovery on March 16, 2026:
+  live canary retries after the blocked publish stop still acknowledged `retry_now` without touching the workspace because the persisted `run_state.json` had been left at `publish`, so `maybe_resume_blocked_issue/2` refused to resume the manual workspace unless the top-level state was still `blocked`. `SymphonyElixir.Orchestrator` now treats seeded manual workspaces with a persisted active stage as resumable during operator retry, clears the stale stop metadata in place, and derives the resumed issue state from the persisted stage (`publish` -> `Merging`) even when the issue snapshot is no longer blocked.
+- Latest focused seeded-manual retry recovery validation on March 16, 2026:
+  `mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs` passed with `39 tests, 0 failures`, and `mix dialyzer --format short` remained clean after adding the seeded-manual publish-stage retry regression.
 
 ## Next Step
-Push the resumed-publish dispatch fix, rerun the live `CLZ-22` canary cycle through publish, and verify that addressed inline replies refresh and safe threads resolve automatically on GitHub instead of stalling in a passive publish state.
+Push the seeded-manual retry recovery fix, rerun the live `CLZ-22` canary cycle through publish, and verify that addressed inline replies refresh and safe threads resolve automatically on GitHub instead of acknowledging `retry_now` without re-entering publish.
