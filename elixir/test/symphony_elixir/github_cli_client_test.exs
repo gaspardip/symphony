@@ -295,6 +295,23 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
     assert [%{author: "reviewer", path: "lib/example.ex", line: 12}] = feedback.comments
   end
 
+  test "review_feedback_by_pr_url reports unavailable for invalid URLs and gh failures" do
+    assert {:error, :review_feedback_unavailable} =
+             GitHubCLIClient.review_feedback_by_pr_url("https://example.com/not-a-pr",
+               gh_runner: fn _command, _args, _opts ->
+                 flunk("invalid PR URLs should not call gh")
+               end
+             )
+
+    assert {:error, :review_feedback_unavailable} =
+             GitHubCLIClient.review_feedback_by_pr_url("https://github.com/example/repo/pull/42",
+               gh_runner: fn
+                 "gh", ["api", "repos/example/repo/pulls/42"], _opts ->
+                   {"boom", 1}
+               end
+             )
+  end
+
   test "post_review_comment_reply posts to the pull request review comment replies endpoint" do
     assert {:ok,
             %{
@@ -340,6 +357,70 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
                    "repos/example/repo/pulls/42/comments/456/replies",
                    "-f",
                    "body=Looks good."
+                 ],
+                 _opts ->
+                   {"boom", 1}
+               end
+             )
+  end
+
+  test "edit_review_comment_reply updates replies and reports invalid URLs and gh failures" do
+    assert {:ok,
+            %{
+              id: "321",
+              url: "https://github.com/example/repo/pull/42#discussion_r321",
+              output: output
+            }} =
+             GitHubCLIClient.edit_review_comment_reply(
+               "https://github.com/example/repo/pull/42",
+               "456",
+               "Updated reply.",
+               gh_runner: fn
+                 "gh",
+                 [
+                   "api",
+                   "--method",
+                   "PATCH",
+                   "repos/example/repo/pulls/comments/456",
+                   "-f",
+                   "body=Updated reply."
+                 ],
+                 _opts ->
+                   payload = %{
+                     "id" => 321,
+                     "html_url" => "https://github.com/example/repo/pull/42#discussion_r321"
+                   }
+
+                   {Jason.encode!(payload), 0}
+               end
+             )
+
+    assert output =~ "\"id\":321"
+
+    assert {:error, :invalid_pr_url} =
+             GitHubCLIClient.edit_review_comment_reply(
+               "https://example.com/not-a-pr",
+               "456",
+               "Updated reply.",
+               gh_runner: fn _command, _args, _opts ->
+                 flunk("invalid PR URLs should not call gh")
+               end
+             )
+
+    assert {:error, {:review_reply_update_failed, 1, "boom"}} =
+             GitHubCLIClient.edit_review_comment_reply(
+               "https://github.com/example/repo/pull/42",
+               "456",
+               "Updated reply.",
+               gh_runner: fn
+                 "gh",
+                 [
+                   "api",
+                   "--method",
+                   "PATCH",
+                   "repos/example/repo/pulls/comments/456",
+                   "-f",
+                   "body=Updated reply."
                  ],
                  _opts ->
                    {"boom", 1}
@@ -405,5 +486,136 @@ defmodule SymphonyElixir.GitHubCLIClientTest do
              )
 
     assert output =~ "THREAD_123"
+  end
+
+  test "resolve_review_comment_thread paginates and reports missing or invalid threads" do
+    assert {:error, :review_thread_not_found} =
+             GitHubCLIClient.resolve_review_comment_thread(
+               "https://github.com/example/repo/pull/42",
+               "999",
+               gh_runner: fn
+                 "gh",
+                 [
+                   "api",
+                   "graphql",
+                   "-f",
+                   query_arg,
+                   "-F",
+                   "owner=example",
+                   "-F",
+                   "repo=repo",
+                   "-F",
+                   "number=42"
+                 ],
+                 _opts ->
+                   assert String.starts_with?(query_arg, "query=")
+
+                   payload = %{
+                     "data" => %{
+                       "repository" => %{
+                         "pullRequest" => %{
+                           "reviewThreads" => %{
+                             "nodes" => [],
+                             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                           }
+                         }
+                       }
+                     }
+                   }
+
+                   {Jason.encode!(payload), 0}
+               end
+             )
+
+    assert {:error, :invalid_pr_url} =
+             GitHubCLIClient.resolve_review_comment_thread(
+               "https://example.com/not-a-pr",
+               "999",
+               gh_runner: fn _command, _args, _opts ->
+                 flunk("invalid PR URLs should not call gh")
+               end
+             )
+  end
+
+  test "resolve_review_comment_thread reports lookup and unresolved mutation failures" do
+    assert {:error, {:review_thread_lookup_failed, 1, "lookup boom"}} =
+             GitHubCLIClient.resolve_review_comment_thread(
+               "https://github.com/example/repo/pull/42",
+               "999",
+               gh_runner: fn
+                 "gh",
+                 [
+                   "api",
+                   "graphql",
+                   "-f",
+                   query_arg,
+                   "-F",
+                   "owner=example",
+                   "-F",
+                   "repo=repo",
+                   "-F",
+                   "number=42"
+                 ],
+                 _opts ->
+                   assert String.starts_with?(query_arg, "query=")
+                   {"lookup boom", 1}
+               end
+             )
+
+    assert {:error, :review_thread_resolve_failed} =
+             GitHubCLIClient.resolve_review_comment_thread(
+               "https://github.com/example/repo/pull/42",
+               "456",
+               gh_runner: fn
+                 "gh",
+                 [
+                   "api",
+                   "graphql",
+                   "-f",
+                   query_arg,
+                   "-F",
+                   "owner=example",
+                   "-F",
+                   "repo=repo",
+                   "-F",
+                   "number=42"
+                 ],
+                 _opts ->
+                   assert String.starts_with?(query_arg, "query=")
+
+                   payload = %{
+                     "data" => %{
+                       "repository" => %{
+                         "pullRequest" => %{
+                           "reviewThreads" => %{
+                             "nodes" => [
+                               %{
+                                 "id" => "THREAD_123",
+                                 "comments" => %{"nodes" => [%{"databaseId" => 456}]}
+                               }
+                             ],
+                             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+                           }
+                         }
+                       }
+                     }
+                   }
+
+                   {Jason.encode!(payload), 0}
+
+                 "gh", ["api", "graphql", "-f", mutation_arg, "-F", "threadId=THREAD_123"], _opts ->
+                   assert String.starts_with?(mutation_arg, "query=")
+
+                   payload = %{
+                     "data" => %{
+                       "resolveReviewThread" => %{
+                         "thread" => %{"id" => "THREAD_123", "isResolved" => false}
+                       }
+                     }
+                   }
+
+                   {Jason.encode!(payload), 0}
+               end
+             )
   end
 end
