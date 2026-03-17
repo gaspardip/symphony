@@ -126,6 +126,29 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert get_in(resolved, ["comment:2926989348", "resolution_state"]) == "resolved"
   end
 
+  test "publish finalization resolves safe contradicted false-positive threads" do
+    resolved =
+      DeliveryEngine.maybe_resolve_autonomous_review_threads_for_test(
+        %{
+          "comment:2926989511" => %{
+            "draft_state" => "posted",
+            "draft_reply" => "I checked this locally and the claim is a false positive.",
+            "disposition" => "dismissed",
+            "verification_status" => "contradicted",
+            "resolution_recommendation" => "resolve_after_contradiction",
+            "posted_reply_id" => "2938720828"
+          }
+        },
+        "/tmp/symphony-pr-feedback",
+        "https://github.com/example/repo/pull/42",
+        %{policy_pack: "private_autopilot", repo_url: "https://github.com/example/repo"},
+        github_client: SymphonyElixir.DeliveryEnginePhase6Test.FakeGitHubClient
+      )
+
+    assert_received {:resolved_review_thread, "2926989511"}
+    assert get_in(resolved, ["comment:2926989511", "resolution_state"]) == "resolved"
+  end
+
   test "checkout blocks when the harness is missing its version" do
     {workspace, issue} = git_stage_workspace!("checkout-missing-version")
 

@@ -537,6 +537,9 @@ defmodule SymphonyElixir.PRWatcher do
     verification_status = Map.get(persisted, "verification_status")
 
     cond do
+      verification_status == "contradicted" ->
+        "resolve_after_contradiction"
+
       verification_status in [
         "verified_review_decision",
         "verified_scope",
@@ -769,6 +772,8 @@ defmodule SymphonyElixir.PRWatcher do
       resolution_recommendation = Map.get(thread_state, "resolution_recommendation")
       implementation_status = Map.get(thread_state, "implementation_status")
       resolution_state = Map.get(thread_state, "resolution_state")
+      verification_status = Map.get(thread_state, "verification_status")
+      disposition = Map.get(thread_state, "disposition")
 
       cond do
         not String.starts_with?(to_string(thread_key), "comment:") ->
@@ -777,8 +782,12 @@ defmodule SymphonyElixir.PRWatcher do
         draft_state != "posted" ->
           {acc, resolved, skipped}
 
-        resolution_recommendation != "resolve_after_change" or
-            implementation_status != "addressed" ->
+        not resolvable_review_thread?(
+          resolution_recommendation,
+          implementation_status,
+          verification_status,
+          disposition
+        ) ->
           {acc, resolved, skipped}
 
         resolution_state == "resolved" ->
@@ -812,6 +821,38 @@ defmodule SymphonyElixir.PRWatcher do
       end
     end)
   end
+
+  defp resolvable_review_thread?(
+         "resolve_after_change",
+         "addressed",
+         _verification_status,
+         _disposition
+       ),
+       do: true
+
+  defp resolvable_review_thread?(
+         "resolve_after_contradiction",
+         _implementation_status,
+         "contradicted",
+         "dismissed"
+       ),
+       do: true
+
+  defp resolvable_review_thread?(
+         "resolve_after_contradiction",
+         _implementation_status,
+         "contradicted",
+         _disposition
+       ),
+       do: true
+
+  defp resolvable_review_thread?(
+         _resolution_recommendation,
+         _implementation_status,
+         _verification_status,
+         _disposition
+       ),
+       do: false
 
   defp ensure_thread_resolve_scope(opts) do
     CredentialRegistry.allow?(

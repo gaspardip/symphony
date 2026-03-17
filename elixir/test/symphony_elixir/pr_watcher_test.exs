@@ -264,6 +264,28 @@ defmodule SymphonyElixir.PRWatcherTest do
     assert get_in(updated_threads, ["comment:3", "resolution_state"]) == nil
   end
 
+  test "resolve_posted_threads resolves contradicted false-positive threads when policy allows" do
+    {:ok, updated_threads, stats} =
+      PRWatcher.resolve_posted_threads(
+        "https://github.com/example/repo/pull/42",
+        %{
+          "comment:2" => %{
+            "draft_state" => "posted",
+            "draft_reply" => "This claim was contradicted locally.",
+            "disposition" => "dismissed",
+            "verification_status" => "contradicted",
+            "resolution_recommendation" => "resolve_after_contradiction"
+          }
+        },
+        policy_pack: :private_autopilot,
+        github_client: __MODULE__.PostingGitHubClient
+      )
+
+    assert stats.resolved_count == 1
+    assert get_in(updated_threads, ["comment:2", "resolution_state"]) == "resolved"
+    assert is_binary(get_in(updated_threads, ["comment:2", "resolved_at"]))
+  end
+
   defmodule FakeGitHubClient do
     @behaviour SymphonyElixir.GitHubClient
 

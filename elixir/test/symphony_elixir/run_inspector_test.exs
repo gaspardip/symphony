@@ -48,6 +48,29 @@ defmodule SymphonyElixir.RunInspectorTest do
     refute RunInspector.required_checks_passed?(snapshot)
   end
 
+  test "required checks rollup matches GitHub workflow names when the check-run name differs" do
+    snapshot = %RunInspector.Snapshot{
+      pr_url: "https://example.com/pr/4",
+      pr_state: "OPEN",
+      review_decision: "APPROVED",
+      harness: %RepoHarness{required_checks: ["pr-description-lint"]},
+      check_statuses: [
+        %{
+          name: "validate-pr-description",
+          workflow_name: "pr-description-lint",
+          status: "COMPLETED",
+          conclusion: "SUCCESS"
+        }
+      ]
+    }
+
+    rollup = RunInspector.required_checks_rollup(snapshot)
+
+    assert rollup.state == :passed
+    assert rollup.missing == []
+    assert RunInspector.required_checks_passed?(snapshot)
+  end
+
   test "ready_for_merge requires an open pull request even when checks and reviews pass" do
     harness = %RepoHarness{required_checks: ["ci / validate"]}
 

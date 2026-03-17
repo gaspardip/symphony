@@ -3038,11 +3038,24 @@ defmodule SymphonyElixir.DeliveryEngine do
     Enum.any?(review_threads, fn {thread_key, thread_state} ->
       String.starts_with?(to_string(thread_key), "comment:") and
         Map.get(thread_state, "draft_state") == "posted" and
-        Map.get(thread_state, "resolution_recommendation") == "resolve_after_change" and
-        Map.get(thread_state, "implementation_status") == "addressed" and
+        resolvable_review_thread_state?(thread_state) and
         Map.get(thread_state, "resolution_state") != "resolved"
     end)
   end
+
+  defp resolvable_review_thread_state?(thread_state) when is_map(thread_state) do
+    case {
+      Map.get(thread_state, "resolution_recommendation"),
+      Map.get(thread_state, "implementation_status"),
+      Map.get(thread_state, "verification_status")
+    } do
+      {"resolve_after_change", "addressed", _} -> true
+      {"resolve_after_contradiction", _, "contradicted"} -> true
+      _ -> false
+    end
+  end
+
+  defp resolvable_review_thread_state?(_thread_state), do: false
 
   defp present_review_thread_reply?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_review_thread_reply?(_value), do: false

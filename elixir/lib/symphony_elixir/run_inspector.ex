@@ -177,7 +177,7 @@ defmodule SymphonyElixir.RunInspector do
 
     states =
       Enum.map(required, fn required_check ->
-        matching_entries = Enum.filter(check_statuses, &(Map.get(&1, :name) == required_check))
+        matching_entries = Enum.filter(check_statuses, &matches_required_check?(&1, required_check))
 
         {required_check, aggregate_required_check_state(matching_entries)}
       end)
@@ -366,9 +366,10 @@ defmodule SymphonyElixir.RunInspector do
 
   defp normalize_checks(checks) when is_list(checks) do
     Enum.map(checks, fn
-      %{"name" => name, "status" => status, "conclusion" => conclusion} ->
+      %{"name" => name, "status" => status, "conclusion" => conclusion} = payload ->
         %{
           name: blank_to_nil(name),
+          workflow_name: blank_to_nil(payload["workflowName"]),
           status: blank_to_nil(status),
           conclusion: blank_to_nil(conclusion)
         }
@@ -379,6 +380,12 @@ defmodule SymphonyElixir.RunInspector do
   end
 
   defp normalize_checks(_checks), do: []
+
+  defp matches_required_check?(entry, required_check) when is_map(entry) and is_binary(required_check) do
+    Map.get(entry, :name) == required_check or Map.get(entry, :workflow_name) == required_check
+  end
+
+  defp matches_required_check?(_entry, _required_check), do: false
 
   defp status_path(line) when is_binary(line) do
     line
