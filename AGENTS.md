@@ -7,6 +7,7 @@ This file is intentionally short. It points agents to the durable repo map and s
 - Self-host contract: [`.symphony/harness.yml`](/Users/gaspar/src/symphony/.symphony/harness.yml)
 - Repo map: [`.symphony/knowledge/codebase-map.md`](/Users/gaspar/src/symphony/.symphony/knowledge/codebase-map.md)
 - Harness guide: [`docs/AGENT_HARNESS.md`](/Users/gaspar/src/symphony/docs/AGENT_HARNESS.md)
+- Observability runbook: [`docs/OBSERVABILITY_RUNBOOK.md`](/Users/gaspar/src/symphony/docs/OBSERVABILITY_RUNBOOK.md)
 - Self-dogfood plan: [`docs/SYMPHONY_SELF_DOGFOOD_EXECUTION_PLAN.md`](/Users/gaspar/src/symphony/docs/SYMPHONY_SELF_DOGFOOD_EXECUTION_PLAN.md)
 
 ## Durable Knowledge

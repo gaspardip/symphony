@@ -56,3 +56,21 @@ mise exec -- mix harness.check
 ```
 
 This is also part of Symphony’s self-host validation path.
+
+## Observability Surfaces
+
+When debugging a self-host run, start with:
+
+- [`docs/OBSERVABILITY_RUNBOOK.md`](/Users/gaspar/src/symphony/docs/OBSERVABILITY_RUNBOOK.md)
+- `GET /api/v1/state`
+- `GET /api/v1/reports/delivery`
+- `GET /api/v1/<ISSUE_IDENTIFIER>`
+- `GET /metrics`
+
+The durable per-issue workspace state lives at:
+
+```text
+<workspace.root>/<ISSUE_IDENTIFIER>/.symphony/run_state.json
+```
+
+Use that file to inspect persisted stage, stop reason, review claims, and CI failure context before guessing from logs.
