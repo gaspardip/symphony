@@ -216,6 +216,9 @@ defmodule SymphonyElixirWeb.Presenter do
         "retry_now" ->
           Orchestrator.retry_issue_now(orchestrator, issue_identifier)
 
+        "refresh_merge_readiness" ->
+          Orchestrator.refresh_merge_readiness(orchestrator, issue_identifier)
+
         "approve_for_merge" ->
           Orchestrator.approve_issue_for_merge(orchestrator, issue_identifier)
 
@@ -625,6 +628,7 @@ defmodule SymphonyElixirWeb.Presenter do
         last_verifier_verdict: Map.get(run_state || %{}, :last_verifier_verdict),
         acceptance_summary: Map.get(run_state || %{}, :acceptance_summary),
         last_post_merge: Map.get(run_state || %{}, :last_post_merge),
+        last_merge_readiness: Map.get(run_state || %{}, :last_merge_readiness),
         last_deploy_preview: Map.get(run_state || %{}, :last_deploy_preview),
         last_deploy_production: Map.get(run_state || %{}, :last_deploy_production),
         last_post_deploy_verify: Map.get(run_state || %{}, :last_post_deploy_verify),
@@ -711,6 +715,7 @@ defmodule SymphonyElixirWeb.Presenter do
       harness: harness,
       review: review,
       publish: publish_payload(entry),
+      merge_readiness: merge_readiness_payload(entry),
       routing: routing_payload(entry),
       lease: lease_payload(entry),
       policy: policy,
@@ -1365,11 +1370,13 @@ defmodule SymphonyElixirWeb.Presenter do
       },
       passive_stage: %{
         passive: Map.get(entry, :passive?, false),
+        merge_readiness: Map.get(entry, :stage) == "merge_readiness",
         waiting_on_checks: Map.get(entry, :stage) == "await_checks",
         review_approved: Map.get(entry, :review_approved, false),
         deploy_approved: Map.get(entry, :deploy_approved, false),
         merge_window_wait: Map.get(entry, :merge_window_wait),
-        deploy_window_wait: Map.get(entry, :deploy_window_wait)
+        deploy_window_wait: Map.get(entry, :deploy_window_wait),
+        last_merge_readiness: merge_readiness_payload(entry)
       },
       tracker: %{
         source: Map.get(entry, :source),
@@ -1434,6 +1441,31 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp review_thread_pr_url(_), do: nil
+
+  defp merge_readiness_payload(entry) when is_map(entry) do
+    merge_readiness = Map.get(entry, :last_merge_readiness)
+
+    if is_map(merge_readiness) do
+      %{
+        active: Map.get(entry, :stage) == "merge_readiness",
+        checked_at: Map.get(merge_readiness, :checked_at) || Map.get(merge_readiness, "checked_at"),
+        pr_body_validation_status:
+          Map.get(merge_readiness, :pr_body_validation_status) ||
+            Map.get(merge_readiness, "pr_body_validation_status"),
+        posted_review_threads:
+          Map.get(merge_readiness, :posted_review_threads) ||
+            Map.get(merge_readiness, "posted_review_threads") || 0,
+        pending_reply_refreshes:
+          Map.get(merge_readiness, :pending_reply_refreshes) ||
+            Map.get(merge_readiness, "pending_reply_refreshes") || 0,
+        resolved_review_threads:
+          Map.get(merge_readiness, :resolved_review_threads) ||
+            Map.get(merge_readiness, "resolved_review_threads") || 0
+      }
+    else
+      nil
+    end
+  end
 
   defp proof_artifacts_payload(run_state, running_payload) do
     proof = get_in(running_payload || %{}, [:runtime_health, :proof]) || %{}
@@ -1657,7 +1689,12 @@ defmodule SymphonyElixirWeb.Presenter do
           review_approved: Map.get(run_state || %{}, :review_approved, false),
           deploy_approved: Map.get(run_state || %{}, :deploy_approved, false),
           merge_window_wait: Map.get(run_state || %{}, :merge_window_wait),
-          deploy_window_wait: Map.get(run_state || %{}, :deploy_window_wait)
+          deploy_window_wait: Map.get(run_state || %{}, :deploy_window_wait),
+          last_merge_readiness:
+            merge_readiness_payload(%{
+              last_merge_readiness: Map.get(run_state || %{}, :last_merge_readiness),
+              stage: Map.get(run_state || %{}, :stage)
+            })
         },
         tracker: %{
           source:
@@ -1834,10 +1871,10 @@ defmodule SymphonyElixirWeb.Presenter do
     passive? = Map.get(entry, :passive?, false)
 
     cond do
-      passive? and stage in ["await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"] ->
+      passive? and stage in ["merge_readiness", "await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"] ->
         %{label: "Passive runtime", tone: "info"}
 
-      stage in ["await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"] ->
+      stage in ["merge_readiness", "await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"] ->
         %{label: "Passive handoff", tone: "warn"}
 
       true ->
@@ -1864,6 +1901,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
         stage == "publish" ->
           "Create or update the PR and attach publish metadata."
+
+        stage == "merge_readiness" ->
+          "Refresh PR hygiene and posted review thread state before passive check polling continues."
 
         stage == "await_checks" and merge_window_waiting?(entry) ->
           "Wait for the next allowed merge window before automerge continues."
@@ -1902,7 +1942,7 @@ defmodule SymphonyElixirWeb.Presenter do
     tone =
       cond do
         token_pressure == "high" -> "warn"
-        stage in ["await_checks", "merge", "post_merge", "deploy_preview", "post_deploy_verify"] -> "info"
+        stage in ["merge_readiness", "await_checks", "merge", "post_merge", "deploy_preview", "post_deploy_verify"] -> "info"
         true -> "muted"
       end
 
@@ -1910,6 +1950,9 @@ defmodule SymphonyElixirWeb.Presenter do
       cond do
         token_pressure == "high" ->
           "Retry context is compressed because the previous agent turn ran hot on input tokens."
+
+        stage == "merge_readiness" ->
+          merge_readiness_status_summary(entry)
 
         stage == "await_checks" and review_approved? ->
           "Approval is already recorded. This issue is waiting only on passive merge readiness."
@@ -1951,6 +1994,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp policy_next_human_action(entry, review) do
     cond do
+      Map.get(entry, :stage) == "merge_readiness" ->
+        "No human action is required unless the passive runtime reports a failure."
+
       Map.get(entry, :stage) == "await_checks" and Map.get(entry, :review_approved, false) ->
         "No human action is required unless checks fail."
 
@@ -1968,6 +2014,30 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
+  defp merge_readiness_status_summary(entry) do
+    merge_readiness = merge_readiness_payload(entry)
+
+    cond do
+      is_nil(merge_readiness) ->
+        "The runtime is refreshing PR hygiene before passive check polling resumes."
+
+      merge_readiness.pending_reply_refreshes > 0 ->
+        "Refreshing #{merge_readiness.pending_reply_refreshes} posted review #{reply_word(merge_readiness.pending_reply_refreshes)} and #{merge_readiness.resolved_review_threads} resolved #{thread_word(merge_readiness.resolved_review_threads)} before check polling resumes."
+
+      merge_readiness.pr_body_validation_status in ["passed", "updated"] ->
+        "PR hygiene is up to date. Passive check polling will resume after this merge-readiness pass."
+
+      true ->
+        "The runtime is reconciling PR body and review-thread state before passive check polling resumes."
+    end
+  end
+
+  defp reply_word(1), do: "reply"
+  defp reply_word(_count), do: "replies"
+
+  defp thread_word(1), do: "thread"
+  defp thread_word(_count), do: "threads"
+
   defp human_attention_entry?(entry) do
     summary = Map.get(entry, :operator_summary, %{})
 
@@ -1981,7 +2051,7 @@ defmodule SymphonyElixirWeb.Presenter do
     passive? = get_in(entry, [:runtime_mode, :label]) == "Passive runtime"
 
     passive? or
-      stage in ["await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"]
+      stage in ["merge_readiness", "await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"]
   end
 
   defp queue_attention_entry?(entry) do

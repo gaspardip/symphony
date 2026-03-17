@@ -3658,6 +3658,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp continuation_metadata_for_running_entry(%{identifier: identifier})
        when is_binary(identifier) do
     case issue_run_state(identifier) do
+      %{stage: "merge_readiness"} = run_state ->
+        %{
+          delay_type: :passive_continuation,
+          passive_delay_ms: passive_delay_ms_for_await_checks(run_state)
+        }
+
       %{stage: "await_checks"} = run_state ->
         %{
           delay_type: :passive_continuation,
@@ -4005,6 +4011,15 @@ defmodule SymphonyElixir.Orchestrator do
     call_if_available(server, {:retry_issue_now, issue_identifier})
   end
 
+  @spec refresh_merge_readiness(String.t()) :: map() | :unavailable
+  def refresh_merge_readiness(issue_identifier),
+    do: refresh_merge_readiness(__MODULE__, issue_identifier)
+
+  @spec refresh_merge_readiness(GenServer.server(), String.t()) :: map() | :unavailable
+  def refresh_merge_readiness(server, issue_identifier) do
+    call_if_available(server, {:refresh_merge_readiness, issue_identifier})
+  end
+
   @spec reprioritize_issue(String.t(), integer() | nil) :: map() | :unavailable
   def reprioritize_issue(issue_identifier, override_rank) do
     reprioritize_issue(__MODULE__, issue_identifier, override_rank)
@@ -4292,6 +4307,12 @@ defmodule SymphonyElixir.Orchestrator do
     {:reply, reply, state}
   end
 
+  def handle_call({:refresh_merge_readiness, issue_identifier}, _from, state) do
+    {reply, state} = refresh_merge_readiness_runtime(state, issue_identifier)
+    notify_dashboard()
+    {:reply, reply, state}
+  end
+
   def handle_call({:reprioritize_issue, issue_identifier, override_rank}, _from, state) do
     {reply, state} = reprioritize_issue_runtime(state, issue_identifier, override_rank)
     notify_dashboard()
@@ -4428,6 +4449,7 @@ defmodule SymphonyElixir.Orchestrator do
       last_verifier_verdict: Map.get(run_state, :last_verifier_verdict),
       acceptance_summary: Map.get(run_state, :acceptance_summary),
       last_pr_body_validation: Map.get(run_state, :last_pr_body_validation),
+      last_merge_readiness: Map.get(run_state, :last_merge_readiness),
       last_post_merge: Map.get(run_state, :last_post_merge),
       base_branch: Map.get(run_state, :base_branch) || (inspection.harness && inspection.harness.base_branch),
       run_state_pr_url: Map.get(run_state, :pr_url),
@@ -4915,6 +4937,97 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp refresh_merge_readiness_runtime(%State{} = state, issue_identifier) do
+    with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+         false <- issue_paused?(state, issue),
+         workspace <- Workspace.path_for_issue(issue.identifier),
+         {:ok, run_state} <- RunStateStore.load(workspace),
+         pr_url when is_binary(pr_url) and pr_url != "" <- Map.get(run_state, :pr_url),
+         :ok <- ensure_merge_readiness_restartable(state, issue.id),
+         :ok <- maybe_update_issue_state(issue.id, issue.state, @merging_state),
+         {:ok, _next_state} <-
+           RunStateStore.transition(workspace, "merge_readiness", %{
+             issue_id: issue.id,
+             issue_identifier: issue.identifier,
+             issue_source: issue.source,
+             pr_url: pr_url,
+             await_checks_polls: 0,
+             stop_reason: nil,
+             last_rule_id: "operator.refresh_merge_readiness",
+             last_failure_class: "pr_hygiene",
+             last_decision_summary: "Operator requested a merge-readiness refresh.",
+             next_human_action: nil
+           }) do
+      state =
+        state
+        |> maybe_restart_passive_issue(issue.id)
+        |> cancel_retry(issue.id)
+        |> clear_paused_issue(issue.id)
+
+      :ok = schedule_tick(0)
+
+      ledger_event =
+        RunLedger.record("operator.action", %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          actor_type: "operator",
+          actor_id: "dashboard",
+          summary: "Requested merge-readiness refresh.",
+          target_state: @merging_state,
+          metadata: %{action: "refresh_merge_readiness", pr_url: pr_url}
+        })
+
+      {%{
+         ok: true,
+         action: "refresh_merge_readiness",
+         issue_identifier: issue.identifier,
+         stage: "merge_readiness",
+         pr_url: pr_url,
+         ledger_event_id: Map.get(ledger_event, :event_id)
+       }, state}
+    else
+      true ->
+        {%{
+           ok: false,
+           action: "refresh_merge_readiness",
+           issue_identifier: issue_identifier,
+           error: "issue is paused"
+         }, state}
+
+      nil ->
+        {%{
+           ok: false,
+           action: "refresh_merge_readiness",
+           issue_identifier: issue_identifier,
+           error: "pr url not found"
+         }, state}
+
+      {:error, :active_stage_running} ->
+        {%{
+           ok: false,
+           action: "refresh_merge_readiness",
+           issue_identifier: issue_identifier,
+           error: "issue is currently running an active stage"
+         }, state}
+
+      {:error, :enoent} ->
+        {%{
+           ok: false,
+           action: "refresh_merge_readiness",
+           issue_identifier: issue_identifier,
+           error: "run state not found"
+         }, state}
+
+      {:error, reason} ->
+        {%{
+           ok: false,
+           action: "refresh_merge_readiness",
+           issue_identifier: issue_identifier,
+           error: inspect(reason)
+         }, state}
+    end
+  end
+
   defp maybe_resume_blocked_issue(%State{} = state, %Issue{} = issue) do
     workspace = Workspace.path_for_issue(issue.identifier)
 
@@ -5136,6 +5249,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_state_for_stage(stage)
        when stage in [
               "publish",
+              "merge_readiness",
               "await_checks",
               "merge",
               "post_merge",
@@ -5627,7 +5741,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_function(active_dispatch_fun, 3) and is_function(passive_dispatch_fun, 3) do
     case normalize_dispatch_stage(issue) do
-      stage when stage in ["await_checks", "merge", "post_merge"] ->
+      stage when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
         passive_dispatch_fun.(state, issue, attempt)
 
       _ ->
@@ -5780,7 +5894,7 @@ defmodule SymphonyElixir.Orchestrator do
     persisted_pr_url = Map.get(state, :pr_url)
 
     inspection.git? and
-      stage in ["implement", "validate", "verify", "publish", "await_checks", "merge"] and
+      stage in ["implement", "validate", "verify", "publish", "merge_readiness", "await_checks", "merge"] and
       is_binary(expected_branch) and expected_branch != "" and
       is_binary(inspection.branch) and inspection.branch != "" and
       inspection.branch != expected_branch and
@@ -5976,6 +6090,35 @@ defmodule SymphonyElixir.Orchestrator do
       :ok
     else
       IssueSource.update_issue_state(%{id: issue_id}, target_state)
+    end
+  end
+
+  defp ensure_merge_readiness_restartable(%State{} = state, issue_id) when is_binary(issue_id) do
+    case Map.get(state.running, issue_id) do
+      nil ->
+        :ok
+
+      %{passive?: true} ->
+        :ok
+
+      %{dispatch_stage: stage} when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
+        :ok
+
+      _ ->
+        {:error, :active_stage_running}
+    end
+  end
+
+  defp maybe_restart_passive_issue(%State{} = state, issue_id) when is_binary(issue_id) do
+    case Map.get(state.running, issue_id) do
+      %{passive?: true} ->
+        terminate_running_issue(state, issue_id, false)
+
+      %{dispatch_stage: stage} when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
+        terminate_running_issue(state, issue_id, false)
+
+      _ ->
+        state
     end
   end
 

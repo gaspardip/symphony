@@ -367,13 +367,34 @@ defmodule SymphonyElixir.PRWatcher do
         item
 
       reply ->
-        item
-        |> Map.put(:draft_state, "posted")
-        |> Map.put(:draft_reply, Map.get(reply, :body) || Map.get(item, :draft_reply))
-        |> Map.put(:posted_reply_id, Map.get(reply, :id))
-        |> Map.put(:posted_reply_url, Map.get(reply, :url))
-        |> Map.put(:posted_at, Map.get(reply, :updated_at) || Map.get(reply, :created_at))
-        |> Map.put(:reply_refresh_needed, false)
+        refresh_pending? = Map.get(persisted, "reply_refresh_needed", false)
+
+        draft_reply =
+          if refresh_pending? do
+            Map.get(persisted, "draft_reply") ||
+              Map.get(reply, :body) ||
+              Map.get(item, :draft_reply)
+          else
+            Map.get(reply, :body) ||
+              Map.get(persisted, "draft_reply") ||
+              Map.get(item, :draft_reply)
+          end
+
+        updated_item =
+          item
+          |> Map.put(:draft_state, "posted")
+          |> Map.put(:draft_reply, draft_reply)
+          |> Map.put(:posted_reply_id, Map.get(reply, :id))
+          |> Map.put(:posted_reply_url, Map.get(reply, :url))
+          |> Map.put(:posted_at, Map.get(reply, :updated_at) || Map.get(reply, :created_at))
+          |> Map.put(:reply_refresh_needed, refresh_pending?)
+
+        Enum.reduce([:implementation_status, :verification_status, :addressed_summary], updated_item, fn field, acc ->
+          case Map.fetch(persisted, Atom.to_string(field)) do
+            {:ok, value} -> Map.put(acc, field, value)
+            :error -> acc
+          end
+        end)
     end
   end
 

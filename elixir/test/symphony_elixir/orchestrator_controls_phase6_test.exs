@@ -509,8 +509,6 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       manual_store_root: manual_store_root
     )
 
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
-
     {:ok, issue} =
       SymphonyElixir.ManualIssueStore.submit(%{
         "id" => "review-thread-lifecycle",
@@ -594,6 +592,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       )
 
     manual_store_root = Path.join(workspace_root, "manual-store")
+    File.rm_rf(workspace_root)
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -656,6 +655,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       else
         Application.put_env(:symphony_elixir, :pr_watcher_github_client, previous_client)
       end
+
+      File.rm_rf(workspace_root)
     end)
 
     payload = Orchestrator.post_review_drafts(orchestrator_name, issue.identifier)
@@ -670,6 +671,423 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert is_binary(get_in(posted_state, [:review_threads, "comment:2", "posted_reply_id"]))
     assert is_binary(get_in(posted_state, [:review_threads, "comment:2", "posted_reply_url"]))
     assert get_in(posted_state, [:review_threads, "review:1", "draft_state"]) == "approved_to_post"
+  end
+
+  test "refresh merge readiness restarts passive PR hygiene work" do
+    unique_suffix = System.unique_integer([:positive])
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-refresh-merge-readiness-#{unique_suffix}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "merge-readiness-refresh-#{unique_suffix}",
+        "identifier" => "MT-MERGE-READY-#{unique_suffix}",
+        "title" => "Refresh merge readiness",
+        "description" => "Restart passive PR hygiene work",
+        "acceptance_criteria" => ["Return the run to merge_readiness"],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-ready")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        pr_url: "https://github.com/example/repo/pull/22",
+        last_pr_body_validation: %{status: "failed"},
+        review_threads: %{
+          "comment:1" => %{
+            "thread_key" => "comment:1",
+            "draft_state" => "posted",
+            "reply_refresh_needed" => true
+          }
+        }
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RefreshMergeReadinessOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    payload = Orchestrator.refresh_merge_readiness(orchestrator_name, issue.identifier)
+    assert payload.ok == true
+    assert payload.action == "refresh_merge_readiness"
+    assert payload.stage == "merge_readiness"
+    assert payload.pr_url == "https://github.com/example/repo/pull/22"
+    assert is_binary(payload.ledger_event_id)
+
+    {:ok, refreshed_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert refreshed_state.stage == "merge_readiness"
+    assert refreshed_state.await_checks_polls == 0
+    assert refreshed_state.last_rule_id == "operator.refresh_merge_readiness"
+    assert refreshed_state.last_failure_class == "pr_hygiene"
+    assert refreshed_state.next_human_action == nil
+  end
+
+  test "refresh merge readiness tolerates an existing passive merge-stage running entry" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-refresh-merge-running-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      tracker_kind: "memory"
+    )
+
+    previous_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "merge-readiness-running-#{System.unique_integer([:positive])}",
+        "identifier" => "MT-MERGE-RUNNING",
+        "title" => "Merge readiness running entry",
+        "description" => "exercise passive merge-stage refresh",
+        "state" => "Merging",
+        "acceptance_criteria" => ["Refresh merge readiness without reopening implement"],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-running")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        pr_url: "https://github.com/example/repo/pull/23",
+        last_pr_body_validation: %{status: "failed"}
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RefreshMergeReadinessRunningOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      if is_nil(previous_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{
+        issue: issue,
+        identifier: issue.identifier,
+        workspace_path: workspace,
+        dispatch_stage: "await_checks",
+        passive?: false
+      }
+
+      %{state | running: %{issue.id => running_entry}}
+    end)
+
+    payload = Orchestrator.refresh_merge_readiness(orchestrator_name, issue.identifier)
+    assert payload.ok == true
+    assert payload.stage == "merge_readiness"
+
+    {:ok, refreshed_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert refreshed_state.stage == "merge_readiness"
+    assert refreshed_state.last_rule_id == "operator.refresh_merge_readiness"
+  end
+
+  test "refresh merge readiness rejects an active implement-stage running entry" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-refresh-merge-active-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      tracker_kind: "memory"
+    )
+
+    previous_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "merge-readiness-active-#{System.unique_integer([:positive])}",
+        "identifier" => "MT-MERGE-ACTIVE",
+        "title" => "Merge readiness active entry",
+        "description" => "reject refresh while implement is active",
+        "state" => "In Progress",
+        "acceptance_criteria" => ["Keep active implement work running"],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-active")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        pr_url: "https://github.com/example/repo/pull/24",
+        last_pr_body_validation: %{status: "failed"}
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RefreshMergeReadinessActiveOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      if is_nil(previous_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{
+        issue: issue,
+        identifier: issue.identifier,
+        workspace_path: workspace,
+        dispatch_stage: "implement",
+        passive?: false
+      }
+
+      %{state | running: %{issue.id => running_entry}}
+    end)
+
+    payload = Orchestrator.refresh_merge_readiness(orchestrator_name, issue.identifier)
+    assert payload.ok == false
+    assert payload.action == "refresh_merge_readiness"
+    assert payload.error == "issue is currently running an active stage"
+
+    {:ok, refreshed_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert refreshed_state.stage == "await_checks"
+    assert refreshed_state.last_rule_id != "operator.refresh_merge_readiness"
+  end
+
+  test "refresh merge readiness reports a missing pr url" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-refresh-merge-missing-pr-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      tracker_kind: "memory"
+    )
+
+    previous_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "merge-readiness-missing-pr-#{System.unique_integer([:positive])}",
+        "identifier" => "MT-MERGE-NO-PR",
+        "title" => "Merge readiness missing PR",
+        "description" => "reject refresh without a PR url",
+        "state" => "Merging",
+        "acceptance_criteria" => ["Keep merge readiness blocked until a PR exists"],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-no-pr")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        last_pr_body_validation: %{status: "failed"}
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RefreshMergeReadinessMissingPrOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      if is_nil(previous_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    payload = Orchestrator.refresh_merge_readiness(orchestrator_name, issue.identifier)
+    assert payload.ok == false
+    assert payload.action == "refresh_merge_readiness"
+    assert payload.error == "pr url not found"
+
+    {:ok, refreshed_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert refreshed_state.stage == "await_checks"
+  end
+
+  test "refresh merge readiness reports a missing run state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-refresh-merge-missing-state-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      tracker_kind: "memory"
+    )
+
+    previous_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "merge-readiness-missing-state-#{System.unique_integer([:positive])}",
+        "identifier" => "MT-MERGE-NO-STATE",
+        "title" => "Merge readiness missing run state",
+        "description" => "reject refresh without persisted run state",
+        "state" => "Merging",
+        "acceptance_criteria" => ["Keep merge readiness blocked until state exists"],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-no-state")
+
+    orchestrator_name = Module.concat(__MODULE__, :RefreshMergeReadinessMissingStateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      if is_nil(previous_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    payload = Orchestrator.refresh_merge_readiness(orchestrator_name, issue.identifier)
+    assert payload.ok == false
+    assert payload.action == "refresh_merge_readiness"
+    assert payload.error == ":missing"
+  end
+
+  test "refresh merge readiness reports paused issues without changing state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-refresh-merge-paused-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      tracker_kind: "memory"
+    )
+
+    previous_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "merge-readiness-paused-#{System.unique_integer([:positive])}",
+        "identifier" => "MT-MERGE-PAUSED",
+        "title" => "Merge readiness paused issue",
+        "description" => "reject refresh while paused",
+        "state" => "Paused",
+        "acceptance_criteria" => ["Keep paused issues paused"],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-paused")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        pr_url: "https://github.com/example/repo/pull/25",
+        last_pr_body_validation: %{status: "failed"}
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RefreshMergeReadinessPausedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      if is_nil(previous_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      paused_entry = %{
+        issue_id: issue.id,
+        identifier: issue.identifier,
+        source: issue.source,
+        external_id: issue.external_id,
+        canonical_identifier: issue.canonical_identifier || issue.identifier,
+        resume_state: "Merging"
+      }
+
+      %{state | paused_issue_states: %{issue.id => paused_entry}}
+    end)
+
+    payload = Orchestrator.refresh_merge_readiness(orchestrator_name, issue.identifier)
+    assert payload.ok == false
+    assert payload.action == "refresh_merge_readiness"
+    assert payload.error == "issue is paused"
+
+    {:ok, refreshed_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert refreshed_state.stage == "await_checks"
   end
 
   test "retry now restores a blocked manual issue to its last actionable stage" do
@@ -1970,6 +2388,29 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert metadata.passive_delay_ms == 30_000
   end
 
+  test "passive continuation metadata backs off merge_readiness retries based on poll count" do
+    identifier = "MT-MERGE-READINESS-DELAY"
+    workspace = Workspace.path_for_issue(identifier)
+
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "merge_readiness", %{
+               issue_id: "manual:merge-readiness-delay",
+               issue_identifier: identifier,
+               await_checks_polls: 6
+             })
+
+    metadata =
+      Orchestrator.continuation_metadata_for_running_entry_for_test(%{identifier: identifier})
+
+    assert metadata.delay_type == :passive_continuation
+    assert metadata.passive_delay_ms == 30_000
+  end
+
   test "blocked review-fix budget stop with addressed claim progress auto-continues" do
     identifier = "MT-REVIEW-FIX-AUTO-CONTINUE"
     workspace = Workspace.path_for_issue(identifier)
@@ -2406,6 +2847,47 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     init_git_workspace!(workspace, branch: "symphony/mt-runtime-passive")
 
     SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier
+    })
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    assert %{mode: :passive, issue: ^issue, attempt: 2} =
+             Orchestrator.dispatch_runtime_issue_for_test(
+               %State{},
+               issue,
+               2,
+               active_dispatch_fun: fn _state, dispatch_issue, attempt ->
+                 %{mode: :active, issue: dispatch_issue, attempt: attempt}
+               end,
+               passive_dispatch_fun: fn _state, dispatch_issue, attempt ->
+                 %{mode: :passive, issue: dispatch_issue, attempt: attempt}
+               end
+             )
+  end
+
+  test "stage-aware runtime dispatch routes merge_readiness issues to passive dispatch" do
+    workspace_root =
+      Path.join(System.tmp_dir!(), "orchestrator-merge-readiness-dispatch-#{System.unique_integer([:positive])}")
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-merge-readiness-passive",
+      identifier: "MT-MERGE-READINESS-PASSIVE",
+      title: "Merge readiness passive",
+      description: "dispatch routing",
+      state: "Merging",
+      labels: []
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-readiness-passive")
+
+    SymphonyElixir.RunStateStore.transition(workspace, "merge_readiness", %{
       issue_id: issue.id,
       issue_identifier: issue.identifier
     })
