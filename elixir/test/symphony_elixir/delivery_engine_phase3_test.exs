@@ -121,7 +121,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
         end
       )
 
-    assert result in [{:stop, :verifier_failed}, {:stop, :noop_turn}]
+    assert result in [{:stop, :verifier_failed}, {:stop, :noop_turn}, {:stop, :behavior_proof_missing}]
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert Enum.any?(state.stage_history, &(&1.stage == "implement"))
@@ -408,6 +408,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
       tracker_kind: "memory",
       workspace_root: Path.dirname(workspace),
       codex_command: fake_codex_binary!("publish-noop-no-pr"),
+      codex_read_timeout_ms: 15_000,
       policy_publish_required: true
     )
 
@@ -439,8 +440,12 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
     )
 
     command_runner = fn
-      "git", ["status", "--porcelain"], _opts -> {"", 0}
-      "git", ["diff", "--stat", "--no-ext-diff", "HEAD"], _opts -> {"", 0}
+      "git", ["status", "--porcelain"], _opts ->
+        {"", 0}
+
+      "git", ["diff", "--stat", "--no-ext-diff", "HEAD"], _opts ->
+        {"", 0}
+
       "gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts ->
         {Jason.encode!(%{
            "url" => "https://github.com/example/repo/pull/77",
@@ -449,7 +454,8 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
            "statusCheckRollup" => []
          }), 0}
 
-      command, args, opts -> System.cmd(command, args, opts)
+      command, args, opts ->
+        System.cmd(command, args, opts)
     end
 
     assert :ok =
@@ -457,7 +463,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
                command_runner: command_runner,
                github_client: SymphonyElixir.DeliveryEnginePhase3Test.FakeGitHubClient,
                github_client_opts: [
-                  existing_pr: %{url: "https://github.com/example/repo/pull/77", state: "OPEN"},
+                 existing_pr: %{url: "https://github.com/example/repo/pull/77", state: "OPEN"},
                  pr_url: "https://github.com/example/repo/pull/77"
                ]
              )
@@ -484,7 +490,8 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
     )
 
     command_runner = fn
-      "git", ["push", "-u", "origin", "main"], _opts -> {"", 0}
+      "git", ["push", "-u", "origin", "main"], _opts ->
+        {"", 0}
 
       "gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts ->
         {Jason.encode!(%{

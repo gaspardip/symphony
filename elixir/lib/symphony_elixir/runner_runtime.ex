@@ -13,6 +13,7 @@ defmodule SymphonyElixir.RunnerRuntime do
   @default_runner_mode "stable"
   @default_history_limit 20
   @valid_runner_modes ["stable", "canary_active", "canary_failed"]
+  @runner_script_relative_path "ops/promote-runner.sh"
 
   @spec info() :: map()
   def info do
@@ -24,17 +25,29 @@ defmodule SymphonyElixir.RunnerRuntime do
     runner_mode = runner_mode(metadata)
     canary_required_labels = canary_required_labels(metadata)
     current_link_target = current_link_target(install_root)
-    runner_health = runner_health(Config.linear_required_labels(), install_root, metadata_result, current_link_target)
+
+    runner_health =
+      runner_health(
+        Config.linear_required_labels(),
+        install_root,
+        metadata_result,
+        current_link_target
+      )
+
     release_manifest_path = release_manifest_path(metadata, current_link_target)
     rollback_target_path = rollback_target_path(metadata)
     canary_evidence = canary_evidence(metadata)
 
     %{
+      instance_id: Config.runner_instance_id(),
       instance_name: Config.runner_instance_name(),
+      channel: Config.runner_channel(),
       install_root: install_root,
+      workspace_root: Config.workspace_root(),
       current_checkout_root: current_root,
       current_link_target: current_link_target,
       current_version_sha: current_version_sha(current_root) || Map.get(metadata, "current_version_sha"),
+      runtime_version: current_version_sha(current_root) || Map.get(metadata, "current_version_sha"),
       promoted_release_sha: Map.get(metadata, "promoted_release_sha"),
       promoted_ref: Map.get(metadata, "promoted_ref"),
       promoted_at: Map.get(metadata, "promoted_at"),
@@ -67,8 +80,98 @@ defmodule SymphonyElixir.RunnerRuntime do
       runner_health_summary: runner_health.summary,
       runner_health_human_action: runner_health.human_action,
       dispatch_enabled: runner_health.dispatch_enabled,
+      commands: commands(),
       history: history
     }
+  end
+
+  @spec instance_id() :: String.t()
+  def instance_id do
+    Config.runner_instance_id()
+  end
+
+  @spec channel() :: String.t()
+  def channel do
+    Config.runner_channel()
+  end
+
+  @spec promotion_script_path() :: Path.t()
+  def promotion_script_path do
+    Path.join(current_checkout_root(), @runner_script_relative_path)
+  end
+
+  @spec commands() :: map()
+  def commands do
+    script = shell_escape(promotion_script_path())
+
+    %{
+      inspect: "bash #{script} inspect",
+      promote: "bash #{script} promote <git-ref> [--canary-label <label>]",
+      record_canary: "bash #{script} record-canary <pass|fail> [--issue <LINEAR-ID>] [--pr <URL>] [--note <text>]",
+      rollback: "bash #{script} rollback [release-sha]"
+    }
+  end
+
+  @spec runtime_version() :: String.t() | nil
+  def runtime_version do
+    current_version_sha(current_checkout_root()) ||
+      Map.get(load_metadata(Config.runner_install_root()), "current_version_sha")
+  end
+
+  @spec promote(String.t(), keyword()) :: {:ok, map()} | {:error, map()}
+  def promote(git_ref, opts \\ []) when is_binary(git_ref) and is_list(opts) do
+    args =
+      ["promote", git_ref] ++
+        Enum.flat_map(Keyword.get(opts, :canary_labels, []), fn label ->
+          ["--canary-label", to_string(label)]
+        end)
+
+    execute_control("promote", args)
+  end
+
+  @spec record_canary(String.t(), keyword()) :: {:ok, map()} | {:error, map()}
+  def record_canary(result, opts \\ []) when is_binary(result) and is_list(opts) do
+    result =
+      result
+      |> String.trim()
+      |> String.downcase()
+
+    case result do
+      "pass" ->
+        execute_control("record_canary", record_canary_args(result, opts))
+
+      "fail" ->
+        execute_control("record_canary", record_canary_args(result, opts))
+
+      _ ->
+        {:error,
+         %{
+           ok: false,
+           action: "record_canary",
+           error: "invalid_result",
+           message: "Canary result must be `pass` or `fail`.",
+           commands: commands()
+         }}
+    end
+  end
+
+  @spec rollback() :: {:ok, map()} | {:error, map()}
+  def rollback do
+    rollback(nil, [])
+  end
+
+  @spec rollback(String.t() | nil) :: {:ok, map()} | {:error, map()}
+  def rollback(target_sha) when is_binary(target_sha) or is_nil(target_sha) do
+    rollback(target_sha, [])
+  end
+
+  @spec rollback(String.t() | nil, keyword()) :: {:ok, map()} | {:error, map()}
+  def rollback(target_sha, opts) when is_binary(target_sha) and is_list(opts) do
+    execute_control("rollback", ["rollback", String.trim(target_sha)])
+  end
+
+  def rollback(nil, opts) when is_list(opts) do
+    execute_control("rollback", ["rollback"])
   end
 
   @spec metadata_path(Path.t()) :: Path.t()
@@ -89,15 +192,20 @@ defmodule SymphonyElixir.RunnerRuntime do
   end
 
   @spec runner_health([String.t()] | nil, Path.t() | nil) :: map()
-  def runner_health(required_labels \\ Config.linear_required_labels(), install_root \\ Config.runner_install_root()) do
+  def runner_health(
+        required_labels \\ Config.linear_required_labels(),
+        install_root \\ Config.runner_install_root()
+      ) do
     metadata_result = read_metadata(install_root)
     current_link_target = current_link_target(install_root)
     runner_health(required_labels, install_root, metadata_result, current_link_target)
   end
 
+  @spec recent_history(Path.t()) :: [map()]
   @spec recent_history(Path.t(), pos_integer()) :: [map()]
   def recent_history(install_root, limit \\ @default_history_limit)
 
+  @spec recent_history(Path.t(), pos_integer()) :: [map()]
   def recent_history(install_root, limit)
       when is_binary(install_root) and is_integer(limit) and limit > 0 do
     install_root
@@ -167,11 +275,20 @@ defmodule SymphonyElixir.RunnerRuntime do
     end
   end
 
+  @spec effective_required_labels() :: [String.t()]
+  @spec effective_required_labels([String.t()] | nil) :: [String.t()]
   @spec effective_required_labels([String.t()] | nil, map() | nil) :: [String.t()]
-  def effective_required_labels(workflow_required_labels \\ Config.linear_required_labels(), metadata \\ nil)
+  def effective_required_labels(
+        workflow_required_labels \\ Config.linear_required_labels(),
+        metadata \\ nil
+      )
 
+  @spec effective_required_labels([String.t()] | nil, map() | nil) :: [String.t()]
   def effective_required_labels(workflow_required_labels, nil) do
-    effective_required_labels(workflow_required_labels, load_metadata(Config.runner_install_root()))
+    effective_required_labels(
+      workflow_required_labels,
+      load_metadata(Config.runner_install_root())
+    )
   end
 
   def effective_required_labels(workflow_required_labels, metadata) when is_map(metadata) do
@@ -185,9 +302,9 @@ defmodule SymphonyElixir.RunnerRuntime do
         workflow_labels
 
       runner_mode(metadata) == "canary_active" ->
-      workflow_labels
-      |> Kernel.++(canary_required_labels(metadata))
-      |> normalize_labels()
+        workflow_labels
+        |> Kernel.++(canary_required_labels(metadata))
+        |> normalize_labels()
 
       true ->
         workflow_labels
@@ -241,7 +358,9 @@ defmodule SymphonyElixir.RunnerRuntime do
 
   @spec rollback_rule_id(map() | nil) :: String.t() | nil
   def rollback_rule_id(%{} = metadata) do
-    if Map.get(metadata, "rollback_recommended", false), do: "runner.rollback_recommended", else: nil
+    if Map.get(metadata, "rollback_recommended", false),
+      do: "runner.rollback_recommended",
+      else: nil
   end
 
   def rollback_rule_id(_metadata), do: nil
@@ -268,7 +387,8 @@ defmodule SymphonyElixir.RunnerRuntime do
     raw_runner_mode = normalize_string(Map.get(metadata, "runner_mode"))
 
     cond do
-      not is_binary(install_root) or String.trim(install_root) == "" or not File.dir?(install_root) ->
+      not is_binary(install_root) or String.trim(install_root) == "" or
+          not File.dir?(install_root) ->
         invalid_runner_health(
           "runner.install_missing",
           "Runner install root is missing or unreadable.",
@@ -403,6 +523,110 @@ defmodule SymphonyElixir.RunnerRuntime do
   defp metadata_from_result({:ok, %{} = metadata}), do: metadata
   defp metadata_from_result(_result), do: %{}
 
+  defp execute_control(action, args) when is_binary(action) and is_list(args) do
+    script = promotion_script_path()
+
+    cond do
+      not File.exists?(script) ->
+        {:error,
+         %{
+           ok: false,
+           action: action,
+           error: "script_missing",
+           message: "Runner promotion script is missing.",
+           command: command_string(script, args),
+           commands: commands()
+         }}
+
+      true ->
+        requested_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+        case command_runner().("bash", [script | args], stderr_to_stdout: true) do
+          {output, 0} ->
+            {:ok,
+             %{
+               ok: true,
+               action: action,
+               requested_at: requested_at,
+               command: command_string(script, args),
+               output: normalize_command_output(output),
+               runner: info(),
+               commands: commands()
+             }}
+
+          {output, status} ->
+            {:error,
+             %{
+               ok: false,
+               action: action,
+               requested_at: requested_at,
+               error: "command_failed",
+               message: "Runner command failed with exit status #{status}.",
+               command: command_string(script, args),
+               output: normalize_command_output(output),
+               exit_status: status,
+               runner: info(),
+               commands: commands()
+             }}
+        end
+    end
+  end
+
+  defp record_canary_args(result, opts) do
+    note =
+      case Keyword.get(opts, :note) do
+        value when is_binary(value) ->
+          case String.trim(value) do
+            "" -> nil
+            trimmed -> trimmed
+          end
+
+        _ ->
+          nil
+      end
+
+    ["record-canary", result] ++
+      Enum.flat_map(Keyword.get(opts, :issues, []), fn issue ->
+        ["--issue", to_string(issue)]
+      end) ++
+      Enum.flat_map(Keyword.get(opts, :prs, []), fn pr ->
+        ["--pr", to_string(pr)]
+      end) ++
+      case note do
+        value when is_binary(value) ->
+          ["--note", value]
+
+        _ ->
+          []
+      end
+  end
+
+  defp command_runner do
+    Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun, &System.cmd/3)
+  end
+
+  defp command_string(script, args) when is_binary(script) and is_list(args) do
+    ["bash", script | args]
+    |> Enum.map(&shell_escape/1)
+    |> Enum.join(" ")
+  end
+
+  defp normalize_command_output(output) when is_binary(output) do
+    output
+    |> String.trim()
+    |> case do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp normalize_command_output(_output), do: nil
+
+  defp shell_escape(value) when is_binary(value) do
+    escaped = String.replace(value, "'", "'\"'\"'")
+    "'#{escaped}'"
+  end
+
   defp release_manifest_path(%{} = metadata, current_link_target) do
     metadata
     |> Map.get("release_manifest_path")
@@ -413,7 +637,8 @@ defmodule SymphonyElixir.RunnerRuntime do
     end
   end
 
-  defp release_manifest_path(_metadata, current_link_target), do: manifest_path_for_release(current_link_target)
+  defp release_manifest_path(_metadata, current_link_target),
+    do: manifest_path_for_release(current_link_target)
 
   defp manifest_path_for_release(path) when is_binary(path) do
     Path.join(path, @manifest_file)

@@ -35,6 +35,18 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert state.last_rule_id == "implementation.invalid_turn_result"
   end
 
+  test "delivery engine returns bootstrap errors when Codex session startup fails for active stages" do
+    {workspace, issue} = implement_workspace!("bootstrap-failure")
+
+    configure_delivery_workflow!(
+      workspace,
+      "/definitely/missing-codex-#{System.unique_integer([:positive])} app-server"
+    )
+
+    assert {:error, reason} = DeliveryEngine.run(workspace, issue, nil)
+    assert inspect(reason) =~ "port_exit"
+  end
+
   test "delivery engine blocks implement turns that omit the turn-result tool call" do
     {workspace, issue} = implement_workspace!("missing-turn-result")
     issue_id = issue.id
@@ -54,7 +66,10 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     {workspace, issue} = git_implement_workspace!("stream-error-retry")
     issue_id = issue.id
 
-    configure_delivery_workflow!(workspace, fake_codex_binary!("stream-error-retry", :stream_error_then_code_change))
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("stream-error-retry", :stream_error_then_code_change)
+    )
 
     assert {:stop, :validation_unavailable} =
              DeliveryEngine.run(workspace, issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end)
@@ -64,7 +79,10 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.stage == "blocked"
     assert state.implementation_turns == 2
-    assert get_in(state, [:last_turn_result, :summary]) == "Recovered after transient stream error"
+
+    assert get_in(state, [:last_turn_result, :summary]) ==
+             "Recovered after transient stream error"
+
     assert get_in(state, [:last_implementation_error, :summary]) =~ "stream_error"
     assert get_in(state, [:stop_reason, :code]) == "validation_unavailable"
   end
@@ -88,7 +106,10 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     {workspace, issue} = validate_workspace!("validation-unavailable")
     issue_id = issue.id
 
-    configure_delivery_workflow!(workspace, fake_codex_binary!("validation-unavailable", :missing))
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("validation-unavailable", :missing)
+    )
 
     assert {:stop, :validation_unavailable} = DeliveryEngine.run(workspace, issue, nil)
 
@@ -101,7 +122,10 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
   test "delivery engine can complete checkout and then block on an invalid implementation turn result" do
     {workspace, issue} = checkout_workspace!("checkout-to-invalid-turn")
 
-    configure_delivery_workflow!(workspace, fake_codex_binary!("checkout-to-invalid-turn", :invalid))
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("checkout-to-invalid-turn", :invalid)
+    )
 
     assert result =
              DeliveryEngine.run(workspace, issue, nil,
@@ -121,11 +145,41 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert get_in(state, [:stop_reason, :code]) == "invalid_turn_result"
   end
 
+  test "delivery engine initializes the agent harness before continuing from checkout" do
+    {workspace, issue} = checkout_workspace!("checkout-with-agent-harness")
+
+    write_agent_harness_yaml!(workspace)
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("checkout-with-agent-harness", :missing)
+    )
+
+    assert result =
+             DeliveryEngine.run(workspace, issue, nil,
+               command_runner: &checkout_command_runner/3,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
+             )
+
+    assert result in [{:stop, :missing_turn_result}, {:stop, :blocked}]
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.harness_status in ["initialized", "ready"]
+    assert is_binary(state.last_harness_init)
+    assert get_in(state, [:stop_reason, :code]) == "missing_turn_result"
+    assert get_in(state, [:last_harness_check, :status]) == "passed"
+    assert File.exists?(Path.join(workspace, ".symphony/progress/MT-RUNTIME.md"))
+    assert File.exists?(Path.join(workspace, ".symphony/knowledge/product.md"))
+  end
+
   test "delivery engine advances from implement to validate after a real code change" do
     {workspace, issue} = git_implement_workspace!("implement-to-validate")
     issue_id = issue.id
 
-    configure_delivery_workflow!(workspace, fake_codex_binary!("implement-to-validate", :code_change))
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("implement-to-validate", :code_change)
+    )
 
     assert {:stop, :validation_unavailable} =
              DeliveryEngine.run(workspace, issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end)
@@ -159,16 +213,48 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
   test "delivery engine finishes when the issue disappears during refresh" do
     {workspace, issue} = implement_workspace!("missing-after-turn")
 
-    configure_delivery_workflow!(workspace, fake_codex_binary!("missing-after-turn", :code_change))
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("missing-after-turn", :code_change)
+    )
 
     assert {:done, :missing} =
              DeliveryEngine.run(workspace, issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, []} end)
   end
 
+  test "delivery engine keeps seeded manual issues alive when refresh returns no tracker record" do
+    {workspace, issue} = git_implement_workspace!("manual-missing-after-turn")
+
+    manual_issue = %Issue{issue | id: "manual:MT-RUNTIME", source: :manual}
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "implement", %{
+               issue_id: manual_issue.id,
+               issue_identifier: manual_issue.identifier,
+               issue_source: manual_issue.source
+             })
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("manual-missing-after-turn", :code_change)
+    )
+
+    assert {:stop, :validation_unavailable} =
+             DeliveryEngine.run(workspace, manual_issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, []} end)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert get_in(state, [:last_turn_result, :summary]) == "Updated tracked file"
+    assert get_in(state, [:stop_reason, :code]) == "validation_unavailable"
+  end
+
   test "delivery engine returns refresh errors from implement turns" do
     {workspace, issue} = git_implement_workspace!("refresh-error-after-turn")
 
-    configure_delivery_workflow!(workspace, fake_codex_binary!("refresh-error-after-turn", :code_change))
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("refresh-error-after-turn", :code_change)
+    )
 
     assert {:error, {:issue_state_refresh_failed, :refresh_failed}} =
              DeliveryEngine.run(workspace, issue, nil, issue_state_fetcher: fn [_issue_id] -> {:error, :refresh_failed} end)
@@ -177,7 +263,10 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
   test "delivery engine stops advancing when the refreshed issue is no longer active" do
     {workspace, issue} = implement_workspace!("inactive-after-turn")
 
-    configure_delivery_workflow!(workspace, fake_codex_binary!("inactive-after-turn", :code_change))
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("inactive-after-turn", :code_change)
+    )
 
     refreshed_issue = %{issue | state: "Done"}
 
@@ -191,7 +280,12 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     configure_delivery_workflow!(workspace, fake_codex_binary!("validate-to-verify", :missing))
     File.mkdir_p!(Path.join(workspace, "scripts"))
     write_harness_yaml!(workspace)
-    File.write!(Path.join(workspace, "scripts/validate.sh"), "#!/usr/bin/env bash\necho validation passed\nexit 0\n")
+
+    File.write!(
+      Path.join(workspace, "scripts/validate.sh"),
+      "#!/usr/bin/env bash\necho validation passed\nexit 0\n"
+    )
+
     File.chmod!(Path.join(workspace, "scripts/validate.sh"), 0o755)
 
     assert {:stop, :verifier_blocked} =
@@ -214,6 +308,571 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     assert get_in(state, [:last_validation, :status]) == "passed"
   end
 
+  test "delivery engine review_verification reopens implement when focused proof confirms a review claim" do
+    {workspace, issue} = review_verification_workspace!("review-claim-accepted")
+
+    assert {:stop, :review_verification_completed} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "implement"
+
+    assert get_in(state, [:review_claims, "review:91", "verification_status"]) ==
+             "verified_review_decision"
+
+    assert get_in(state, [:review_claims, "review:91", "disposition"]) == "accepted"
+
+    assert get_in(state, [:review_threads, "review:91", "verification_status"]) ==
+             "verified_review_decision"
+
+    assert get_in(state, [:review_threads, "review:91", "draft_reply"]) =~
+             "verified this concern locally"
+
+    assert get_in(state, [:review_threads, "review:91", "resolution_recommendation"]) ==
+             "keep_open_until_change"
+
+    assert get_in(state, [:resume_context, :review_claim_summary]) =~ "verified_review_decision"
+    assert get_in(state, [:resume_context, :review_claim_summary]) =~ "lib/example.ex:2"
+    assert get_in(state, [:resume_context, :review_feedback_summary]) =~ "lib/example.ex:2"
+
+    assert get_in(state, [:resume_context, :next_objective]) =~
+             "Address only the verified PR review claims"
+
+    assert get_in(state, [:resume_context, :token_pressure]) == "high"
+  end
+
+  test "delivery engine review_verification returns to the passive stage when focused proof contradicts a claim" do
+    {workspace, issue} = review_verification_workspace!("review-claim-contradicted")
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:review_claims, %{
+                 "comment:92" => %{
+                   "thread_key" => "comment:92",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 3,
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "pending"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:92" => %{
+                   "thread_key" => "comment:92",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 3,
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :review_verification_completed} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "await_checks"
+    assert get_in(state, [:review_claims, "comment:92", "verification_status"]) == "contradicted"
+    assert get_in(state, [:review_claims, "comment:92", "disposition"]) == "dismissed"
+
+    assert get_in(state, [:review_threads, "comment:92", "draft_reply"]) =~
+             "could not confirm the claim"
+
+    assert state.last_decision_summary =~ "did not find enough evidence"
+  end
+
+  test "delivery engine auto-posts contradicted inline review replies for autonomous runs" do
+    {workspace, issue} = review_verification_workspace!("review-claim-contradicted-posted")
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:92" => %{
+                   "thread_key" => "comment:92",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 3,
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "pending"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:92" => %{
+                   "thread_key" => "comment:92",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 3,
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :review_verification_completed} =
+             DeliveryEngine.run(workspace, issue, nil, github_client: __MODULE__.PostingGitHubClient)
+
+    assert_receive {:posted_review_reply, "https://github.com/example/repo/pull/42", "92", body}
+    assert body =~ "could not confirm the claim"
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "await_checks"
+    assert get_in(state, [:review_threads, "comment:92", "draft_state"]) == "posted"
+    assert is_binary(get_in(state, [:review_threads, "comment:92", "posted_reply_id"]))
+  end
+
+  test "delivery engine auto-posts addressed inline review replies after an implement turn" do
+    {workspace, issue} = git_implement_workspace!("review-claim-addressed-posted")
+    issue_id = issue.id
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-addressed-posted", :code_change)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:93" => %{
+                   "thread_key" => "comment:93",
+                   "kind" => "comment",
+                   "path" => "README.md",
+                   "line" => 1,
+                   "claim_type" => "maintainability",
+                   "disposition" => "accepted",
+                   "actionable" => true,
+                   "verification_status" => "verified_scope"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:93" => %{
+                   "thread_key" => "comment:93",
+                   "kind" => "comment",
+                   "path" => "README.md",
+                   "line" => 1,
+                   "disposition" => "accepted",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :validation_unavailable} =
+             DeliveryEngine.run(workspace, issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
+               github_client: __MODULE__.PostingGitHubClient
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+    assert_receive {:posted_review_reply, "https://github.com/example/repo/pull/42", "93", body}
+    assert body =~ "addressed this concern locally"
+    assert body =~ "included on the branch"
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert get_in(state, [:review_claims, "comment:93", "implementation_status"]) == "addressed"
+    assert get_in(state, [:review_threads, "comment:93", "draft_state"]) == "posted"
+
+    assert get_in(state, [:review_threads, "comment:93", "resolution_recommendation"]) ==
+             "resolve_after_change"
+  end
+
+  test "delivery engine auto-posts already-addressed inline replies before the next implement turn" do
+    {workspace, issue} = implement_workspace!("review-claim-addressed-preflight-posted")
+    issue_id = issue.id
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-addressed-preflight-posted", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:94" => %{
+                   "thread_key" => "comment:94",
+                   "kind" => "comment",
+                   "path" => "README.md",
+                   "line" => 1,
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "accepted",
+                   "actionable" => false,
+                   "verification_status" => "verified_scope",
+                   "implementation_status" => "addressed",
+                   "addressed_summary" => "Preflight addressed the scoped metrics-path fix."
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:94" => %{
+                   "thread_key" => "comment:94",
+                   "kind" => "comment",
+                   "path" => "README.md",
+                   "line" => 1,
+                   "disposition" => "accepted",
+                   "actionable" => false,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+               github_client: __MODULE__.PostingGitHubClient
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+    assert_receive {:posted_review_reply, "https://github.com/example/repo/pull/42", "94", body}
+    assert body =~ "addressed this concern locally"
+    assert body =~ "Preflight addressed the scoped metrics-path fix."
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert get_in(state, [:review_threads, "comment:94", "draft_state"]) == "posted"
+
+    assert get_in(state, [:review_threads, "comment:94", "resolution_recommendation"]) ==
+             "resolve_after_change"
+  end
+
+  test "delivery engine keeps deferred and insufficient-evidence inline review replies as drafts before implement" do
+    {workspace, issue} = implement_workspace!("review-claim-non-actionable-preflight-posted")
+    issue_id = issue.id
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-non-actionable-preflight-posted", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:95" => %{
+                   "thread_key" => "comment:95",
+                   "kind" => "comment",
+                   "path" => "README.md",
+                   "line" => 1,
+                   "claim_type" => "maintainability",
+                   "disposition" => "deferred",
+                   "actionable" => false,
+                   "verification_status" => "not_needed"
+                 },
+                 "comment:96" => %{
+                   "thread_key" => "comment:96",
+                   "kind" => "comment",
+                   "path" => "README.md",
+                   "line" => 1,
+                   "claim_type" => "unclear",
+                   "disposition" => "dismissed",
+                   "actionable" => false,
+                   "verification_status" => "not_needed",
+                   "consensus_summary" => "Consensus mixed and no concrete local proof was found."
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:95" => %{
+                   "thread_key" => "comment:95",
+                   "kind" => "comment",
+                   "path" => "README.md",
+                   "line" => 1,
+                   "disposition" => "deferred",
+                   "actionable" => false,
+                   "draft_state" => "drafted"
+                 },
+                 "comment:96" => %{
+                   "thread_key" => "comment:96",
+                   "kind" => "comment",
+                   "path" => "README.md",
+                   "line" => 1,
+                   "disposition" => "dismissed",
+                   "actionable" => false,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+               github_client: __MODULE__.PostingGitHubClient
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert get_in(state, [:review_threads, "comment:95", "draft_state"]) == "drafted"
+    assert get_in(state, [:review_threads, "comment:96", "draft_state"]) == "drafted"
+  end
+
+  test "delivery engine refreshes stale posted inline replies when the reply plan changes" do
+    {workspace, issue} = implement_workspace!("review-claim-posted-refresh")
+    issue_id = issue.id
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-posted-refresh", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:97" => %{
+                   "thread_key" => "comment:97",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 1,
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "dismissed",
+                   "actionable" => false,
+                   "verification_status" => "contradicted"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:97" => %{
+                   "thread_key" => "comment:97",
+                   "kind" => "comment",
+                   "path" => "lib/missing.ex",
+                   "line" => 1,
+                   "disposition" => "dismissed",
+                   "actionable" => false,
+                   "draft_state" => "posted",
+                   "draft_reply" => "Old reply.",
+                   "posted_reply_id" => "reply-97",
+                   "posted_reply_url" => "https://github.com/example/repo/pull/42#reply-97"
+                 }
+               })
+             end)
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+               github_client: __MODULE__.PostingGitHubClient
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+
+    assert_receive {:updated_review_reply, "https://github.com/example/repo/pull/42", "reply-97", body}
+
+    assert body =~ "could not confirm the claim"
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert get_in(state, [:review_threads, "comment:97", "draft_state"]) == "posted"
+    assert get_in(state, [:review_threads, "comment:97", "reply_refresh_needed"]) == false
+  end
+
+  test "delivery engine reconciles stale posted inline replies from live GitHub feedback before implement" do
+    {workspace, issue} = implement_workspace!("review-claim-live-reconcile")
+    issue_id = issue.id
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-live-reconcile", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:98" => %{
+                   "thread_key" => "comment:98",
+                   "kind" => "comment",
+                   "body" => "Please harden the local-only default.",
+                   "path" => "ops/observability/docker-compose.yml",
+                   "line" => 56,
+                   "claim_type" => "maintainability",
+                   "disposition" => "deferred",
+                   "actionable" => false,
+                   "verification_status" => "not_needed"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:98" => %{
+                   "thread_key" => "comment:98",
+                   "kind" => "comment",
+                   "path" => "ops/observability/docker-compose.yml",
+                   "line" => 56,
+                   "disposition" => "deferred",
+                   "actionable" => false,
+                   "draft_state" => "posted",
+                   "draft_reply" => "Old local reply.",
+                   "posted_reply_id" => "reply-98",
+                   "posted_reply_url" => "https://github.com/example/repo/pull/42#discussion_rreply-98",
+                   "reply_refresh_needed" => true
+                 }
+               })
+             end)
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil,
+               issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end,
+               github_client: __MODULE__.ReconcilingGitHubClient
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert get_in(state, [:review_threads, "comment:98", "draft_state"]) in ["posted", "approved_to_update"]
+    refute get_in(state, [:review_threads, "comment:98", "draft_reply"]) == "Old local reply."
+    assert get_in(state, [:review_threads, "comment:98", "posted_reply_id"]) == "reply-98"
+    assert get_in(state, [:review_threads, "comment:98", "posted_at"]) == "2026-03-16T12:06:00Z"
+    assert get_in(state, [:resume_context, :review_feedback_summary]) =~ "docker-compose.yml:56"
+  end
+
+  test "delivery engine refreshes pending review claims from local proof before implement" do
+    {workspace, issue} = implement_workspace!("review-claim-preflight-pattern-refresh")
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("review-claim-preflight-pattern-refresh", :missing)
+    )
+
+    tracker_file = Path.join(workspace, "elixir/lib/symphony_elixir/tracker_event.ex")
+    File.mkdir_p!(Path.dirname(tracker_file))
+
+    File.write!(
+      tracker_file,
+      """
+      defmodule Example do
+        def dedupe_key(hash) do
+          ("tracker-event:" <> hash)
+          |> Base.encode16(case: :lower)
+        end
+      end
+      """
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.update(workspace, fn state ->
+               state
+               |> Map.put(:policy_pack, :private_autopilot)
+               |> Map.put(:effective_policy_class, "fully_autonomous")
+               |> Map.put(:pr_url, "https://github.com/example/repo/pull/42")
+               |> Map.put(:review_claims, %{
+                 "comment:97" => %{
+                   "thread_key" => "comment:97",
+                   "kind" => "comment",
+                   "body" => "`dedupe_key/1` now produces a completely different key and may break deduplication/backfill logic.",
+                   "path" => "elixir/lib/symphony_elixir/tracker_event.ex",
+                   "line" => 3,
+                   "claim_type" => "unclear",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "insufficient_evidence"
+                 }
+               })
+               |> Map.put(:review_threads, %{
+                 "comment:97" => %{
+                   "thread_key" => "comment:97",
+                   "kind" => "comment",
+                   "path" => "elixir/lib/symphony_elixir/tracker_event.ex",
+                   "line" => 3,
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               })
+             end)
+
+    assert {:stop, :missing_turn_result} =
+             DeliveryEngine.run(workspace, issue, nil, issue_state_fetcher: fn [_issue_id] -> {:ok, [issue]} end)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+
+    assert get_in(state, [:review_claims, "comment:97", "verification_status"]) ==
+             "verified_local_pattern"
+
+    assert get_in(state, [:review_claims, "comment:97", "disposition"]) == "accepted"
+    assert get_in(state, [:review_claims, "comment:97", "hard_proof"]) == true
+  end
+
+  test "delivery engine blocks deploy preview stage when the harness omits a preview command" do
+    {workspace, issue} = checkout_workspace!("deploy-preview-missing")
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("deploy-preview-missing", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "deploy_preview", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier
+             })
+
+    assert {:stop, :deploy_preview_missing} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert get_in(state, [:stop_reason, :code]) == "deploy_preview_missing"
+  end
+
+  test "delivery engine blocks deploy production stage when the harness omits a production command" do
+    {workspace, issue} = checkout_workspace!("deploy-production-missing")
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("deploy-production-missing", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "deploy_production", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier
+             })
+
+    assert {:stop, :deploy_production_missing} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert get_in(state, [:stop_reason, :code]) == "deploy_production_missing"
+  end
+
+  test "delivery engine blocks post-deploy verification when the harness omits the verify command" do
+    {workspace, issue} = checkout_workspace!("post-deploy-verify-missing")
+
+    configure_delivery_workflow!(
+      workspace,
+      fake_codex_binary!("post-deploy-verify-missing", :missing)
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "post_deploy_verify", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               current_deploy_target: "preview"
+             })
+
+    assert {:stop, :post_deploy_failed} = DeliveryEngine.run(workspace, issue, nil)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert get_in(state, [:stop_reason, :code]) == "post_deploy_failed"
+  end
+
   test "run inspector public helpers handle bare rollups and wrapper commands" do
     assert RunInspector.required_checks_rollup(nil, [%{name: "ignored"}]) == %{
              state: :passed,
@@ -224,7 +883,10 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
              cancelled: []
            }
 
-    assert RunInspector.required_checks_rollup(%RepoHarness{required_checks: ["ci / validate"]}, []).state ==
+    assert RunInspector.required_checks_rollup(
+             %RepoHarness{required_checks: ["ci / validate"]},
+             []
+           ).state ==
              :missing
 
     harness = %RepoHarness{validation_command: "validate", smoke_command: "smoke"}
@@ -438,6 +1100,146 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
     {workspace, issue}
   end
 
+  defp review_verification_workspace!(suffix) do
+    {workspace, issue} = implement_workspace!(suffix)
+    File.mkdir_p!(Path.join(workspace, "lib"))
+
+    File.write!(
+      Path.join(workspace, "lib/example.ex"),
+      "defmodule Example do\n  def ok, do: :ok\nend\n"
+    )
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "review_verification", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               review_return_stage: "await_checks",
+               review_claims: %{
+                 "review:91" => %{
+                   "thread_key" => "review:91",
+                   "kind" => "review",
+                   "path" => "lib/example.ex",
+                   "line" => 2,
+                   "review_decision" => "CHANGES_REQUESTED",
+                   "claim_type" => "correctness_risk",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "verification_status" => "pending"
+                 }
+               },
+               review_threads: %{
+                 "review:91" => %{
+                   "thread_key" => "review:91",
+                   "kind" => "review",
+                   "path" => "lib/example.ex",
+                   "line" => 2,
+                   "review_decision" => "CHANGES_REQUESTED",
+                   "disposition" => "needs_verification",
+                   "actionable" => true,
+                   "draft_state" => "drafted"
+                 }
+               }
+             })
+
+    {workspace, issue}
+  end
+
+  defmodule PostingGitHubClient do
+    @behaviour SymphonyElixir.GitHubClient
+
+    @impl true
+    def existing_pull_request(_workspace, _opts), do: {:error, :missing_pr}
+
+    @impl true
+    def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+      do: {:error, :unsupported}
+
+    @impl true
+    def merge_pull_request(_workspace, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def review_feedback(_workspace, _opts), do: {:error, :review_feedback_unavailable}
+
+    @impl true
+    def review_feedback_by_pr_url(_pr_url, _opts), do: {:error, :review_feedback_unavailable}
+
+    @impl true
+    def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+    @impl true
+    def post_review_comment_reply(pr_url, comment_id, body, _opts) do
+      send(self(), {:posted_review_reply, pr_url, to_string(comment_id), body})
+      {:ok, %{id: "reply-#{comment_id}", url: "#{pr_url}#reply-#{comment_id}", output: ""}}
+    end
+
+    @impl true
+    def edit_review_comment_reply(pr_url, comment_id, body, _opts) do
+      send(self(), {:updated_review_reply, pr_url, to_string(comment_id), body})
+      {:ok, %{id: to_string(comment_id), url: "#{pr_url}#reply-#{comment_id}", output: ""}}
+    end
+  end
+
+  defmodule ReconcilingGitHubClient do
+    @behaviour SymphonyElixir.GitHubClient
+
+    @impl true
+    def existing_pull_request(_workspace, _opts), do: {:error, :missing_pr}
+
+    @impl true
+    def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+      do: {:error, :unsupported}
+
+    @impl true
+    def merge_pull_request(_workspace, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def review_feedback(_workspace, _opts) do
+      {:ok,
+       %{
+         pr_url: "https://github.com/example/repo/pull/42",
+         review_decision: "COMMENTED",
+         reviews: [],
+         comments: [
+           %{
+             id: "98",
+             user: %{login: "Copilot"},
+             body: "Please harden the local-only default.",
+             path: "ops/observability/docker-compose.yml",
+             line: 56,
+             created_at: "2026-03-16T12:00:00Z",
+             replies: [
+               %{
+                 id: "reply-98",
+                 url: "https://github.com/example/repo/pull/42#discussion_rreply-98",
+                 body: "I agree this may be worthwhile, but I am deferring it for now to avoid churn on the current PR.",
+                 created_at: "2026-03-16T12:05:00Z",
+                 updated_at: "2026-03-16T12:06:00Z"
+               }
+             ]
+           }
+         ]
+       }}
+    end
+
+    @impl true
+    def review_feedback_by_pr_url(_pr_url, _opts), do: review_feedback(nil, nil)
+
+    @impl true
+    def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+    @impl true
+    def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def edit_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+  end
+
   defp checkout_workspace!(suffix) do
     workspace = temp_workspace!("delivery-engine-#{suffix}")
     File.mkdir_p!(Path.join(workspace, ".git"))
@@ -600,16 +1402,35 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
   defp checkout_command_runner("git", ["config", "--get", "remote.origin.url"], _opts),
     do: {"git@example.com:repo.git\n", 0}
 
-  defp checkout_command_runner("git", ["rev-parse", "--abbrev-ref", "HEAD"], _opts), do: {"main\n", 0}
+  defp checkout_command_runner("git", ["rev-parse", "--abbrev-ref", "HEAD"], _opts),
+    do: {"main\n", 0}
+
   defp checkout_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"abc123\n", 0}
   defp checkout_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
-  defp checkout_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts), do: {"", 1}
+
+  defp checkout_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ),
+       do: {"", 1}
+
   defp checkout_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
   defp checkout_command_runner("git", ["checkout", "symphony/mt-runtime"], _opts), do: {"", 1}
-  defp checkout_command_runner("git", ["checkout", "-B", "symphony/mt-runtime", "origin/main"], _opts), do: {"", 0}
 
-  defp checkout_command_runner("git", ["config", "branch.symphony/mt-runtime.symphony-base-branch", "main"], _opts),
-    do: {"", 0}
+  defp checkout_command_runner(
+         "git",
+         ["checkout", "-B", "symphony/mt-runtime", "origin/main"],
+         _opts
+       ),
+       do: {"", 0}
+
+  defp checkout_command_runner(
+         "git",
+         ["config", "branch.symphony/mt-runtime.symphony-base-branch", "main"],
+         _opts
+       ),
+       do: {"", 0}
 
   defp checkout_command_runner(command, args, opts), do: System.cmd(command, args, opts)
 
@@ -632,6 +1453,73 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
       """
       version: 1
       base_branch: main
+      preflight:
+        command:
+          - ./scripts/preflight.sh
+      validation:
+        command:
+          - ./scripts/validate.sh
+      smoke:
+        command:
+          - ./scripts/smoke.sh
+      post_merge:
+        command:
+          - ./scripts/post-merge.sh
+      artifacts:
+        command:
+          - ./scripts/artifacts.sh
+      pull_request:
+        required_checks:
+          - ci / validate
+      """
+    )
+  end
+
+  defp write_agent_harness_yaml!(workspace) do
+    File.write!(
+      RepoHarness.harness_file_path(workspace),
+      """
+      version: 1
+      base_branch: main
+      agent_harness:
+        scope: self_host_only
+        initializer:
+          enabled: true
+          max_turns: 1
+          refresh: missing
+        knowledge:
+          root: .symphony/knowledge
+          required_files:
+            - product.md
+            - architecture.md
+            - codebase-map.md
+            - delivery-loop.md
+            - testing-and-ops.md
+        progress:
+          root: .symphony/progress
+          pattern: "{{ issue.identifier }}.md"
+          required_sections:
+            - Goal
+            - Acceptance
+            - Plan
+            - Work Log
+            - Evidence
+            - Next Step
+        features:
+          root: .symphony/features
+          format: yaml
+          required_fields:
+            - id
+            - title
+            - status
+            - summary
+            - source_paths
+            - acceptance_signals
+            - dependencies
+            - last_updated_by_issue
+        publish_gate:
+          require_progress: true
+          require_feature_update_on_code_change: true
       preflight:
         command:
           - ./scripts/preflight.sh

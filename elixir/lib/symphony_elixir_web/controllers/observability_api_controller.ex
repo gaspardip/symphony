@@ -6,6 +6,7 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
+  alias SymphonyElixir.Observability.Metrics
   alias SymphonyElixirWeb.{Endpoint, Presenter}
 
   @spec state(Conn.t(), map()) :: Conn.t()
@@ -21,6 +22,19 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   @spec portfolio(Conn.t(), map()) :: Conn.t()
   def portfolio(conn, _params) do
     json(conn, Presenter.portfolio_payload())
+  end
+
+  @spec metrics(Conn.t(), map()) :: Conn.t()
+  def metrics(conn, _params) do
+    case safe_metrics_scrape() do
+      {:ok, metrics} ->
+        conn
+        |> put_resp_content_type("text/plain")
+        |> send_resp(200, metrics)
+
+      {:error, :unavailable} ->
+        error_response(conn, 503, "metrics_unavailable", "Metrics collector is unavailable")
+    end
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()
@@ -77,6 +91,31 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @spec runner_control(Conn.t(), map()) :: Conn.t()
+  def runner_control(conn, %{"action" => action} = params) do
+    case Presenter.runner_control_payload(action, params) do
+      {:ok, payload} ->
+        json(conn, payload)
+
+      {:error, :unknown_action} ->
+        error_response(conn, 400, "unknown_action", "Unknown runner action")
+
+      {:error, {:invalid_params, message}} ->
+        error_response(conn, 400, "invalid_params", message)
+
+      {:error, %{error: "script_missing", message: message}} ->
+        error_response(conn, 503, "runner_script_missing", message)
+
+      {:error, %{error: "command_failed", message: message} = payload} ->
+        conn
+        |> put_status(409)
+        |> json(payload |> Map.put(:error, %{code: "runner_command_failed", message: message}))
+
+      {:error, reason} ->
+        error_response(conn, 500, "runner_action_failed", inspect(reason))
+    end
+  end
+
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
   def method_not_allowed(conn, _params) do
     error_response(conn, 405, "method_not_allowed", "Method not allowed")
@@ -85,6 +124,13 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   @spec not_found(Conn.t(), map()) :: Conn.t()
   def not_found(conn, _params) do
     error_response(conn, 404, "not_found", "Route not found")
+  end
+
+  defp safe_metrics_scrape do
+    {:ok, Metrics.scrape()}
+  rescue
+    UndefinedFunctionError -> {:error, :unavailable}
+    ErlangError -> {:error, :unavailable}
   end
 
   defp error_response(conn, status, code, message) do

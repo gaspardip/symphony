@@ -14,8 +14,12 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.IssueSource
   alias SymphonyElixir.IssuePolicy
+  alias SymphonyElixir.ManualIssueSpec
+  alias SymphonyElixir.Observability
   alias SymphonyElixir.PolicyPack
   alias SymphonyElixir.PullRequestManager
+  alias SymphonyElixir.PRWatcher
+  alias SymphonyElixir.ReviewEvidenceCollector
   alias SymphonyElixir.RepoMap
   alias SymphonyElixir.RepoHarness
   alias SymphonyElixir.RuleCatalog
@@ -37,17 +41,35 @@ defmodule SymphonyElixir.DeliveryEngine do
   @turn_runtime_error_key_prefix :symphony_turn_runtime_error
   @await_checks_missing_limit 6
   @codex_turn_error_methods ["codex/event/stream_error", "codex/event/error", "error"]
-  @passive_stages ["await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"]
+  @review_fix_max_turns 6
+  @dialyzer {:nowarn_function, refreshed_review_claims: 3}
+  @dialyzer {:nowarn_function, refreshed_review_threads: 3}
+  @dialyzer {:nowarn_function, refreshed_review_thread_state: 2}
+  @dialyzer {:nowarn_function, refreshed_review_claim_verification_status: 2}
+  @passive_stages [
+    "await_checks",
+    "review_verification",
+    "merge",
+    "post_merge",
+    "deploy_preview",
+    "deploy_production",
+    "post_deploy_verify"
+  ]
 
   @spec run(Path.t(), Issue.t(), pid() | nil, keyword()) ::
           :ok | {:done, Issue.t()} | {:stop, term()} | {:error, term()}
-  def run(workspace, %Issue{} = issue, codex_update_recipient, opts \\ []) when is_binary(workspace) do
+  def run(workspace, %Issue{} = issue, codex_update_recipient, opts \\ [])
+      when is_binary(workspace) do
     max_turns = Keyword.get(opts, :max_turns, Config.agent_max_turns())
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &IssueSource.fetch_issue_states_by_ids/1)
+
+    issue_state_fetcher =
+      Keyword.get(opts, :issue_state_fetcher, &IssueSource.fetch_issue_states_by_ids/1)
+
     stage = current_stage(workspace, issue)
 
     if passive_stage?(stage) do
       Logger.info("Skipping Codex session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}")
+
       do_run(nil, workspace, issue, codex_update_recipient, issue_state_fetcher, max_turns, opts)
     else
       Logger.info("Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}")
@@ -56,71 +78,100 @@ defmodule SymphonyElixir.DeliveryEngine do
         Logger.info("Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}")
 
         try do
-          do_run(app_session, workspace, issue, codex_update_recipient, issue_state_fetcher, max_turns, opts)
+          do_run(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            opts
+          )
         after
           AppServer.stop_session(app_session)
         end
       else
         {:error, reason} = error ->
           Logger.error("Codex session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
+
           error
       end
     end
   end
 
   @doc false
+  @spec fetch_turn_result_for_test(term()) :: term()
   def fetch_turn_result_for_test(issue), do: fetch_turn_result(issue)
 
   @doc false
+  @spec execute_tool_for_test(term(), term(), term(), keyword()) :: term()
   def execute_tool_for_test(issue, tool, arguments, opts \\ []) do
     tool_executor(issue, opts).(tool, arguments)
   end
 
   @doc false
-  def implementation_turn_error_summary_for_test(reason), do: implementation_turn_error_summary(reason)
+  @spec implementation_turn_error_summary_for_test(term()) :: term()
+  def implementation_turn_error_summary_for_test(reason),
+    do: implementation_turn_error_summary(reason)
 
   @doc false
+  @spec retryable_implementation_error_for_test(term()) :: boolean()
   def retryable_implementation_error_for_test(reason), do: retryable_implementation_error?(reason)
 
   @doc false
-  def non_retryable_implementation_error_for_test(reason), do: non_retryable_implementation_error?(reason)
+  @spec non_retryable_implementation_error_for_test(term()) :: boolean()
+  def non_retryable_implementation_error_for_test(reason),
+    do: non_retryable_implementation_error?(reason)
 
   @doc false
+  @spec implementation_error_code_for_test(term()) :: term()
   def implementation_error_code_for_test(reason), do: implementation_error_code(reason)
 
   @doc false
+  @spec maybe_move_issue_for_test(term(), term()) :: term()
   def maybe_move_issue_for_test(issue, target_state), do: maybe_move_issue(issue, target_state)
 
   @doc false
-  def codex_message_handler_for_test(recipient, issue), do: codex_message_handler(recipient, issue)
+  @spec codex_message_handler_for_test(pid() | nil, term()) :: term()
+  def codex_message_handler_for_test(recipient, issue),
+    do: codex_message_handler(recipient, issue)
 
   @doc false
+  @spec normalize_state_for_test(term()) :: term()
   def normalize_state_for_test(state), do: normalize_state(state)
 
   @doc false
+  @spec active_issue_state_for_test(term()) :: boolean()
   def active_issue_state_for_test(state_name), do: active_issue_state?(state_name)
 
   @doc false
+  @spec branch_has_publishable_changes_for_test(Path.t(), map(), keyword()) :: term()
   def branch_has_publishable_changes_for_test(workspace, state, opts \\ []) do
     branch_has_publishable_changes?(workspace, state, opts)
   end
 
   @doc false
+  @spec normalize_pr_state_for_test(term()) :: term()
   def normalize_pr_state_for_test(pr_state), do: normalize_pr_state(pr_state)
 
   @doc false
+  @spec maybe_sync_policy_override_for_test(map(), Path.t(), keyword()) :: map()
   def maybe_sync_policy_override_for_test(state, workspace, opts) do
     maybe_sync_policy_override(state, workspace, opts)
   end
 
   @doc false
+  @spec detail_summary_for_test(term(), term()) :: term()
   def detail_summary_for_test(code, detail), do: detail_summary(code, detail)
 
   @doc false
+  @spec human_review_summary_for_test(term()) :: String.t()
   def human_review_summary_for_test(code),
     do: approval_gate_summary(code, WorkflowProfile.approval_gate_state("review_required"))
 
   @doc false
+  @spec implement_prompt_for_test(term(), map(), keyword(), non_neg_integer(), pos_integer()) ::
+          String.t()
   def implement_prompt_for_test(issue, state, opts, turn_number, max_turns),
     do:
       implement_prompt(
@@ -130,7 +181,12 @@ defmodule SymphonyElixir.DeliveryEngine do
         Keyword.get(
           opts,
           :inspection,
-          %RunInspector.Snapshot{fingerprint: "test", dirty?: false, changed_files: 0, pr_url: nil}
+          %RunInspector.Snapshot{
+            fingerprint: "test",
+            dirty?: false,
+            changed_files: 0,
+            pr_url: nil
+          }
         ),
         opts,
         turn_number,
@@ -138,155 +194,232 @@ defmodule SymphonyElixir.DeliveryEngine do
       )
 
   @doc false
+  @spec implement_command_output_budget_for_test(map()) :: map()
+  def implement_command_output_budget_for_test(state), do: implement_command_output_budget(state)
+
+  @spec advance_review_claims_after_turn_for_test(map(), list(), TurnResult.t()) :: map()
+  def advance_review_claims_after_turn_for_test(
+        review_claims,
+        focused_claims,
+        %TurnResult{} = turn_result
+      ),
+      do: advance_review_claims_after_turn(review_claims, focused_claims, turn_result)
+
+  @doc false
+  @spec finalize_published_review_threads_for_test(map()) :: map()
+  def finalize_published_review_threads_for_test(review_threads),
+    do: finalize_published_review_threads(review_threads)
+
+  @doc false
+  @spec maybe_resolve_autonomous_review_threads_for_test(
+          map(),
+          Path.t(),
+          String.t(),
+          map(),
+          keyword()
+        ) :: map()
+  def maybe_resolve_autonomous_review_threads_for_test(
+        review_threads,
+        workspace,
+        pr_url,
+        state,
+        opts \\ []
+      ),
+      do: maybe_resolve_autonomous_review_threads(review_threads, workspace, pr_url, state, opts)
+
+  @doc false
+  @spec ensure_turn_progress_for_test(term(), term(), term()) :: term()
   def ensure_turn_progress_for_test(turn_result, before_snapshot, after_snapshot),
     do: ensure_turn_progress(turn_result, before_snapshot, after_snapshot)
 
   @doc false
+  @spec implement_next_stage_for_test(term(), term(), term()) :: term()
   def implement_next_stage_for_test(turn_result, before_snapshot, after_snapshot),
     do: implement_next_stage(turn_result, before_snapshot, after_snapshot)
 
   @doc false
+  @spec handle_checkout_error_for_test(Path.t(), term(), term()) :: term()
   def handle_checkout_error_for_test(workspace, issue, reason),
     do: handle_checkout_error(workspace, issue, reason)
 
-  defp do_run(app_session, workspace, issue, codex_update_recipient, issue_state_fetcher, max_turns, opts) do
+  @doc false
+  @spec should_resume_validation_from_retained_changes_for_test(map(), list(), term()) ::
+          boolean()
+  def should_resume_validation_from_retained_changes_for_test(
+        state,
+        focused_claims,
+        before_snapshot
+      ),
+      do: should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot)
+
+  defp do_run(
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         issue_state_fetcher,
+         max_turns,
+         opts
+       ) do
     state =
       workspace
       |> RunStateStore.load_or_default(issue)
       |> maybe_sync_policy_override(workspace, opts)
 
     workflow_profile = WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
-    max_turns = workflow_profile.max_turns_override || max_turns
+    max_turns = effective_max_turns(workflow_profile.max_turns_override || max_turns, state)
 
     stage = Map.get(state, :stage, "checkout")
     inspection = RunInspector.inspect(workspace, opts)
 
-    case stage do
-      "checkout" ->
-        handle_checkout(
-          app_session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          inspection,
-          opts
-        )
+    Observability.with_stage(stage, issue_observability_metadata(issue, state), fn ->
+      case stage do
+        "checkout" ->
+          handle_checkout(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "implement" ->
-        handle_implement(
-          app_session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          inspection,
-          opts
-        )
+        "implement" ->
+          handle_implement(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "initialize_harness" ->
-        handle_initialize_harness(
-          app_session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          inspection,
-          opts
-        )
+        "initialize_harness" ->
+          handle_initialize_harness(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "validate" ->
-        handle_validate(
-          app_session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          inspection,
-          opts
-        )
+        "validate" ->
+          handle_validate(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "verify" ->
-        handle_verify(
-          app_session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          inspection,
-          opts
-        )
+        "review_verification" ->
+          handle_review_verification(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "publish" ->
-        handle_publish(
-          app_session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          inspection,
-          opts
-        )
+        "verify" ->
+          handle_verify(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "await_checks" ->
-        handle_await_checks(
-          app_session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          inspection,
-          opts
-        )
+        "publish" ->
+          handle_publish(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "merge" ->
-        handle_merge(
-          app_session,
-          workspace,
-          issue,
-          codex_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          inspection,
-          opts
-        )
+        "await_checks" ->
+          handle_await_checks(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "post_merge" ->
-        handle_post_merge(workspace, issue, state, inspection, opts)
+        "merge" ->
+          handle_merge(
+            app_session,
+            workspace,
+            issue,
+            codex_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
 
-      "deploy_preview" ->
-        handle_deploy_preview(workspace, issue, state, inspection, opts)
+        "post_merge" ->
+          handle_post_merge(workspace, issue, state, inspection, opts)
 
-      "deploy_production" ->
-        handle_deploy_production(workspace, issue, state, inspection, opts)
+        "deploy_preview" ->
+          handle_deploy_preview(workspace, issue, state, inspection, opts)
 
-      "post_deploy_verify" ->
-        handle_post_deploy_verify(workspace, issue, state, inspection, opts)
+        "deploy_production" ->
+          handle_deploy_production(workspace, issue, state, inspection, opts)
 
-      "done" ->
-        {:done, issue}
+        "post_deploy_verify" ->
+          handle_post_deploy_verify(workspace, issue, state, inspection, opts)
 
-      "blocked" ->
-        {:stop, :blocked}
+        "done" ->
+          {:done, issue}
 
-      _ ->
-        {:error, {:unknown_stage, stage}}
-    end
+        "blocked" ->
+          {:stop, :blocked}
+
+        _ ->
+          {:error, {:unknown_stage, stage}}
+      end
+    end)
+  end
+
+  defp issue_observability_metadata(issue, state) do
+    Observability.issue_metadata(issue, state, %{
+      workflow_profile: Map.get(state, :effective_policy_class),
+      operating_mode: Config.company_mode()
+    })
   end
 
   defp current_stage(workspace, issue) do
@@ -299,11 +432,23 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp passive_stage?(stage) when stage in @passive_stages, do: true
   defp passive_stage?(_stage), do: false
 
-  defp handle_checkout(app_session, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts) do
-    with {:ok, branch_info} <- GitManager.prepare_issue_branch(workspace, issue, inspection.harness, opts),
+  defp handle_checkout(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         inspection,
+         opts
+       ) do
+    with {:ok, branch_info} <-
+           GitManager.prepare_issue_branch(workspace, issue, inspection.harness, opts),
          {:ok, harness} <- RepoHarness.load(workspace),
          {:ok, policy_resolution} <- resolve_policy(issue, state, workspace),
-         next_stage <- if(AgentHarness.enabled?(harness), do: "initialize_harness", else: "implement"),
+         next_stage <-
+           if(AgentHarness.enabled?(harness), do: "initialize_harness", else: "implement"),
          {:ok, _state} <-
            RunStateStore.transition(workspace, next_stage, %{
              issue_id: issue.id,
@@ -321,7 +466,17 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp handle_initialize_harness(app_session, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts) do
+  defp handle_initialize_harness(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         inspection,
+         opts
+       ) do
     harness = inspection.harness
 
     case AgentHarness.initialize(workspace, issue, harness) do
@@ -330,12 +485,18 @@ defmodule SymphonyElixir.DeliveryEngine do
           RunStateStore.transition(
             workspace,
             "implement",
-            Map.merge(%{
-              last_harness_init: Map.merge(attrs, %{status: "passed"}),
-              last_harness_check: %{status: "passed", checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()},
-              harness_status: "ready",
-              harness_attempts: Map.get(state, :harness_attempts, 0) + 1
-            }, attrs)
+            Map.merge(
+              %{
+                last_harness_init: Map.merge(attrs, %{status: "passed"}),
+                last_harness_check: %{
+                  status: "passed",
+                  checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+                },
+                harness_status: "ready",
+                harness_attempts: Map.get(state, :harness_attempts, 0) + 1
+              },
+              attrs
+            )
           )
 
         do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
@@ -351,137 +512,282 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp handle_implement(app_session, workspace, issue, recipient, fetcher, max_turns, state, _inspection, opts) do
-    implementation_turns = Map.get(state, :implementation_turns, 0)
+  defp handle_implement(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         _inspection,
+         opts
+       ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
 
-    if implementation_turns >= max_turns do
-      block_issue(
-        workspace,
-        issue,
-        :turn_budget_exhausted,
-        "Reached #{max_turns} implementation turns without a mergeable result.",
-        @blocked_state
+    preflight_review_claims =
+      maybe_refresh_preflight_review_claims(
+        Map.get(state, :review_claims, %{}),
+        workspace
       )
-    else
-      before_snapshot = RunInspector.inspect(workspace, opts)
-      prompt = implement_prompt(issue, state, workspace, before_snapshot, opts, implementation_turns + 1, max_turns)
-      clear_turn_result(issue)
-      clear_turn_runtime_errors(issue)
 
-      try do
-        with {:ok, _turn_session} <-
-               AppServer.run_turn(
-                 app_session,
-                 prompt,
-                 issue,
-                 Keyword.merge(
-                   opts,
-                   [
-                     stage: "implement",
-                     effort: Config.codex_turn_effort("implement"),
-                     forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
-                     command_output_budget: implement_command_output_budget(),
-                     on_message: codex_message_handler(recipient, issue),
-                     tool_executor: tool_executor(issue, opts)
-                   ]
-                 )
-               ),
-             {:ok, turn_result} <- fetch_turn_result(issue),
-             after_snapshot <- RunInspector.inspect(workspace, opts),
-             {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
-             :ok <- ensure_issue_still_active(refreshed_issue),
-             {:ok, next_stage} <- implement_next_stage(turn_result, before_snapshot, after_snapshot),
-             {:ok, _state} <-
-               RunStateStore.transition(workspace, next_stage, Map.merge(%{
-                 implementation_turns: implementation_turns + 1,
-                 last_turn_result: TurnResult.to_map(turn_result),
-                 branch: after_snapshot.branch || Map.get(state, :branch),
-                 pr_url: after_snapshot.pr_url || Map.get(state, :pr_url)
-               }, resume_context_attrs(workspace, refreshed_issue, state, after_snapshot, %{
-                 last_turn_summary: turn_result.summary,
-                 next_objective: next_objective_for_stage(next_stage, turn_result)
-               }, opts))) do
-          do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
-        else
-          {:error, {:turn_runtime_error, reason}} ->
-            handle_implementation_turn_error(
-              app_session,
-              workspace,
-              issue,
-              recipient,
-              fetcher,
-              max_turns,
-              state,
-              opts,
-              reason
+    preflight_review_threads =
+      sync_review_claims_into_threads(
+        Map.get(state, :review_threads, %{}),
+        preflight_review_claims
+      )
+      |> maybe_post_autonomous_review_replies(
+        workspace,
+        Map.get(state, :pr_url),
+        Map.put(state, :review_claims, preflight_review_claims),
+        opts
+      )
+
+    state =
+      if preflight_review_threads != Map.get(state, :review_threads, %{}) or
+           preflight_review_claims != Map.get(state, :review_claims, %{}) do
+        {:ok, persisted_state} =
+          RunStateStore.update(workspace, fn persisted ->
+            persisted
+            |> Map.put(:review_claims, preflight_review_claims)
+            |> Map.put(:review_threads, preflight_review_threads)
+          end)
+
+        persisted_state
+      else
+        state
+      end
+
+    implementation_turns = Map.get(state, :implementation_turns, 0)
+    effective_implementation_turns = effective_implementation_turns(state)
+    before_snapshot = RunInspector.inspect(workspace, opts)
+
+    focused_claims =
+      focused_review_claims(
+        preflight_review_claims,
+        focused_review_claim_limit(state)
+      )
+
+    cond do
+      should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot) ->
+        {:ok, _state} =
+          RunStateStore.transition(
+            workspace,
+            "validate",
+            Map.merge(
+              %{
+                review_claims: preflight_review_claims,
+                review_threads: preflight_review_threads,
+                branch: before_snapshot.branch || Map.get(state, :branch),
+                pr_url: before_snapshot.pr_url || Map.get(state, :pr_url)
+              },
+              resume_context_attrs(
+                workspace,
+                issue,
+                state,
+                before_snapshot,
+                %{
+                  next_objective: "Stop editing and let Symphony run the official validation contract."
+                },
+                opts
+              )
             )
+          )
 
-          {:error, {:invalid_turn_result, reason}} ->
-            block_issue(workspace, issue, :invalid_turn_result, inspect(reason), @blocked_state)
+        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
-          {:error, :missing_turn_result} ->
-            block_issue(
-              workspace,
-              issue,
-              :missing_turn_result,
-              "The agent did not report `report_agent_turn_result` before the turn ended.",
-              @blocked_state
-            )
+      effective_implementation_turns >= max_turns ->
+        block_issue(
+          workspace,
+          issue,
+          :turn_budget_exhausted,
+          "Reached #{max_turns} implementation turns without a mergeable result.",
+          @blocked_state
+        )
 
-          {:error, {:noop_turn, _summary}} ->
-            block_issue(workspace, issue, :noop_turn, "The turn produced no code change and no PR.", @blocked_state)
+      true ->
+        prompt =
+          implement_prompt(
+            issue,
+            state,
+            workspace,
+            before_snapshot,
+            opts,
+            effective_implementation_turns + 1,
+            max_turns
+          )
 
-          {:error, {:agent_blocked, %TurnResult{} = turn_result}} ->
-            block_issue(
-              workspace,
-              issue,
-              turn_result.blocker_type,
-              turn_result.summary,
-              @blocked_state
-            )
-
-          {:done, finished_issue} ->
-            {:done, finished_issue}
-
-          {:skip, finished_issue} ->
-            {:done, finished_issue}
-
-          {:error, reason} ->
-            cond do
-              retryable_implementation_error?(reason) ->
-                handle_implementation_turn_error(
-                  app_session,
-                  workspace,
-                  issue,
-                  recipient,
-                  fetcher,
-                  max_turns,
-                  state,
-                  opts,
-                  reason
-                )
-
-              non_retryable_implementation_error?(reason) ->
-                block_issue(
-                  workspace,
-                  issue,
-                  implementation_error_code(reason),
-                  implementation_turn_error_summary(reason),
-                  @blocked_state
-                )
-
-              true ->
-                {:error, reason}
-            end
-        end
-      after
         clear_turn_result(issue)
         clear_turn_runtime_errors(issue)
-      end
+
+        try do
+          with {:ok, _turn_session} <-
+                 AppServer.run_turn(
+                   app_session,
+                   prompt,
+                   issue,
+                   Keyword.merge(
+                     opts,
+                     stage: "implement",
+                     effort: implement_effort(state),
+                     forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
+                     command_output_budget: implement_command_output_budget(state),
+                     on_message: codex_message_handler(recipient, issue),
+                     tool_executor: tool_executor(issue, opts)
+                   )
+                 ),
+               {:ok, turn_result} <- fetch_turn_result(issue),
+               after_snapshot <- RunInspector.inspect(workspace, opts),
+               {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
+               :ok <- ensure_issue_still_active(refreshed_issue),
+               {:ok, next_stage} <-
+                 implement_next_stage(turn_result, before_snapshot, after_snapshot),
+               updated_review_claims =
+                 advance_review_claims_after_turn(
+                   preflight_review_claims,
+                   focused_claims,
+                   turn_result
+                 ),
+               updated_review_threads =
+                 sync_review_claims_into_threads(
+                   Map.get(state, :review_threads, %{}),
+                   updated_review_claims
+                 )
+                 |> maybe_post_autonomous_review_replies(
+                   workspace,
+                   after_snapshot.pr_url || Map.get(state, :pr_url),
+                   state,
+                   opts
+                 ),
+               {:ok, _state} <-
+                 RunStateStore.transition(
+                   workspace,
+                   next_stage,
+                   Map.merge(
+                     %{
+                       implementation_turns: implementation_turns + 1,
+                       review_claims: updated_review_claims,
+                       review_threads: updated_review_threads,
+                       last_turn_result: TurnResult.to_map(turn_result),
+                       branch: after_snapshot.branch || Map.get(state, :branch),
+                       pr_url: after_snapshot.pr_url || Map.get(state, :pr_url)
+                     },
+                     resume_context_attrs(
+                       workspace,
+                       refreshed_issue,
+                       state,
+                       after_snapshot,
+                       %{
+                         last_turn_summary: turn_result.summary,
+                         next_objective:
+                           next_objective_for_stage(
+                             next_stage,
+                             turn_result,
+                             updated_review_claims
+                           )
+                       },
+                       opts
+                     )
+                   )
+                 ) do
+            do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
+          else
+            {:error, {:turn_runtime_error, reason}} ->
+              handle_implementation_turn_error(
+                app_session,
+                workspace,
+                issue,
+                recipient,
+                fetcher,
+                max_turns,
+                state,
+                opts,
+                reason
+              )
+
+            {:error, {:invalid_turn_result, reason}} ->
+              block_issue(workspace, issue, :invalid_turn_result, inspect(reason), @blocked_state)
+
+            {:error, :missing_turn_result} ->
+              block_issue(
+                workspace,
+                issue,
+                :missing_turn_result,
+                "The agent did not report `report_agent_turn_result` before the turn ended.",
+                @blocked_state
+              )
+
+            {:error, {:noop_turn, _summary}} ->
+              block_issue(
+                workspace,
+                issue,
+                :noop_turn,
+                "The turn produced no code change and no PR.",
+                @blocked_state
+              )
+
+            {:error, {:agent_blocked, %TurnResult{} = turn_result}} ->
+              block_issue(
+                workspace,
+                issue,
+                turn_result.blocker_type,
+                turn_result.summary,
+                @blocked_state
+              )
+
+            {:done, finished_issue} ->
+              {:done, finished_issue}
+
+            {:skip, finished_issue} ->
+              {:done, finished_issue}
+
+            {:error, reason} ->
+              cond do
+                retryable_implementation_error?(reason) ->
+                  handle_implementation_turn_error(
+                    app_session,
+                    workspace,
+                    issue,
+                    recipient,
+                    fetcher,
+                    max_turns,
+                    state,
+                    opts,
+                    reason
+                  )
+
+                non_retryable_implementation_error?(reason) ->
+                  block_issue(
+                    workspace,
+                    issue,
+                    implementation_error_code(reason),
+                    implementation_turn_error_summary(reason),
+                    @blocked_state
+                  )
+
+                true ->
+                  {:error, reason}
+              end
+          end
+        after
+          clear_turn_result(issue)
+          clear_turn_runtime_errors(issue)
+        end
     end
   end
 
-  defp handle_validate(app_session, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts) do
+  defp handle_validate(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         inspection,
+         opts
+       ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
     result = RunInspector.run_validation(workspace, inspection.harness, opts)
     validation_attempts = Map.get(state, :validation_attempts, 0) + 1
 
@@ -503,13 +809,27 @@ defmodule SymphonyElixir.DeliveryEngine do
     case result.status do
       :passed ->
         {:ok, _state} =
-          RunStateStore.transition(workspace, "verify", Map.merge(%{
-            validation_attempts: validation_attempts,
-            last_validation: command_result_to_map(result)
-          }, resume_context_attrs(workspace, issue, state, inspection, %{
-            last_validation_summary: summarized_command_output(result.output, 800),
-            next_objective: "Review validation output and confirm behavior against acceptance criteria."
-          }, opts)))
+          RunStateStore.transition(
+            workspace,
+            "verify",
+            Map.merge(
+              %{
+                validation_attempts: validation_attempts,
+                last_validation: command_result_to_map(result)
+              },
+              resume_context_attrs(
+                workspace,
+                issue,
+                state,
+                inspection,
+                %{
+                  last_validation_summary: summarized_command_output(result.output, 800),
+                  next_objective: "Review validation output and confirm behavior against acceptance criteria."
+                },
+                opts
+              )
+            )
+          )
 
         do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
@@ -518,13 +838,27 @@ defmodule SymphonyElixir.DeliveryEngine do
              validation_attempts < Config.policy_max_validation_attempts_per_run() and
              Map.get(state, :implementation_turns, 0) < max_turns do
           {:ok, _state} =
-            RunStateStore.transition(workspace, "implement", Map.merge(%{
-              validation_attempts: validation_attempts,
-              last_validation: command_result_to_map(result)
-            }, resume_context_attrs(workspace, issue, state, inspection, %{
-              last_validation_summary: summarized_command_output(result.output, 800),
-              next_objective: "Address the latest validation failure without rerunning the full repo validation in implement."
-            }, opts)))
+            RunStateStore.transition(
+              workspace,
+              "implement",
+              Map.merge(
+                %{
+                  validation_attempts: validation_attempts,
+                  last_validation: command_result_to_map(result)
+                },
+                resume_context_attrs(
+                  workspace,
+                  issue,
+                  state,
+                  inspection,
+                  %{
+                    last_validation_summary: summarized_command_output(result.output, 800),
+                    next_objective: "Address the latest validation failure without rerunning the full repo validation in implement."
+                  },
+                  opts
+                )
+              )
+            )
 
           do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
         else
@@ -536,12 +870,130 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp handle_verify(app_session, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts) do
+  defp handle_review_verification(
+         _app_session,
+         workspace,
+         issue,
+         _recipient,
+         _fetcher,
+         _max_turns,
+         state,
+         inspection,
+         opts
+       ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
+
+    {updated_claims, stats} =
+      ReviewEvidenceCollector.collect(Map.get(state, :review_claims, %{}), workspace)
+
+    updated_threads =
+      sync_review_claims_into_threads(Map.get(state, :review_threads, %{}), updated_claims)
+      |> maybe_post_autonomous_review_replies(
+        workspace,
+        Map.get(state, :pr_url),
+        state,
+        opts
+      )
+
+    return_stage = Map.get(state, :review_return_stage) || "await_checks"
+
+    {target_stage, summary, next_objective} =
+      cond do
+        stats.accepted_count > 0 ->
+          {
+            "implement",
+            "Focused review verification confirmed #{stats.accepted_count} actionable PR review claim(s). Returning to implement.",
+            accepted_review_next_objective(updated_claims)
+          }
+
+        stats.pending_count > 0 ->
+          {
+            return_stage,
+            "Focused review verification found #{stats.pending_count} plausible PR review claim(s), but not enough hard proof to reopen implementation automatically. Returning to #{return_stage}.",
+            "Wait for stronger proof, a narrower reproducer, or new review evidence before reopening implementation."
+          }
+
+        stats.insufficient_count > 0 or stats.contradicted_count > 0 ->
+          {
+            return_stage,
+            "Focused review verification did not find enough evidence to reopen implementation. Returning to #{return_stage}.",
+            "Wait for new review evidence or status changes before reopening implementation."
+          }
+
+        true ->
+          {
+            return_stage,
+            "No pending PR review claims required focused verification. Returning to #{return_stage}.",
+            "Continue the passive review/check state unless new review feedback arrives."
+          }
+      end
+
+    RunLedger.record("review.verification_completed", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      stage: "review_verification",
+      actor_type: "runtime",
+      actor_id: "delivery_engine",
+      policy_class: Map.get(state, :effective_policy_class),
+      summary: summary,
+      details: ReviewEvidenceCollector.summary(updated_claims),
+      metadata: %{
+        accepted_count: stats.accepted_count,
+        contradicted_count: stats.contradicted_count,
+        insufficient_count: stats.insufficient_count,
+        return_stage: return_stage,
+        target_stage: target_stage
+      }
+    })
+
+    {:ok, _state} =
+      RunStateStore.transition(
+        workspace,
+        target_stage,
+        Map.merge(
+          %{
+            review_claims: updated_claims,
+            review_threads: updated_threads,
+            last_decision_summary: summary,
+            next_human_action: nil
+          },
+          resume_context_attrs(
+            workspace,
+            issue,
+            state,
+            inspection,
+            %{
+              review_feedback_summary: actionable_review_claim_summary(updated_claims),
+              review_claim_summary: actionable_review_claim_summary(updated_claims),
+              next_objective: next_objective,
+              token_pressure: if(stats.accepted_count > 0, do: "high", else: nil)
+            },
+            opts
+          )
+        )
+      )
+
+    {:stop, :review_verification_completed}
+  end
+
+  defp handle_verify(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         inspection,
+         opts
+       ) do
     if Config.policy_require_verifier?() do
       verifier_runner = Keyword.get(opts, :verifier_runner, &VerifierRunner.verify/5)
       result = verifier_runner.(workspace, issue, state, inspection, opts)
       verification_attempts = Map.get(state, :verification_attempts, 0) + 1
-      verifier_summary = Map.get(result, :summary) || Map.get(result, "summary") || inspect(result)
+
+      verifier_summary =
+        Map.get(result, :summary) || Map.get(result, "summary") || inspect(result)
 
       RunLedger.record("verification.completed", %{
         issue_id: issue.id,
@@ -563,16 +1015,32 @@ defmodule SymphonyElixir.DeliveryEngine do
           verifier_map = verifier_result_to_map(result)
 
           {:ok, _state} =
-            RunStateStore.transition(workspace, "publish", Map.merge(%{
-              verification_attempts: verification_attempts,
-              last_verifier: verifier_map,
-              last_verifier_verdict: "pass",
-              acceptance_summary: get_in(result, [:acceptance, :summary]) || get_in(result, ["acceptance", "summary"]),
-              ui_proof_required_checks: ui_proof_required_checks(verifier_map)
-            }, resume_context_attrs(workspace, issue, state, inspection, %{
-              last_verifier_summary: summarized_text(verifier_summary, 800),
-              next_objective: "Publish the verified branch and attach the PR."
-            }, opts)))
+            RunStateStore.transition(
+              workspace,
+              "publish",
+              Map.merge(
+                %{
+                  verification_attempts: verification_attempts,
+                  last_verifier: verifier_map,
+                  last_verifier_verdict: "pass",
+                  acceptance_summary:
+                    get_in(result, [:acceptance, :summary]) ||
+                      get_in(result, ["acceptance", "summary"]),
+                  ui_proof_required_checks: ui_proof_required_checks(verifier_map)
+                },
+                resume_context_attrs(
+                  workspace,
+                  issue,
+                  state,
+                  inspection,
+                  %{
+                    last_verifier_summary: summarized_text(verifier_summary, 800),
+                    next_objective: "Publish the verified branch and attach the PR."
+                  },
+                  opts
+                )
+              )
+            )
 
           do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
@@ -581,15 +1049,31 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           if should_retry_verification?(reason_code, verification_attempts, state, max_turns) do
             {:ok, _state} =
-              RunStateStore.transition(workspace, "implement", Map.merge(%{
-                verification_attempts: verification_attempts,
-                last_verifier: verifier_result_to_map(result),
-                last_verifier_verdict: "needs_more_work",
-                acceptance_summary: get_in(result, [:acceptance, :summary]) || get_in(result, ["acceptance", "summary"])
-              }, resume_context_attrs(workspace, issue, state, inspection, %{
-                last_verifier_summary: summarized_text(verifier_summary, 800),
-                next_objective: verifier_retry_objective(result)
-              }, opts)))
+              RunStateStore.transition(
+                workspace,
+                "implement",
+                Map.merge(
+                  %{
+                    verification_attempts: verification_attempts,
+                    last_verifier: verifier_result_to_map(result),
+                    last_verifier_verdict: "needs_more_work",
+                    acceptance_summary:
+                      get_in(result, [:acceptance, :summary]) ||
+                        get_in(result, ["acceptance", "summary"])
+                  },
+                  resume_context_attrs(
+                    workspace,
+                    issue,
+                    state,
+                    inspection,
+                    %{
+                      last_verifier_summary: summarized_text(verifier_summary, 800),
+                      next_objective: verifier_retry_objective(result)
+                    },
+                    opts
+                  )
+                )
+              )
 
             do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
           else
@@ -646,12 +1130,26 @@ defmodule SymphonyElixir.DeliveryEngine do
     Config.policy_retry_validation_failures_within_run?() and
       verification_attempts < Config.policy_max_validation_attempts_per_run() and
       Map.get(state, :implementation_turns, 0) < max_turns and
-      (reason_code not in ["behavior_proof_missing", "ui_proof_missing"] or verification_attempts < 2)
+      (reason_code not in ["behavior_proof_missing", "ui_proof_missing"] or
+         verification_attempts < 2)
   end
 
-  defp handle_publish(app_session, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts) do
+  defp handle_publish(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         inspection,
+         opts
+       ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
+
     if Config.policy_publish_required?() do
-      with :ok <- maybe_enforce_agent_harness_publish_gate(workspace, issue, inspection.harness, opts) do
+      with :ok <-
+             maybe_enforce_agent_harness_publish_gate(workspace, issue, inspection.harness, opts) do
         case GitManager.commit_all(
                workspace,
                issue,
@@ -659,23 +1157,55 @@ defmodule SymphonyElixir.DeliveryEngine do
                opts
              ) do
           {:ok, :noop} ->
-            if is_nil(inspection.pr_url) and not branch_has_publishable_changes?(workspace, state, opts) do
-              block_issue(workspace, issue, :noop_turn, "No commit and no PR were produced for publish.", @blocked_state)
+            if is_nil(inspection.pr_url) and
+                 not branch_has_publishable_changes?(workspace, state, opts) do
+              block_issue(
+                workspace,
+                issue,
+                :noop_turn,
+                "No commit and no PR were produced for publish.",
+                @blocked_state
+              )
             else
-              publish_after_commit(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts)
+              publish_after_commit(
+                app_session,
+                workspace,
+                issue,
+                recipient,
+                fetcher,
+                max_turns,
+                state,
+                opts
+              )
             end
 
           {:ok, %{sha: sha}} ->
             with branch when is_binary(branch) <- Map.get(state, :branch) || inspection.branch,
                  :ok <- GitManager.push_branch(workspace, branch, opts),
-                 {:ok, _state} <- RunStateStore.update(workspace, &Map.put(&1, :last_commit_sha, sha)) do
-              publish_after_commit(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts)
+                 {:ok, _state} <-
+                   RunStateStore.update(workspace, &Map.put(&1, :last_commit_sha, sha)) do
+              publish_after_commit(
+                app_session,
+                workspace,
+                issue,
+                recipient,
+                fetcher,
+                max_turns,
+                state,
+                opts
+              )
             else
               {:error, reason} ->
                 block_issue(workspace, issue, :publish_failed, inspect(reason), @blocked_state)
 
               _ ->
-                block_issue(workspace, issue, :publish_failed, "Unable to determine branch for publish.", @blocked_state)
+                block_issue(
+                  workspace,
+                  issue,
+                  :publish_failed,
+                  "Unable to determine branch for publish.",
+                  @blocked_state
+                )
             end
 
           {:error, reason} ->
@@ -683,7 +1213,13 @@ defmodule SymphonyElixir.DeliveryEngine do
         end
       else
         {:error, reason} ->
-          block_issue(workspace, issue, :harness_publish_gate_failed, inspect(reason), @blocked_state)
+          block_issue(
+            workspace,
+            issue,
+            :harness_publish_gate_failed,
+            inspect(reason),
+            @blocked_state
+          )
       end
     else
       {:ok, _state} = RunStateStore.transition(workspace, "await_checks", %{})
@@ -691,12 +1227,40 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp publish_after_commit(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts) do
+  defp publish_after_commit(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         opts
+       ) do
+    prepared_review_threads =
+      Map.get(state, :review_threads, %{})
+      |> finalize_published_review_threads()
+
     with {:ok, pr} <- PullRequestManager.ensure_pull_request(workspace, issue, state, opts),
+         finalized_review_threads <-
+           prepared_review_threads
+           |> maybe_post_autonomous_review_replies(
+             workspace,
+             pr.url,
+             state,
+             opts
+           )
+           |> maybe_resolve_autonomous_review_threads(
+             workspace,
+             pr.url,
+             state,
+             opts
+           ),
          :ok <- maybe_move_issue(issue, @merging_state),
          {:ok, _state} <-
            RunStateStore.transition(workspace, "await_checks", %{
              pr_url: pr.url,
+             review_threads: finalized_review_threads,
              publish_attempts: Map.get(state, :publish_attempts, 0) + 1,
              await_checks_polls: 0,
              last_pr_body_validation: Map.get(pr, :body_validation)
@@ -723,12 +1287,24 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp handle_await_checks(app_session, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts) do
+  defp handle_await_checks(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         inspection,
+         opts
+       ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
     await_checks_polls = Map.get(state, :await_checks_polls, 0) + 1
     required_checks = effective_required_checks(inspection, state)
     check_rollup = RunInspector.required_checks_rollup(required_checks, inspection.check_statuses)
     await_checks_attrs = await_checks_state_attrs(inspection, check_rollup, await_checks_polls)
     policy_resolution = resolve_policy(issue, state, workspace)
+
     effective_policy_class =
       case policy_resolution do
         {:ok, resolution} -> IssuePolicy.class_to_string(resolution.class)
@@ -764,21 +1340,47 @@ defmodule SymphonyElixir.DeliveryEngine do
     cond do
       match?({:error, _}, policy_resolution) ->
         {:error, policy_reason} = policy_resolution
-        block_issue(workspace, issue, policy_reason.code, Enum.join(policy_reason.labels, ", "), @blocked_state)
+
+        block_issue(
+          workspace,
+          issue,
+          policy_reason.code,
+          Enum.join(policy_reason.labels, ", "),
+          @blocked_state
+        )
 
       is_nil(inspection.pr_url) ->
-        block_issue(workspace, issue, :publish_missing_pr, "No PR is attached for the current branch.", @blocked_state)
+        block_issue(
+          workspace,
+          issue,
+          :publish_missing_pr,
+          "No PR is attached for the current branch.",
+          @blocked_state
+        )
 
       merged_pull_request?(inspection) ->
         {:ok, _state} =
-          RunStateStore.transition(workspace, "post_merge", Map.merge(await_checks_attrs, %{last_merge: %{status: :already_merged, url: inspection.pr_url}}))
+          RunStateStore.transition(
+            workspace,
+            "post_merge",
+            Map.merge(await_checks_attrs, %{
+              last_merge: %{status: :already_merged, url: inspection.pr_url}
+            })
+          )
 
         do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
       closed_pull_request?(inspection) ->
-        block_issue(workspace, issue, :pr_closed, "The PR closed before Symphony could merge it.", @blocked_state)
+        block_issue(
+          workspace,
+          issue,
+          :pr_closed,
+          "The PR closed before Symphony could merge it.",
+          @blocked_state
+        )
 
-      check_rollup.state == :failed and ui_proof_checks_active?(state) and ui_proof_checks_failed?(state, check_rollup) ->
+      check_rollup.state == :failed and ui_proof_checks_active?(state) and
+          ui_proof_checks_failed?(state, check_rollup) ->
         block_issue(
           workspace,
           issue,
@@ -806,7 +1408,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         )
 
       check_rollup.state == :missing and ui_proof_checks_active?(state) and
-          ui_proof_checks_missing?(state, check_rollup) and await_checks_polls >= @await_checks_missing_limit ->
+        ui_proof_checks_missing?(state, check_rollup) and
+          await_checks_polls >= @await_checks_missing_limit ->
         block_issue(
           workspace,
           issue,
@@ -826,16 +1429,18 @@ defmodule SymphonyElixir.DeliveryEngine do
 
       RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
         risk_review_required?(workspace, inspection, workflow_profile, state) and
-        Map.get(state, :review_approved, false) == false ->
+          Map.get(state, :review_approved, false) == false ->
         hold_for_policy_review(workspace, issue, state, await_checks_attrs, :risk_review_required)
 
       RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
-        Config.policy_automerge_on_green?() and Map.get(state, :automerge_disabled, false) == false and
-        merge_window_deferred?(state) ->
+        Config.policy_automerge_on_green?() and
+        Map.get(state, :automerge_disabled, false) == false and
+          merge_window_deferred?(state) ->
         defer_for_merge_window(workspace, issue, await_checks_attrs, state)
 
       RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
-        Config.policy_automerge_on_green?() and Map.get(state, :automerge_disabled, false) == false ->
+        Config.policy_automerge_on_green?() and
+          Map.get(state, :automerge_disabled, false) == false ->
         {:ok, _state} =
           RunStateStore.transition(workspace, "merge", await_checks_attrs)
 
@@ -849,13 +1454,31 @@ defmodule SymphonyElixir.DeliveryEngine do
         do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
       RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :review_gate ->
-        hold_for_policy_review(workspace, issue, state, await_checks_attrs, :policy_review_required)
+        hold_for_policy_review(
+          workspace,
+          issue,
+          state,
+          await_checks_attrs,
+          :policy_review_required
+        )
 
       RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :manual_only ->
-        hold_for_policy_review(workspace, issue, state, await_checks_attrs, :policy_never_automerge)
+        hold_for_policy_review(
+          workspace,
+          issue,
+          state,
+          await_checks_attrs,
+          :policy_never_automerge
+        )
 
       RunInspector.ready_for_merge?(inspection) ->
-        hold_for_policy_review(workspace, issue, state, await_checks_attrs, :policy_review_required)
+        hold_for_policy_review(
+          workspace,
+          issue,
+          state,
+          await_checks_attrs,
+          :policy_review_required
+        )
 
       true ->
         {:ok, _state} = RunStateStore.transition(workspace, "await_checks", await_checks_attrs)
@@ -865,7 +1488,17 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   @dialyzer {:nowarn_function, handle_merge: 9}
-  defp handle_merge(app_session, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts) do
+  defp handle_merge(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         inspection,
+         opts
+       ) do
     if merge_limit_reached?(state) do
       block_issue(
         workspace,
@@ -875,63 +1508,77 @@ defmodule SymphonyElixir.DeliveryEngine do
         @blocked_state
       )
     else
-    cond do
-      merged_pull_request?(inspection) ->
-        {:ok, _state} =
-          RunStateStore.transition(workspace, "post_merge", %{
-            pr_url: inspection.pr_url,
-            last_pr_state: inspection.pr_state,
-            last_merge: %{status: :already_merged, url: inspection.pr_url},
-            merge_attempts: Map.get(state, :merge_attempts, 0)
-          })
+      cond do
+        merged_pull_request?(inspection) ->
+          {:ok, _state} =
+            RunStateStore.transition(workspace, "post_merge", %{
+              pr_url: inspection.pr_url,
+              last_pr_state: inspection.pr_state,
+              last_merge: %{status: :already_merged, url: inspection.pr_url},
+              merge_attempts: Map.get(state, :merge_attempts, 0)
+            })
 
-        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+          do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
-      closed_pull_request?(inspection) ->
-        block_issue(workspace, issue, :pr_closed, "The PR closed before Symphony could merge it.", @blocked_state)
+        closed_pull_request?(inspection) ->
+          block_issue(
+            workspace,
+            issue,
+            :pr_closed,
+            "The PR closed before Symphony could merge it.",
+            @blocked_state
+          )
 
-      RunInspector.ready_for_merge?(inspection) ->
-        case PullRequestManager.merge_pull_request(workspace, opts) do
-          {:ok, %{url: url, status: merge_status} = merge_result} ->
-            {:ok, _state} =
-              RunStateStore.transition(workspace, "post_merge", %{
-                pr_url: url,
-                merge_attempts: Map.get(state, :merge_attempts, 0) + 1,
-                last_pr_state: inspection.pr_state,
-                last_merge: %{
-                  status: merge_status,
+        RunInspector.ready_for_merge?(inspection) ->
+          case PullRequestManager.merge_pull_request(workspace, opts) do
+            {:ok, %{url: url, status: merge_status} = merge_result} ->
+              {:ok, _state} =
+                RunStateStore.transition(workspace, "post_merge", %{
+                  pr_url: url,
+                  merge_attempts: Map.get(state, :merge_attempts, 0) + 1,
+                  last_pr_state: inspection.pr_state,
+                  last_merge: %{
+                    status: merge_status,
+                    url: url,
+                    output: String.slice(to_string(Map.get(merge_result, :output, "")), 0, 2_000)
+                  }
+                })
+
+              RunLedger.record("merge.completed", %{
+                issue_id: issue.id,
+                issue_identifier: issue.identifier,
+                stage: "merge",
+                actor_type: "runtime",
+                actor_id: "delivery_engine",
+                policy_class: Map.get(state, :effective_policy_class),
+                summary: "Merge status #{merge_status}",
+                details: url || "No PR URL",
+                metadata: %{
                   url: url,
-                  output: String.slice(to_string(Map.get(merge_result, :output, "")), 0, 2_000)
+                  status: merge_status
                 }
               })
 
-            RunLedger.record("merge.completed", %{
-              issue_id: issue.id,
-              issue_identifier: issue.identifier,
-              stage: "merge",
-              actor_type: "runtime",
-              actor_id: "delivery_engine",
-              policy_class: Map.get(state, :effective_policy_class),
-              summary: "Merge status #{merge_status}",
-              details: url || "No PR URL",
-              metadata: %{
-                url: url,
-                status: merge_status
-              }
-            })
+              do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
-            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+            {:error, reason} ->
+              block_issue(workspace, issue, :merge_failed, inspect(reason), @blocked_state)
+          end
 
-          {:error, reason} ->
-            block_issue(workspace, issue, :merge_failed, inspect(reason), @blocked_state)
-        end
+        true ->
+          {:ok, _state} =
+            RunStateStore.transition(
+              workspace,
+              "await_checks",
+              await_checks_state_attrs(
+                inspection,
+                RunInspector.required_checks_rollup(inspection),
+                Map.get(state, :await_checks_polls, 0)
+              )
+            )
 
-      true ->
-        {:ok, _state} =
-          RunStateStore.transition(workspace, "await_checks", await_checks_state_attrs(inspection, RunInspector.required_checks_rollup(inspection), Map.get(state, :await_checks_polls, 0)))
-
-        :ok
-    end
+          :ok
+      end
     end
   end
 
@@ -939,8 +1586,22 @@ defmodule SymphonyElixir.DeliveryEngine do
     workflow_profile = WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
 
     with :ok <- GitManager.reset_to_base(workspace, inspection.harness, opts),
-         :ok <- maybe_post_merge_verify(workspace, issue, inspection.harness, Keyword.put(opts, :workflow_profile, workflow_profile)),
-         result <- maybe_begin_preview_deploy(workspace, issue, state, inspection.harness, workflow_profile, opts) do
+         :ok <-
+           maybe_post_merge_verify(
+             workspace,
+             issue,
+             inspection.harness,
+             Keyword.put(opts, :workflow_profile, workflow_profile)
+           ),
+         result <-
+           maybe_begin_preview_deploy(
+             workspace,
+             issue,
+             state,
+             inspection.harness,
+             workflow_profile,
+             opts
+           ) do
       case result do
         :continue ->
           finalize_done(workspace, issue, state)
@@ -950,7 +1611,13 @@ defmodule SymphonyElixir.DeliveryEngine do
       end
     else
       {:error, :missing_preview_deploy} ->
-        block_issue(workspace, issue, :deploy_preview_missing, "Preview deploy is enabled for this workflow profile but the repo harness does not declare `deploy.preview.command`.", @blocked_state)
+        block_issue(
+          workspace,
+          issue,
+          :deploy_preview_missing,
+          "Preview deploy is enabled for this workflow profile but the repo harness does not declare `deploy.preview.command`.",
+          @blocked_state
+        )
 
       {:error, {:post_merge_rework, reason}} ->
         block_issue(workspace, issue, :post_merge_failed, inspect(reason), @rework_state)
@@ -963,7 +1630,13 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp handle_deploy_preview(workspace, issue, state, inspection, opts) do
     case inspection.harness && inspection.harness.deploy_preview_command do
       nil ->
-        block_issue(workspace, issue, :deploy_preview_missing, "Preview deploy is enabled for this workflow profile but the repo harness does not declare `deploy.preview.command`.", @blocked_state)
+        block_issue(
+          workspace,
+          issue,
+          :deploy_preview_missing,
+          "Preview deploy is enabled for this workflow profile but the repo harness does not declare `deploy.preview.command`.",
+          @blocked_state
+        )
 
       _command ->
         result = RunInspector.run_deploy_preview(workspace, inspection.harness, opts)
@@ -988,7 +1661,10 @@ defmodule SymphonyElixir.DeliveryEngine do
               metadata: %{command: result.command}
             })
 
-            if post_deploy_verification_required?(inspection.harness, WorkflowProfile.resolve(Map.get(state, :effective_policy_class))) do
+            if post_deploy_verification_required?(
+                 inspection.harness,
+                 WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
+               ) do
               {:ok, _state} =
                 RunStateStore.transition(workspace, "post_deploy_verify", %{
                   issue_id: issue.id,
@@ -1004,7 +1680,13 @@ defmodule SymphonyElixir.DeliveryEngine do
             end
 
           _ ->
-            block_issue(workspace, issue, :deploy_preview_failed, to_string(result.output || ""), @blocked_state)
+            block_issue(
+              workspace,
+              issue,
+              :deploy_preview_failed,
+              to_string(result.output || ""),
+              @blocked_state
+            )
         end
     end
   end
@@ -1012,7 +1694,13 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp handle_deploy_production(workspace, issue, state, inspection, opts) do
     case inspection.harness && inspection.harness.deploy_production_command do
       nil ->
-        block_issue(workspace, issue, :deploy_production_missing, "Production deploy is enabled for this workflow profile but the repo harness does not declare `deploy.production.command`.", @blocked_state)
+        block_issue(
+          workspace,
+          issue,
+          :deploy_production_missing,
+          "Production deploy is enabled for this workflow profile but the repo harness does not declare `deploy.production.command`.",
+          @blocked_state
+        )
 
       _command ->
         if production_deploy_window_deferred?(state) do
@@ -1043,7 +1731,10 @@ defmodule SymphonyElixir.DeliveryEngine do
                 metadata: %{command: result.command}
               })
 
-              if post_deploy_verification_required?(inspection.harness, WorkflowProfile.resolve(Map.get(state, :effective_policy_class))) do
+              if post_deploy_verification_required?(
+                   inspection.harness,
+                   WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
+                 ) do
                 {:ok, _state} =
                   RunStateStore.transition(workspace, "post_deploy_verify", %{
                     issue_id: issue.id,
@@ -1059,7 +1750,13 @@ defmodule SymphonyElixir.DeliveryEngine do
               end
 
             _ ->
-              block_issue(workspace, issue, :deploy_production_failed, to_string(result.output || ""), @blocked_state)
+              block_issue(
+                workspace,
+                issue,
+                :deploy_production_failed,
+                to_string(result.output || ""),
+                @blocked_state
+              )
           end
         end
     end
@@ -1090,7 +1787,13 @@ defmodule SymphonyElixir.DeliveryEngine do
           metadata: %{command: result.command, deploy_target: deploy_target}
         })
 
-        case maybe_begin_production_deploy(workspace, issue, state, inspection.harness, workflow_profile) do
+        case maybe_begin_production_deploy(
+               workspace,
+               issue,
+               state,
+               inspection.harness,
+               workflow_profile
+             ) do
           :continue ->
             finalize_done(workspace, issue, state)
 
@@ -1102,24 +1805,40 @@ defmodule SymphonyElixir.DeliveryEngine do
               RunStateStore.update(workspace, fn current ->
                 current
                 |> Map.put(:deploy_approved, false)
-                |> Map.put(:last_decision_summary, "Waiting in #{approval_state} before production deployment.")
+                |> Map.put(
+                  :last_decision_summary,
+                  "Waiting in #{approval_state} before production deployment."
+                )
               end)
 
             :ok
 
           {:error, :missing_production_deploy} ->
-            block_issue(workspace, issue, :deploy_production_missing, "Production deployment is enabled for this workflow profile but the repo harness does not declare `deploy.production.command`.", @blocked_state)
+            block_issue(
+              workspace,
+              issue,
+              :deploy_production_missing,
+              "Production deployment is enabled for this workflow profile but the repo harness does not declare `deploy.production.command`.",
+              @blocked_state
+            )
         end
 
       _ ->
-        block_issue(workspace, issue, :post_deploy_failed, to_string(result.output || ""), @blocked_state)
+        block_issue(
+          workspace,
+          issue,
+          :post_deploy_failed,
+          to_string(result.output || ""),
+          @blocked_state
+        )
     end
   end
 
   defp maybe_post_merge_verify(workspace, issue, harness, opts) do
     workflow_profile = Keyword.get(opts, :workflow_profile, WorkflowProfile.resolve(nil))
 
-    if Config.policy_post_merge_verification_required?() and workflow_profile.post_merge_verification_required do
+    if Config.policy_post_merge_verification_required?() and
+         workflow_profile.post_merge_verification_required do
       result = VerifierRunner.post_merge_verify(workspace, harness, opts)
 
       case result.status do
@@ -1163,10 +1882,12 @@ defmodule SymphonyElixir.DeliveryEngine do
     post_deploy_status = get_in(state, [:last_post_deploy_verify, :status])
 
     cond do
-      is_binary(merge_url) and merge_url != "" and production_status == :passed and post_deploy_status == :passed ->
+      is_binary(merge_url) and merge_url != "" and production_status == :passed and
+          post_deploy_status == :passed ->
         "Autonomously finalized after merge, preview deployment, production deployment, and post-deploy verification passed (#{merge_url})."
 
-      is_binary(merge_url) and merge_url != "" and preview_status == :passed and post_deploy_status == :passed ->
+      is_binary(merge_url) and merge_url != "" and preview_status == :passed and
+          post_deploy_status == :passed ->
         "Autonomously finalized after merge, preview deployment, and post-deploy verification passed (#{merge_url})."
 
       is_binary(merge_url) and merge_url != "" and preview_status == :passed ->
@@ -1298,45 +2019,91 @@ defmodule SymphonyElixir.DeliveryEngine do
     repo_map = RepoMap.from_harness(inspection.harness)
     workflow_profile = WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
 
-    [
-      "You are implementing ticket `#{issue.identifier}`.",
-      "",
-      "Title: #{to_string(issue.title || "Untitled issue")}",
-      repo_platform_note(inspection),
-      "Current implementation turn: #{turn_number} of #{max_turns}.",
-      "",
-      "Issue brief:",
-      summarized_text(issue.description || "No description provided.", 2_500),
-      "",
-      "Resolved workflow profile: #{WorkflowProfile.name_string(workflow_profile)} (merge mode #{workflow_profile.merge_mode}).",
-      "",
-      RepoMap.prompt_block(repo_map),
-      "",
-      "Acceptance summary:",
-      summarized_text(acceptance.summary, 1_200),
-      maybe_acceptance_criteria_block(acceptance.criteria, resume_context),
-      "",
-      "Runtime-owned delivery rules:",
-      "- Symphony owns git branch creation, commit, push, PR publication, CI waiting, merge, and post-merge closure.",
-      "- Your job is limited to code changes in the checked out repo and reporting the structured turn result.",
-      "- Do not create commits, push branches, open PRs, merge PRs, or change issue states yourself.",
-      "- Do not run full validation, smoke, build, or test commands during `implement`.",
-      "- Do not run heavyweight commands such as `xcodebuild`, `make all`, full test suites, or repo-wide validation scripts from this turn.",
-      "- Do not inventory the entire repo or dump full diffs during `implement`: avoid `rg --files`, `fd`, `find .`, and full `git diff`; use targeted file reads and `git diff --stat` only.",
-      "- Limit shell usage to targeted inspection and editing support only: prefer `rg`, `sed -n`, narrow file reads, and small `git status` or `git diff --stat` commands.",
-      "- Keep command output small. Do not stream long logs or dump large files into the turn.",
-      "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
-      "- `files_touched` must list every path you changed this turn.",
-      "- Set `blocked=true` only for a true blocker you cannot resolve from the repo or local environment.",
-      "- Set `needs_another_turn=true` only when more implementation work is still required after this turn.",
-      "",
-      "Resume context:",
-      resume_context_block(resume_context),
-      token_pressure,
-      "",
-      "Exact next objective:",
-      resume_context[:next_objective] || "Advance the current diff toward validation with the smallest complete code change set possible."
-    ]
+    focused_review_claims =
+      focused_review_claims(
+        Map.get(state, :review_claims, %{}),
+        focused_review_claim_limit(state)
+      )
+
+    prompt_lines =
+      if focused_review_claims == [] do
+        [
+          "You are implementing ticket `#{issue.identifier}`.",
+          "",
+          "Title: #{to_string(issue.title || "Untitled issue")}",
+          repo_platform_note(inspection),
+          "Current implementation turn: #{turn_number} of #{max_turns}.",
+          "",
+          "Issue brief:",
+          summarized_text(issue.description || "No description provided.", 2_500),
+          "",
+          "Resolved workflow profile: #{WorkflowProfile.name_string(workflow_profile)} (merge mode #{workflow_profile.merge_mode}).",
+          "",
+          RepoMap.prompt_block(repo_map),
+          "",
+          "Acceptance summary:",
+          summarized_text(acceptance.summary, 1_200),
+          maybe_acceptance_criteria_block(acceptance.criteria, resume_context),
+          "",
+          "Runtime-owned delivery rules:",
+          "- Symphony owns git branch creation, commit, push, PR publication, CI waiting, merge, and post-merge closure.",
+          "- Your job is limited to code changes in the checked out repo and reporting the structured turn result.",
+          "- Do not create commits, push branches, open PRs, merge PRs, or change issue states yourself.",
+          "- Do not run full validation, smoke, build, or test commands during `implement`.",
+          "- Do not run heavyweight commands such as `xcodebuild`, `make all`, full test suites, or repo-wide validation scripts from this turn.",
+          "- Do not inventory the entire repo or dump full diffs during `implement`: avoid `rg --files`, `fd`, `find .`, and full `git diff`; use targeted file reads and `git diff --stat` only.",
+          "- Limit shell usage to targeted inspection and editing support only: prefer `rg`, `sed -n`, narrow file reads, and small `git status` or `git diff --stat` commands.",
+          "- Keep command output small. Do not stream long logs or dump large files into the turn.",
+          "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
+          "- `files_touched` must list every path you changed this turn.",
+          "- Set `blocked=true` only for a true blocker you cannot resolve from the repo or local environment.",
+          "- Set `needs_another_turn=true` only when more implementation work is still required after this turn.",
+          "",
+          "Resume context:",
+          resume_context_block(resume_context),
+          token_pressure,
+          "",
+          "Exact next objective:",
+          resume_context[:next_objective] ||
+            "Advance the current diff toward validation with the smallest complete code change set possible."
+        ]
+      else
+        [
+          "You are implementing ticket `#{issue.identifier}`.",
+          "",
+          "Title: #{to_string(issue.title || "Untitled issue")}",
+          repo_platform_note(inspection),
+          "Current implementation turn: #{turn_number} of #{max_turns}.",
+          "",
+          "This is a scoped review-fix turn. Do not rediscover the issue or rescan the repo.",
+          "Resolved workflow profile: #{WorkflowProfile.name_string(workflow_profile)} (merge mode #{workflow_profile.merge_mode}).",
+          maybe_named_line("PR under review", Map.get(state, :pr_url), 200),
+          "",
+          "Scoped review claims for this turn:",
+          focused_review_claim_block(focused_review_claims, Map.get(state, :review_claims, %{})),
+          token_pressure,
+          "",
+          "Review-fix rules:",
+          "- Touch only the files named in the scoped review claims unless a directly adjacent helper must change to make the fix compile.",
+          "- Do not rescan unrelated files, docs, or tests.",
+          "- Do not run full validation, smoke, build, or test commands during `implement`.",
+          "- Limit shell usage to narrow reads of the listed files and minimal diff/status checks.",
+          "- Keep command output small. Do not stream long logs or dump large files into the turn.",
+          "- If you complete this claim batch but additional verified review claims remain, set `needs_another_turn=true`.",
+          "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
+          "",
+          "Resume context:",
+          focused_resume_context_block(resume_context),
+          "",
+          "Exact next objective:",
+          focused_review_next_objective(
+            focused_review_claims,
+            Map.get(state, :review_claims, %{})
+          )
+        ]
+      end
+
+    prompt_lines
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
     |> String.trim()
@@ -1352,8 +2119,11 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     diff_hint =
       case Map.get(resume_context, :dirty_files, []) do
-        [] -> nil
-        files -> "Current dirty files:\n" <> Enum.map_join(Enum.take(files, 20), "\n", &("- " <> &1))
+        [] ->
+          nil
+
+        files ->
+          "Current dirty files:\n" <> Enum.map_join(Enum.take(files, 20), "\n", &("- " <> &1))
       end
 
     [Enum.join(criteria, "\n"), diff_hint]
@@ -1369,7 +2139,10 @@ defmodule SymphonyElixir.DeliveryEngine do
       end
 
     if resume_context_stale?(stored, inspection) do
-      fresh_resume_context(workspace, issue, state, inspection, %{})
+      Map.merge(
+        fresh_resume_context(workspace, issue, state, inspection, %{}),
+        preserved_resume_context(stored)
+      )
     else
       Map.merge(fresh_resume_context(workspace, issue, state, inspection, %{}), stored)
     end
@@ -1380,21 +2153,51 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp fresh_resume_context(workspace, issue, state, inspection, overrides) do
+    focused_review_claims =
+      focused_review_claims(
+        Map.get(state, :review_claims, %{}),
+        focused_review_claim_limit(state)
+      )
+
     %{
       issue_identifier: issue.identifier,
       fingerprint: inspection.fingerprint,
       last_turn_summary: get_in(state, [:last_turn_result, :summary]),
       last_validation_summary: summarized_command_output(get_in(state, [:last_validation, :output]), 800),
       last_verifier_summary:
-        summarized_text(get_in(state, [:last_verifier, :summary]) || get_in(state, [:last_verifier, :output]), 800),
+        summarized_text(
+          get_in(state, [:last_verifier, :summary]) || get_in(state, [:last_verifier, :output]),
+          800
+        ),
       dirty_files: RunInspector.changed_paths(workspace) |> Enum.take(20),
       diff_summary: summarized_diff_summary(RunInspector.diff_summary(workspace), 30),
       last_blocking_rule: get_in(state, [:stop_reason, :code]) || Map.get(state, :last_rule_id),
+      review_feedback_summary:
+        Map.get(overrides, :review_feedback_summary) ||
+          default_review_feedback_summary(state, focused_review_claims),
+      review_claim_summary:
+        Map.get(overrides, :review_claim_summary) ||
+          default_review_claim_summary(state, focused_review_claims),
       next_objective:
         Map.get(overrides, :next_objective) ||
-          "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
+          default_next_objective(state, focused_review_claims)
     }
     |> Map.merge(Enum.into(overrides, %{}))
+  end
+
+  defp preserved_resume_context(context) when is_map(context) do
+    context
+    |> Map.take([
+      :next_objective,
+      :review_feedback_summary,
+      :review_claim_summary,
+      :review_feedback_pr_url,
+      :token_pressure,
+      :review_fix_budget_retry_count,
+      :implementation_turn_window_base
+    ])
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
   end
 
   defp repo_platform_note(%{harness: %{project: %{type: type}}}) when is_binary(type) do
@@ -1415,21 +2218,51 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp repo_platform_note(_inspection), do: nil
 
   defp resume_context_attrs(workspace, issue, state, inspection, overrides, _opts) do
-    %{resume_context: fresh_resume_context(workspace, issue, state, inspection, overrides)}
+    %{resume_context: refreshed_resume_context(workspace, issue, state, inspection, overrides)}
+  end
+
+  defp refreshed_resume_context(workspace, issue, state, inspection, overrides) do
+    preserved =
+      state
+      |> Map.get(:resume_context, %{})
+      |> preserved_resume_context()
+
+    fresh_resume_context(workspace, issue, state, inspection, overrides)
+    |> Map.merge(preserved)
   end
 
   defp resume_context_block(resume_context) when is_map(resume_context) do
     [
       maybe_named_line("Last implementation summary", resume_context[:last_turn_summary], 400),
-      maybe_named_line("Latest validation summary", resume_context[:last_validation_summary], 800),
+      maybe_named_line(
+        "Latest validation summary",
+        resume_context[:last_validation_summary],
+        800
+      ),
       maybe_named_line("Latest verifier summary", resume_context[:last_verifier_summary], 800),
       maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200),
+      maybe_named_multiline(
+        "Pending PR review feedback",
+        resume_context[:review_feedback_summary]
+      ),
+      maybe_named_multiline("Pending PR review claims", resume_context[:review_claim_summary]),
       maybe_named_list("Dirty files", resume_context[:dirty_files], 20),
       maybe_named_multiline("Diff stat", resume_context[:diff_summary])
     ]
     |> Enum.reject(&is_nil/1)
     |> case do
       [] -> "No prior resume context recorded."
+      lines -> Enum.join(lines, "\n")
+    end
+  end
+
+  defp focused_resume_context_block(resume_context) when is_map(resume_context) do
+    [
+      maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> "No focused review context recorded."
       lines -> Enum.join(lines, "\n")
     end
   end
@@ -1452,6 +2285,783 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp maybe_named_multiline(_label, nil), do: nil
   defp maybe_named_multiline(label, value), do: "#{label}:\n#{value}"
+
+  defp review_feedback_summary(review_threads) when is_map(review_threads) do
+    review_threads
+    |> Enum.sort_by(fn {thread_key, _thread_state} -> thread_key end)
+    |> Enum.take(8)
+    |> Enum.map(fn {_thread_key, thread_state} ->
+      kind = Map.get(thread_state, "kind") || "comment"
+
+      location =
+        case {Map.get(thread_state, "path"), Map.get(thread_state, "line")} do
+          {path, line} when is_binary(path) and is_integer(line) -> " #{path}:#{line}"
+          {path, _line} when is_binary(path) -> " #{path}"
+          _ -> ""
+        end
+
+      body =
+        thread_state
+        |> Map.get("body")
+        |> to_string()
+        |> String.trim()
+        |> String.replace(~r/\s+/, " ")
+        |> summarized_text(280)
+
+      "- #{kind}#{location}: #{body}"
+    end)
+    |> Enum.reject(&String.ends_with?(&1, ": "))
+    |> Enum.join("\n")
+    |> case do
+      "" -> nil
+      summary -> summary
+    end
+  end
+
+  defp review_feedback_summary(_review_threads), do: nil
+
+  defp default_review_feedback_summary(state, []),
+    do: review_feedback_summary(Map.get(state, :review_threads, %{}))
+
+  defp default_review_feedback_summary(_state, _focused_claims), do: nil
+
+  defp default_review_claim_summary(state, []),
+    do: ReviewEvidenceCollector.summary(Map.get(state, :review_claims, %{}))
+
+  defp default_review_claim_summary(_state, focused_claims) do
+    actionable_review_claim_summary_from_entries(focused_claims)
+  end
+
+  defp default_next_objective(_state, []),
+    do: "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
+
+  defp default_next_objective(state, focused_claims) do
+    focused_review_next_objective(focused_claims, Map.get(state, :review_claims, %{}))
+  end
+
+  defp actionable_review_claim_summary(review_claims) when is_map(review_claims) do
+    entries = focused_review_claims(review_claims, 6)
+
+    case actionable_review_claim_summary_from_entries(entries) do
+      nil -> ReviewEvidenceCollector.summary(review_claims)
+      text -> text
+    end
+  end
+
+  defp actionable_review_claim_summary_from_entries(entries) when is_list(entries) do
+    entries
+    |> Enum.map(fn {_thread_key, claim} ->
+      claim_type = Map.get(claim, "claim_type") || "review_claim"
+      verification_status = Map.get(claim, "verification_status") || "verified"
+
+      location =
+        case {Map.get(claim, "path"), Map.get(claim, "line")} do
+          {path, line} when is_binary(path) and is_integer(line) -> "#{path}:#{line}"
+          {path, _line} when is_binary(path) -> path
+          _ -> "review feedback"
+        end
+
+      "- #{claim_type} #{location}: #{verification_status}"
+    end)
+    |> Enum.join("\n")
+    |> case do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp accepted_review_next_objective(review_claims) when is_map(review_claims) do
+    focused_review_next_objective(focused_review_claims(review_claims), review_claims)
+  end
+
+  defp focused_review_next_objective(focused_claims, all_review_claims)
+       when is_list(focused_claims) and is_map(all_review_claims) do
+    files =
+      focused_claims
+      |> Enum.reduce([], fn {_thread_key, claim}, acc ->
+        case Map.get(claim, "path") do
+          path when is_binary(path) and path != "" -> [path | acc]
+          _ -> acc
+        end
+      end)
+      |> Enum.uniq()
+      |> Enum.reverse()
+
+    remaining_count =
+      max(0, accepted_actionable_claim_count(all_review_claims) - length(focused_claims))
+
+    case files do
+      [] ->
+        "Address the verified PR review claims without rerunning the full repo validation in implement."
+
+      _ ->
+        suffix =
+          if remaining_count > 0 do
+            " If you finish this batch, report `needs_another_turn=true` so Symphony can continue with the remaining #{remaining_count} verified claim(s)."
+          else
+            ""
+          end
+
+        "Address only the verified PR review claims in #{Enum.join(files, ", ")}. Do not rescan unrelated files or docs, and stop once those scoped fixes are in place." <>
+          suffix
+    end
+  end
+
+  defp focused_review_claims(review_claims, limit \\ 2)
+
+  defp focused_review_claims(review_claims, limit)
+       when is_map(review_claims) and is_integer(limit) and limit > 0 do
+    review_claims
+    |> Enum.sort_by(fn {thread_key, claim} ->
+      {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "", Map.get(claim, "line") || 0, thread_key}
+    end)
+    |> Enum.filter(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
+    |> Enum.take(limit)
+  end
+
+  defp accepted_actionable_claim_count(review_claims) when is_map(review_claims) do
+    review_claims
+    |> Enum.count(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
+  end
+
+  defp maybe_refresh_preflight_review_claims(review_claims, workspace)
+       when is_map(review_claims) and is_binary(workspace) do
+    pending_verification_claims =
+      review_claims
+      |> Enum.filter(fn {_thread_key, claim} ->
+        claim_value(claim, :implementation_status) != "addressed" and
+          claim_value(claim, :disposition) == "needs_verification"
+      end)
+      |> Map.new()
+
+    if map_size(pending_verification_claims) == 0 do
+      review_claims
+    else
+      {refreshed_claims, _stats} =
+        ReviewEvidenceCollector.collect(pending_verification_claims, workspace)
+
+      Map.merge(review_claims, refreshed_claims)
+    end
+  end
+
+  defp maybe_refresh_preflight_review_claims(review_claims, _workspace), do: review_claims
+
+  defp maybe_persist_reconciled_review_feedback(state, workspace, opts)
+       when is_map(state) and is_binary(workspace) do
+    reconciled_state = maybe_reconcile_live_review_feedback(state, workspace, opts)
+
+    if review_feedback_state_changed?(state, reconciled_state) do
+      {:ok, persisted_state} =
+        RunStateStore.update(workspace, fn persisted ->
+          persisted
+          |> Map.put(:review_claims, Map.get(reconciled_state, :review_claims, %{}))
+          |> Map.put(:review_threads, Map.get(reconciled_state, :review_threads, %{}))
+          |> Map.put(:last_review_decision, Map.get(reconciled_state, :last_review_decision))
+          |> Map.update(:resume_context, %{}, fn context ->
+            context
+            |> Map.put(
+              :review_feedback_summary,
+              review_feedback_summary(Map.get(reconciled_state, :review_threads, %{}))
+            )
+            |> Map.put(
+              :review_claim_summary,
+              ReviewEvidenceCollector.summary(Map.get(reconciled_state, :review_claims, %{}))
+            )
+            |> Map.put(:review_feedback_pr_url, Map.get(reconciled_state, :pr_url))
+          end)
+        end)
+
+      persisted_state
+    else
+      state
+    end
+  end
+
+  defp maybe_persist_reconciled_review_feedback(state, _workspace, _opts), do: state
+
+  defp review_feedback_state_changed?(state, reconciled_state)
+       when is_map(state) and is_map(reconciled_state) do
+    Map.get(state, :review_threads, %{}) != Map.get(reconciled_state, :review_threads, %{}) or
+      Map.get(state, :review_claims, %{}) != Map.get(reconciled_state, :review_claims, %{}) or
+      Map.get(state, :last_review_decision) != Map.get(reconciled_state, :last_review_decision)
+  end
+
+  defp review_feedback_state_changed?(_state, _reconciled_state), do: false
+
+  defp maybe_reconcile_live_review_feedback(state, workspace, opts)
+       when is_map(state) and is_binary(workspace) do
+    pr_url = Map.get(state, :pr_url)
+    review_threads = Map.get(state, :review_threads, %{})
+    review_claims = Map.get(state, :review_claims, %{})
+
+    cond do
+      not is_binary(pr_url) or String.trim(pr_url) == "" ->
+        state
+
+      map_size(review_threads) == 0 and map_size(review_claims) == 0 ->
+        state
+
+      true ->
+        watcher_opts =
+          [
+            policy_pack: Map.get(state, :policy_pack) || Config.policy_pack_name(),
+            pr_url: pr_url,
+            thread_states: review_threads
+          ]
+          |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
+          |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
+
+        case PRWatcher.review_feedback(workspace, watcher_opts) do
+          %{status: "ok", items: items} = feedback when is_list(items) ->
+            if items == [] do
+              state
+            else
+              state
+              |> Map.put(:review_claims, refreshed_review_claims(items, review_claims, pr_url))
+              |> Map.put(:review_threads, refreshed_review_threads(items, review_threads, pr_url))
+              |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
+            end
+
+          _ ->
+            state
+        end
+    end
+  end
+
+  defp maybe_reconcile_live_review_feedback(state, _workspace, _opts), do: state
+
+  defp refreshed_review_claims(items, persisted_claims, pr_url)
+       when is_list(items) and is_map(persisted_claims) do
+    Enum.reduce(items, persisted_claims, fn item, acc ->
+      case Map.get(item, :thread_key) do
+        thread_key when is_binary(thread_key) ->
+          persisted = Map.get(acc, thread_key, %{})
+
+          claim_state = %{
+            "thread_key" => Map.get(item, :thread_key),
+            "id" => Map.get(item, :id),
+            "kind" => Map.get(item, :kind) |> to_string(),
+            "author" => Map.get(item, :author),
+            "body" => Map.get(item, :body),
+            "path" => Map.get(item, :path),
+            "line" => Map.get(item, :line),
+            "state" => Map.get(item, :state),
+            "review_decision" => Map.get(item, :review_decision),
+            "submitted_at" => Map.get(item, :submitted_at),
+            "source_class" => Map.get(item, :source_class),
+            "claim_type" => Map.get(item, :claim_type),
+            "veracity_score" => Map.get(item, :veracity_score),
+            "reproducibility_score" => Map.get(item, :reproducibility_score),
+            "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+            "locality_score" => Map.get(item, :locality_score),
+            "source_precision_score" => Map.get(item, :source_precision_score),
+            "consensus_score" => Map.get(item, :consensus_score),
+            "consensus_state" => Map.get(item, :consensus_state),
+            "consensus_summary" => Map.get(item, :consensus_summary),
+            "consensus_reasons" => Map.get(item, :consensus_reasons, []),
+            "historical_precision_score" => Map.get(item, :historical_precision_score),
+            "stagnation_score" => Map.get(item, :stagnation_score),
+            "stagnation_state" => Map.get(item, :stagnation_state),
+            "repeated_feedback_count" => Map.get(item, :repeated_feedback_count, 1),
+            "hard_proof" => Map.get(item, :hard_proof, false),
+            "proof_sources" => Map.get(item, :proof_sources, []),
+            "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+            "disposition" => Map.get(item, :disposition),
+            "actionable" => Map.get(item, :actionable, false),
+            "adjudication_summary" => Map.get(item, :adjudication_summary),
+            "verification_status" => refreshed_review_claim_verification_status(persisted, item),
+            "verification_attempts" => Map.get(persisted, "verification_attempts", 0),
+            "evidence_refs" => Map.get(persisted, "evidence_refs", []),
+            "evidence_summary" => Map.get(persisted, "evidence_summary"),
+            "implementation_status" => Map.get(persisted, "implementation_status"),
+            "addressed_summary" => Map.get(persisted, "addressed_summary"),
+            "pr_url" => pr_url
+          }
+
+          Map.put(acc, thread_key, claim_state)
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp refreshed_review_claims(_items, persisted_claims, _pr_url), do: persisted_claims
+
+  defp refreshed_review_threads(items, persisted_threads, pr_url)
+       when is_list(items) and is_map(persisted_threads) do
+    Enum.reduce(items, persisted_threads, fn item, acc ->
+      case Map.get(item, :thread_key) do
+        thread_key when is_binary(thread_key) ->
+          Map.put(acc, thread_key, refreshed_review_thread_state(item, pr_url))
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  defp refreshed_review_threads(_items, persisted_threads, _pr_url), do: persisted_threads
+
+  defp refreshed_review_thread_state(item, pr_url) when is_map(item) do
+    %{
+      "thread_key" => Map.get(item, :thread_key),
+      "id" => Map.get(item, :id),
+      "kind" => Map.get(item, :kind) |> to_string(),
+      "author" => Map.get(item, :author),
+      "body" => Map.get(item, :body),
+      "path" => Map.get(item, :path),
+      "line" => Map.get(item, :line),
+      "state" => Map.get(item, :state),
+      "review_decision" => Map.get(item, :review_decision),
+      "submitted_at" => Map.get(item, :submitted_at),
+      "draft_state" => Map.get(item, :draft_state, "drafted"),
+      "draft_reply" => Map.get(item, :draft_reply),
+      "resolution_recommendation" => Map.get(item, :resolution_recommendation),
+      "source_class" => Map.get(item, :source_class),
+      "claim_type" => Map.get(item, :claim_type),
+      "veracity_score" => Map.get(item, :veracity_score),
+      "reproducibility_score" => Map.get(item, :reproducibility_score),
+      "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+      "locality_score" => Map.get(item, :locality_score),
+      "source_precision_score" => Map.get(item, :source_precision_score),
+      "consensus_score" => Map.get(item, :consensus_score),
+      "consensus_state" => Map.get(item, :consensus_state),
+      "consensus_summary" => Map.get(item, :consensus_summary),
+      "consensus_reasons" => Map.get(item, :consensus_reasons, []),
+      "historical_precision_score" => Map.get(item, :historical_precision_score),
+      "stagnation_score" => Map.get(item, :stagnation_score),
+      "stagnation_state" => Map.get(item, :stagnation_state),
+      "repeated_feedback_count" => Map.get(item, :repeated_feedback_count, 1),
+      "hard_proof" => Map.get(item, :hard_proof, false),
+      "proof_sources" => Map.get(item, :proof_sources, []),
+      "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+      "disposition" => Map.get(item, :disposition),
+      "actionable" => Map.get(item, :actionable, false),
+      "adjudication_summary" => Map.get(item, :adjudication_summary),
+      "posted_reply_id" => Map.get(item, :posted_reply_id),
+      "posted_reply_url" => Map.get(item, :posted_reply_url),
+      "posted_at" => Map.get(item, :posted_at),
+      "reply_refresh_needed" => Map.get(item, :reply_refresh_needed, false),
+      "pr_url" => pr_url
+    }
+  end
+
+  defp refreshed_review_claim_verification_status(persisted, item)
+       when is_map(persisted) and is_map(item) do
+    persisted_status = Map.get(persisted, "verification_status")
+    disposition = Map.get(item, :disposition)
+
+    cond do
+      disposition == "needs_verification" and
+          persisted_status in [nil, "", "not_needed", "contradicted"] ->
+        "pending"
+
+      is_binary(persisted_status) and persisted_status != "" ->
+        persisted_status
+
+      disposition == "needs_verification" ->
+        "pending"
+
+      true ->
+        "not_needed"
+    end
+  end
+
+  defp refreshed_review_claim_verification_status(_persisted, _item), do: "not_needed"
+
+  defp claim_priority_bucket("security_risk"), do: 0
+  defp claim_priority_bucket("critical_bug"), do: 0
+  defp claim_priority_bucket("correctness_risk"), do: 1
+  defp claim_priority_bucket("failure_handling_risk"), do: 2
+  defp claim_priority_bucket("maintainability"), do: 3
+  defp claim_priority_bucket(_claim_type), do: 4
+
+  defp focused_review_claim_block(focused_claims, all_review_claims)
+       when is_list(focused_claims) and is_map(all_review_claims) do
+    remaining_count =
+      max(0, accepted_actionable_claim_count(all_review_claims) - length(focused_claims))
+
+    block =
+      focused_claims
+      |> Enum.map(fn {_thread_key, claim} ->
+        location =
+          case {Map.get(claim, "path"), Map.get(claim, "line")} do
+            {path, line} when is_binary(path) and is_integer(line) -> "#{path}:#{line}"
+            {path, _line} when is_binary(path) -> path
+            _ -> "review feedback"
+          end
+
+        detail =
+          claim
+          |> Map.get("body")
+          |> summarized_text(90)
+
+        "- #{Map.get(claim, "claim_type") || "review_claim"} #{location}: #{detail}"
+      end)
+      |> Enum.join("\n")
+
+    if remaining_count > 0 do
+      block <> "\n- Additional verified claims remain after this batch: #{remaining_count}"
+    else
+      block
+    end
+  end
+
+  defp sync_review_claims_into_threads(review_threads, review_claims)
+       when is_map(review_threads) and is_map(review_claims) do
+    Enum.reduce(review_claims, review_threads, fn {thread_key, claim}, acc ->
+      reply_plan = ReviewEvidenceCollector.reply_plan(claim)
+
+      Map.update(acc, thread_key, %{}, fn thread_state ->
+        draft_state = Map.get(thread_state, "draft_state", "drafted")
+
+        thread_state
+        |> Map.put("disposition", Map.get(claim, "disposition"))
+        |> Map.put("actionable", Map.get(claim, "actionable", false))
+        |> Map.put("hard_proof", Map.get(claim, "hard_proof", false))
+        |> Map.put("proof_sources", Map.get(claim, "proof_sources", []))
+        |> Map.put("contradiction_sources", Map.get(claim, "contradiction_sources", []))
+        |> Map.put("consensus_score", Map.get(claim, "consensus_score"))
+        |> Map.put("consensus_state", Map.get(claim, "consensus_state"))
+        |> Map.put("consensus_summary", Map.get(claim, "consensus_summary"))
+        |> Map.put("consensus_reasons", Map.get(claim, "consensus_reasons", []))
+        |> Map.put("historical_precision_score", Map.get(claim, "historical_precision_score"))
+        |> Map.put("stagnation_score", Map.get(claim, "stagnation_score"))
+        |> Map.put("stagnation_state", Map.get(claim, "stagnation_state"))
+        |> Map.put("repeated_feedback_count", Map.get(claim, "repeated_feedback_count", 1))
+        |> Map.put("verification_status", Map.get(claim, "verification_status"))
+        |> Map.put("implementation_status", Map.get(claim, "implementation_status"))
+        |> Map.put("addressed_summary", Map.get(claim, "addressed_summary"))
+        |> Map.put("verification_attempts", Map.get(claim, "verification_attempts", 0))
+        |> Map.put("evidence_refs", Map.get(claim, "evidence_refs", []))
+        |> Map.put("evidence_summary", Map.get(claim, "evidence_summary"))
+        |> maybe_put_reply_plan(draft_state, reply_plan)
+      end)
+    end)
+  end
+
+  defp sync_review_claims_into_threads(review_threads, _review_claims), do: review_threads
+
+  defp claim_pending_review_fix?(claim) when is_map(claim) do
+    claim_value(claim, :disposition) == "accepted" and
+      claim_value(claim, :actionable, false) and
+      claim_value(claim, :implementation_status) != "addressed"
+  end
+
+  defp advance_review_claims_after_turn(
+         review_claims,
+         focused_claims,
+         %TurnResult{} = turn_result
+       )
+       when is_map(review_claims) and is_list(focused_claims) do
+    touched_paths =
+      turn_result.files_touched
+      |> List.wrap()
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&normalize_review_claim_path/1)
+      |> MapSet.new()
+
+    resolved_without_edit? =
+      MapSet.size(touched_paths) == 0 and resolved_review_claim_summary?(turn_result.summary)
+
+    if MapSet.size(touched_paths) == 0 and not resolved_without_edit? do
+      review_claims
+    else
+      Enum.reduce(focused_claims, review_claims, fn {thread_key, claim}, acc ->
+        claim_path = claim_value(claim, :path)
+
+        if (is_binary(claim_path) and review_claim_touched?(claim_path, touched_paths)) or
+             resolved_without_edit? do
+          Map.update(acc, thread_key, claim, fn existing ->
+            existing
+            |> Map.put("implementation_status", "addressed")
+            |> Map.put("actionable", false)
+            |> Map.put("addressed_summary", turn_result.summary)
+          end)
+        else
+          acc
+        end
+      end)
+    end
+  end
+
+  defp resolved_review_claim_summary?(summary) when is_binary(summary) do
+    normalized = String.downcase(summary)
+
+    String.contains?(normalized, "already resolved") or
+      String.contains?(normalized, "verified and retained") or
+      String.contains?(normalized, "verified the scoped review claim")
+  end
+
+  defp resolved_review_claim_summary?(_summary), do: false
+
+  defp review_claim_touched?(claim_path, touched_paths)
+       when is_binary(claim_path) and is_struct(touched_paths, MapSet) do
+    normalized_claim_path = normalize_review_claim_path(claim_path)
+
+    Enum.any?(touched_paths, fn touched_path ->
+      touched_path == normalized_claim_path or
+        String.ends_with?(touched_path, "/" <> normalized_claim_path) or
+        String.ends_with?(normalized_claim_path, "/" <> touched_path)
+    end)
+  end
+
+  defp review_claim_touched?(_claim_path, _touched_paths), do: false
+
+  defp normalize_review_claim_path(path) when is_binary(path) do
+    path
+    |> String.trim()
+    |> String.replace("\\", "/")
+    |> String.trim_leading("./")
+    |> case do
+      "" = blank ->
+        blank
+
+      normalized ->
+        workspace_root = Config.workspace_root() |> String.replace("\\", "/")
+
+        cond do
+          String.starts_with?(normalized, workspace_root <> "/") ->
+            String.replace_prefix(normalized, workspace_root <> "/", "")
+
+          true ->
+            normalized
+        end
+    end
+  end
+
+  defp normalize_review_claim_path(path), do: path
+
+  defp maybe_put_reply_plan(thread_state, draft_state, _reply_plan)
+       when draft_state == "approved_to_post" do
+    thread_state
+  end
+
+  defp maybe_put_reply_plan(thread_state, "posted", reply_plan) do
+    next_reply = Map.get(reply_plan, :draft_reply)
+    existing_reply = Map.get(thread_state, "draft_reply")
+
+    if present_review_thread_reply?(next_reply) and
+         String.trim(to_string(next_reply)) != String.trim(to_string(existing_reply)) do
+      thread_state
+      |> Map.put("draft_reply", next_reply)
+      |> Map.put("resolution_recommendation", Map.get(reply_plan, :resolution_recommendation))
+      |> Map.put("reply_refresh_needed", true)
+    else
+      thread_state
+      |> Map.put("resolution_recommendation", Map.get(reply_plan, :resolution_recommendation))
+    end
+  end
+
+  defp maybe_put_reply_plan(thread_state, _draft_state, reply_plan) do
+    thread_state
+    |> Map.put("draft_reply", Map.get(reply_plan, :draft_reply))
+    |> Map.put("resolution_recommendation", Map.get(reply_plan, :resolution_recommendation))
+  end
+
+  defp maybe_post_autonomous_review_replies(review_threads, workspace, pr_url, state, opts)
+       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
+    pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
+    prepared_threads = promote_autonomous_review_drafts(review_threads, pack)
+
+    cond do
+      not PolicyPack.external_comment_posting_allowed?(pack) ->
+        prepared_threads
+
+      not is_binary(pr_url) or String.trim(pr_url) == "" ->
+        prepared_threads
+
+      not has_postable_review_drafts?(prepared_threads) ->
+        prepared_threads
+
+      true ->
+        watcher_opts =
+          [policy_pack: pack, repo_url: Map.get(state, :repo_url)]
+          |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
+          |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
+
+        case PRWatcher.post_approved_drafts(workspace, pr_url, prepared_threads, watcher_opts) do
+          {:ok, updated_threads, _stats} -> updated_threads
+          {:error, :no_postable_review_threads} -> prepared_threads
+          {:error, _reason} -> prepared_threads
+        end
+    end
+  end
+
+  defp maybe_post_autonomous_review_replies(review_threads, _workspace, _pr_url, _state, _opts),
+    do: review_threads
+
+  defp promote_autonomous_review_drafts(review_threads, %PolicyPack{})
+       when is_map(review_threads) do
+    Enum.reduce(review_threads, review_threads, fn {thread_key, thread_state}, acc ->
+      cond do
+        autonomous_review_postable_thread?(thread_key, thread_state) ->
+          Map.update!(acc, thread_key, &Map.put(&1, "draft_state", "approved_to_post"))
+
+        autonomous_review_refreshable_thread?(thread_key, thread_state) ->
+          Map.update!(acc, thread_key, &Map.put(&1, "draft_state", "approved_to_update"))
+
+        true ->
+          acc
+      end
+    end)
+  end
+
+  defp autonomous_review_postable_thread?(thread_key, thread_state)
+       when is_map(thread_state) do
+    draft_state = Map.get(thread_state, "draft_state", "drafted")
+    disposition = Map.get(thread_state, "disposition")
+    implementation_status = Map.get(thread_state, "implementation_status")
+    verification_status = Map.get(thread_state, "verification_status")
+
+    draft_state == "drafted" and
+      present_review_thread_reply?(Map.get(thread_state, "draft_reply")) and
+      String.starts_with?(to_string(thread_key), "comment:") and
+      (implementation_status == "addressed" or
+         (disposition == "dismissed" and verification_status == "contradicted"))
+  end
+
+  defp autonomous_review_postable_thread?(_thread_key, _thread_state), do: false
+
+  defp autonomous_review_refreshable_thread?(thread_key, thread_state)
+       when is_map(thread_state) do
+    Map.get(thread_state, "draft_state") == "posted" and
+      Map.get(thread_state, "reply_refresh_needed") == true and
+      is_binary(Map.get(thread_state, "posted_reply_id")) and
+      present_review_thread_reply?(Map.get(thread_state, "draft_reply")) and
+      String.starts_with?(to_string(thread_key), "comment:")
+  end
+
+  defp autonomous_review_refreshable_thread?(_thread_key, _thread_state), do: false
+
+  defp has_postable_review_drafts?(review_threads) when is_map(review_threads) do
+    Enum.any?(review_threads, fn {thread_key, thread_state} ->
+      String.starts_with?(to_string(thread_key), "comment:") and
+        Map.get(thread_state, "draft_state") in ["approved_to_post", "approved_to_update"] and
+        present_review_thread_reply?(Map.get(thread_state, "draft_reply"))
+    end)
+  end
+
+  defp has_postable_review_drafts?(_review_threads), do: false
+
+  defp finalize_published_review_threads(review_threads) when is_map(review_threads) do
+    Enum.reduce(review_threads, review_threads, fn {thread_key, thread_state}, acc ->
+      updated = finalize_published_review_thread(thread_state)
+
+      if String.starts_with?(to_string(thread_key), "comment:") and updated != thread_state do
+        Map.put(acc, thread_key, updated)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp finalize_published_review_threads(review_threads), do: review_threads
+
+  defp finalize_published_review_thread(thread_state) when is_map(thread_state) do
+    draft_reply = Map.get(thread_state, "draft_reply")
+
+    cond do
+      Map.get(thread_state, "implementation_status") != "addressed" ->
+        thread_state
+
+      not is_binary(draft_reply) ->
+        thread_state
+
+      true ->
+        updated_reply =
+          String.replace(
+            draft_reply,
+            "I addressed this concern locally and will include it in the next branch update.",
+            "I addressed this concern locally and it is now included on the branch."
+          )
+
+        cond do
+          updated_reply == draft_reply ->
+            thread_state
+
+          Map.get(thread_state, "draft_state") == "posted" ->
+            thread_state
+            |> Map.put("draft_reply", updated_reply)
+            |> Map.put("reply_refresh_needed", true)
+            |> Map.put("resolution_recommendation", "resolve_after_change")
+
+          true ->
+            thread_state
+            |> Map.put("draft_reply", updated_reply)
+            |> Map.put("resolution_recommendation", "resolve_after_change")
+        end
+    end
+  end
+
+  defp finalize_published_review_thread(thread_state), do: thread_state
+
+  defp maybe_resolve_autonomous_review_threads(review_threads, workspace, pr_url, state, opts)
+       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
+    pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
+
+    cond do
+      not PolicyPack.thread_resolution_allowed?(pack) ->
+        review_threads
+
+      not is_binary(pr_url) or String.trim(pr_url) == "" ->
+        review_threads
+
+      not has_resolvable_review_threads?(review_threads) ->
+        review_threads
+
+      true ->
+        watcher_opts =
+          [policy_pack: pack, repo_url: Map.get(state, :repo_url)]
+          |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
+          |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
+
+        case PRWatcher.resolve_posted_threads(pr_url, review_threads, watcher_opts) do
+          {:ok, updated_threads, _stats} -> updated_threads
+          {:error, :no_resolvable_review_threads} -> review_threads
+          {:error, _reason} -> review_threads
+        end
+    end
+  end
+
+  defp maybe_resolve_autonomous_review_threads(
+         review_threads,
+         _workspace,
+         _pr_url,
+         _state,
+         _opts
+       ),
+       do: review_threads
+
+  defp has_resolvable_review_threads?(review_threads) when is_map(review_threads) do
+    Enum.any?(review_threads, fn {thread_key, thread_state} ->
+      String.starts_with?(to_string(thread_key), "comment:") and
+        Map.get(thread_state, "draft_state") == "posted" and
+        resolvable_review_thread_state?(thread_state) and
+        Map.get(thread_state, "resolution_state") != "resolved"
+    end)
+  end
+
+  defp resolvable_review_thread_state?(thread_state) when is_map(thread_state) do
+    case {
+      Map.get(thread_state, "resolution_recommendation"),
+      Map.get(thread_state, "implementation_status"),
+      Map.get(thread_state, "verification_status")
+    } do
+      {"resolve_after_change", "addressed", _} -> true
+      {"resolve_after_contradiction", _, "contradicted"} -> true
+      _ -> false
+    end
+  end
+
+  defp resolvable_review_thread_state?(_thread_state), do: false
+
+  defp present_review_thread_reply?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_review_thread_reply?(_value), do: false
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp maybe_named_list(_label, [], _limit), do: nil
 
@@ -1503,7 +3113,19 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp next_objective_for_stage("implement", %TurnResult{summary: summary}) when is_binary(summary) do
+  defp next_objective_for_stage("implement", %TurnResult{} = turn_result, review_claims)
+       when is_map(review_claims) do
+    case accepted_actionable_claim_count(review_claims) do
+      count when count > 0 -> accepted_review_next_objective(review_claims)
+      _ -> next_objective_for_stage("implement", turn_result)
+    end
+  end
+
+  defp next_objective_for_stage(stage, turn_result, _review_claims) when is_binary(stage),
+    do: next_objective_for_stage(stage, turn_result)
+
+  defp next_objective_for_stage("implement", %TurnResult{summary: summary})
+       when is_binary(summary) do
     "Continue implementation from the existing diff. Last turn summary: #{summarized_text(summary, 240)}"
   end
 
@@ -1514,13 +3136,19 @@ defmodule SymphonyElixir.DeliveryEngine do
     do: "Advance the issue to #{stage}."
 
   defp verifier_retry_objective(result) do
-    summary = get_in(result, [:summary]) || get_in(result, ["summary"]) || "Verifier requested more work."
+    summary =
+      get_in(result, [:summary]) || get_in(result, ["summary"]) || "Verifier requested more work."
+
     "Address the latest verifier feedback: #{summarized_text(summary, 280)}"
   end
 
   defp implement_forbidden_commands(harness) do
     harness_commands =
-      [harness && harness.validation_command, harness && harness.smoke_command, harness && harness.post_merge_command]
+      [
+        harness && harness.validation_command,
+        harness && harness.smoke_command,
+        harness && harness.post_merge_command
+      ]
       |> Enum.reject(&is_nil/1)
 
     [
@@ -1541,24 +3169,105 @@ defmodule SymphonyElixir.DeliveryEngine do
     |> Enum.uniq()
   end
 
-  defp implement_command_output_budget do
-    %{
-      stage: "implement",
-      per_command_bytes: 8_192,
-      per_turn_bytes: 32_768,
-      max_command_count: 12
-    }
+  defp implement_effort(state) do
+    if focused_review_claims(Map.get(state, :review_claims, %{})) == [] do
+      Config.codex_turn_effort("implement")
+    else
+      "low"
+    end
   end
 
-  defp ensure_turn_progress(%TurnResult{blocked: true} = turn_result, _before_snapshot, _after_snapshot) do
+  defp implement_command_output_budget(state) do
+    cond do
+      focused_review_claims(Map.get(state, :review_claims, %{})) == [] ->
+        %{
+          stage: "implement",
+          per_command_bytes: 8_192,
+          per_turn_bytes: 32_768,
+          max_command_count: 12
+        }
+
+      get_in(state, [:resume_context, :token_pressure]) == "high" ->
+        %{
+          stage: "implement",
+          per_command_bytes: 4_096,
+          per_turn_bytes: 12_288,
+          max_command_count: 4
+        }
+
+      true ->
+        %{
+          stage: "implement",
+          per_command_bytes: 6_144,
+          per_turn_bytes: 24_576,
+          max_command_count: 6
+        }
+    end
+  end
+
+  defp focused_review_claim_limit(state) do
+    case get_in(state, [:resume_context, :token_pressure]) do
+      "high" -> 1
+      _ -> 2
+    end
+  end
+
+  defp effective_implementation_turns(state) when is_map(state) do
+    implementation_turns = Map.get(state, :implementation_turns, 0)
+    window_base = get_in(state, [:resume_context, :implementation_turn_window_base]) || 0
+
+    cond do
+      not is_integer(implementation_turns) ->
+        0
+
+      not is_integer(window_base) ->
+        implementation_turns
+
+      implementation_turns >= window_base ->
+        implementation_turns - window_base
+
+      true ->
+        implementation_turns
+    end
+  end
+
+  defp effective_max_turns(max_turns, state) when is_integer(max_turns) and is_map(state) do
+    if review_fix_turn_budget_candidate?(state) do
+      max(max_turns, @review_fix_max_turns)
+    else
+      max_turns
+    end
+  end
+
+  defp review_fix_turn_budget_candidate?(state) when is_map(state) do
+    get_in(state, [:resume_context, :token_pressure]) == "high" and
+      Enum.any?(Map.get(state, :review_claims, %{}), fn {_thread_key, claim} ->
+        claim_value(claim, :disposition) == "accepted" and claim_value(claim, :actionable, false)
+      end)
+  end
+
+  defp claim_value(claim, key, default \\ nil) when is_map(claim) and is_atom(key) do
+    Map.get(claim, key, Map.get(claim, Atom.to_string(key), default))
+  end
+
+  defp ensure_turn_progress(
+         %TurnResult{blocked: true} = turn_result,
+         _before_snapshot,
+         _after_snapshot
+       ) do
     {:error, {:agent_blocked, turn_result}}
   end
 
   defp ensure_turn_progress(%TurnResult{} = turn_result, before_snapshot, after_snapshot) do
-    if RunInspector.code_changed?(before_snapshot, after_snapshot) or is_binary(after_snapshot.pr_url) do
+    if RunInspector.code_changed?(before_snapshot, after_snapshot) or
+         is_binary(after_snapshot.pr_url) do
       :ok
     else
-      if retained_workspace_changes_ready_for_validation?(turn_result, before_snapshot, after_snapshot) do
+      if retained_workspace_changes_ready_for_validation?(
+           turn_result,
+           before_snapshot,
+           after_snapshot
+         ) do
         :ok
       else
         if Config.policy_stop_on_noop_turn?() do
@@ -1570,9 +3279,15 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp implement_next_stage(%TurnResult{needs_another_turn: true} = turn_result, before_snapshot, after_snapshot) do
+  defp implement_next_stage(
+         %TurnResult{needs_another_turn: true} = turn_result,
+         before_snapshot,
+         after_snapshot
+       ) do
     case ensure_turn_progress(turn_result, before_snapshot, after_snapshot) do
-      :ok -> {:ok, "implement"}
+      :ok ->
+        {:ok, "implement"}
+
       {:error, {:noop_turn, _summary}} ->
         if retained_workspace_changes_present?(after_snapshot) do
           {:ok, "implement"}
@@ -1580,7 +3295,8 @@ defmodule SymphonyElixir.DeliveryEngine do
           {:error, {:noop_turn, "No code change and no PR"}}
         end
 
-      {:error, reason} -> {:error, reason}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -1600,8 +3316,12 @@ defmodule SymphonyElixir.DeliveryEngine do
     true
   end
 
-  defp retained_workspace_changes_ready_for_validation?(_turn_result, _before_snapshot, _after_snapshot),
-    do: false
+  defp retained_workspace_changes_ready_for_validation?(
+         _turn_result,
+         _before_snapshot,
+         _after_snapshot
+       ),
+       do: false
 
   defp retained_workspace_changes_present?(%RunInspector.Snapshot{
          dirty?: true,
@@ -1612,6 +3332,27 @@ defmodule SymphonyElixir.DeliveryEngine do
        do: true
 
   defp retained_workspace_changes_present?(_snapshot), do: false
+
+  defp should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot)
+       when is_map(state) and is_list(focused_claims) do
+    focused_claims == [] and
+      retained_workspace_changes_present?(before_snapshot) and
+      last_turn_completed_without_follow_up?(Map.get(state, :last_turn_result))
+  end
+
+  defp should_resume_validation_from_retained_changes?(_state, _focused_claims, _before_snapshot),
+    do: false
+
+  defp last_turn_completed_without_follow_up?(%TurnResult{} = turn_result) do
+    turn_result.blocked == false and turn_result.needs_another_turn == false
+  end
+
+  defp last_turn_completed_without_follow_up?(turn_result) when is_map(turn_result) do
+    claim_value(turn_result, :blocked, false) == false and
+      claim_value(turn_result, :needs_another_turn, false) == false
+  end
+
+  defp last_turn_completed_without_follow_up?(_turn_result), do: false
 
   defp ensure_issue_still_active(%Issue{} = issue) do
     if active_issue_state?(issue.state) do
@@ -1647,11 +3388,19 @@ defmodule SymphonyElixir.DeliveryEngine do
           case TurnResult.normalize(arguments) do
             {:ok, turn_result} ->
               Process.put(turn_result_key(issue), turn_result)
-              %{"success" => true, "contentItems" => [%{"type" => "inputText", "text" => "turn result recorded"}]}
+
+              %{
+                "success" => true,
+                "contentItems" => [%{"type" => "inputText", "text" => "turn result recorded"}]
+              }
 
             {:error, reason} ->
               Process.put(turn_result_key(issue), {:error, reason})
-              %{"success" => false, "contentItems" => [%{"type" => "inputText", "text" => inspect(reason)}]}
+
+              %{
+                "success" => false,
+                "contentItems" => [%{"type" => "inputText", "text" => inspect(reason)}]
+              }
           end
 
         _ ->
@@ -1686,7 +3435,8 @@ defmodule SymphonyElixir.DeliveryEngine do
     :ok
   end
 
-  defp turn_runtime_error_key(%Issue{id: issue_id}), do: {@turn_runtime_error_key_prefix, issue_id}
+  defp turn_runtime_error_key(%Issue{id: issue_id}),
+    do: {@turn_runtime_error_key_prefix, issue_id}
 
   defp maybe_move_issue(%Issue{id: issue_id, state: current_state} = issue, target_state)
        when is_binary(issue_id) and is_binary(target_state) do
@@ -1710,7 +3460,8 @@ defmodule SymphonyElixir.DeliveryEngine do
          opts,
          reason
        ) do
-    attempts = Map.get(state, :implementation_turns, 0) + 1
+    attempts = effective_implementation_turns(state) + 1
+    total_implementation_turns = Map.get(state, :implementation_turns, 0) + 1
     summary = implementation_turn_error_summary(reason)
 
     with {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
@@ -1726,7 +3477,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       else
         {:ok, _state} =
           RunStateStore.transition(workspace, "implement", %{
-            implementation_turns: attempts,
+            implementation_turns: total_implementation_turns,
             last_implementation_error: %{
               summary: summary,
               reason: implementation_error_to_map(reason)
@@ -1804,7 +3555,8 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp implementation_error_to_map({tag, details}) when is_atom(tag),
     do: %{type: Atom.to_string(tag), details: safe_detail_text(details)}
 
-  defp implementation_error_to_map(reason), do: %{type: "unknown", details: safe_detail_text(reason)}
+  defp implementation_error_to_map(reason),
+    do: %{type: "unknown", details: safe_detail_text(reason)}
 
   defp retryable_implementation_error?({:turn_failed, details}) do
     case turn_failed_reason_code(details) do
@@ -1855,7 +3607,13 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp handle_checkout_error(workspace, issue, {:error, reason})
        when reason in [:missing_harness_version, :missing_required_checks] do
-    block_issue(workspace, issue, reason, "The repo harness contract is incomplete.", @blocked_state)
+    block_issue(
+      workspace,
+      issue,
+      reason,
+      "The repo harness contract is incomplete.",
+      @blocked_state
+    )
   end
 
   defp handle_checkout_error(workspace, issue, {:error, {:missing_harness_command, stage}}) do
@@ -1889,10 +3647,20 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_checkout_error(workspace, issue, {:error, :invalid_harness_root}) do
-    block_issue(workspace, issue, :invalid_harness, inspect(:invalid_harness_root), @blocked_state)
+    block_issue(
+      workspace,
+      issue,
+      :invalid_harness,
+      inspect(:invalid_harness_root),
+      @blocked_state
+    )
   end
 
-  defp handle_checkout_error(workspace, issue, {:error, %{code: :policy_pack_disallows_class} = conflict}) do
+  defp handle_checkout_error(
+         workspace,
+         issue,
+         {:error, %{code: :policy_pack_disallows_class} = conflict}
+       ) do
     block_issue(
       workspace,
       issue,
@@ -1916,11 +3684,21 @@ defmodule SymphonyElixir.DeliveryEngine do
     block_issue(workspace, issue, :checkout_failed, reason, @blocked_state)
   end
 
-  defp refresh_issue(%Issue{id: issue_id}, issue_state_fetcher) when is_binary(issue_id) do
+  defp refresh_issue(%Issue{id: issue_id} = issue, issue_state_fetcher)
+       when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
-      {:ok, [%Issue{} = refreshed_issue | _]} -> {:ok, refreshed_issue}
-      {:ok, []} -> {:done, :missing}
-      {:error, reason} -> {:error, {:issue_state_refresh_failed, reason}}
+      {:ok, [%Issue{} = refreshed_issue | _]} ->
+        {:ok, refreshed_issue}
+
+      {:ok, []} ->
+        if ManualIssueSpec.runtime_issue_id?(issue_id) do
+          {:ok, issue}
+        else
+          {:done, :missing}
+        end
+
+      {:error, reason} ->
+        {:error, {:issue_state_refresh_failed, reason}}
     end
   end
 
@@ -2048,9 +3826,15 @@ defmodule SymphonyElixir.DeliveryEngine do
     record_turn_runtime_error(issue, reason)
   end
 
-  defp maybe_capture_turn_runtime_error(issue, %{event: :notification, payload: %{"method" => method} = payload})
+  defp maybe_capture_turn_runtime_error(issue, %{
+         event: :notification,
+         payload: %{"method" => method} = payload
+       })
        when method in @codex_turn_error_methods do
-    record_turn_runtime_error(issue, {:codex_notification_error, method, Map.get(payload, "params", %{})})
+    record_turn_runtime_error(
+      issue,
+      {:codex_notification_error, method, Map.get(payload, "params", %{})}
+    )
   end
 
   defp maybe_capture_turn_runtime_error(_issue, _message), do: :ok
@@ -2063,7 +3847,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp normalize_state(_state), do: ""
 
-  defp truthy?(value), do: value in [true, "true", :true, 1, "1"]
+  defp truthy?(value), do: value in [true, "true", true, 1, "1"]
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_state(state_name)
@@ -2078,7 +3862,10 @@ defmodule SymphonyElixir.DeliveryEngine do
     base_branch = Map.get(state, :base_branch, "main")
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
 
-    case command_runner.("git", ["rev-list", "--count", "origin/#{base_branch}..HEAD"], cd: workspace, stderr_to_stdout: true) do
+    case command_runner.("git", ["rev-list", "--count", "origin/#{base_branch}..HEAD"],
+           cd: workspace,
+           stderr_to_stdout: true
+         ) do
       {output, 0} ->
         case Integer.parse(String.trim(output)) do
           {count, _rest} -> count > 0
@@ -2219,8 +4006,12 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp effective_required_checks(inspection, state) do
     base_checks =
       case inspection.harness do
-        nil -> []
-        harness -> Map.get(harness, :publish_required_checks, []) |> Kernel.++(Map.get(harness, :required_checks, []))
+        nil ->
+          []
+
+        harness ->
+          Map.get(harness, :publish_required_checks, [])
+          |> Kernel.++(Map.get(harness, :required_checks, []))
       end
 
     (base_checks ++ ui_proof_required_checks_from_state(state))
@@ -2320,11 +4111,13 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp hold_for_policy_review(workspace, issue, state, await_checks_attrs, code) do
     rule = RuleCatalog.rule(code)
+
     workflow_profile =
       WorkflowProfile.resolve(
         Map.get(state, :effective_policy_class),
         policy_pack: Map.get(state, :policy_pack)
       )
+
     approval_gate_state = workflow_profile.approval_gate_state
 
     :ok = maybe_move_issue(issue, approval_gate_state)
@@ -2387,8 +4180,12 @@ defmodule SymphonyElixir.DeliveryEngine do
     :ok
   end
 
-  defp detail_summary(:publish_missing_pr, _detail), do: "No PR is attached for the current branch."
-  defp detail_summary(:policy_invalid_labels, _detail), do: "The issue has conflicting policy labels."
+  defp detail_summary(:publish_missing_pr, _detail),
+    do: "No PR is attached for the current branch."
+
+  defp detail_summary(:policy_invalid_labels, _detail),
+    do: "The issue has conflicting policy labels."
+
   defp detail_summary(code, detail), do: "#{code}: #{String.slice(detail, 0, 160)}"
 
   defp approval_gate_summary(:policy_review_required, approval_gate_state),
@@ -2408,7 +4205,11 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     if PolicyPack.contractor_mode?(pack) do
       changed_paths = RunInspector.changed_paths(workspace)
-      harness = if inspection.harness, do: Map.get(inspection.harness, :raw) || inspection.harness, else: nil
+
+      harness =
+        if inspection.harness,
+          do: Map.get(inspection.harness, :raw) || inspection.harness,
+          else: nil
 
       risk =
         SymphonyElixir.RiskClassifier.classify(
@@ -2433,8 +4234,12 @@ defmodule SymphonyElixir.DeliveryEngine do
 
         RunLedger.recent_entries(500)
         |> Enum.count(fn entry ->
-          (Map.get(entry, "event_type") || Map.get(entry, :event_type) || Map.get(entry, "event")) == "merge.completed" and
-            String.starts_with?(to_string(Map.get(entry, "at") || Map.get(entry, :at) || ""), today)
+          (Map.get(entry, "event_type") || Map.get(entry, :event_type) || Map.get(entry, "event")) ==
+            "merge.completed" and
+            String.starts_with?(
+              to_string(Map.get(entry, "at") || Map.get(entry, :at) || ""),
+              today
+            )
         end) >= limit
 
       _ ->

@@ -6,8 +6,10 @@ defmodule SymphonyElixir.VerifierRunner do
   alias SymphonyElixir.BehavioralProof
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.Config
+  alias SymphonyElixir.DebugArtifacts
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Observability
   alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.RunInspector
   alias SymphonyElixir.UiProof
@@ -19,73 +21,99 @@ defmodule SymphonyElixir.VerifierRunner do
   @spec verify(Path.t(), Issue.t() | map(), map(), RunInspector.snapshot(), keyword()) :: map()
   def verify(workspace, issue, state, inspection, opts \\ [])
       when is_binary(workspace) and is_map(state) do
-    smoke_result = RunInspector.run_smoke(workspace, inspection.harness, opts)
-    acceptance = IssueAcceptance.from_issue(issue)
-    context = verification_context(workspace, inspection, state, acceptance, smoke_result, opts)
+    metadata = %{
+      issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
+      stage: "verify",
+      policy_class: Map.get(state, :effective_policy_class),
+      workflow_profile: Map.get(state, :effective_policy_class)
+    }
 
-    case smoke_result.status do
-      :unavailable ->
-        blocked_result(
-          "The repo smoke command is unavailable, so Symphony cannot verify this change.",
-          ["Smoke command missing or invalid in `.symphony/harness.yml`."],
-          context
-        )
+    Observability.with_span("symphony.verifier", metadata, fn ->
+      start_time = System.monotonic_time()
+      smoke_result = RunInspector.run_smoke(workspace, inspection.harness, opts)
+      acceptance = IssueAcceptance.from_issue(issue)
+      context = verification_context(workspace, inspection, state, acceptance, smoke_result, opts)
 
-      :failed ->
-        needs_more_work_result(
-          "The smoke verification command failed, so the implementation needs another pass.",
-          context
-        )
+      emit_proof_event(:behavioral, context.behavioral_proof, metadata)
+      emit_proof_event(:ui, context.ui_proof, metadata)
 
-      :passed ->
-        cond do
-          context.behavioral_proof.required? and not context.behavioral_proof.satisfied? ->
-            missing_behavioral_proof_result(context)
+      result =
+        case smoke_result.status do
+          :unavailable ->
+            blocked_result(
+              "The repo smoke command is unavailable, so Symphony cannot verify this change.",
+              ["Smoke command missing or invalid in `.symphony/harness.yml`."],
+              context
+            )
 
-          context.ui_proof.verify_required? and not context.ui_proof.verify_satisfied? ->
-            missing_ui_proof_result(context)
+          :failed ->
+            store_failure_artifact("verify_smoke_failed", smoke_result.output || "", metadata)
 
-          true ->
-            before_snapshot = RunInspector.inspect(workspace, opts)
-            verifier_session_runner = Keyword.get(opts, :verifier_session_runner, &run_verifier_session/4)
+            needs_more_work_result(
+              "The smoke verification command failed, so the implementation needs another pass.",
+              context
+            )
 
-            case verifier_session_runner.(workspace, issue, state, Keyword.put(opts, :verification_context, context)) do
-              {:ok, %VerifierResult{} = result} ->
-                after_snapshot = RunInspector.inspect(workspace, opts)
+          :passed ->
+            cond do
+              context.behavioral_proof.required? and not context.behavioral_proof.satisfied? ->
+                missing_behavioral_proof_result(context)
 
-                if RunInspector.code_changed?(before_snapshot, after_snapshot) do
-                  blocked_result(
-                    "The verifier mutated the workspace, which is forbidden for read-only verification.",
-                    ["Verification must not change files, git state, or PR metadata."],
-                    context
-                  )
-                else
-                  verifier_result_payload(result, context)
+              context.ui_proof.verify_required? and not context.ui_proof.verify_satisfied? ->
+                missing_ui_proof_result(context)
+
+              true ->
+                before_snapshot = RunInspector.inspect(workspace, opts)
+                verifier_session_runner = Keyword.get(opts, :verifier_session_runner, &run_verifier_session/4)
+
+                case verifier_session_runner.(workspace, issue, state, Keyword.put(opts, :verification_context, context)) do
+                  {:ok, %VerifierResult{} = result} ->
+                    after_snapshot = RunInspector.inspect(workspace, opts)
+
+                    if RunInspector.code_changed?(before_snapshot, after_snapshot) do
+                      blocked_result(
+                        "The verifier mutated the workspace, which is forbidden for read-only verification.",
+                        ["Verification must not change files, git state, or PR metadata."],
+                        context
+                      )
+                    else
+                      verifier_result_payload(result, context)
+                    end
+
+                  {:error, :missing_verifier_result} ->
+                    blocked_result(
+                      "The verifier turn completed without reporting `report_verifier_result`.",
+                      ["Verifier tool result missing."],
+                      context
+                    )
+
+                  {:error, {:invalid_verifier_result, reason}} ->
+                    blocked_result(
+                      "The verifier reported an invalid structured result.",
+                      [inspect(reason)],
+                      context
+                    )
+
+                  {:error, reason} ->
+                    blocked_result(
+                      "The verifier session failed before producing a usable result.",
+                      [inspect(reason)],
+                      context
+                    )
                 end
-
-              {:error, :missing_verifier_result} ->
-                blocked_result(
-                  "The verifier turn completed without reporting `report_verifier_result`.",
-                  ["Verifier tool result missing."],
-                  context
-                )
-
-              {:error, {:invalid_verifier_result, reason}} ->
-                blocked_result(
-                  "The verifier reported an invalid structured result.",
-                  [inspect(reason)],
-                  context
-                )
-
-              {:error, reason} ->
-                blocked_result(
-                  "The verifier session failed before producing a usable result.",
-                  [inspect(reason)],
-                  context
-                )
             end
         end
-    end
+
+      Observability.emit(
+        [:symphony, :verifier, :completed],
+        %{count: 1, duration: System.monotonic_time() - start_time},
+        metadata
+        |> Map.put(:verdict, Map.get(result, :verdict) || Map.get(result, "verdict"))
+        |> Map.put(:smoke_status, smoke_result.status)
+      )
+
+      result
+    end)
   end
 
   @spec post_merge_verify(Path.t(), map() | nil, keyword()) :: RunInspector.command_result()
@@ -284,6 +312,7 @@ defmodule SymphonyElixir.VerifierRunner do
   end
 
   @doc false
+  @spec format_command_output_excerpt(term()) :: String.t()
   def format_command_output_excerpt(output) do
     output = to_string(output || "")
 
@@ -371,6 +400,44 @@ defmodule SymphonyElixir.VerifierRunner do
       description: Map.get(issue, :description) || Map.get(issue, "description")
     }
   end
+
+  defp emit_proof_event(:behavioral, proof, metadata) do
+    Observability.emit(
+      [:symphony, :proof, :behavioral, :evaluated],
+      %{count: 1},
+      %{
+        required: proof.required?,
+        satisfied: proof.satisfied?,
+        reason: proof.reason
+      }
+      |> Map.merge(metadata)
+    )
+  end
+
+  defp emit_proof_event(:ui, proof, metadata) do
+    Observability.emit(
+      [:symphony, :proof, :ui, :evaluated],
+      %{count: 1},
+      %{
+        required: proof.verify_required?,
+        satisfied: proof.verify_satisfied?,
+        reason: proof.reason
+      }
+      |> Map.merge(metadata)
+    )
+  end
+
+  defp store_failure_artifact(kind, output, metadata) do
+    case DebugArtifacts.store_failure(kind, output, metadata) do
+      {:ok, artifact_ref} ->
+        Observability.emit_debug_artifact_reference(kind, artifact_ref, metadata)
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
   defp command_result_to_map(result) do
     %{
       status: result.status,

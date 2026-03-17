@@ -6,6 +6,8 @@ defmodule SymphonyElixir.RunLedger do
 
   # credo:disable-for-this-file
 
+  alias SymphonyElixir.Observability
+
   @default_filename "run_ledger.jsonl"
   @default_recent_limit 50
   @schema_version 1
@@ -52,6 +54,7 @@ defmodule SymphonyElixir.RunLedger do
       |> typed_entry(event_type)
       |> persist_entry()
 
+    Observability.emit_ledger_event(event_type, entry)
     entry
   rescue
     _error ->

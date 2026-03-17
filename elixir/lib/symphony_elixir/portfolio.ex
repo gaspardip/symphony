@@ -23,16 +23,16 @@ defmodule SymphonyElixir.Portfolio do
 
     %{
       instances: instances,
-        totals: %{
-          instances: length(instances),
-          healthy_instances: Enum.count(instances, & &1.healthy),
-          running: Enum.reduce(instances, 0, &(&1.counts.running + &2)),
-          attention_now:
-            Enum.reduce(instances, 0, fn instance, acc ->
-              acc + normalize_int(get_in(instance, [:triage, "summary", "attention_now"]))
-            end)
-        }
+      totals: %{
+        instances: length(instances),
+        healthy_instances: Enum.count(instances, & &1.healthy),
+        running: Enum.reduce(instances, 0, &(&1.counts.running + &2)),
+        attention_now:
+          Enum.reduce(instances, 0, fn instance, acc ->
+            acc + normalize_int(get_in(instance, [:triage, "summary", "attention_now"]))
+          end)
       }
+    }
   end
 
   defp fetch_instance_summary(%{} = instance) do

@@ -27,41 +27,55 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, opts) do
-      try do
-        run_turn(session, prompt, issue, opts)
-      after
-        stop_session(session)
+    with_port_exit_trapping(fn ->
+      with {:ok, session} <- start_session(workspace, opts) do
+        try do
+          run_turn(session, prompt, issue, opts)
+        after
+          stop_session(session)
+        end
       end
+    end)
+  end
+
+  defp with_port_exit_trapping(fun) when is_function(fun, 0) do
+    previous_trap_exit? = Process.flag(:trap_exit, true)
+
+    try do
+      fun.()
+    after
+      Process.flag(:trap_exit, previous_trap_exit?)
     end
   end
 
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
-    with :ok <- validate_workspace_cwd(workspace),
-         {:ok, port} <- start_port(workspace, opts) do
-      metadata = port_metadata(port)
-      expanded_workspace = Path.expand(workspace)
+    with_port_exit_trapping(fn ->
+      with :ok <- validate_workspace_cwd(workspace),
+           {:ok, port} <- start_port(workspace, opts) do
+        metadata = port_metadata(port)
+        expanded_workspace = Path.expand(workspace)
 
-      with {:ok, session_policies} <- session_policies(expanded_workspace),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
-        {:ok,
-         %{
-           port: port,
-           metadata: metadata,
-           approval_policy: session_policies.approval_policy,
-           auto_approve_requests: session_policies.approval_policy == "never",
-           thread_sandbox: session_policies.thread_sandbox,
-           turn_sandbox_policy: session_policies.turn_sandbox_policy,
-           thread_id: thread_id,
-           workspace: expanded_workspace
-         }}
-      else
-        {:error, reason} ->
-          stop_port(port)
-          {:error, reason}
+        with {:ok, session_policies} <- session_policies(expanded_workspace),
+             {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+          {:ok,
+           %{
+             port: port,
+             metadata: metadata,
+             approval_policy: session_policies.approval_policy,
+             auto_approve_requests: session_policies.approval_policy == "never",
+             thread_sandbox: session_policies.thread_sandbox,
+             turn_sandbox_policy: session_policies.turn_sandbox_policy,
+             thread_id: thread_id,
+             workspace: expanded_workspace
+           }}
+        else
+          {:error, reason} ->
+            stop_port(port)
+            {:error, reason}
+        end
       end
-    end
+    end)
   end
 
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -79,76 +93,78 @@ defmodule SymphonyElixir.Codex.AppServer do
         issue,
         opts \\ []
       ) do
-    on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    with_port_exit_trapping(fn ->
+      on_message = Keyword.get(opts, :on_message, &default_on_message/1)
 
-    tool_executor =
-      Keyword.get(opts, :tool_executor, fn tool, arguments ->
-        DynamicTool.execute(tool, arguments)
-      end)
+      tool_executor =
+        Keyword.get(opts, :tool_executor, fn tool, arguments ->
+          DynamicTool.execute(tool, arguments)
+        end)
 
-    case start_turn(
-           port,
-           thread_id,
-           prompt,
-           issue,
-           workspace,
-           approval_policy,
-           turn_sandbox_policy,
-           Keyword.get(opts, :effort)
-         ) do
-      {:ok, turn_id} ->
-        session_id = "#{thread_id}-#{turn_id}"
-        Process.put(@command_monitor_key, command_monitor(opts))
-        Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
+      case start_turn(
+             port,
+             thread_id,
+             prompt,
+             issue,
+             workspace,
+             approval_policy,
+             turn_sandbox_policy,
+             Keyword.get(opts, :effort)
+           ) do
+        {:ok, turn_id} ->
+          session_id = "#{thread_id}-#{turn_id}"
+          Process.put(@command_monitor_key, command_monitor(opts))
+          Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
-        emit_message(
-          on_message,
-          :session_started,
-          %{
-            session_id: session_id,
-            thread_id: thread_id,
-            turn_id: turn_id
-          },
-          metadata
-        )
+          emit_message(
+            on_message,
+            :session_started,
+            %{
+              session_id: session_id,
+              thread_id: thread_id,
+              turn_id: turn_id
+            },
+            metadata
+          )
 
-        try do
-          case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-            {:ok, result} ->
-              Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
+          try do
+            case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+              {:ok, result} ->
+                Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
-              {:ok,
-               %{
-                 result: result,
-                 session_id: session_id,
-                 thread_id: thread_id,
-                 turn_id: turn_id
-               }}
+                {:ok,
+                 %{
+                   result: result,
+                   session_id: session_id,
+                   thread_id: thread_id,
+                   turn_id: turn_id
+                 }}
 
-            {:error, reason} ->
-              Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+              {:error, reason} ->
+                Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
-              emit_message(
-                on_message,
-                :turn_ended_with_error,
-                %{
-                  session_id: session_id,
-                  reason: reason
-                },
-                metadata
-              )
+                emit_message(
+                  on_message,
+                  :turn_ended_with_error,
+                  %{
+                    session_id: session_id,
+                    reason: reason
+                  },
+                  metadata
+                )
 
-              {:error, reason}
+                {:error, reason}
+            end
+          after
+            Process.delete(@command_monitor_key)
           end
-        after
-          Process.delete(@command_monitor_key)
-        end
 
-      {:error, reason} ->
-        Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
-        emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
-        {:error, reason}
-    end
+        {:error, reason} ->
+          Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
+          emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
+          {:error, reason}
+      end
+    end)
   end
 
   @spec stop_session(session()) :: :ok
@@ -253,6 +269,7 @@ defmodule SymphonyElixir.Codex.AppServer do
        when is_binary(command) do
     codex_home = Map.get(runtime_profile, :codex_home)
     inherit_env = Map.get(runtime_profile, :inherit_env, true)
+
     env_allowlist =
       runtime_profile
       |> Map.get(:env_allowlist, [])
@@ -414,6 +431,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
+
+      {:EXIT, ^port, reason} ->
+        {:error, {:port_exit, reason}}
     after
       timeout_ms ->
         {:error, :turn_timeout}
@@ -571,18 +591,19 @@ defmodule SymphonyElixir.Codex.AppServer do
         else
           case maybe_track_command_output(method, payload) do
             :ok ->
-          emit_message(
-            on_message,
-            :notification,
-            %{
-              payload: payload,
-              raw: payload_string
-            },
-            metadata
-          )
+              emit_message(
+                on_message,
+                :notification,
+                %{
+                  payload: payload,
+                  raw: payload_string
+                },
+                metadata
+              )
 
-          Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+              Logger.debug("Codex notification: #{inspect(method)}")
+              receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+
             {:error, reason} ->
               {:error, reason}
           end
@@ -602,16 +623,16 @@ defmodule SymphonyElixir.Codex.AppServer do
        ) do
     with :ok <- check_stage_command_allowed(payload),
          :ok <- increment_command_count() do
-    approve_or_require(
-      port,
-      id,
-      "acceptForSession",
-      payload,
-      payload_string,
-      on_message,
-      metadata,
-      auto_approve_requests
-    )
+      approve_or_require(
+        port,
+        id,
+        "acceptForSession",
+        payload,
+        payload_string,
+        on_message,
+        metadata,
+        auto_approve_requests
+      )
     end
   end
 
@@ -963,6 +984,9 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
+
+      {:EXIT, ^port, reason} ->
+        {:error, {:port_exit, reason}}
     after
       timeout_ms ->
         {:error, :response_timeout}
@@ -1267,6 +1291,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp needs_input_field?(_payload), do: false
 
   @doc false
+  @spec helper_for_test(atom(), list()) :: term()
   def helper_for_test(:port_metadata, [port]), do: port_metadata(port)
 
   def helper_for_test(:launch_command, [command, bash_executable, env_executable, runtime_profile]),
@@ -1293,6 +1318,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   def helper_for_test(:needs_input, [method, payload]), do: needs_input?(method, payload)
   def helper_for_test(:stop_port, [port]), do: stop_port(port)
   def helper_for_test(:shell_escape, [value]), do: shell_escape(value)
+
   def helper_for_test(:log_stream_output, [stream_label, data]),
     do: log_non_json_stream_line(data, stream_label)
 end

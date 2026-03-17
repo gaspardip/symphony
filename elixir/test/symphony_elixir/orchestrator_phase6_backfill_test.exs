@@ -585,10 +585,9 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
 
     refute Map.has_key?(updated_state.running, issue.id)
+
     assert {:ok, run_state} =
-             SymphonyElixir.RunStateStore.load(
-               Path.join(Config.workspace_root(), issue.identifier)
-             )
+             SymphonyElixir.RunStateStore.load(Path.join(Config.workspace_root(), issue.identifier))
 
     assert run_state.last_rule_id == "policy.invalid_labels"
   end

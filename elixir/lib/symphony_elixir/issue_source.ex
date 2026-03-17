@@ -3,7 +3,7 @@ defmodule SymphonyElixir.IssueSource do
   Source-aware issue reads and writes across tracker-backed and manual issues.
   """
 
-  alias SymphonyElixir.{Config, CredentialRegistry, ManualIssueSpec, ManualIssueStore, PolicyPack, Tracker}
+  alias SymphonyElixir.{Config, CredentialRegistry, ManualIssueSpec, ManualIssueStore, Observability, PolicyPack, Tracker}
   alias SymphonyElixir.Linear.Issue
 
   @type issue_ref :: %{
@@ -147,6 +147,7 @@ defmodule SymphonyElixir.IssueSource do
 
   def issue_ref(%{} = issue) do
     id = Map.get(issue, :id) || Map.get(issue, "id")
+
     source =
       issue
       |> Map.get(:source)
@@ -167,7 +168,7 @@ defmodule SymphonyElixir.IssueSource do
 
   defp tracker_fetch(fun) when is_function(fun, 0) do
     if tracker_enabled?() do
-      fun.()
+      observe_source_operation(:tracker, :fetch, fun)
     else
       {:ok, []}
     end
@@ -175,7 +176,7 @@ defmodule SymphonyElixir.IssueSource do
 
   defp tracker_lookup(fun) when is_function(fun, 0) do
     if tracker_enabled?() do
-      fun.()
+      observe_source_operation(:tracker, :lookup, fun)
     else
       {:ok, nil}
     end
@@ -183,7 +184,7 @@ defmodule SymphonyElixir.IssueSource do
 
   defp manual_fetch(fun) when is_function(fun, 0) do
     if Config.manual_enabled?() do
-      fun.()
+      observe_source_operation(:manual, :fetch, fun)
     else
       {:ok, []}
     end
@@ -191,7 +192,7 @@ defmodule SymphonyElixir.IssueSource do
 
   defp manual_lookup(fun) when is_function(fun, 0) do
     if Config.manual_enabled?() do
-      fun.()
+      observe_source_operation(:manual, :lookup, fun)
     else
       {:ok, nil}
     end
@@ -262,7 +263,8 @@ defmodule SymphonyElixir.IssueSource do
       not PolicyPack.tracker_mutation_allowed?(pack) ->
         {:error, {:tracker_mutation_forbidden, PolicyPack.name_string(pack)}}
 
-      match?({:error, _},
+      match?(
+        {:error, _},
         CredentialRegistry.allow?("tracker", "write",
           policy_pack: pack,
           company_name: Config.company_name(),
@@ -276,8 +278,33 @@ defmodule SymphonyElixir.IssueSource do
         )
 
       true ->
-        fun.()
+        observe_source_operation(:tracker, :mutation, fun)
     end
+  end
+
+  defp observe_source_operation(source, operation, fun)
+       when source in [:manual, :tracker] and is_atom(operation) and is_function(fun, 0) do
+    metadata = %{source: Atom.to_string(source), operation: Atom.to_string(operation)}
+    start_time = System.monotonic_time()
+
+    Observability.emit([:symphony, :issue_source, :start], %{count: 1}, metadata)
+    result = fun.()
+
+    outcome =
+      case result do
+        {:ok, _value} -> "ok"
+        :ok -> "ok"
+        {:error, _reason} -> "error"
+        _other -> "other"
+      end
+
+    Observability.emit(
+      [:symphony, :issue_source, :stop],
+      %{count: 1, duration: System.monotonic_time() - start_time},
+      Map.put(metadata, :outcome, outcome)
+    )
+
+    result
   end
 
   defp infer_source(value) when is_binary(value) do

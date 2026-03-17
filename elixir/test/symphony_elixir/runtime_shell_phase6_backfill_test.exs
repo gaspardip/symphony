@@ -93,12 +93,9 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:error, {:response_error, %{"message" => "turn-start-failed"}}} =
-             AppServer.run(workspace, "startup failed", sample_issue("MT-AS-STARTUP"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "startup failed", sample_issue("MT-AS-STARTUP"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
-    assert_receive {:app_server_message,
-                    %{event: :startup_failed, reason: {:response_error, %{"message" => "turn-start-failed"}}}}
+    assert_receive {:app_server_message, %{event: :startup_failed, reason: {:response_error, %{"message" => "turn-start-failed"}}}}
   end
 
   test "app server returns turn_failed errors and emits error lifecycle messages" do
@@ -116,15 +113,11 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:error, {:turn_failed, %{"reason" => "verifier failed"}}} =
-             AppServer.run(workspace, "turn failed", sample_issue("MT-AS-TURN-FAILED"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "turn failed", sample_issue("MT-AS-TURN-FAILED"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
-    assert_receive {:app_server_message,
-                    %{event: :turn_failed, details: %{"reason" => "verifier failed"}}}
+    assert_receive {:app_server_message, %{event: :turn_failed, details: %{"reason" => "verifier failed"}}}
 
-    assert_receive {:app_server_message,
-                    %{event: :turn_ended_with_error, reason: {:turn_failed, %{"reason" => "verifier failed"}}}}
+    assert_receive {:app_server_message, %{event: :turn_ended_with_error, reason: {:turn_failed, %{"reason" => "verifier failed"}}}}
   end
 
   test "app server ignores non-json stream noise and still emits other_message before completing a turn" do
@@ -142,12 +135,9 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:ok, %{result: :turn_completed}} =
-             AppServer.run(workspace, "malformed stream", sample_issue("MT-AS-MALFORMED"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "malformed stream", sample_issue("MT-AS-MALFORMED"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
-    assert_receive {:app_server_message,
-                    %{event: :other_message, payload: %{"note" => "keep-going"}, usage: %{"input_tokens" => 1}}}
+    assert_receive {:app_server_message, %{event: :other_message, payload: %{"note" => "keep-going"}, usage: %{"input_tokens" => 1}}}
 
     refute_receive {:app_server_message, %{event: :malformed, payload: "warn: noisy line"}}
   end
@@ -167,9 +157,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:ok, %{result: :turn_completed}} =
-             AppServer.run(workspace, "malformed json stream", sample_issue("MT-AS-MALFORMED-JSON"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "malformed json stream", sample_issue("MT-AS-MALFORMED-JSON"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
     assert_receive {:app_server_message, %{event: :malformed, payload: "{\"note\":\"broken\""}}
   end
@@ -189,9 +177,8 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:error, {:invalid_thread_payload, %{}}} =
-             AppServer.run(workspace, "invalid thread", sample_issue("MT-AS-INVALID-THREAD"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "invalid thread", sample_issue("MT-AS-INVALID-THREAD"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
+
     refute_receive {:app_server_message, _message}
   end
 
@@ -210,15 +197,11 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:error, {:turn_cancelled, %{"reason" => "operator cancelled"}}} =
-             AppServer.run(workspace, "turn cancelled", sample_issue("MT-AS-TURN-CANCELLED"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "turn cancelled", sample_issue("MT-AS-TURN-CANCELLED"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
-    assert_receive {:app_server_message,
-                    %{event: :turn_cancelled, details: %{"reason" => "operator cancelled"}}}
+    assert_receive {:app_server_message, %{event: :turn_cancelled, details: %{"reason" => "operator cancelled"}}}
 
-    assert_receive {:app_server_message,
-                    %{event: :turn_ended_with_error, reason: {:turn_cancelled, %{"reason" => "operator cancelled"}}}}
+    assert_receive {:app_server_message, %{event: :turn_ended_with_error, reason: {:turn_cancelled, %{"reason" => "operator cancelled"}}}}
   end
 
   test "app server emits unsupported_tool_call when a tool name is missing" do
@@ -236,12 +219,9 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:ok, %{result: :turn_completed}} =
-             AppServer.run(workspace, "unsupported tool name", sample_issue("MT-AS-UNSUPPORTED-TOOL"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "unsupported tool name", sample_issue("MT-AS-UNSUPPORTED-TOOL"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
-    assert_receive {:app_server_message,
-                    %{event: :unsupported_tool_call, payload: %{"params" => %{"arguments" => %{"note" => "missing tool"}}}}}
+    assert_receive {:app_server_message, %{event: :unsupported_tool_call, payload: %{"params" => %{"arguments" => %{"note" => "missing tool"}}}}}
   end
 
   test "app server ignores noisy response startup lines and emits notifications" do
@@ -261,9 +241,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     log =
       ExUnit.CaptureLog.capture_log(fn ->
         assert {:ok, %{result: :turn_completed}} =
-                 AppServer.run(workspace, "startup noise", sample_issue("MT-AS-NOTIFICATION"),
-                   on_message: fn message -> send(parent, {:app_server_message, message}) end
-                 )
+                 AppServer.run(workspace, "startup noise", sample_issue("MT-AS-NOTIFICATION"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
       end)
 
     assert log =~ "Codex response stream output: warning: response stream noise"
@@ -291,9 +269,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:error, {:response_error, %{"id" => 3, "usage" => %{"input_tokens" => 1}}}} =
-             AppServer.run(workspace, "missing result", sample_issue("MT-AS-MISSING-RESULT"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "missing result", sample_issue("MT-AS-MISSING-RESULT"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
     assert_receive {:app_server_message,
                     %{
@@ -318,9 +294,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:error, :response_timeout} =
-             AppServer.run(workspace, "startup timeout", sample_issue("MT-AS-STARTUP-TIMEOUT"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "startup timeout", sample_issue("MT-AS-STARTUP-TIMEOUT"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
     refute_receive {:app_server_message, _message}
   end
@@ -340,14 +314,11 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:error, {:port_exit, 17}} =
-             AppServer.run(workspace, "turn port exit", sample_issue("MT-AS-PORT-EXIT"),
-               on_message: fn message -> send(parent, {:app_server_message, message}) end
-             )
+             AppServer.run(workspace, "turn port exit", sample_issue("MT-AS-PORT-EXIT"), on_message: fn message -> send(parent, {:app_server_message, message}) end)
 
     assert_receive {:app_server_message, %{event: :session_started}}
 
-    assert_receive {:app_server_message,
-                    %{event: :turn_ended_with_error, reason: {:port_exit, 17}}}
+    assert_receive {:app_server_message, %{event: :turn_ended_with_error, reason: {:port_exit, 17}}}
   end
 
   test "app server trims tool names and defaults missing tool arguments" do
@@ -394,14 +365,17 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     }
 
     assert :ok =
-             CLI.evaluate([
-               @ack_flag,
-               "--logs-root",
-               "tmp/one",
-               "--logs-root",
-               "tmp/two",
-               "WORKFLOW.md"
-             ], deps)
+             CLI.evaluate(
+               [
+                 @ack_flag,
+                 "--logs-root",
+                 "tmp/one",
+                 "--logs-root",
+                 "tmp/two",
+                 "WORKFLOW.md"
+               ],
+               deps
+             )
 
     assert_received {:logs_root, expanded_path}
     assert expanded_path == Path.expand("tmp/two")
@@ -417,8 +391,18 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
       spawn(fn ->
-        Process.sleep(200)
-        Supervisor.stop(SymphonyElixir.Supervisor, :shutdown)
+        wait_for_supervisor = fn wait_for_supervisor ->
+          case Process.whereis(SymphonyElixir.Supervisor) do
+            pid when is_pid(pid) ->
+              Supervisor.stop(pid, :shutdown)
+
+            _ ->
+              Process.sleep(50)
+              wait_for_supervisor.(wait_for_supervisor)
+          end
+        end
+
+        wait_for_supervisor.(wait_for_supervisor)
       end)
 
       SymphonyElixir.CLI.main([#{inspect(@ack_flag)}, #{inspect(workflow_path)}])
@@ -439,9 +423,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
 
     start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: snapshot, refresh: :unavailable})
 
-    start_supervised!(
-      {HttpServer, host: "localhost", port: 0, orchestrator: orchestrator_name, snapshot_timeout_ms: 50}
-    )
+    start_supervised!({HttpServer, host: "localhost", port: 0, orchestrator: orchestrator_name, snapshot_timeout_ms: 50})
 
     port = wait_for_bound_port()
     response = Req.get!("http://localhost:#{port}/api/v1/state")
@@ -529,6 +511,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:ok, issues} = Client.fetch_candidate_issues()
+
     assert Enum.map(issues, &{&1.identifier, &1.assigned_to_worker}) == [
              {"MT-LINEAR-1", true},
              {"MT-LINEAR-2", false},
@@ -572,8 +555,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     assert {:ok, [%Issue{identifier: "MT-LINEAR-BLANK", assigned_to_worker: true}]} =
              Client.fetch_candidate_issues()
 
-    assert_receive {:linear_payload,
-                    %{"variables" => %{"after" => nil, "projectSlug" => "project", "stateNames" => ["Todo"]}}}
+    assert_receive {:linear_payload, %{"variables" => %{"after" => nil, "projectSlug" => "project", "stateNames" => ["Todo"]}}}
 
     refute_receive {:linear_payload, _payload}
   end
@@ -645,6 +627,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     )
 
     assert {:ok, issues} = Client.fetch_issue_states_by_ids(["issue-1", "issue-1", "issue-2"])
+
     assert Enum.map(issues, &{&1.identifier, &1.assigned_to_worker}) == [
              {"MT-LINEAR-1", true},
              {"MT-LINEAR-2", false}
@@ -876,9 +859,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
              )
 
     assert {:error, {:linear_api_request, :timeout}} =
-             Client.graphql("query Viewer { viewer { id } }", %{},
-               request_fun: fn _payload, _headers -> {:error, :timeout} end
-             )
+             Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: fn _payload, _headers -> {:error, :timeout} end)
   end
 
   test "linear client helper APIs cover pagination and normalization edge cases" do
@@ -950,17 +931,21 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
 
     assert AppServer.helper_for_test(:tool_request_user_input_approval_answers, [%{"questions" => [%{"id" => "q1", "options" => nil}]}]) == :error
     assert AppServer.helper_for_test(:tool_request_user_input_approval_answers, [%{"questions" => []}]) == :error
+
     assert AppServer.helper_for_test(:tool_request_user_input_unavailable_answers, [%{"questions" => [%{"id" => "q1"}]}]) ==
              {:ok, %{"q1" => %{"answers" => ["This is a non-interactive session. Operator input is unavailable."]}}}
+
     assert AppServer.helper_for_test(:tool_request_user_input_unavailable_answers, [%{"questions" => [%{"header" => "missing id"}]}]) == :error
     assert AppServer.helper_for_test(:tool_request_user_input_unavailable_answers, [%{"questions" => []}]) == :error
     assert AppServer.helper_for_test(:tool_request_user_input_unavailable_answers, [%{}]) == :error
+
     assert AppServer.helper_for_test(:tool_request_user_input_approval_answer, [%{"id" => "q1", "options" => [%{"label" => "Deny"}, %{"label" => "Allow now"}]}]) ==
              {:ok, "q1", "Allow now"}
+
     assert AppServer.helper_for_test(:tool_request_user_input_approval_answer, [%{"id" => "q1", "options" => [%{"description" => "missing"}]}]) == :error
     assert AppServer.helper_for_test(:tool_request_user_input_approval_option_label, [[%{"label" => "Allow now"}]]) == "Allow now"
     assert AppServer.helper_for_test(:tool_request_user_input_option_label, [%{}]) == nil
-    assert AppServer.helper_for_test(:tool_call_name, [%{"tool" => "   " }]) == nil
+    assert AppServer.helper_for_test(:tool_call_name, [%{"tool" => "   "}]) == nil
     assert AppServer.helper_for_test(:tool_call_name, [:oops]) == nil
     assert AppServer.helper_for_test(:tool_call_arguments, [:oops]) == %{}
     assert AppServer.helper_for_test(:maybe_set_usage, [%{}, %{"usage" => %{"input_tokens" => 1}}]) == %{usage: %{"input_tokens" => 1}}
@@ -968,9 +953,11 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     assert AppServer.helper_for_test(:needs_input, ["turn/requires_input", %{"type" => "input_required"}])
     refute AppServer.helper_for_test(:needs_input, ["notification", %{}])
     refute AppServer.helper_for_test(:needs_input, [123, %{"requiresInput" => true}])
+
     assert ExUnit.CaptureLog.capture_log(fn ->
              AppServer.helper_for_test(:log_stream_output, ["response stream", "plain notice"])
            end) =~ "Codex response stream output: plain notice"
+
     assert AppServer.helper_for_test(:shell_escape, ["a'b"]) == "'a'\"'\"'b'"
 
     port =
@@ -1047,6 +1034,7 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     {:ok, headers, initial_body} = recv_until_headers(socket, "")
     content_length = http_content_length(headers)
     {:ok, body} = recv_exact(socket, content_length - byte_size(initial_body), initial_body)
+
     {status, response_body} =
       case handler.(body) do
         {status, payload} when is_integer(status) -> {status, encode_linear_response_body(payload)}

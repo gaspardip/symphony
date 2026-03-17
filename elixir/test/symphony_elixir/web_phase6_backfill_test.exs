@@ -207,6 +207,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     File.mkdir_p!(workspace)
 
     long_output = String.duplicate("validation output ", 30)
+
     compatibility_report = %{
       compatible: false,
       failing_checks: ["behavioral_proof"],
@@ -241,9 +242,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :PresenterFallbackOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
 
     assert {:ok, payload} = Presenter.issue_payload(issue.identifier, orchestrator_name, 50)
     assert payload.issue_identifier == issue.identifier
@@ -319,16 +318,55 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              Presenter.control_payload("bogus", "MT-WEB", %{}, orchestrator_name)
   end
 
+  test "presenter runner control payload validates params and executes runner commands" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn command, args, opts ->
+        send(self(), {:runner_runtime_cmd, command, args, opts})
+        {"runner ok\n", 0}
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    assert {:error, {:invalid_params, "git ref is required"}} =
+             Presenter.runner_control_payload("promote", %{})
+
+    assert {:ok, inspect_payload} = Presenter.runner_control_payload("inspect", %{})
+    assert inspect_payload.ok == true
+    assert is_map(inspect_payload.runner)
+    assert inspect_payload.commands.promote =~ "promote <git-ref>"
+
+    assert {:ok, promote_payload} =
+             Presenter.runner_control_payload("promote", %{
+               "ref" => "main",
+               "canary_labels" => ["canary:symphony"]
+             })
+
+    assert promote_payload.ok == true
+    assert promote_payload.action == "promote"
+    assert_receive {:runner_runtime_cmd, "bash", [_script, "promote", "main", "--canary-label", "canary:symphony"], _opts}
+
+    assert {:ok, rollback_payload} =
+             Presenter.runner_control_payload("rollback", %{"release_sha" => "deadbeef"})
+
+    assert rollback_payload.action == "rollback"
+    assert_receive {:runner_runtime_cmd, "bash", [_script, "rollback", "deadbeef"], _opts}
+  end
+
   test "observability api control returns 400 for unknown actions and 503 for unavailable orchestrators" do
     orchestrator_name = Module.concat(__MODULE__, :ApiControlOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator,
-       name: orchestrator_name,
-       test_pid: self(),
-       snapshot: base_snapshot(),
-       responses: %{{:pause_issue, "MT-WEB"} => :unavailable}}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot(), responses: %{{:pause_issue, "MT-WEB"} => :unavailable}})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -342,6 +380,107 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "observability api runner control returns validation and command payloads" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn _command, args, _opts ->
+        send(self(), {:runner_api_cmd, args})
+        {"runner api ok\n", 0}
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    orchestrator_name = Module.concat(__MODULE__, :ApiRunnerControlOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()})
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert json_response(post(build_conn(), "/api/v1/runner/actions/promote", %{}), 400) ==
+             %{
+               "error" => %{
+                 "code" => "invalid_params",
+                 "message" => "git ref is required"
+               }
+             }
+
+    response =
+      post(build_conn(), "/api/v1/runner/actions/promote", %{
+        "ref" => "main",
+        "canary_labels" => ["canary:symphony"]
+      })
+      |> json_response(200)
+
+    assert response["ok"] == true
+    assert response["action"] == "promote"
+    assert_receive {:runner_api_cmd, [_script, "promote", "main", "--canary-label", "canary:symphony"]}
+  end
+
+  test "observability api runner control maps inspect record_canary and command failures" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn _command, args, _opts ->
+        send(self(), {:runner_api_cmd, args})
+
+        case args do
+          [_script, "record-canary", "fail" | _rest] ->
+            {"runner command failed\n", 9}
+
+          _ ->
+            {"runner api ok\n", 0}
+        end
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    orchestrator_name = Module.concat(__MODULE__, :ApiRunnerControlFailureOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()})
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    inspect_response =
+      post(build_conn(), "/api/v1/runner/actions/inspect", %{})
+      |> json_response(200)
+
+    assert inspect_response["ok"] == true
+    assert inspect_response["action"] == "inspect"
+    assert is_map(inspect_response["runner"])
+
+    error_response =
+      post(build_conn(), "/api/v1/runner/actions/record_canary", %{
+        "result" => "fail",
+        "issue" => "CLZ-22",
+        "pr" => "https://github.com/gaspardip/symphony/pull/1"
+      })
+      |> json_response(409)
+
+    assert error_response["error"]["code"] == "runner_command_failed"
+    assert error_response["action"] == "record_canary"
+    assert error_response["exit_status"] == 9
+    assert_receive {:runner_api_cmd, [_script, "record-canary", "fail", "--issue", "CLZ-22", "--pr", "https://github.com/gaspardip/symphony/pull/1"]}
   end
 
   test "delivery report summarizes completed work in client-readable form" do
@@ -397,9 +536,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :DeliveryReportOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -470,9 +607,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :TraceabilityIssueOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -533,9 +668,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :TraceabilityReviewIssueOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -583,9 +716,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :TraceabilityReviewIssueFromThreadsOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -657,9 +788,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :DeliveryReviewReportOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -718,9 +847,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :PortfolioOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -747,14 +874,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     dashboard_name = Module.concat(__MODULE__, :DisabledDashboard)
     parent = self()
 
-    start_supervised!(
-      {StatusDashboard,
-       name: dashboard_name,
-       enabled: false,
-       refresh_ms: 5,
-       render_interval_ms: 5,
-       render_fun: fn content -> send(parent, {:render, content}) end}
-    )
+    start_supervised!({StatusDashboard, name: dashboard_name, enabled: false, refresh_ms: 5, render_interval_ms: 5, render_fun: fn content -> send(parent, {:render, content}) end})
 
     assert :ok = StatusDashboard.notify_update(dashboard_name)
     refute_receive {:render, _content}, 50
@@ -847,12 +967,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :PresenterStateOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator,
-       name: orchestrator_name,
-       test_pid: self(),
-       snapshot: rich_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: rich_snapshot()})
 
     state_payload = Presenter.state_payload(orchestrator_name, 50)
 
@@ -865,6 +980,8 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert state_payload.polling.dispatch_summary =~ "manual issues continue to dispatch"
     assert state_payload.pr_watcher.enabled == true
     assert state_payload.pr_watcher.mode == "draft_first"
+    assert state_payload.github_webhooks.health == "healthy"
+    assert state_payload.github_inbox.last_assignment.assignment_state == "processed"
     assert state_payload.triage.summary.attention_now >= 3
     assert state_payload.triage.summary.autonomous_now == 0
     assert state_payload.triage.summary.recently_finished == 0
@@ -880,6 +997,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert running.policy.token_budget.per_turn_input.tone == "warn"
     assert running.policy.token_budget.per_issue_total.tone == "danger"
     assert running.policy.token_budget.per_issue_total_output.tone == "good"
+    assert running.lease.owner == "orchestrator-rich"
+    assert running.lease.status == "reclaimable"
+    assert running.lease.reclaimable == true
     assert running.last_decision.output == String.duplicate("x", 239) <> "…"
     assert Enum.any?(running.recent_activity, &(&1.message == "turn failed: compiler boom"))
     assert Enum.any?(state_payload.activity, &(&1.issue_identifier == "runner" and &1.message =~ "rollback suggested"))
@@ -896,11 +1016,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     [skipped] = state_payload.skipped
     assert skipped.reason == "missing labels"
+    assert skipped.lease.owner_channel == "canary"
     assert skipped.operator_summary.why_here == "Skipped"
 
     [queue] = state_payload.queue
     assert queue.label_gate_eligible == false
     assert queue.rank == 7
+    assert queue.lease.owner == "queue-owner"
     assert queue.operator_summary.why_here == "Queued"
     assert queue.operator_summary.automatic_next == "Wait for the required operator action before dispatch."
     assert Enum.any?(state_payload.triage.attention_now, &(&1.issue_identifier == "MT-PAUSED"))
@@ -932,11 +1054,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     assert {:ok, run_state_payload} = Presenter.issue_payload("MT-RUNSTATE", orchestrator_name, 50)
     assert run_state_payload.status == "validate"
+
     assert run_state_payload.last_decision == %{
              status: nil,
              command: nil,
              output: "plain-text validation output"
            }
+
     assert run_state_payload.tracked == %{}
 
     assert {:error, :issue_not_found} = Presenter.issue_payload("MT-MISSING", orchestrator_name, 50)
@@ -1036,13 +1160,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
   test "dashboard live handles runtime ticks, unknown controls, and unavailable snapshot updates" do
     orchestrator_name = Module.concat(__MODULE__, :DashboardLiveUnavailable)
 
-    start_supervised!(
-      {BackfillOrchestrator,
-       name: orchestrator_name,
-       test_pid: self(),
-       snapshot: base_snapshot(),
-       refresh: :unavailable}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot(), refresh: :unavailable})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -1075,12 +1193,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
   test "dashboard live renders empty sections and runner canary details" do
     orchestrator_name = Module.concat(__MODULE__, :DashboardLiveRunnerDetails)
 
-    start_supervised!(
-      {BackfillOrchestrator,
-       name: orchestrator_name,
-       test_pid: self(),
-       snapshot: runner_canary_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: runner_canary_snapshot()})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -1168,12 +1281,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :PresenterGreenStateOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator,
-       name: orchestrator_name,
-       test_pid: self(),
-       snapshot: green_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: green_snapshot()})
 
     state_payload = Presenter.state_payload(orchestrator_name, 50)
 
@@ -1246,18 +1354,14 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
   test "issue payload hydrates persisted review thread state into review feedback drafts" do
     orchestrator_name = Module.concat(__MODULE__, :PresenterReviewThreadStateOrchestrator)
+
     review_running =
       green_running_entry()
       |> Map.put(:identifier, "MT-REVIEWSTATE")
       |> Map.put(:issue_id, "issue-reviewstate")
       |> Map.put(:workspace, "/tmp/MT-REVIEWSTATE")
 
-    start_supervised!(
-      {BackfillOrchestrator,
-       name: orchestrator_name,
-       test_pid: self(),
-       snapshot: %{base_snapshot() | running: [review_running]}}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: %{base_snapshot() | running: [review_running]}})
 
     workspace = Path.join(Config.workspace_root(), "MT-REVIEWSTATE")
     File.mkdir_p!(workspace)
@@ -1404,9 +1508,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :DeployWaitingIssueOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()})
 
     assert {:ok, payload} = Presenter.issue_payload(issue_identifier, orchestrator_name, 50)
     assert payload.status == "Deploy Approval"
@@ -1462,12 +1564,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :PresenterPolicyMatrixOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator,
-       name: orchestrator_name,
-       test_pid: self(),
-       snapshot: policy_matrix_snapshot()}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: policy_matrix_snapshot()})
 
     state_payload = Presenter.state_payload(orchestrator_name, 50)
     entries = Map.new(state_payload.running, &{&1.issue_identifier, &1})
@@ -1608,12 +1705,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
       orchestrator_name = Module.concat(__MODULE__, :DoneSummaryOrchestrator)
 
-      start_supervised!(
-        {BackfillOrchestrator,
-         name: orchestrator_name,
-         test_pid: self(),
-         snapshot: base_snapshot()}
-      )
+      start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()})
 
       assert {:ok, payload} = Presenter.issue_payload(issue_identifier, orchestrator_name, 50)
       assert payload.status == "done"
@@ -1633,14 +1725,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     dashboard_name = Module.concat(__MODULE__, :EnabledDashboard)
     parent = self()
 
-    start_supervised!(
-      {StatusDashboard,
-       name: dashboard_name,
-       enabled: true,
-       refresh_ms: 10_000,
-       render_interval_ms: 50,
-       render_fun: fn content -> send(parent, {:render, content}) end}
-    )
+    start_supervised!({StatusDashboard, name: dashboard_name, enabled: true, refresh_ms: 10_000, render_interval_ms: 50, render_fun: fn content -> send(parent, {:render, content}) end})
 
     StatusDashboard.notify_update(dashboard_name)
 
@@ -1859,6 +1944,18 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
         tracker_reads_paused: true,
         manual_dispatch_enabled: true
       },
+      github_webhooks: %{health: "healthy"},
+      github_inbox: %{
+        depth: 1,
+        oldest_pending_event_at: "2026-03-07T15:14:00Z",
+        last_drained_at: "2026-03-07T15:14:30Z",
+        last_assignment: %{
+          event_id: "delivery-rich",
+          assignment_state: "processed",
+          assignment_reason: "review_feedback_persisted",
+          assigned_runner_channel: "stable"
+        }
+      },
       runner: %{
         instance_name: "test-runner",
         runner_mode: "stable",
@@ -2070,6 +2167,19 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_decision_summary: "Need review",
       next_human_action: "Attach a PR.",
       last_ledger_event_id: "evt-run",
+      lease: %{
+        lease_owner: "orchestrator-rich",
+        lease_owner_instance_id: "stable:test-runner",
+        lease_owner_channel: "stable",
+        lease_acquired_at: "2026-03-07T15:00:00Z",
+        lease_updated_at: "2026-03-07T15:12:30Z",
+        lease_status: "reclaimable",
+        lease_epoch: 4,
+        lease_age_ms: 150_000,
+        lease_ttl_ms: 60_000,
+        lease_reclaimable: true,
+        lease_source: "live"
+      },
       last_decision: %{status: "failed", command: "mix test", output: String.duplicate("x", 260)},
       last_deploy_preview: %{status: "passed", command: "./scripts/deploy-preview.sh", output: "preview ok"},
       last_deploy_production: %{status: "passed", command: "./scripts/deploy-production.sh", output: "production ok"},
@@ -2127,7 +2237,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_rule_id: "routing.labels",
       last_failure_class: "routing",
       last_decision_summary: "Skipped",
-      last_ledger_event_id: "evt-skip"
+      last_ledger_event_id: "evt-skip",
+      lease: %{
+        lease_owner: "skip-owner",
+        lease_owner_instance_id: "canary:dogfood-runner",
+        lease_owner_channel: "canary",
+        lease_status: "held",
+        lease_epoch: 2,
+        lease_reclaimable: false
+      }
     }
   end
 
@@ -2150,7 +2268,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_rule_id: "priority.rank",
       last_failure_class: "priority",
       last_decision_summary: "Queued",
-      last_ledger_event_id: "evt-queue"
+      last_ledger_event_id: "evt-queue",
+      lease: %{
+        lease_owner: "queue-owner",
+        lease_owner_instance_id: "stable:test-runner",
+        lease_owner_channel: "stable",
+        lease_status: "held",
+        lease_epoch: 1,
+        lease_reclaimable: false
+      }
     }
   end
 

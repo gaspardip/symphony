@@ -106,10 +106,7 @@ defmodule SymphonyElixir.RepoMap do
       mode: normalize_optional_string(Map.get(proof, :mode) || Map.get(proof, "mode")),
       source_paths: normalize_string_list(Map.get(proof, :source_paths) || Map.get(proof, "source_paths")),
       test_paths: normalize_string_list(Map.get(proof, :test_paths) || Map.get(proof, "test_paths")),
-      artifact_paths:
-        normalize_string_list(
-          Map.get(proof, :artifact_paths) || Map.get(proof, "artifact_paths") || [Map.get(proof, :artifact_path) || Map.get(proof, "artifact_path")]
-        )
+      artifact_paths: normalize_string_list(Map.get(proof, :artifact_paths) || Map.get(proof, "artifact_paths") || [Map.get(proof, :artifact_path) || Map.get(proof, "artifact_path")])
     }
   end
 

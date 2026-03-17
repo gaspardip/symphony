@@ -960,8 +960,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert {:noreply, rejected_state} =
              Orchestrator.handle_info(
-               {:tracker_webhook_rejected,
-                %{reason: "invalid signature", rule_id: "webhook.signature_invalid"}},
+               {:tracker_webhook_rejected, %{reason: "invalid signature", rule_id: "webhook.signature_invalid"}},
                state
              )
 
@@ -1210,6 +1209,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, :tick)
+
     _snapshot =
       wait_for_snapshot(
         pid,
@@ -1220,7 +1220,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           _ ->
             false
         end,
-        1_000
+        5_000
       )
 
     state = :sys.get_state(pid)

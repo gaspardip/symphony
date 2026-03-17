@@ -25,6 +25,7 @@ defmodule SymphonyElixir.VerifierRunnerTest do
         artifact_path: nil
       }
     }
+
     inspection = %RunInspector.Snapshot{workspace: workspace, harness: harness}
 
     result = VerifierRunner.verify(workspace, issue, %{}, inspection)
@@ -246,6 +247,7 @@ defmodule SymphonyElixir.VerifierRunnerTest do
       - `./scripts/symphony-smoke.sh`
       """
     )
+
     System.cmd("git", ["add", "README.md"], cd: workspace)
 
     harness = %RepoHarness{smoke_command: "./smoke.sh"}
@@ -271,9 +273,7 @@ defmodule SymphonyElixir.VerifierRunnerTest do
     end
 
     result =
-      VerifierRunner.verify(workspace, issue, %{}, inspection,
-        verifier_session_runner: verifier_runner
-      )
+      VerifierRunner.verify(workspace, issue, %{}, inspection, verifier_session_runner: verifier_runner)
 
     assert result.verdict == "pass"
   end

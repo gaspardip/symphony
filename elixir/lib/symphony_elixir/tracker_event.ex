@@ -50,8 +50,8 @@ defmodule SymphonyElixir.TrackerEvent do
 
     if base == "" do
       "tracker-event:" <>
-        :crypto.hash(:sha256, Jason.encode!(event.raw))
-        |> Base.encode16(case: :lower)
+        (:crypto.hash(:sha256, Jason.encode!(event.raw))
+         |> Base.encode16(case: :lower))
     else
       base
     end

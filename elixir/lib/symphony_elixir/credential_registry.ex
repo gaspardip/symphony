@@ -6,15 +6,15 @@ defmodule SymphonyElixir.CredentialRegistry do
   alias SymphonyElixir.{Config, PolicyPack}
 
   @write_like_operations MapSet.new([
-                          "write",
-                          "pr_write",
-                          "merge",
-                          "comment_post",
-                          "thread_resolve",
-                          "deploy_preview",
-                          "deploy_production",
-                          "deploy_rollback"
-                        ])
+                           "write",
+                           "pr_write",
+                           "merge",
+                           "comment_post",
+                           "thread_resolve",
+                           "deploy_preview",
+                           "deploy_production",
+                           "deploy_rollback"
+                         ])
 
   @spec allow?(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def allow?(provider, operation, opts \\ [])

@@ -8,7 +8,8 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.FakeGitHubClient do
   def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :missing_pr}
 
   @impl true
-  def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts), do: {:error, :missing_pr}
+  def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+    do: {:error, :missing_pr}
 
   @impl true
   def merge_pull_request(_workspace, opts) do
@@ -17,10 +18,17 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.FakeGitHubClient do
   end
 
   @impl true
-  def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
+  def review_feedback(_workspace, _opts),
+    do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
 
   @impl true
   def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+  @impl true
+  def resolve_review_comment_thread(_pr_url, comment_id, _opts) do
+    send(self(), {:resolved_review_thread, to_string(comment_id)})
+    {:ok, %{thread_id: "thread-#{comment_id}", resolved: true, output: ""}}
+  end
 end
 
 defmodule SymphonyElixir.DeliveryEnginePhase6Test.FakeMergeFailureGitHubClient do
@@ -33,16 +41,21 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.FakeMergeFailureGitHubClient d
   def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :missing_pr}
 
   @impl true
-  def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts), do: {:error, :missing_pr}
+  def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+    do: {:error, :missing_pr}
 
   @impl true
   def merge_pull_request(_workspace, _opts), do: {:error, :merge_failed}
 
   @impl true
-  def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
+  def review_feedback(_workspace, _opts),
+    do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
 
   @impl true
   def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+  @impl true
+  def resolve_review_comment_thread(_pr_url, _comment_id, _opts), do: {:error, :unsupported}
 end
 
 defmodule SymphonyElixir.DeliveryEnginePhase6Test do
@@ -81,6 +94,61 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert {:done, %Issue{id: ^issue_id}} = DeliveryEngine.run(workspace, issue, nil)
   end
 
+  test "publish finalization refreshes addressed replies and resolves safe threads" do
+    review_threads = %{
+      "comment:2926989348" => %{
+        "draft_state" => "posted",
+        "draft_reply" => "I addressed this concern locally and will include it in the next branch update. Updated the router.",
+        "implementation_status" => "addressed",
+        "resolution_recommendation" => "resolve_after_change",
+        "posted_reply_id" => "2938658963"
+      }
+    }
+
+    finalized = DeliveryEngine.finalize_published_review_threads_for_test(review_threads)
+
+    assert get_in(finalized, ["comment:2926989348", "reply_refresh_needed"]) == true
+
+    assert get_in(finalized, ["comment:2926989348", "draft_reply"]) =~
+             "it is now included on the branch"
+
+    resolved =
+      DeliveryEngine.maybe_resolve_autonomous_review_threads_for_test(
+        Map.put(finalized["comment:2926989348"], "draft_state", "posted")
+        |> then(&%{"comment:2926989348" => &1}),
+        "/tmp/symphony-pr-feedback",
+        "https://github.com/example/repo/pull/42",
+        %{policy_pack: "private_autopilot", repo_url: "https://github.com/example/repo"},
+        github_client: SymphonyElixir.DeliveryEnginePhase6Test.FakeGitHubClient
+      )
+
+    assert_received {:resolved_review_thread, "2926989348"}
+    assert get_in(resolved, ["comment:2926989348", "resolution_state"]) == "resolved"
+  end
+
+  test "publish finalization resolves safe contradicted false-positive threads" do
+    resolved =
+      DeliveryEngine.maybe_resolve_autonomous_review_threads_for_test(
+        %{
+          "comment:2926989511" => %{
+            "draft_state" => "posted",
+            "draft_reply" => "I checked this locally and the claim is a false positive.",
+            "disposition" => "dismissed",
+            "verification_status" => "contradicted",
+            "resolution_recommendation" => "resolve_after_contradiction",
+            "posted_reply_id" => "2938720828"
+          }
+        },
+        "/tmp/symphony-pr-feedback",
+        "https://github.com/example/repo/pull/42",
+        %{policy_pack: "private_autopilot", repo_url: "https://github.com/example/repo"},
+        github_client: SymphonyElixir.DeliveryEnginePhase6Test.FakeGitHubClient
+      )
+
+    assert_received {:resolved_review_thread, "2926989511"}
+    assert get_in(resolved, ["comment:2926989511", "resolution_state"]) == "resolved"
+  end
+
   test "checkout blocks when the harness is missing its version" do
     {workspace, issue} = git_stage_workspace!("checkout-missing-version")
 
@@ -113,9 +181,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :missing_harness_version}, {:stop, :blocked}]
 
@@ -155,9 +221,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :missing_required_checks}, {:stop, :blocked}]
 
@@ -195,9 +259,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :missing_harness_command}, {:stop, :blocked}]
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -239,9 +301,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :invalid_harness}, {:stop, :blocked}]
 
@@ -264,9 +324,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert result =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &checkout_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
 
     assert result in [{:stop, :invalid_harness}, {:stop, :blocked}]
 
@@ -284,9 +342,10 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
       codex_command: fake_codex_binary!("checkout-missing-harness")
     )
 
-    assert DeliveryEngine.run(workspace, issue, nil,
-             command_runner: &checkout_command_runner/3
-           ) in [{:stop, :missing_harness}, {:stop, :blocked}]
+    assert DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3) in [
+             {:stop, :missing_harness},
+             {:stop, :blocked}
+           ]
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert get_in(state, [:stop_reason, :code]) == "missing_harness"
@@ -294,6 +353,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
 
   test "checkout blocks generic git failures" do
     {workspace, issue} = git_stage_workspace!("checkout-git-failed")
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       workspace_root: Path.dirname(workspace),
@@ -354,6 +414,103 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
              )
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+  end
+
+  test "scoped review-fix implement turns get a higher turn budget than the default cap" do
+    {workspace, issue} = git_stage_workspace!("implement-review-fix-turn-budget")
+
+    RunStateStore.transition(workspace, "implement", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      implementation_turns: 1,
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/example.ex",
+          "line" => 10,
+          "body" => "Apply the scoped review fix."
+        }
+      },
+      resume_context: %{token_pressure: "high"}
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("implement-review-fix-turn-budget")
+    )
+
+    assert result =
+             DeliveryEngine.run(workspace, issue, nil,
+               max_turns: 1,
+               command_runner: &checkout_command_runner/3
+             )
+
+    refute result == {:stop, :turn_budget_exhausted}
+  end
+
+  test "scoped review-fix retries count implementation turns from the retry window base" do
+    {workspace, issue} = git_stage_workspace!("implement-review-fix-window-base")
+
+    RunStateStore.transition(workspace, "implement", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      implementation_turns: 6,
+      review_claims: %{
+        "comment:1" => %{
+          "disposition" => "accepted",
+          "actionable" => true,
+          "claim_type" => "correctness_risk",
+          "path" => "lib/example.ex",
+          "line" => 10,
+          "body" => "Apply the scoped review fix."
+        }
+      },
+      resume_context: %{
+        token_pressure: "high",
+        implementation_turn_window_base: 6
+      }
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("implement-review-fix-window-base")
+    )
+
+    assert result =
+             DeliveryEngine.run(workspace, issue, nil,
+               max_turns: 1,
+               command_runner: &checkout_command_runner/3
+             )
+
+    refute result == {:stop, :turn_budget_exhausted}
+  end
+
+  test "retained scoped review-fix changes resume at validate instead of blocking on turn budget" do
+    before_snapshot = %SymphonyElixir.RunInspector.Snapshot{
+      workspace: "/tmp/workspace",
+      dirty?: true,
+      changed_files: 1,
+      pr_url: nil
+    }
+
+    state = %{
+      implementation_turns: 23,
+      last_turn_result: %{
+        "blocked" => false,
+        "needs_another_turn" => false,
+        "summary" => "Scoped review fix applied."
+      }
+    }
+
+    assert DeliveryEngine.should_resume_validation_from_retained_changes_for_test(
+             state,
+             [],
+             before_snapshot
+           )
   end
 
   test "unknown stage returns an error" do
@@ -443,7 +600,9 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
              end
            )
 
-    refute DeliveryEngine.branch_has_publishable_changes_for_test(workspace, %{base_branch: "main"})
+    refute DeliveryEngine.branch_has_publishable_changes_for_test(workspace, %{
+             base_branch: "main"
+           })
   end
 
   test "normalize_pr_state_for_test handles nil and uppercases values" do
@@ -496,6 +655,14 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
              "The issue has conflicting policy labels."
   end
 
+  test "detail_summary_for_test covers missing pull requests and risk review summaries" do
+    assert DeliveryEngine.detail_summary_for_test(:publish_missing_pr, "ignored") ==
+             "No PR is attached for the current branch."
+
+    assert DeliveryEngine.human_review_summary_for_test(:risk_review_required) ==
+             "High-risk contractor work requires Human Review before merge."
+  end
+
   test "human_review_summary_for_test falls back to the generic summary" do
     assert DeliveryEngine.human_review_summary_for_test(:other) == "Waiting in Human Review."
   end
@@ -526,7 +693,9 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert get_in(state, [:stop_reason, :code]) == "invalid_harness"
-    assert get_in(state, [:stop_reason, :details]) =~ "Unknown harness keys under validation: mystery"
+
+    assert get_in(state, [:stop_reason, :details]) =~
+             "Unknown harness keys under validation: mystery"
   end
 
   test "merge stage falls back to await_checks when PR is not merge-ready" do
@@ -545,9 +714,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &pending_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &pending_merge_command_runner/3)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.stage == "await_checks"
@@ -571,9 +738,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :required_checks_failed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &failed_checks_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &failed_checks_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -594,9 +759,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &pending_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &pending_merge_command_runner/3)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.stage == "await_checks"
@@ -620,9 +783,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :required_checks_cancelled} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &cancelled_checks_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &cancelled_checks_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -645,9 +806,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :required_checks_missing} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &missing_checks_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &missing_checks_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -669,9 +828,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :pr_closed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &closed_pr_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &closed_pr_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -694,9 +851,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :invalid_labels} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &pending_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &pending_merge_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -768,9 +923,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &ready_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &ready_merge_command_runner/3)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.stage == "await_checks"
@@ -797,9 +950,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:done, %Issue{id: ^issue_id}} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &already_merged_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &already_merged_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -825,9 +976,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:done, %Issue{id: ^issue_id}} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &already_merged_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &already_merged_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -853,9 +1002,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:done, %Issue{id: ^issue_id}} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &already_merged_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &already_merged_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -880,9 +1027,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &ready_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &ready_merge_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -990,9 +1135,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :post_merge_failed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &post_merge_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &post_merge_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
     assert {:ok, state} = RunStateStore.load(workspace)
@@ -1077,9 +1220,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :pr_closed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               command_runner: &closed_pr_command_runner/3
-             )
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &closed_pr_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
   end
@@ -1170,13 +1311,30 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
 
   defp checkout_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"abc123\n", 0}
   defp checkout_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
-  defp checkout_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts), do: {"", 1}
+
+  defp checkout_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ),
+       do: {"", 1}
+
   defp checkout_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
   defp checkout_command_runner("git", ["checkout", "symphony/mt-phase6"], _opts), do: {"", 1}
-  defp checkout_command_runner("git", ["checkout", "-B", "symphony/mt-phase6", "origin/main"], _opts), do: {"", 0}
 
-  defp checkout_command_runner("git", ["config", "branch.symphony/mt-phase6.symphony-base-branch", "main"], _opts),
-    do: {"", 0}
+  defp checkout_command_runner(
+         "git",
+         ["checkout", "-B", "symphony/mt-phase6", "origin/main"],
+         _opts
+       ),
+       do: {"", 0}
+
+  defp checkout_command_runner(
+         "git",
+         ["config", "branch.symphony/mt-phase6.symphony-base-branch", "main"],
+         _opts
+       ),
+       do: {"", 0}
 
   defp pending_merge_command_runner("git", ["config", "--get", "remote.origin.url"], _opts),
     do: {"git@example.com:repo.git\n", 0}
@@ -1187,7 +1345,11 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp pending_merge_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"abc123\n", 0}
   defp pending_merge_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
 
-  defp pending_merge_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do
+  defp pending_merge_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ) do
     payload = %{
       "url" => "https://github.com/example/repo/pull/7",
       "state" => "OPEN",
@@ -1210,11 +1372,20 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
 
   defp already_merged_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"def456\n", 0}
   defp already_merged_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
-  defp already_merged_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
-  defp already_merged_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
-  defp already_merged_command_runner("git", ["reset", "--hard", "origin/main"], _opts), do: {"", 0}
 
-  defp already_merged_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do
+  defp already_merged_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts),
+    do: {"", 0}
+
+  defp already_merged_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
+
+  defp already_merged_command_runner("git", ["reset", "--hard", "origin/main"], _opts),
+    do: {"", 0}
+
+  defp already_merged_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ) do
     payload = %{
       "url" => "https://github.com/example/repo/pull/8",
       "state" => "MERGED",
@@ -1237,7 +1408,10 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
 
   defp post_merge_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"ghi789\n", 0}
   defp post_merge_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
-  defp post_merge_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
+
+  defp post_merge_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts),
+    do: {"", 0}
+
   defp post_merge_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
   defp post_merge_command_runner("git", ["reset", "--hard", "origin/main"], _opts), do: {"", 0}
   defp post_merge_command_runner(command, args, opts), do: System.cmd(command, args, opts)
@@ -1251,7 +1425,11 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp failed_checks_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"jkl012\n", 0}
   defp failed_checks_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
 
-  defp failed_checks_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do
+  defp failed_checks_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ) do
     payload = %{
       "url" => "https://github.com/example/repo/pull/10",
       "state" => "OPEN",
@@ -1275,7 +1453,11 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp closed_pr_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"pqr678\n", 0}
   defp closed_pr_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
 
-  defp closed_pr_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do
+  defp closed_pr_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ) do
     payload = %{
       "url" => "https://github.com/example/repo/pull/13",
       "state" => "CLOSED",
@@ -1298,11 +1480,18 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
 
   defp ready_merge_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"stu901\n", 0}
   defp ready_merge_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
-  defp ready_merge_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
+
+  defp ready_merge_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts),
+    do: {"", 0}
+
   defp ready_merge_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
   defp ready_merge_command_runner("git", ["reset", "--hard", "origin/main"], _opts), do: {"", 0}
 
-  defp ready_merge_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do
+  defp ready_merge_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ) do
     payload = %{
       "url" => "https://github.com/example/repo/pull/15",
       "state" => "OPEN",
@@ -1326,7 +1515,11 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp cancelled_checks_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"mno345\n", 0}
   defp cancelled_checks_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
 
-  defp cancelled_checks_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do
+  defp cancelled_checks_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ) do
     payload = %{
       "url" => "https://github.com/example/repo/pull/11",
       "state" => "OPEN",
@@ -1350,7 +1543,11 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp missing_checks_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"pqr678\n", 0}
   defp missing_checks_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
 
-  defp missing_checks_command_runner("gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts) do
+  defp missing_checks_command_runner(
+         "gh",
+         ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"],
+         _opts
+       ) do
     payload = %{
       "url" => "https://github.com/example/repo/pull/12",
       "state" => "OPEN",

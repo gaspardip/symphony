@@ -632,7 +632,10 @@ defmodule SymphonyElixir.StatusDashboard do
   @doc false
   @spec format_running_summary_for_test(map(), integer() | nil) :: String.t()
   def format_running_summary_for_test(running_entry, terminal_columns \\ nil),
-    do: format_running_summary(running_entry, running_event_width(terminal_columns))
+    do:
+      running_entry
+      |> format_running_summary(running_event_width(terminal_columns || fixed_running_width() + @running_row_chrome_width + 120))
+      |> sanitize_ansi_and_control_bytes()
 
   @doc false
   @spec format_tps_for_test(number()) :: String.t()
@@ -643,6 +646,7 @@ defmodule SymphonyElixir.StatusDashboard do
   def tps_graph_for_test(samples, now_ms, current_tokens), do: tps_graph(samples, now_ms, current_tokens)
 
   @doc false
+  @spec helper_for_test(atom(), list()) :: term()
   def helper_for_test(:dashboard_url_host, [host]), do: dashboard_url_host(host)
   def helper_for_test(:terminal_columns_from_env, []), do: terminal_columns_from_env()
   def helper_for_test(:format_cell, [value, width]), do: format_cell(value, width)

@@ -7,6 +7,39 @@ defmodule SymphonyElixir.TurnResult do
 
   @required_keys ~w(summary files_touched needs_another_turn blocked blocker_type)a
   @implementation_blockers ~w(implementation validation verifier)a
+  @runtime_owned_blocker_markers [
+    "commit could not be created",
+    "could not create commit",
+    "couldn't create commit",
+    "unable to create commit",
+    "git metadata for this worktree",
+    "git index access",
+    "outside the writable sandbox",
+    "escalation is disallowed",
+    "could not stage",
+    "couldn't stage",
+    "unable to stage",
+    "could not push",
+    "couldn't push",
+    "unable to push",
+    "could not open pr",
+    "couldn't open pr",
+    "unable to open pr",
+    "could not create pr",
+    "couldn't create pr",
+    "unable to create pr",
+    "could not create pull request",
+    "couldn't create pull request",
+    "unable to create pull request"
+  ]
+  @runtime_owned_more_work_markers [
+    "additional verified review claim remains",
+    "another verified review claim remains",
+    "remaining verified review claim",
+    "for a subsequent turn",
+    "needs another turn",
+    "remaining review claim"
+  ]
   @allowed_blockers [
     :none,
     :environment,
@@ -59,7 +92,8 @@ defmodule SymphonyElixir.TurnResult do
          needs_another_turn: needs_another_turn,
          blocked: blocked,
          blocker_type: blocker_type
-       }}
+       }
+       |> normalize_runtime_owned_blocker()}
     end
   end
 
@@ -138,22 +172,29 @@ defmodule SymphonyElixir.TurnResult do
         blocker_type = parse_blocker_type(value)
 
         cond do
-          blocker_type == :invalid ->
-            {:error, :invalid_blocker_type}
+          blocked == false and blocker_type == :invalid ->
+            {:ok, :none}
 
           blocker_type in @allowed_blockers ->
             if blocked == false and blocker_type != :none do
-              {:error, :unexpected_blocker_type}
+              {:ok, :none}
             else
               {:ok, blocker_type}
             end
 
+          blocked == false ->
+            {:ok, :none}
+
           true ->
-            {:error, :invalid_blocker_type}
+            {:ok, :implementation}
         end
 
       _ ->
-        {:error, :invalid_blocker_type}
+        if blocked == false do
+          {:ok, :none}
+        else
+          {:ok, :implementation}
+        end
     end
   end
 
@@ -179,5 +220,31 @@ defmodule SymphonyElixir.TurnResult do
 
   defp fetch(map, key) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp normalize_runtime_owned_blocker(%__MODULE__{blocked: true, blocker_type: blocker_type, summary: summary} = turn_result)
+       when blocker_type in [:implementation, :publish, :merge, :review] and is_binary(summary) do
+    if runtime_owned_blocker_summary?(summary) do
+      %{
+        turn_result
+        | blocked: false,
+          blocker_type: :none,
+          needs_another_turn: turn_result.needs_another_turn || runtime_owned_more_work?(summary)
+      }
+    else
+      turn_result
+    end
+  end
+
+  defp normalize_runtime_owned_blocker(%__MODULE__{} = turn_result), do: turn_result
+
+  defp runtime_owned_blocker_summary?(summary) when is_binary(summary) do
+    normalized_summary = String.downcase(summary)
+    Enum.any?(@runtime_owned_blocker_markers, &String.contains?(normalized_summary, &1))
+  end
+
+  defp runtime_owned_more_work?(summary) when is_binary(summary) do
+    normalized_summary = String.downcase(summary)
+    Enum.any?(@runtime_owned_more_work_markers, &String.contains?(normalized_summary, &1))
   end
 end
