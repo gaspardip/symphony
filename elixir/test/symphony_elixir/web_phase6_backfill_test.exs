@@ -1584,6 +1584,22 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert attached.policy.merge_gate.label == "Awaiting review and checks"
     assert Enum.any?(attached.recent_activity, &(&1.message == "policy.pr_gate"))
 
+    merge_readiness = Map.fetch!(entries, "MT-MERGE-READINESS")
+    assert merge_readiness.runtime_mode.label == "Passive runtime"
+    assert merge_readiness.merge_readiness.active == true
+    assert merge_readiness.merge_readiness.pr_body_validation_status == "passed"
+    assert merge_readiness.runtime_health.passive_stage.merge_readiness == true
+    assert merge_readiness.status_summary.tone == "info"
+
+    assert merge_readiness.status_summary.automatic_next ==
+             "Refresh PR hygiene and posted review thread state before passive check polling continues."
+
+    assert merge_readiness.status_summary.summary ==
+             "Refreshing 1 posted review reply and 2 resolved threads before check polling resumes."
+
+    assert merge_readiness.policy.next_human_action ==
+             "No human action is required unless the passive runtime reports a failure."
+
     await_checks = Map.fetch!(entries, "MT-AWAIT-CHECKS")
     assert await_checks.policy.pr_gate.label == "PR attached"
     assert await_checks.policy.merge_gate.label == "Awaiting required checks"
@@ -2086,6 +2102,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       running: [
         review_pr_entry(),
         attached_pr_entry(),
+        merge_readiness_entry(),
         await_checks_entry()
       ],
       retrying: [],
@@ -2546,6 +2563,90 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
         acceptance: %{"checks" => false},
         ledger_event_id: "evt-await",
         output: "test check missing"
+      }
+    }
+  end
+
+  defp merge_readiness_entry do
+    %{
+      issue_id: "issue-merge-readiness",
+      identifier: "MT-MERGE-READINESS",
+      state: "Merging",
+      stage: "merge_readiness",
+      passive?: true,
+      review_approved: false,
+      token_pressure: nil,
+      session_id: nil,
+      turn_count: 0,
+      codex_app_server_pid: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: ~U[2026-03-07 17:11:00Z],
+      last_codex_event: "stage_transition",
+      recent_codex_updates: [],
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      current_turn_input_tokens: 0,
+      runtime_seconds: 6,
+      started_at: ~U[2026-03-07 17:10:30Z],
+      workspace: "/tmp/MT-MERGE-READINESS",
+      checkout?: true,
+      git?: true,
+      origin_url: "git@example.com/org/repo.git",
+      branch: "mt-merge-readiness",
+      head_sha: "aaaabbbbccccdddd",
+      dirty?: false,
+      changed_files: 0,
+      status_text: nil,
+      base_branch: "main",
+      harness_path: ".symphony/harness.yml",
+      harness_version: "1",
+      harness_error: nil,
+      preflight_command: "./scripts/preflight.sh",
+      validation_command: "./scripts/validate.sh",
+      smoke_command: "./scripts/smoke.sh",
+      post_merge_command: nil,
+      required_checks: ["test"],
+      publish_required_checks: [],
+      ci_required_checks: [],
+      pr_url: "https://example.com/pr/merge-readiness",
+      pr_state: "OPEN",
+      review_decision: "COMMENTED",
+      check_statuses: [%{name: "test", conclusion: nil, status: "queued"}],
+      ready_for_merge: false,
+      policy_class: "fully_autonomous",
+      policy_source: "workflow",
+      policy_override: nil,
+      labels: ["dogfood"],
+      required_labels: ["dogfood"],
+      label_gate_eligible: true,
+      last_rule_id: "policy.merge_readiness",
+      last_failure_class: "pr_hygiene",
+      last_decision_summary: "Refreshing PR hygiene",
+      next_human_action: nil,
+      last_ledger_event_id: "evt-merge-readiness",
+      last_decision: %{
+        status: "running",
+        command: nil,
+        verdict: "continue",
+        rule_id: "policy.merge_readiness",
+        failure_class: "pr_hygiene",
+        summary: "Refreshing PR hygiene",
+        details: "Posted review replies and PR body are being reconciled before passive check polling.",
+        human_action: nil,
+        acceptance_gaps: [],
+        risky_areas: ["publish"],
+        evidence: ["1 posted reply refresh", "2 resolved threads"],
+        acceptance: %{"pr_hygiene" => true},
+        ledger_event_id: "evt-merge-readiness",
+        output: ""
+      },
+      last_merge_readiness: %{
+        checked_at: "2026-03-07T17:10:45Z",
+        pr_body_validation_status: "passed",
+        posted_review_threads: 3,
+        pending_reply_refreshes: 1,
+        resolved_review_threads: 2
       }
     }
   end

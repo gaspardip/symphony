@@ -47,6 +47,7 @@ acceptance_signals:
   - Publish and await-checks stages rehydrate live GitHub review state before continuing, so post-publish thread cleanup acts on current PR replies instead of stale local thread copies
   - Publish can refresh posted addressed replies and resolve safe addressed inline threads on GitHub before handing the run to await-checks
   - Publish enters an explicit passive `merge_readiness` stage that can self-heal PR hygiene by regenerating a valid PR body after `validate-pr-description` failures and reconciling outdated posted review threads before `await_checks` evaluates merge readiness
+  - Operator payloads expose `merge_readiness` as distinct passive work with PR-body validation and reply-refresh counts, so PR hygiene is visible separately from generic check polling
   - Await-checks recognizes required GitHub workflows even when the emitted check-run name differs from the configured harness name, so publish is not blocked on alias-only check naming
   - Failing PR-scoped GitHub `check_run` or `workflow_run` webhooks can return a fully autonomous run from `await_checks` or blocked check states back to `implement` with the failed-check context embedded in `resume_context`
   - Publish-time safe review-thread resolution also covers contradicted false-positive replies, so exact local contradictions can close their GitHub threads instead of only posting a reply
