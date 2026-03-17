@@ -55,15 +55,19 @@ defmodule SymphonyElixir.Orchestrator do
   }
   @dialyzer {:nowarn_function,
              persist_review_feedback_for_workspace: 4,
+             persist_ci_failure_for_workspace: 5,
              review_thread_state: 2,
              issue_for_run_state: 1,
              seeded_manual_issue_from_run_state: 1,
              issue_ref_for_run_state: 1,
              normalize_issue_source: 1,
              maybe_start_autonomous_review_follow_up: 8,
+             maybe_start_autonomous_ci_follow_up: 6,
              autonomous_review_follow_up?: 3,
              paused_issue?: 3,
              maybe_dispatch_autonomous_review_follow_up: 2,
+             ci_resume_context: 3,
+             ci_failure_summary: 1,
              put_review_resume_context: 5,
              review_resume_context: 5,
              review_feedback_summary: 1}
@@ -626,14 +630,26 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_process_github_event(%State{} = state, %GitHubEvent{} = event) do
-    if GitHubEvent.review_affecting?(event) do
-      {next_state, assignment} = refresh_pr_feedback_by_url(state, event)
-      record_github_assignment(next_state, event, assignment)
-    else
-      record_github_assignment(state, event, %{
-        assignment_state: "ignored",
-        assignment_reason: "non_review_affecting_event"
-      })
+    cond do
+      GitHubEvent.review_affecting?(event) ->
+        {next_state, assignment} = refresh_pr_feedback_by_url(state, event)
+        record_github_assignment(next_state, event, assignment)
+
+      GitHubEvent.ci_failure_affecting?(event) ->
+        {next_state, assignment} = refresh_pr_ci_failure_by_url(state, event)
+        record_github_assignment(next_state, event, assignment)
+
+      GitHubEvent.ci_affecting?(event) ->
+        record_github_assignment(state, event, %{
+          assignment_state: "ignored",
+          assignment_reason: "non_failing_ci_event"
+        })
+
+      true ->
+        record_github_assignment(state, event, %{
+          assignment_state: "ignored",
+          assignment_reason: "non_review_affecting_event"
+        })
     end
   end
 
@@ -680,6 +696,53 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp refresh_pr_feedback_for_url(%State{} = state, _event, _pr_url) do
+    {state, %{assignment_state: "ignored", assignment_reason: "missing_pr_url"}}
+  end
+
+  defp refresh_pr_ci_failure_by_url(%State{} = state, %GitHubEvent{} = event) do
+    pr_url = Map.get(event, :pr_url)
+
+    if is_binary(pr_url) and pr_url != "" do
+      refresh_pr_ci_failure_for_url(state, event, pr_url)
+    else
+      {state,
+       %{
+         assignment_state: "ignored",
+         assignment_reason: "missing_pr_url"
+       }}
+    end
+  end
+
+  defp refresh_pr_ci_failure_for_url(%State{} = state, %GitHubEvent{} = event, pr_url)
+       when is_binary(pr_url) and pr_url != "" do
+    {next_state, outcomes} =
+      Config.workspace_root()
+      |> list_workspace_paths()
+      |> Enum.reduce({state, []}, fn workspace, {state_acc, outcomes_acc} ->
+        case RunStateStore.load(workspace) do
+          {:ok, run_state} ->
+            if Map.get(run_state, :pr_url) != pr_url do
+              {state_acc, outcomes_acc}
+            else
+              process_github_ci_workspace_match(
+                state_acc,
+                workspace,
+                run_state,
+                pr_url,
+                event,
+                outcomes_acc
+              )
+            end
+
+          _ ->
+            {state_acc, outcomes_acc}
+        end
+      end)
+
+    {next_state, summarize_github_assignment(event, pr_url, outcomes)}
+  end
+
+  defp refresh_pr_ci_failure_for_url(%State{} = state, _event, _pr_url) do
     {state, %{assignment_state: "ignored", assignment_reason: "missing_pr_url"}}
   end
 
@@ -790,6 +853,106 @@ defmodule SymphonyElixir.Orchestrator do
     {state, outcomes}
   end
 
+  defp process_github_ci_workspace_match(
+         %State{} = state,
+         workspace,
+         run_state,
+         pr_url,
+         event,
+         outcomes
+       )
+       when is_map(run_state) do
+    issue_identifier = Map.get(run_state, :issue_identifier)
+    target_runner_channel = Map.get(run_state, :runner_channel)
+    runner_instance_id = Map.get(run_state, :runner_instance_id)
+    lease_status = review_follow_up_lease_status(state, run_state)
+
+    cond do
+      not run_state_routed_to_current_runner?(run_state) ->
+        {state,
+         [
+           %{
+             issue_identifier: issue_identifier,
+             target_runner_channel: target_runner_channel,
+             assigned_runner_channel: target_runner_channel,
+             assigned_runner_instance_id: runner_instance_id,
+             assignment_state: "routed_to_other_runner",
+             assignment_reason: "run_state_owned_by_other_runner"
+           }
+           | outcomes
+         ]}
+
+      match?({:skip, _}, lease_status) ->
+        {:skip, owner} = lease_status
+
+        {state,
+         [
+           %{
+             issue_identifier: issue_identifier,
+             target_runner_channel: target_runner_channel,
+             assigned_runner_channel: Config.runner_channel(),
+             assigned_runner_instance_id: RunnerRuntime.instance_id(),
+             assignment_state: "leased_elsewhere",
+             assignment_reason: "issue_lease_owned_by_other_runner",
+             lease_owner: inspect(owner)
+           }
+           | outcomes
+         ]}
+
+      match?({:error, _}, lease_status) ->
+        {:error, reason} = lease_status
+
+        {state,
+         [
+           %{
+             issue_identifier: issue_identifier,
+             target_runner_channel: target_runner_channel,
+             assigned_runner_channel: Config.runner_channel(),
+             assigned_runner_instance_id: RunnerRuntime.instance_id(),
+             assignment_state: "lease_lookup_error",
+             assignment_reason: inspect(reason)
+           }
+           | outcomes
+         ]}
+
+      true ->
+        {
+          persist_ci_failure_for_workspace(state, workspace, run_state, pr_url, event),
+          [
+            %{
+              issue_identifier: issue_identifier,
+              target_runner_channel: target_runner_channel || Config.runner_channel(),
+              assigned_runner_channel: Config.runner_channel(),
+              assigned_runner_instance_id: RunnerRuntime.instance_id(),
+              assignment_state:
+                case lease_status do
+                  {:reclaimable, _owner} -> "stale_lease_reclaimable"
+                  _ -> "processed"
+                end,
+              assignment_reason:
+                case lease_status do
+                  {:reclaimable, _owner} ->
+                    "ci_failure_persisted_pending_stale_lease_takeover"
+
+                  _ ->
+                    "ci_failure_persisted"
+                end,
+              lease_owner:
+                case lease_status do
+                  {:reclaimable, owner} -> inspect(owner)
+                  _ -> nil
+                end
+            }
+            | outcomes
+          ]
+        }
+    end
+  end
+
+  defp process_github_ci_workspace_match(%State{} = state, _workspace, _run_state, _pr_url, _event, outcomes) do
+    {state, outcomes}
+  end
+
   defp summarize_github_assignment(%GitHubEvent{} = event, pr_url, outcomes)
        when is_list(outcomes) do
     preferred_outcome =
@@ -839,6 +1002,9 @@ defmodule SymphonyElixir.Orchestrator do
       |> Map.put_new(:action, Map.get(event, :action))
       |> Map.put_new(:pr_url, Map.get(event, :pr_url))
       |> Map.put_new(:repo_full_name, Map.get(event, :repo_full_name))
+      |> Map.put_new(:conclusion, Map.get(event, :conclusion))
+      |> Map.put_new(:check_name, Map.get(event, :check_name))
+      |> Map.put_new(:details_url, Map.get(event, :details_url))
       |> Map.put_new(:received_runner_channel, Map.get(event, :received_runner_channel))
       |> Map.put_new(:received_runner_instance_id, Map.get(event, :received_runner_instance_id))
       |> Map.put_new(:processed_at, datetime_to_iso8601(DateTime.utc_now()))
@@ -1025,6 +1191,187 @@ defmodule SymphonyElixir.Orchestrator do
       state
     end
   end
+
+  defp persist_ci_failure_for_workspace(
+         %State{} = state,
+         workspace,
+         run_state,
+         pr_url,
+         %GitHubEvent{} = event
+       ) do
+    issue = issue_for_run_state(run_state)
+    ci_failure = ci_failure_payload(event, pr_url)
+
+    case maybe_start_autonomous_ci_follow_up(state, issue, workspace, run_state, pr_url, ci_failure) do
+      {:ok, next_state} ->
+        next_state
+
+      :not_autonomous ->
+        summary = "GitHub CI failure detected on #{pr_url}: #{ci_failure_summary(ci_failure)}."
+
+        human_action =
+          "Inspect the failing GitHub checks and decide whether Symphony should reopen implementation."
+
+        case RunStateStore.update(workspace, fn persisted ->
+               persisted
+               |> Map.put(:last_ci_failure, ci_failure)
+               |> Map.put(:last_decision_summary, summary)
+               |> Map.put(:next_human_action, human_action)
+               |> Map.put(:resume_context, ci_resume_context(Map.get(persisted, :resume_context), pr_url, ci_failure))
+             end) do
+          {:ok, next_run_state} ->
+            RunLedger.record("ci.failure_detected", %{
+              issue_id: Map.get(next_run_state, :issue_id),
+              issue_identifier: Map.get(next_run_state, :issue_identifier),
+              actor_type: "runtime",
+              actor_id: "github_webhook",
+              summary: summary,
+              details: Map.get(ci_failure, :details_url) || pr_url,
+              metadata: ci_failure
+            })
+
+            state
+
+          {:error, reason} ->
+            Logger.warning("Failed to persist CI failure for #{pr_url}: #{inspect(reason)}")
+            state
+        end
+    end
+  end
+
+  defp maybe_start_autonomous_ci_follow_up(
+         %State{} = state,
+         issue,
+         workspace,
+         run_state,
+         pr_url,
+         ci_failure
+       ) do
+    if autonomous_review_follow_up?(state, issue, run_state) do
+      summary = "GitHub CI failure detected on #{pr_url}. Returning to implement to fix failing checks."
+
+      next_objective =
+        "Investigate and fix the failing GitHub checks on #{pr_url}. Focus first on #{ci_failure_summary(ci_failure)} and return the branch to runtime validation."
+
+      case ensure_review_follow_up_lease(state, run_state) do
+        {:ok, lease_attrs, release_on_failure?} ->
+          case RunStateStore.transition(
+                 workspace,
+                 "implement",
+                 %{
+                   issue_id: Map.get(run_state, :issue_id),
+                   issue_identifier: Map.get(run_state, :issue_identifier),
+                   issue_source: Map.get(run_state, :issue_source),
+                   pr_url: pr_url,
+                   stop_reason: nil,
+                   last_decision: nil,
+                   last_rule_id: nil,
+                   last_failure_class: nil,
+                   last_decision_summary: summary,
+                   next_human_action: nil,
+                   await_checks_polls: 0,
+                   last_ci_failure: ci_failure,
+                   resume_context:
+                     ci_resume_context(
+                       Map.get(run_state, :resume_context),
+                       pr_url,
+                       Map.put(ci_failure, :next_objective, next_objective)
+                     )
+                 }
+                 |> Map.merge(lease_attrs)
+               ) do
+            {:ok, _next_run_state} ->
+              issue_ref = issue_ref_for_run_state(run_state)
+              _ = IssueSource.update_issue_state(issue || issue_ref, "In Progress")
+
+              refreshed_issue =
+                case issue do
+                  %Issue{} = existing_issue ->
+                    case IssueSource.refresh_issue(existing_issue) do
+                      {:ok, %Issue{} = latest_issue} -> latest_issue
+                      _ -> %{existing_issue | state: "In Progress"}
+                    end
+
+                  _ ->
+                    nil
+                end
+
+              RunLedger.record("ci.failure_autonomous_follow_up", %{
+                issue_id: Map.get(run_state, :issue_id),
+                issue_identifier: Map.get(run_state, :issue_identifier),
+                actor_type: "runtime",
+                actor_id: "github_webhook",
+                summary: summary,
+                details: Map.get(ci_failure, :details_url) || pr_url,
+                metadata: ci_failure
+              })
+
+              {:ok, maybe_dispatch_autonomous_review_follow_up(state, refreshed_issue)}
+
+            {:error, reason} ->
+              if release_on_failure? do
+                release_review_follow_up_lease(state, run_state, workspace)
+              end
+
+              Logger.warning("Failed to transition #{pr_url} back to implement after CI failure: #{inspect(reason)}")
+              :not_autonomous
+          end
+
+        {:skip, owner} ->
+          Logger.info("Skipping autonomous CI follow-up for #{pr_url}; lease is owned by #{inspect(owner)}")
+          :not_autonomous
+
+        {:error, reason} ->
+          Logger.warning("Unable to secure lease for autonomous CI follow-up on #{pr_url}: #{inspect(reason)}")
+          :not_autonomous
+      end
+    else
+      :not_autonomous
+    end
+  end
+
+  defp ci_failure_payload(%GitHubEvent{} = event, pr_url) do
+    %{
+      event_name: Map.get(event, :event_name),
+      action: Map.get(event, :action),
+      check_name: Map.get(event, :check_name),
+      conclusion: Map.get(event, :conclusion),
+      details_url: Map.get(event, :details_url),
+      head_sha: Map.get(event, :head_sha),
+      pr_url: pr_url,
+      summary: GitHubEvent.failure_summary(event)
+    }
+  end
+
+  defp ci_resume_context(current_context, pr_url, ci_failure) when is_map(ci_failure) do
+    context =
+      case current_context do
+        value when is_map(value) -> value
+        _ -> %{}
+      end
+
+    context
+    |> Map.put(:ci_failure_summary, ci_failure_summary(ci_failure))
+    |> Map.put(:ci_failure_pr_url, pr_url)
+    |> Map.put(:ci_failure_details_url, Map.get(ci_failure, :details_url))
+    |> maybe_put_context_value(:next_objective, Map.get(ci_failure, :next_objective))
+  end
+
+  defp ci_failure_summary(ci_failure) when is_map(ci_failure) do
+    Map.get(ci_failure, :summary) ||
+      GitHubEvent.failure_summary(%GitHubEvent{
+        provider: "github",
+        event_name: to_string(Map.get(ci_failure, :event_name) || ""),
+        action: to_string(Map.get(ci_failure, :action) || ""),
+        raw: %{},
+        conclusion: Map.get(ci_failure, :conclusion),
+        check_name: Map.get(ci_failure, :check_name)
+      }) ||
+      "failing required checks"
+  end
+
+  defp maybe_put_context_value(context, _key, value) when value in [nil, ""], do: context
+  defp maybe_put_context_value(context, key, value), do: Map.put(context, key, value)
 
   defp review_thread_state(item, pr_url) when is_map(item) do
     %{
@@ -1598,6 +1945,10 @@ defmodule SymphonyElixir.Orchestrator do
       pr_url: Map.get(payload, "pr_url"),
       repo_full_name: Map.get(payload, "repo_full_name"),
       updated_at: parse_tracker_event_timestamp(Map.get(payload, "updated_at")),
+      conclusion: Map.get(payload, "conclusion"),
+      check_name: Map.get(payload, "check_name"),
+      details_url: Map.get(payload, "details_url"),
+      head_sha: Map.get(payload, "head_sha"),
       received_runner_channel: Map.get(payload, "received_runner_channel"),
       received_runner_instance_id: Map.get(payload, "received_runner_instance_id"),
       target_runner_channel: Map.get(payload, "target_runner_channel"),

@@ -567,6 +567,132 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     )
   end
 
+  test "github webhook controller returns fully autonomous PRs to implement with CI failure context" do
+    secret = "github-webhook-secret"
+    previous_secret = System.get_env("GITHUB_WEBHOOK_SECRET")
+    System.put_env("GITHUB_WEBHOOK_SECRET", secret)
+    on_exit(fn -> restore_env("GITHUB_WEBHOOK_SECRET", previous_secret) end)
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-github-webhook-ci-failure-#{System.unique_integer([:positive])}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root,
+      max_concurrent_agents: 0,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    orchestrator_name =
+      :"github-webhook-ci-failure-orchestrator-#{System.unique_integer([:positive])}"
+
+    Application.put_env(
+      :symphony_elixir,
+      SymphonyElixirWeb.Endpoint,
+      Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+      |> Keyword.merge(
+        orchestrator: orchestrator_name,
+        secret_key_base: String.duplicate("s", 64),
+        server: false
+      )
+    )
+
+    start_supervised!({Orchestrator, name: orchestrator_name})
+    start_supervised!({SymphonyElixirWeb.Endpoint, []})
+
+    unique = System.unique_integer([:positive])
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "github-webhook-ci-failure-#{unique}",
+        "identifier" => "EVT-GH-CI-#{unique}",
+        "title" => "Autonomous webhook CI follow-up",
+        "description" => "Resume automatically when GitHub checks fail",
+        "acceptance_criteria" => [
+          "Return the runtime to implement when a required GitHub check fails"
+        ],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.mkdir_p!(workspace)
+
+    :ok =
+      RunStateStore.save(workspace, %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        stage: "await_checks",
+        effective_policy_class: "fully_autonomous",
+        pr_url: "https://github.com/gaspardip/events/pull/8",
+        stage_history: [%{stage: "publish"}, %{stage: "await_checks"}],
+        stage_transition_counts: %{"publish" => 1, "await_checks" => 1}
+      })
+
+    raw_body =
+      Jason.encode!(%{
+        "action" => "completed",
+        "check_run" => %{
+          "id" => 301,
+          "name" => "make-all",
+          "conclusion" => "failure",
+          "details_url" => "https://github.com/gaspardip/events/actions/runs/123/job/456",
+          "head_sha" => "abc123",
+          "completed_at" => "2026-03-16T20:00:00Z",
+          "pull_requests" => [
+            %{"html_url" => "https://github.com/gaspardip/events/pull/8"}
+          ]
+        },
+        "repository" => %{"full_name" => "gaspardip/events"}
+      })
+
+    conn =
+      build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("x-github-event", "check_run")
+      |> put_req_header("x-github-delivery", "delivery-ci-failure")
+      |> put_req_header("x-hub-signature-256", github_signature(secret, raw_body))
+      |> post("/api/webhooks/github", raw_body)
+
+    assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
+
+    assert_eventually(
+      fn ->
+        {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, lease} = LeaseManager.read(issue.id)
+
+        {:ok, %Issue{} = refreshed_issue} =
+          ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+
+        assert Map.get(run_state, :stage) == "implement"
+        assert Map.get(run_state, :last_decision_summary) =~ "Returning to implement to fix failing checks"
+        assert Map.get(run_state, :next_human_action) == nil
+        assert Map.get(run_state, :await_checks_polls) == 0
+        assert Map.get(run_state, :last_ci_failure, %{})[:check_name] == "make-all"
+        assert Map.get(run_state, :last_ci_failure, %{})[:conclusion] == "failure"
+
+        assert get_in(run_state, [:resume_context, :ci_failure_summary]) == "make-all (failure)"
+
+        assert get_in(run_state, [:resume_context, :ci_failure_pr_url]) ==
+                 "https://github.com/gaspardip/events/pull/8"
+
+        assert get_in(run_state, [:resume_context, :next_objective]) =~
+                 "Investigate and fix the failing GitHub checks"
+
+        assert is_binary(Map.get(run_state, :lease_owner))
+        assert Map.get(run_state, :lease_owner) == lease["owner"]
+        assert refreshed_issue.state == "In Progress"
+      end,
+      60
+    )
+  end
+
   test "github webhook controller reopens seeded manual workspaces without a manual store issue record" do
     secret = "github-webhook-secret"
     previous_secret = System.get_env("GITHUB_WEBHOOK_SECRET")

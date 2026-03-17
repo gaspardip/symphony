@@ -228,6 +228,7 @@ defmodule SymphonyElixir.RunStateStore do
       review_claims: %{},
       review_return_stage: nil,
       last_review_decision: nil,
+      last_ci_failure: nil,
       last_check_statuses: [],
       last_required_checks_state: nil,
       last_missing_required_checks: [],
