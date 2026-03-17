@@ -45,7 +45,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   @review_fix_max_turns 6
   @dialyzer {:nowarn_function, refreshed_review_claims: 3}
   @dialyzer {:nowarn_function, refreshed_review_threads: 3}
-  @dialyzer {:nowarn_function, refreshed_review_thread_state: 2}
+  @dialyzer {:nowarn_function, refreshed_review_thread_state: 3}
   @dialyzer {:nowarn_function, refreshed_review_claim_verification_status: 2}
   @passive_stages [
     "merge_readiness",
@@ -2817,7 +2817,11 @@ defmodule SymphonyElixir.DeliveryEngine do
     Enum.reduce(items, persisted_threads, fn item, acc ->
       case Map.get(item, :thread_key) do
         thread_key when is_binary(thread_key) ->
-          Map.put(acc, thread_key, refreshed_review_thread_state(item, pr_url))
+          Map.put(
+            acc,
+            thread_key,
+            refreshed_review_thread_state(item, Map.get(persisted_threads, thread_key, %{}), pr_url)
+          )
 
         _ ->
           acc
@@ -2827,7 +2831,8 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp refreshed_review_threads(_items, persisted_threads, _pr_url), do: persisted_threads
 
-  defp refreshed_review_thread_state(item, pr_url) when is_map(item) do
+  defp refreshed_review_thread_state(item, persisted_thread, pr_url)
+       when is_map(item) and is_map(persisted_thread) do
     %{
       "thread_key" => Map.get(item, :thread_key),
       "id" => Map.get(item, :id),
@@ -2870,6 +2875,8 @@ defmodule SymphonyElixir.DeliveryEngine do
       "posted_reply_url" => Map.get(item, :posted_reply_url),
       "posted_at" => Map.get(item, :posted_at),
       "reply_refresh_needed" => Map.get(item, :reply_refresh_needed, false),
+      "resolution_state" => Map.get(persisted_thread, "resolution_state"),
+      "resolved_at" => Map.get(persisted_thread, "resolved_at"),
       "pr_url" => pr_url
     }
   end

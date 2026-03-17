@@ -109,7 +109,7 @@ defmodule SymphonyElixir.PRWatcherTest do
     assert comment_item.posted_reply_url ==
              "https://github.com/example/repo/pull/42#discussion_r3"
 
-    assert comment_item.draft_reply == "Old local reply."
+    assert comment_item.draft_reply == "I fixed this locally."
     assert comment_item.reply_refresh_needed == false
   end
 
