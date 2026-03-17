@@ -101,8 +101,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Verified the relay live on March 13, 2026: posting a signed `pull_request_review` webhook to the local stable runner at `http://127.0.0.1:4040/api/webhooks/github` advanced both stable and canary `github_webhooks.last_accepted_at`, and the canary `CLZ-22` run remained in `review_verification` with `next_human_action=nil`, confirming the forwarded webhook resumed on canary instead of requiring a direct GitHub target.
 
 ## Evidence
-- Telemetry smoke: `cd /Users/gaspar/src/symphony-telemetry/elixir && mise exec -- mix test test/symphony_elixir/telemetry_smoke_test.exs`
-- Repo smoke with telemetry proof: `cd /Users/gaspar/src/symphony-telemetry && ./scripts/symphony-smoke.sh`
+- Telemetry smoke: `cd elixir && mise exec -- mix test test/symphony_elixir/telemetry_smoke_test.exs`
+- Repo smoke with telemetry proof: `./scripts/symphony-smoke.sh`
 - Linear issue: `CLZ-22`
 - Worktree: `/Users/gaspar/src/symphony-clz-22`
 - Branch: `codex/clz-22-observability`

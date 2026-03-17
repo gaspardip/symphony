@@ -6,9 +6,9 @@ Give operators and agents one repo-owned place to inspect Symphony telemetry end
 
 Use this runbook together with:
 
-- [`.symphony/harness.yml`](/Users/gaspar/src/symphony/.symphony/harness.yml)
-- [`docs/LOCAL_DOGFOOD_TOPOLOGY.md`](/Users/gaspar/src/symphony/docs/LOCAL_DOGFOOD_TOPOLOGY.md)
-- [`docs/OBSERVABILITY_IMPLEMENTATION_PLAN.md`](/Users/gaspar/src/symphony/docs/OBSERVABILITY_IMPLEMENTATION_PLAN.md)
+- [`.symphony/harness.yml`](../.symphony/harness.yml)
+- [`LOCAL_DOGFOOD_TOPOLOGY.md`](./LOCAL_DOGFOOD_TOPOLOGY.md)
+- [`OBSERVABILITY_IMPLEMENTATION_PLAN.md`](./OBSERVABILITY_IMPLEMENTATION_PLAN.md)
 
 ## Primary Surfaces
 
@@ -22,9 +22,9 @@ Use this runbook together with:
 
 These routes are defined in:
 
-- [`elixir/lib/symphony_elixir_web/router.ex`](/Users/gaspar/src/symphony/elixir/lib/symphony_elixir_web/router.ex)
-- [`elixir/lib/symphony_elixir_web/controllers/observability_api_controller.ex`](/Users/gaspar/src/symphony/elixir/lib/symphony_elixir_web/controllers/observability_api_controller.ex)
-- [`elixir/lib/symphony_elixir_web/presenter.ex`](/Users/gaspar/src/symphony/elixir/lib/symphony_elixir_web/presenter.ex)
+- [`elixir/lib/symphony_elixir_web/router.ex`](../elixir/lib/symphony_elixir_web/router.ex)
+- [`elixir/lib/symphony_elixir_web/controllers/observability_api_controller.ex`](../elixir/lib/symphony_elixir_web/controllers/observability_api_controller.ex)
+- [`elixir/lib/symphony_elixir_web/presenter.ex`](../elixir/lib/symphony_elixir_web/presenter.ex)
 
 ### Runtime State
 
@@ -45,15 +45,15 @@ This is the fastest place to inspect:
 
 The persistence layer lives in:
 
-- [`elixir/lib/symphony_elixir/run_state_store.ex`](/Users/gaspar/src/symphony/elixir/lib/symphony_elixir/run_state_store.ex)
+- [`elixir/lib/symphony_elixir/run_state_store.ex`](../elixir/lib/symphony_elixir/run_state_store.ex)
 
 ### Metrics and Traces
 
 Telemetry helpers and metrics definitions live in:
 
-- [`elixir/lib/symphony_elixir/observability.ex`](/Users/gaspar/src/symphony/elixir/lib/symphony_elixir/observability.ex)
-- [`elixir/lib/symphony_elixir/observability/metrics.ex`](/Users/gaspar/src/symphony/elixir/lib/symphony_elixir/observability/metrics.ex)
-- [`elixir/lib/symphony_elixir/observability/supervisor.ex`](/Users/gaspar/src/symphony/elixir/lib/symphony_elixir/observability/supervisor.ex)
+- [`elixir/lib/symphony_elixir/observability.ex`](../elixir/lib/symphony_elixir/observability.ex)
+- [`elixir/lib/symphony_elixir/observability/metrics.ex`](../elixir/lib/symphony_elixir/observability/metrics.ex)
+- [`elixir/lib/symphony_elixir/observability/supervisor.ex`](../elixir/lib/symphony_elixir/observability/supervisor.ex)
 
 Key emitted surfaces:
 
@@ -74,11 +74,11 @@ Debug artifacts are bounded local captures stored under:
 
 Artifact storage lives in:
 
-- [`elixir/lib/symphony_elixir/debug_artifacts.ex`](/Users/gaspar/src/symphony/elixir/lib/symphony_elixir/debug_artifacts.ex)
+- [`elixir/lib/symphony_elixir/debug_artifacts.ex`](../elixir/lib/symphony_elixir/debug_artifacts.ex)
 
 ## Local Dogfood Checklist
 
-1. Start the local topology from [`docs/LOCAL_DOGFOOD_TOPOLOGY.md`](/Users/gaspar/src/symphony/docs/LOCAL_DOGFOOD_TOPOLOGY.md).
+1. Start the local topology from [`LOCAL_DOGFOOD_TOPOLOGY.md`](./LOCAL_DOGFOOD_TOPOLOGY.md).
 2. Confirm `GET /api/v1/state` returns a healthy runner payload.
 3. Confirm `GET /metrics` scrapes successfully.
 4. Confirm the target issue workspace has `.symphony/run_state.json`.
@@ -92,8 +92,8 @@ Artifact storage lives in:
 
 Telemetry smoke is part of the repo-owned smoke contract through:
 
-- [`elixir/test/symphony_elixir/telemetry_smoke_test.exs`](/Users/gaspar/src/symphony/elixir/test/symphony_elixir/telemetry_smoke_test.exs)
-- [`scripts/symphony-smoke.sh`](/Users/gaspar/src/symphony/scripts/symphony-smoke.sh)
+- [`elixir/test/symphony_elixir/telemetry_smoke_test.exs`](../elixir/test/symphony_elixir/telemetry_smoke_test.exs)
+- [`scripts/symphony-smoke.sh`](../scripts/symphony-smoke.sh)
 
 That smoke proves:
 

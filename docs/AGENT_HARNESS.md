@@ -61,7 +61,7 @@ This is also part of Symphony’s self-host validation path.
 
 When debugging a self-host run, start with:
 
-- [`docs/OBSERVABILITY_RUNBOOK.md`](/Users/gaspar/src/symphony/docs/OBSERVABILITY_RUNBOOK.md)
+- [`OBSERVABILITY_RUNBOOK.md`](./OBSERVABILITY_RUNBOOK.md)
 - `GET /api/v1/state`
 - `GET /api/v1/reports/delivery`
 - `GET /api/v1/<ISSUE_IDENTIFIER>`
