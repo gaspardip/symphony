@@ -308,6 +308,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   the new Tempo-config behavioral proof originally depended on checkout-specific paths, which passed on the branch but failed inside the live canary workspace. `test/symphony_elixir/observability_test.exs` now resolves `ops/observability/tempo/config.yml` relative to `__DIR__`, so the same proof works in both the branch checkout and isolated dogfood workspaces.
 - Latest focused portable-proof validation on March 16, 2026:
   `mix test test/symphony_elixir/observability_test.exs` passed with `6 tests, 0 failures` on both `/Users/gaspar/src/symphony-clz-22` and the live canary workspace after switching the Tempo-config proof to a repo-relative path.
+- Publish-stage review finalization on March 16, 2026:
+  `SymphonyElixir.DeliveryEngine` now rehydrates live GitHub review state at `publish` and `await_checks`, refreshes stale addressed inline replies from “next branch update” wording to “included on the branch,” and hands posted addressed threads to `SymphonyElixir.PRWatcher` for real GitHub thread resolution after publish. `SymphonyElixir.GitHubCLIClient` now resolves review threads through GitHub GraphQL by mapping root review comment ids back to review-thread ids.
+- Latest focused publish-finalization validation on March 16, 2026:
+  `mix test test/symphony_elixir/github_cli_client_test.exs test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `72 tests, 0 failures` after adding publish-time reply refresh and thread-resolution coverage.
 
 ## Next Step
-Commit the retained-diff resume fix, rotate the local stable/canary topology onto the new head, and re-run the live `CLZ-22` canary cycle to confirm the run advances from `implement` into `validate` instead of re-blocking on `implementation.turn_budget_exhausted`.
+Restart the local stable/canary topology on the latest pushed head, rerun the live `CLZ-22` canary cycle through publish, and verify that addressed inline replies are refreshed and safe threads resolve automatically on GitHub.

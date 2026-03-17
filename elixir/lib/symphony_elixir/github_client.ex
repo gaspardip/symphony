@@ -11,7 +11,8 @@ defmodule SymphonyElixir.GitHubClient do
   @callback create_pull_request(Path.t(), String.t(), String.t(), String.t(), Path.t(), keyword()) ::
               {:ok, %{url: String.t(), state: String.t() | nil}} | {:error, term()}
   @callback merge_pull_request(Path.t(), keyword()) ::
-              {:ok, %{merged: boolean(), url: String.t() | nil, output: String.t(), status: atom()}}
+              {:ok,
+               %{merged: boolean(), url: String.t() | nil, output: String.t(), status: atom()}}
               | {:error, term()}
   @callback review_feedback(Path.t(), keyword()) ::
               {:ok,
@@ -38,5 +39,10 @@ defmodule SymphonyElixir.GitHubClient do
   @callback edit_review_comment_reply(String.t(), String.t(), String.t(), keyword()) ::
               {:ok, %{id: String.t() | nil, url: String.t() | nil, output: String.t() | nil}}
               | {:error, term()}
-  @optional_callbacks review_feedback_by_pr_url: 2, edit_review_comment_reply: 4
+  @callback resolve_review_comment_thread(String.t(), String.t(), keyword()) ::
+              {:ok, %{thread_id: String.t() | nil, resolved: boolean(), output: String.t() | nil}}
+              | {:error, term()}
+  @optional_callbacks review_feedback_by_pr_url: 2,
+                      edit_review_comment_reply: 4,
+                      resolve_review_comment_thread: 3
 end

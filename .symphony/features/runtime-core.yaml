@@ -42,6 +42,8 @@ acceptance_signals:
   - Persisted stale review claims can be upgraded back into accepted implementation work when focused verification matches an exact local regression pattern
   - Runs that are already back in `implement` can refresh unresolved `needs_verification` claims from cheap local proof before the next turn, so newly shipped proof logic applies without forcing a separate review-verification cycle
   - If a scoped review-fix run re-enters `implement` with no accepted actionable claims left and only retained local edits from the last clean turn, the runtime advances directly to `validate` instead of tripping the implement turn budget on the next cycle
+  - Publish and await-checks stages rehydrate live GitHub review state before continuing, so post-publish thread cleanup acts on current PR replies instead of stale local thread copies
+  - Publish can refresh posted addressed replies and resolve safe addressed inline threads on GitHub before handing the run to await-checks
   - Operator snapshots surface lease age, TTL, reclaimability, and latest GitHub assignment state so webhook and routing skips are explainable
   - Stable ingress can relay verified GitHub review webhooks to configured sibling runner instances without creating forwarding loops
   - Operators can invoke inspect, promote, record-canary, and rollback runner actions through the observability API using the repo-owned promotion script

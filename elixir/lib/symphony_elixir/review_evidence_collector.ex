@@ -63,7 +63,7 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     draft_reply =
       cond do
         implementation_status == "addressed" ->
-          "I addressed this concern locally and will include it in the next branch update. #{addressed_summary}"
+          "I addressed this concern locally and it is now included on the branch. #{addressed_summary}"
 
         verification_status in [
           "verified_review_decision",
@@ -548,7 +548,9 @@ defmodule SymphonyElixir.ReviewEvidenceCollector do
     stats
     |> bump_stat(if(disposition == "accepted", do: :accepted_count, else: nil))
     |> bump_stat(if(verification_status == "contradicted", do: :contradicted_count, else: nil))
-    |> bump_stat(if(verification_status == "insufficient_evidence", do: :insufficient_count, else: nil))
+    |> bump_stat(
+      if(verification_status == "insufficient_evidence", do: :insufficient_count, else: nil)
+    )
     |> bump_stat(if(disposition == "needs_verification", do: :pending_count, else: nil))
   end
 

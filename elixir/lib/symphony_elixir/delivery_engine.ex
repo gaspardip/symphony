@@ -68,14 +68,20 @@ defmodule SymphonyElixir.DeliveryEngine do
     stage = current_stage(workspace, issue)
 
     if passive_stage?(stage) do
-      Logger.info("Skipping Codex session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}")
+      Logger.info(
+        "Skipping Codex session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}"
+      )
 
       do_run(nil, workspace, issue, codex_update_recipient, issue_state_fetcher, max_turns, opts)
     else
-      Logger.info("Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}")
+      Logger.info(
+        "Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}"
+      )
 
       with {:ok, app_session} <- AppServer.start_session(workspace) do
-        Logger.info("Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}")
+        Logger.info(
+          "Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}"
+        )
 
         try do
           do_run(
@@ -92,7 +98,9 @@ defmodule SymphonyElixir.DeliveryEngine do
         end
       else
         {:error, reason} = error ->
-          Logger.error("Codex session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
+          Logger.error(
+            "Codex session bootstrap failed for #{issue.identifier}: #{inspect(reason)}"
+          )
 
           error
       end
@@ -204,6 +212,28 @@ defmodule SymphonyElixir.DeliveryEngine do
         %TurnResult{} = turn_result
       ),
       do: advance_review_claims_after_turn(review_claims, focused_claims, turn_result)
+
+  @doc false
+  @spec finalize_published_review_threads_for_test(map()) :: map()
+  def finalize_published_review_threads_for_test(review_threads),
+    do: finalize_published_review_threads(review_threads)
+
+  @doc false
+  @spec maybe_resolve_autonomous_review_threads_for_test(
+          map(),
+          Path.t(),
+          String.t(),
+          map(),
+          keyword()
+        ) :: map()
+  def maybe_resolve_autonomous_review_threads_for_test(
+        review_threads,
+        workspace,
+        pr_url,
+        state,
+        opts \\ []
+      ),
+      do: maybe_resolve_autonomous_review_threads(review_threads, workspace, pr_url, state, opts)
 
   @doc false
   @spec ensure_turn_progress_for_test(term(), term(), term()) :: term()
@@ -468,7 +498,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                 last_harness_init: Map.merge(attrs, %{status: "passed"}),
                 last_harness_check: %{
                   status: "passed",
-                  checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+                  checked_at:
+                    DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
                 },
                 harness_status: "ready",
                 harness_attempts: Map.get(state, :harness_attempts, 0) + 1
@@ -565,7 +596,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                 state,
                 before_snapshot,
                 %{
-                  next_objective: "Stop editing and let Symphony run the official validation contract."
+                  next_objective:
+                    "Stop editing and let Symphony run the official validation contract."
                 },
                 opts
               )
@@ -657,7 +689,12 @@ defmodule SymphonyElixir.DeliveryEngine do
                        after_snapshot,
                        %{
                          last_turn_summary: turn_result.summary,
-                         next_objective: next_objective_for_stage(next_stage, turn_result, updated_review_claims)
+                         next_objective:
+                           next_objective_for_stage(
+                             next_stage,
+                             turn_result,
+                             updated_review_claims
+                           )
                        },
                        opts
                      )
@@ -797,7 +834,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                 inspection,
                 %{
                   last_validation_summary: summarized_command_output(result.output, 800),
-                  next_objective: "Review validation output and confirm behavior against acceptance criteria."
+                  next_objective:
+                    "Review validation output and confirm behavior against acceptance criteria."
                 },
                 opts
               )
@@ -826,7 +864,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                   inspection,
                   %{
                     last_validation_summary: summarized_command_output(result.output, 800),
-                    next_objective: "Address the latest validation failure without rerunning the full repo validation in implement."
+                    next_objective:
+                      "Address the latest validation failure without rerunning the full repo validation in implement."
                   },
                   opts
                 )
@@ -1118,6 +1157,8 @@ defmodule SymphonyElixir.DeliveryEngine do
          inspection,
          opts
        ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
+
     if Config.policy_publish_required?() do
       with :ok <-
              maybe_enforce_agent_harness_publish_gate(workspace, issue, inspection.harness, opts) do
@@ -1208,11 +1249,30 @@ defmodule SymphonyElixir.DeliveryEngine do
          state,
          opts
        ) do
+    prepared_review_threads =
+      Map.get(state, :review_threads, %{})
+      |> finalize_published_review_threads()
+
     with {:ok, pr} <- PullRequestManager.ensure_pull_request(workspace, issue, state, opts),
+         finalized_review_threads <-
+           prepared_review_threads
+           |> maybe_post_autonomous_review_replies(
+             workspace,
+             pr.url,
+             state,
+             opts
+           )
+           |> maybe_resolve_autonomous_review_threads(
+             workspace,
+             pr.url,
+             state,
+             opts
+           ),
          :ok <- maybe_move_issue(issue, @merging_state),
          {:ok, _state} <-
            RunStateStore.transition(workspace, "await_checks", %{
              pr_url: pr.url,
+             review_threads: finalized_review_threads,
              publish_attempts: Map.get(state, :publish_attempts, 0) + 1,
              await_checks_polls: 0,
              last_pr_body_validation: Map.get(pr, :body_validation)
@@ -1250,6 +1310,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          inspection,
          opts
        ) do
+    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
     await_checks_polls = Map.get(state, :await_checks_polls, 0) + 1
     required_checks = effective_required_checks(inspection, state)
     check_rollup = RunInspector.required_checks_rollup(required_checks, inspection.check_statuses)
@@ -1622,7 +1683,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                   issue_identifier: issue.identifier,
                   issue_source: issue.source,
                   current_deploy_target: "preview",
-                  last_decision_summary: "Preview deployment completed. Running post-deploy verification."
+                  last_decision_summary:
+                    "Preview deployment completed. Running post-deploy verification."
                 })
 
               :ok
@@ -1692,7 +1754,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                     issue_identifier: issue.identifier,
                     issue_source: issue.source,
                     current_deploy_target: "production",
-                    last_decision_summary: "Production deployment completed. Running post-deploy verification."
+                    last_decision_summary:
+                      "Production deployment completed. Running post-deploy verification."
                   })
 
                 :ok
@@ -1915,7 +1978,8 @@ defmodule SymphonyElixir.DeliveryEngine do
             issue_id: issue.id,
             issue_identifier: issue.identifier,
             issue_source: issue.source,
-            last_decision_summary: "Post-deploy verification passed. Starting production deployment.",
+            last_decision_summary:
+              "Post-deploy verification passed. Starting production deployment.",
             effective_policy_class: Map.get(state, :effective_policy_class),
             current_deploy_target: "production"
           })
@@ -2114,7 +2178,8 @@ defmodule SymphonyElixir.DeliveryEngine do
       issue_identifier: issue.identifier,
       fingerprint: inspection.fingerprint,
       last_turn_summary: get_in(state, [:last_turn_result, :summary]),
-      last_validation_summary: summarized_command_output(get_in(state, [:last_validation, :output]), 800),
+      last_validation_summary:
+        summarized_command_output(get_in(state, [:last_validation, :output]), 800),
       last_verifier_summary:
         summarized_text(
           get_in(state, [:last_verifier, :summary]) || get_in(state, [:last_verifier, :output]),
@@ -2284,7 +2349,8 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp default_next_objective(_state, []),
-    do: "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
+    do:
+      "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
 
   defp default_next_objective(state, focused_claims) do
     focused_review_next_objective(focused_claims, Map.get(state, :review_claims, %{}))
@@ -2364,7 +2430,8 @@ defmodule SymphonyElixir.DeliveryEngine do
        when is_map(review_claims) and is_integer(limit) and limit > 0 do
     review_claims
     |> Enum.sort_by(fn {thread_key, claim} ->
-      {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "", Map.get(claim, "line") || 0, thread_key}
+      {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "",
+       Map.get(claim, "line") || 0, thread_key}
     end)
     |> Enum.filter(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
     |> Enum.take(limit)
@@ -2454,7 +2521,11 @@ defmodule SymphonyElixir.DeliveryEngine do
 
       true ->
         watcher_opts =
-          [policy_pack: Map.get(state, :policy_pack) || Config.policy_pack_name(), pr_url: pr_url, thread_states: review_threads]
+          [
+            policy_pack: Map.get(state, :policy_pack) || Config.policy_pack_name(),
+            pr_url: pr_url,
+            thread_states: review_threads
+          ]
           |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
           |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
 
@@ -2891,6 +2962,105 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp has_postable_review_drafts?(_review_threads), do: false
+
+  defp finalize_published_review_threads(review_threads) when is_map(review_threads) do
+    Enum.reduce(review_threads, review_threads, fn {thread_key, thread_state}, acc ->
+      updated = finalize_published_review_thread(thread_state)
+
+      if String.starts_with?(to_string(thread_key), "comment:") and updated != thread_state do
+        Map.put(acc, thread_key, updated)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp finalize_published_review_threads(review_threads), do: review_threads
+
+  defp finalize_published_review_thread(thread_state) when is_map(thread_state) do
+    draft_reply = Map.get(thread_state, "draft_reply")
+
+    cond do
+      Map.get(thread_state, "implementation_status") != "addressed" ->
+        thread_state
+
+      not is_binary(draft_reply) ->
+        thread_state
+
+      true ->
+        updated_reply =
+          String.replace(
+            draft_reply,
+            "I addressed this concern locally and will include it in the next branch update.",
+            "I addressed this concern locally and it is now included on the branch."
+          )
+
+        cond do
+          updated_reply == draft_reply ->
+            thread_state
+
+          Map.get(thread_state, "draft_state") == "posted" ->
+            thread_state
+            |> Map.put("draft_reply", updated_reply)
+            |> Map.put("reply_refresh_needed", true)
+            |> Map.put("resolution_recommendation", "resolve_after_change")
+
+          true ->
+            thread_state
+            |> Map.put("draft_reply", updated_reply)
+            |> Map.put("resolution_recommendation", "resolve_after_change")
+        end
+    end
+  end
+
+  defp finalize_published_review_thread(thread_state), do: thread_state
+
+  defp maybe_resolve_autonomous_review_threads(review_threads, workspace, pr_url, state, opts)
+       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
+    pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
+
+    cond do
+      not PolicyPack.thread_resolution_allowed?(pack) ->
+        review_threads
+
+      not is_binary(pr_url) or String.trim(pr_url) == "" ->
+        review_threads
+
+      not has_resolvable_review_threads?(review_threads) ->
+        review_threads
+
+      true ->
+        watcher_opts =
+          [policy_pack: pack, repo_url: Map.get(state, :repo_url)]
+          |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
+          |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
+
+        case PRWatcher.resolve_posted_threads(pr_url, review_threads, watcher_opts) do
+          {:ok, updated_threads, _stats} -> updated_threads
+          {:error, :no_resolvable_review_threads} -> review_threads
+          {:error, _reason} -> review_threads
+        end
+    end
+  end
+
+  defp maybe_resolve_autonomous_review_threads(
+         review_threads,
+         _workspace,
+         _pr_url,
+         _state,
+         _opts
+       ),
+       do: review_threads
+
+  defp has_resolvable_review_threads?(review_threads) when is_map(review_threads) do
+    Enum.any?(review_threads, fn {thread_key, thread_state} ->
+      String.starts_with?(to_string(thread_key), "comment:") and
+        Map.get(thread_state, "draft_state") == "posted" and
+        Map.get(thread_state, "resolution_recommendation") == "resolve_after_change" and
+        Map.get(thread_state, "implementation_status") == "addressed" and
+        Map.get(thread_state, "resolution_state") != "resolved"
+    end)
+  end
 
   defp present_review_thread_reply?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_review_thread_reply?(_value), do: false
@@ -3633,7 +3803,8 @@ defmodule SymphonyElixir.DeliveryEngine do
     %{
       verdict: Map.get(result, :verdict) || Map.get(result, "verdict"),
       summary: Map.get(result, :summary) || Map.get(result, "summary"),
-      acceptance_gaps: Map.get(result, :acceptance_gaps) || Map.get(result, "acceptance_gaps") || [],
+      acceptance_gaps:
+        Map.get(result, :acceptance_gaps) || Map.get(result, "acceptance_gaps") || [],
       risky_areas: Map.get(result, :risky_areas) || Map.get(result, "risky_areas") || [],
       evidence: Map.get(result, :evidence) || Map.get(result, "evidence") || [],
       output: Map.get(result, :raw_output) || Map.get(result, "raw_output"),

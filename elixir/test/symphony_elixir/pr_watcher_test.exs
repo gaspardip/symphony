@@ -105,7 +105,10 @@ defmodule SymphonyElixir.PRWatcherTest do
 
     assert comment_item.draft_state == "posted"
     assert comment_item.posted_reply_id == "3"
-    assert comment_item.posted_reply_url == "https://github.com/example/repo/pull/42#discussion_r3"
+
+    assert comment_item.posted_reply_url ==
+             "https://github.com/example/repo/pull/42#discussion_r3"
+
     assert comment_item.draft_reply == "I fixed this locally."
     assert comment_item.reply_refresh_needed == false
   end
@@ -230,6 +233,35 @@ defmodule SymphonyElixir.PRWatcherTest do
                policy_pack: :client_safe_shadow,
                github_client: __MODULE__.PostingGitHubClient
              )
+  end
+
+  test "resolve_posted_threads resolves addressed inline threads when policy allows" do
+    {:ok, updated_threads, stats} =
+      PRWatcher.resolve_posted_threads(
+        "https://github.com/example/repo/pull/42",
+        %{
+          "comment:2" => %{
+            "draft_state" => "posted",
+            "draft_reply" => "Included on the branch.",
+            "implementation_status" => "addressed",
+            "resolution_recommendation" => "resolve_after_change"
+          },
+          "comment:3" => %{
+            "draft_state" => "posted",
+            "draft_reply" => "Need more proof.",
+            "implementation_status" => nil,
+            "resolution_recommendation" => "keep_open_until_confirmed"
+          }
+        },
+        policy_pack: :private_autopilot,
+        github_client: __MODULE__.PostingGitHubClient
+      )
+
+    assert stats.resolved_count == 1
+    assert stats.skipped_count == 0
+    assert get_in(updated_threads, ["comment:2", "resolution_state"]) == "resolved"
+    assert is_binary(get_in(updated_threads, ["comment:2", "resolved_at"]))
+    assert get_in(updated_threads, ["comment:3", "resolution_state"]) == nil
   end
 
   defmodule FakeGitHubClient do
@@ -419,6 +451,11 @@ defmodule SymphonyElixir.PRWatcherTest do
          url: "https://github.com/example/reply/#{comment_id}",
          output: ""
        }}
+    end
+
+    @impl true
+    def resolve_review_comment_thread(_pr_url, comment_id, _opts) do
+      {:ok, %{thread_id: "thread-#{comment_id}", resolved: true, output: ""}}
     end
   end
 end

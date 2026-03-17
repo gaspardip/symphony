@@ -46,6 +46,8 @@ acceptance_signals:
   - GitHub review reconciliation imports already-posted inline reply ids, urls, timestamps, and body text back into persisted thread state so stale local drafts do not drift from the live PR thread
   - Language false positives such as Elixir `true` versus `:true` can be contradicted locally instead of being promoted into fake correctness work
   - Deterministic proof with a low-cost, low-risk fix path can upgrade a previously deferred or dismissed review claim back into accepted work without waiting for another human nudge
+  - Once a branch update is published, previously posted addressed inline replies can be refreshed in place with “included on the branch” wording instead of stale “next update” language
+  - Addressed inline review threads can be resolved automatically on GitHub after publish when the reply is already posted and the resolution recommendation is `resolve_after_change`
   - High-pressure accepted-claim follow-up can continue past the default implement turn cap without giving the same higher turn allowance to unrelated implementation work
   - A scoped PR-comment run that already produced the retained local patch and exhausted its accepted actionable claims can advance directly into validation instead of failing the next cycle on the implement turn cap
   - Seeded/manual PR-comment runs do not terminate as `{:done, :missing}` after a successful turn just because no manual-store issue record exists; the runtime keeps the manual issue shell alive and advances to the next stage

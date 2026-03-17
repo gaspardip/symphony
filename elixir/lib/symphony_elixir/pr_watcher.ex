@@ -141,7 +141,8 @@ defmodule SymphonyElixir.PRWatcher do
             %{
               status: "ok",
               pr_url: Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url"),
-              review_decision: Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
+              review_decision:
+                Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision"),
               pending_drafts_count: length(items),
               actionable_items_count: actionable_items_count,
               items: items
@@ -257,7 +258,8 @@ defmodule SymphonyElixir.PRWatcher do
       submitted_at: nil,
       draft_state: Map.get(persisted, "draft_state", "drafted"),
       draft_reply: Map.get(persisted, "draft_reply"),
-      resolution_recommendation: Map.get(persisted, "resolution_recommendation", "keep_open_until_confirmed"),
+      resolution_recommendation:
+        Map.get(persisted, "resolution_recommendation", "keep_open_until_confirmed"),
       source_class: Map.get(persisted, "source_class", "unknown"),
       claim_type: Map.get(persisted, "claim_type", "unclear"),
       veracity_score: Map.get(persisted, "veracity_score", 0.0),
@@ -388,8 +390,10 @@ defmodule SymphonyElixir.PRWatcher do
       reply_id = Map.get(reply, :id) || Map.get(reply, "id")
       reply_url = normalize_pr_url(Map.get(reply, :url) || Map.get(reply, "url"))
 
-      (is_binary(persisted_reply_id) and persisted_reply_id != "" and reply_id == persisted_reply_id) or
-        (is_binary(persisted_reply_url) and persisted_reply_url != "" and reply_url == persisted_reply_url)
+      (is_binary(persisted_reply_id) and persisted_reply_id != "" and
+         reply_id == persisted_reply_id) or
+        (is_binary(persisted_reply_url) and persisted_reply_url != "" and
+           reply_url == persisted_reply_url)
     end)
   end
 
@@ -655,7 +659,8 @@ defmodule SymphonyElixir.PRWatcher do
   end
 
   defp do_post_approved_drafts(_workspace, pr_url, thread_states, github_client, github_opts) do
-    Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state}, {acc, posted, skipped} ->
+    Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state},
+                                                         {acc, posted, skipped} ->
       draft_state = thread_state |> Map.get("draft_state", "drafted") |> to_string()
       draft_reply = Map.get(thread_state, "draft_reply")
 
@@ -724,6 +729,98 @@ defmodule SymphonyElixir.PRWatcher do
     CredentialRegistry.allow?(
       "github",
       "comment_post",
+      policy_pack: Keyword.get(opts, :policy_pack),
+      company_name: Keyword.get(opts, :company_name) || Config.company_name(),
+      repo_url: Keyword.get(opts, :repo_url) || Config.company_repo_url()
+    )
+  end
+
+  @spec resolve_posted_threads(String.t(), map(), keyword()) ::
+          {:ok, map(), map()} | {:error, term()}
+  def resolve_posted_threads(pr_url, thread_states, opts \\ [])
+      when is_binary(pr_url) and is_map(thread_states) do
+    pack = PolicyPack.resolve(Keyword.get(opts, :policy_pack))
+
+    cond do
+      not PolicyPack.thread_resolution_allowed?(pack) ->
+        {:error, {:thread_resolution_forbidden, PolicyPack.name_string(pack)}}
+
+      true ->
+        with :ok <- ensure_thread_resolve_scope(opts),
+             {updated_threads, resolved_count, skipped_count} <-
+               do_resolve_posted_threads(
+                 pr_url,
+                 thread_states,
+                 Keyword.get(opts, :github_client, configured_github_client()),
+                 Keyword.merge(
+                   configured_github_client_opts(),
+                   Keyword.get(opts, :github_client_opts, [])
+                 )
+               ),
+             true <- resolved_count > 0 do
+          {:ok, updated_threads, %{resolved_count: resolved_count, skipped_count: skipped_count}}
+        else
+          false -> {:error, :no_resolvable_review_threads}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp do_resolve_posted_threads(pr_url, thread_states, github_client, github_opts) do
+    Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state},
+                                                         {acc, resolved, skipped} ->
+      draft_state = thread_state |> Map.get("draft_state", "drafted") |> to_string()
+      resolution_recommendation = Map.get(thread_state, "resolution_recommendation")
+      implementation_status = Map.get(thread_state, "implementation_status")
+      resolution_state = Map.get(thread_state, "resolution_state")
+
+      cond do
+        not String.starts_with?(to_string(thread_key), "comment:") ->
+          {acc, resolved, skipped}
+
+        draft_state != "posted" ->
+          {acc, resolved, skipped}
+
+        resolution_recommendation != "resolve_after_change" or
+            implementation_status != "addressed" ->
+          {acc, resolved, skipped}
+
+        resolution_state == "resolved" ->
+          {acc, resolved, skipped}
+
+        not function_exported?(github_client, :resolve_review_comment_thread, 3) ->
+          {acc, resolved, skipped + 1}
+
+        true ->
+          target_comment_id =
+            thread_key
+            |> to_string()
+            |> String.split(":", parts: 2)
+            |> List.last()
+
+          case github_client.resolve_review_comment_thread(pr_url, target_comment_id, github_opts) do
+            {:ok, _reply} ->
+              updated =
+                thread_state
+                |> Map.put("resolution_state", "resolved")
+                |> Map.put(
+                  "resolved_at",
+                  DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+                )
+
+              {Map.put(acc, thread_key, updated), resolved + 1, skipped}
+
+            {:error, _reason} ->
+              {acc, resolved, skipped + 1}
+          end
+      end
+    end)
+  end
+
+  defp ensure_thread_resolve_scope(opts) do
+    CredentialRegistry.allow?(
+      "github",
+      "thread_resolve",
       policy_pack: Keyword.get(opts, :policy_pack),
       company_name: Keyword.get(opts, :company_name) || Config.company_name(),
       repo_url: Keyword.get(opts, :repo_url) || Config.company_repo_url()

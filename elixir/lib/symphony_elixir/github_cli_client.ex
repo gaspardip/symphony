@@ -286,6 +286,45 @@ defmodule SymphonyElixir.GitHubCLIClient do
     end
   end
 
+  @impl true
+  def resolve_review_comment_thread(pr_url, comment_id, opts)
+      when is_binary(pr_url) and is_binary(comment_id) do
+    runner = command_runner(opts)
+
+    with {:ok, %{owner: owner, repo: repo, number: number}} <- parse_pr_identity(pr_url),
+         {:ok, thread_id, lookup_output} <-
+           find_review_thread_id(runner, owner, repo, number, comment_id),
+         {output, 0} <-
+           runner.(
+             "gh",
+             [
+               "api",
+               "graphql",
+               "-f",
+               "query=#{resolve_review_thread_query()}",
+               "-F",
+               "threadId=#{thread_id}"
+             ],
+             stderr_to_stdout: true
+           ),
+         {:ok, payload} <- Jason.decode(output),
+         true <- get_in(payload, ["data", "resolveReviewThread", "thread", "isResolved"]) == true do
+      {:ok, %{thread_id: thread_id, resolved: true, output: lookup_output <> "\n" <> output}}
+    else
+      {:error, reason} ->
+        {:error, reason}
+
+      {output, status} when is_integer(status) ->
+        {:error, {:review_thread_resolve_failed, status, output}}
+
+      false ->
+        {:error, :review_thread_resolve_failed}
+
+      _ ->
+        {:error, :review_thread_resolve_failed}
+    end
+  end
+
   defp normalize_pr_create_output(output, workspace, opts) do
     url =
       output
@@ -380,7 +419,8 @@ defmodule SymphonyElixir.GitHubCLIClient do
       updated_at: blank_to_nil(comment["updated_at"]),
       url: blank_to_nil(comment["html_url"]),
       author: get_in(comment, ["user", "login"]),
-      in_reply_to_id: comment_reply_parent_id(comment) && to_string(comment_reply_parent_id(comment))
+      in_reply_to_id:
+        comment_reply_parent_id(comment) && to_string(comment_reply_parent_id(comment))
     }
   end
 
@@ -404,5 +444,121 @@ defmodule SymphonyElixir.GitHubCLIClient do
 
   defp command_runner(opts) do
     Keyword.get(opts, :gh_runner, &System.cmd/3)
+  end
+
+  defp find_review_thread_id(
+         runner,
+         owner,
+         repo,
+         number,
+         comment_id,
+         cursor \\ nil,
+         acc_output \\ ""
+       )
+
+  defp find_review_thread_id(runner, owner, repo, number, comment_id, cursor, acc_output) do
+    args =
+      [
+        "api",
+        "graphql",
+        "-f",
+        "query=#{review_threads_query()}",
+        "-F",
+        "owner=#{owner}",
+        "-F",
+        "repo=#{repo}",
+        "-F",
+        "number=#{number}"
+      ] ++ if(cursor, do: ["-F", "after=#{cursor}"], else: [])
+
+    case runner.("gh", args, stderr_to_stdout: true) do
+      {output, 0} ->
+        with {:ok, payload} <- Jason.decode(output),
+             threads when is_list(threads) <-
+               get_in(payload, ["data", "repository", "pullRequest", "reviewThreads", "nodes"]) do
+          case Enum.find(threads, &thread_matches_comment?(&1, comment_id)) do
+            %{"id" => thread_id} when is_binary(thread_id) and thread_id != "" ->
+              {:ok, thread_id, acc_output <> output}
+
+            _ ->
+              page_info =
+                get_in(payload, ["data", "repository", "pullRequest", "reviewThreads", "pageInfo"]) ||
+                  %{}
+
+              if page_info["hasNextPage"] do
+                find_review_thread_id(
+                  runner,
+                  owner,
+                  repo,
+                  number,
+                  comment_id,
+                  page_info["endCursor"],
+                  acc_output <> output
+                )
+              else
+                {:error, :review_thread_not_found}
+              end
+          end
+        else
+          _ -> {:error, :review_thread_not_found}
+        end
+
+      {output, status} ->
+        {:error, {:review_thread_lookup_failed, status, output}}
+    end
+  end
+
+  defp thread_matches_comment?(thread, comment_id) when is_map(thread) do
+    thread
+    |> get_in(["comments", "nodes"])
+    |> List.wrap()
+    |> Enum.any?(fn comment ->
+      to_string(comment["databaseId"]) == to_string(comment_id)
+    end)
+  end
+
+  defp thread_matches_comment?(_thread, _comment_id), do: false
+
+  defp review_threads_query do
+    """
+    query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100, after: $after) {
+            nodes {
+              id
+              isResolved
+              comments(first: 100) {
+                nodes {
+                  databaseId
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+        }
+      }
+    }
+    """
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+  end
+
+  defp resolve_review_thread_query do
+    """
+    mutation($threadId: ID!) {
+      resolveReviewThread(input: {threadId: $threadId}) {
+        thread {
+          id
+          isResolved
+        }
+      }
+    }
+    """
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
   end
 end
