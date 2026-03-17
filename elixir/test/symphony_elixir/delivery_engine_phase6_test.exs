@@ -366,9 +366,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     )
 
     assert {:stop, :merge_readiness_failed} =
-             DeliveryEngine.run(workspace, issue, nil,
-               github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessFailureGitHubClient
-             )
+             DeliveryEngine.run(workspace, issue, nil, github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessFailureGitHubClient)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
 
