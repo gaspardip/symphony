@@ -45,6 +45,7 @@ acceptance_signals:
   - Fully autonomous PR-comment runs keep low-confidence deferred or insufficient-evidence inline replies as local drafts instead of auto-posting them publicly
   - Fully autonomous PR-comment runs can refresh already-posted inline replies in place when a later adjudication or proof pass changes the recommended public response
   - GitHub review reconciliation imports already-posted inline reply ids, urls, timestamps, and body text back into persisted thread state so stale local drafts do not drift from the live PR thread
+  - Live GitHub reply reconciliation preserves persisted addressed-state intent for already-posted inline replies, so merge-readiness can still refresh stale “next branch update” wording and resolve the thread after the branch update lands
   - Await-checks can refresh already-posted inline replies, resolve outdated safe threads, and keep the persisted `review_threads` state aligned with GitHub before the run decides whether the PR is merge-ready
   - Presenter issue payloads carry the persisted `last_merge_readiness` summary even outside running snapshots, so operators can inspect PR-hygiene counts from detail views after the passive pass completes
   - Language false positives such as Elixir `true` versus `:true` can be contradicted locally instead of being promoted into fake correctness work

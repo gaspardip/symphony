@@ -367,13 +367,26 @@ defmodule SymphonyElixir.PRWatcher do
         item
 
       reply ->
-        item
-        |> Map.put(:draft_state, "posted")
-        |> Map.put(:draft_reply, Map.get(reply, :body) || Map.get(item, :draft_reply))
-        |> Map.put(:posted_reply_id, Map.get(reply, :id))
-        |> Map.put(:posted_reply_url, Map.get(reply, :url))
-        |> Map.put(:posted_at, Map.get(reply, :updated_at) || Map.get(reply, :created_at))
-        |> Map.put(:reply_refresh_needed, false)
+        draft_reply =
+          Map.get(persisted, "draft_reply") ||
+            Map.get(reply, :body) ||
+            Map.get(item, :draft_reply)
+
+        updated_item =
+          item
+          |> Map.put(:draft_state, "posted")
+          |> Map.put(:draft_reply, draft_reply)
+          |> Map.put(:posted_reply_id, Map.get(reply, :id))
+          |> Map.put(:posted_reply_url, Map.get(reply, :url))
+          |> Map.put(:posted_at, Map.get(reply, :updated_at) || Map.get(reply, :created_at))
+          |> Map.put(:reply_refresh_needed, Map.get(persisted, "reply_refresh_needed", false))
+
+        Enum.reduce([:implementation_status, :verification_status, :addressed_summary], updated_item, fn field, acc ->
+          case Map.fetch(persisted, Atom.to_string(field)) do
+            {:ok, value} -> Map.put(acc, field, value)
+            :error -> acc
+          end
+        end)
     end
   end
 
