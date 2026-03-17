@@ -375,6 +375,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   the audited total still missed by `0.04%`, so the next slice added one higher-yield runtime-path test instead of more threshold-chasing edge cases. `delivery_engine_phase6_test.exs` now proves a clean passive `merge_readiness` run hands off to `await_checks` and resumes normal required-check polling without booting Codex.
 - Latest focused passive-handoff validation on March 17, 2026:
   `mix test test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `57 tests, 0 failures`.
+- Live reply-reconciliation fix on March 17, 2026:
+  the second live merge-readiness proof on disposable PR `#7` exposed a real two-part gap in posted-reply reconciliation. `SymphonyElixir.PRWatcher.reconcile_posted_reply/3` preserved the public reply id/url from GitHub but discarded the persisted `implementation_status`, refresh intent, and desired draft reply body. Then `SymphonyElixir.DeliveryEngine.refreshed_review_thread_state/2` rebuilt `review_threads` from the reconciled items without carrying those same addressed-state fields forward. Together that left addressed threads stuck as ordinary posted comments, so merge-readiness could not rewrite stale “next branch update” wording or resolve the thread after a branch update landed. Both seams now preserve the persisted addressed/reply-refresh state while still rehydrating live posted-reply metadata from GitHub.
+- Latest focused live-reconciliation validation on March 17, 2026:
+  `mix test test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `73 tests, 0 failures`, and `mix dialyzer --format short` remained clean afterward (`Total errors: 165, Skipped: 165, Unnecessary Skips: 7`).
 
 ## Next Step
 Run the full harness validation gate, then push the CI-webhook follow-up slice and wire GitHub `check_run` / `workflow_run` webhooks into the stable ingress so failed required checks can reopen Symphony autonomously.

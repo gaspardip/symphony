@@ -89,7 +89,33 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient do
   def review_feedback(_workspace, _opts), do: {:error, :review_feedback_unavailable}
 
   @impl true
-  def review_feedback_by_pr_url(_pr_url, _opts), do: {:error, :review_feedback_unavailable}
+  def review_feedback_by_pr_url(pr_url, _opts) do
+    {:ok,
+     %{
+       pr_url: pr_url,
+       review_decision: "",
+       reviews: [],
+       comments: [
+         %{
+           id: 2_926_989_348,
+           body: "Please confirm the branch includes the requested router update.",
+           path: "lib/example.ex",
+           line: 12,
+           author: "reviewer",
+           replies: [
+             %{
+               id: "reply-2926989348",
+               body: "I addressed this concern locally and will include it in the next branch update. Updated the router.",
+               url: "#{pr_url}#reply-2926989348",
+               author: "gaspardip",
+               created_at: "2026-03-17T20:00:00Z",
+               updated_at: "2026-03-17T20:01:00Z"
+             }
+           ]
+         }
+       ]
+     }}
+  end
 
   @impl true
   def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
@@ -318,6 +344,108 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert body =~ "it is now included on the branch"
     assert_receive {:merge_readiness_review_resolved, ^pr_url, "2926989348"}
     assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolution_state"]) == "resolved"
+    assert get_in(updated_state, [:last_merge_readiness, :resolved_review_threads]) == 1
+  end
+
+  test "merge readiness preserves addressed reply intent through live reconciliation before refreshing and resolving" do
+    workspace = "/tmp/symphony-merge-readiness"
+    pr_url = "https://github.com/example/repo/pull/42"
+
+    state = %{
+      stage: "await_checks",
+      pr_url: pr_url,
+      policy_pack: :private_autopilot,
+      repo_url: "https://github.com/example/repo",
+      last_pr_body_validation: %{status: "passed"},
+      review_threads: %{
+        "comment:2926989348" => %{
+          "thread_key" => "comment:2926989348",
+          "kind" => "comment",
+          "draft_state" => "posted",
+          "draft_reply" => "I addressed this concern locally and will include it in the next branch update. Updated the router.",
+          "implementation_status" => "addressed",
+          "resolution_recommendation" => "resolve_after_change",
+          "posted_reply_id" => "reply-2926989348",
+          "posted_reply_url" => "#{pr_url}#reply-2926989348",
+          "reply_refresh_needed" => true
+        }
+      },
+      review_claims: %{
+        "comment:2926989348" => %{
+          "thread_key" => "comment:2926989348",
+          "implementation_status" => "addressed",
+          "verification_status" => "verified_review_decision",
+          "addressed_summary" => "Updated the router."
+        }
+      }
+    }
+
+    assert {:ok, updated_state} =
+             DeliveryEngine.maintain_merge_readiness_for_test(
+               workspace,
+               %{},
+               state,
+               %{pr_url: pr_url},
+               github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient,
+               github_client_opts: [test_pid: self(), pr_url: pr_url],
+               persist_merge_readiness: false
+             )
+
+    assert_receive {:merge_readiness_review_updated, ^pr_url, "reply-2926989348", body}
+    assert body =~ "it is now included on the branch"
+    assert_receive {:merge_readiness_review_resolved, ^pr_url, "2926989348"}
+    assert get_in(updated_state, [:review_threads, "comment:2926989348", "implementation_status"]) == "addressed"
+    assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolution_state"]) == "resolved"
+  end
+
+  test "merge readiness preserves resolved thread bookkeeping across later live reconciliation" do
+    workspace = "/tmp/symphony-merge-readiness"
+    pr_url = "https://github.com/example/repo/pull/42"
+
+    state = %{
+      stage: "await_checks",
+      pr_url: pr_url,
+      policy_pack: :private_autopilot,
+      repo_url: "https://github.com/example/repo",
+      last_pr_body_validation: %{status: "passed"},
+      review_threads: %{
+        "comment:2926989348" => %{
+          "thread_key" => "comment:2926989348",
+          "kind" => "comment",
+          "draft_state" => "posted",
+          "draft_reply" => "I addressed this concern locally and it is now included on the branch. Updated the router.",
+          "implementation_status" => "addressed",
+          "resolution_recommendation" => "resolve_after_change",
+          "posted_reply_id" => "reply-2926989348",
+          "posted_reply_url" => "#{pr_url}#reply-2926989348",
+          "resolution_state" => "resolved",
+          "resolved_at" => "2026-03-17T21:10:36Z"
+        }
+      },
+      review_claims: %{
+        "comment:2926989348" => %{
+          "thread_key" => "comment:2926989348",
+          "implementation_status" => "addressed",
+          "verification_status" => "verified_review_decision",
+          "addressed_summary" => "Updated the router."
+        }
+      }
+    }
+
+    assert {:ok, updated_state} =
+             DeliveryEngine.maintain_merge_readiness_for_test(
+               workspace,
+               %{},
+               state,
+               %{pr_url: pr_url},
+               github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient,
+               github_client_opts: [test_pid: self(), pr_url: pr_url],
+               persist_merge_readiness: false
+             )
+
+    refute_received {:merge_readiness_review_resolved, ^pr_url, "2926989348"}
+    assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolution_state"]) == "resolved"
+    assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolved_at"]) == "2026-03-17T21:10:36Z"
     assert get_in(updated_state, [:last_merge_readiness, :resolved_review_threads]) == 1
   end
 

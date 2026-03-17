@@ -113,6 +113,38 @@ defmodule SymphonyElixir.PRWatcherTest do
     assert comment_item.reply_refresh_needed == false
   end
 
+  test "review_feedback preserves addressed posted reply state during live reconciliation" do
+    feedback =
+      PRWatcher.review_feedback(
+        "/tmp/symphony-pr-feedback",
+        policy_pack: :private_autopilot,
+        github_client: __MODULE__.FakeGitHubClient,
+        thread_states: %{
+          "comment:2" => %{
+            "draft_state" => "posted",
+            "draft_reply" => "I addressed this concern locally and will include it in the next branch update. Updated the router.",
+            "posted_reply_id" => "3",
+            "posted_reply_url" => "https://github.com/example/repo/pull/42#discussion_r3",
+            "implementation_status" => "addressed",
+            "resolution_recommendation" => "resolve_after_change",
+            "reply_refresh_needed" => true
+          }
+        }
+      )
+
+    comment_item = Enum.find(feedback.items, &(&1.thread_key == "comment:2"))
+
+    assert comment_item.draft_state == "posted"
+    assert comment_item.posted_reply_id == "3"
+
+    assert comment_item.draft_reply ==
+             "I addressed this concern locally and will include it in the next branch update. Updated the router."
+
+    assert comment_item.implementation_status == "addressed"
+    assert comment_item.resolution_recommendation == "resolve_after_change"
+    assert comment_item.reply_refresh_needed == true
+  end
+
   test "review_feedback falls back to pr_url when workspace lookup is unavailable" do
     feedback =
       PRWatcher.review_feedback(
