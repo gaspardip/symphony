@@ -818,6 +818,83 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert refreshed_state.last_rule_id == "operator.refresh_merge_readiness"
   end
 
+  test "refresh merge readiness rejects an active implement-stage running entry" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-refresh-merge-active-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      tracker_kind: "memory"
+    )
+
+    previous_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      ManualIssueStore.submit(%{
+        "id" => "merge-readiness-active-#{System.unique_integer([:positive])}",
+        "identifier" => "MT-MERGE-ACTIVE",
+        "title" => "Merge readiness active entry",
+        "description" => "reject refresh while implement is active",
+        "state" => "In Progress",
+        "acceptance_criteria" => ["Keep active implement work running"],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-active")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        pr_url: "https://github.com/example/repo/pull/24",
+        last_pr_body_validation: %{status: "failed"}
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RefreshMergeReadinessActiveOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      if is_nil(previous_issues) do
+        Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      else
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{
+        issue: issue,
+        identifier: issue.identifier,
+        workspace_path: workspace,
+        dispatch_stage: "implement",
+        passive?: false
+      }
+
+      %{state | running: %{issue.id => running_entry}}
+    end)
+
+    payload = Orchestrator.refresh_merge_readiness(orchestrator_name, issue.identifier)
+    assert payload.ok == false
+    assert payload.action == "refresh_merge_readiness"
+    assert payload.error == "issue is currently running an active stage"
+
+    {:ok, refreshed_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert refreshed_state.stage == "await_checks"
+    assert refreshed_state.last_rule_id != "operator.refresh_merge_readiness"
+  end
+
   test "retry now restores a blocked manual issue to its last actionable stage" do
     workspace_root =
       Path.join(

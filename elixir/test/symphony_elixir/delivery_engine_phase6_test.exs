@@ -113,6 +113,40 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient do
   end
 end
 
+defmodule SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessFailureGitHubClient do
+  @behaviour SymphonyElixir.GitHubClient
+
+  @impl true
+  def existing_pull_request(_workspace, _opts) do
+    {:ok, %{url: "https://github.com/example/repo/pull/43", state: "OPEN"}}
+  end
+
+  @impl true
+  def edit_pull_request(_workspace, _title, _body_file, _opts), do: {:error, :pr_update_failed}
+
+  @impl true
+  def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+    do: {:error, :unsupported}
+
+  @impl true
+  def merge_pull_request(_workspace, _opts), do: {:error, :unsupported}
+
+  @impl true
+  def review_feedback(_workspace, _opts), do: {:error, :review_feedback_unavailable}
+
+  @impl true
+  def review_feedback_by_pr_url(_pr_url, _opts), do: {:error, :review_feedback_unavailable}
+
+  @impl true
+  def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+  @impl true
+  def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+
+  @impl true
+  def resolve_review_comment_thread(_pr_url, _comment_id, _opts), do: {:error, :unsupported}
+end
+
 defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   use SymphonyElixir.TestSupport
 
@@ -285,6 +319,63 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert_receive {:merge_readiness_review_resolved, ^pr_url, "2926989348"}
     assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolution_state"]) == "resolved"
     assert get_in(updated_state, [:last_merge_readiness, :resolved_review_threads]) == 1
+  end
+
+  test "merge_readiness blocks when PR maintenance fails" do
+    {workspace, issue} = stage_workspace!("merge-readiness-failed")
+    issue_id = issue.id
+    fixture_root = Path.expand("../../..", __DIR__)
+
+    File.mkdir_p!(Path.join(workspace, ".github"))
+    File.mkdir_p!(Path.join([workspace, "elixir", "lib", "mix", "tasks"]))
+
+    File.ln_s!(
+      Path.join([fixture_root, ".github", "pull_request_template.md"]),
+      Path.join([workspace, ".github", "pull_request_template.md"])
+    )
+
+    File.ln_s!(
+      Path.join([fixture_root, "elixir", "mix.exs"]),
+      Path.join([workspace, "elixir", "mix.exs"])
+    )
+
+    File.ln_s!(
+      Path.join([fixture_root, "elixir", ".mise.toml"]),
+      Path.join([workspace, "elixir", ".mise.toml"])
+    )
+
+    File.ln_s!(
+      Path.join([fixture_root, "elixir", "lib", "mix", "tasks", "pr_body.check.ex"]),
+      Path.join([workspace, "elixir", "lib", "mix", "tasks", "pr_body.check.ex"])
+    )
+
+    RunStateStore.transition(workspace, "merge_readiness", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      issue_source: issue.source,
+      branch: "codex/merge-readiness",
+      base_branch: "main",
+      pr_url: "https://github.com/example/repo/pull/43",
+      last_pr_body_validation: %{status: "failed"}
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("merge-readiness-failed")
+    )
+
+    assert {:stop, :merge_readiness_failed} =
+             DeliveryEngine.run(workspace, issue, nil,
+               github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessFailureGitHubClient
+             )
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "blocked"
+    assert state.last_rule_id == "merge_readiness.failed"
+    assert state.last_failure_class == "pr_hygiene"
   end
 
   test "checkout blocks when the harness is missing its version" do
