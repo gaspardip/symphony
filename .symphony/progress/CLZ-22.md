@@ -18,6 +18,7 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Validate with the harness contract, tests, lint, and smoke coverage, then prepare the PR.
 
 ## Work Log
+- Added two more `RepoCompatibility` coverage cases on March 17, 2026 to recover the final `make-all` coverage drift after the stale reply-test fix: one for missing workspaces and one for missing base branches via `compatible?/2`, targeting the `86.25%` repo audit floor without weakening the gate.
 - Fixed the next hidden `make-all` blocker on March 17, 2026 after the repo-compat repair: `review_evidence_collector_test.exs` now expects the published addressed-claim reply wording (`included on the branch`) instead of the older draft phrasing (`next branch update`), matching the runtime behavior already shipped on the branch.
 - Fixed the remaining `make-all` PR blocker on March 17, 2026 by making the repo-compatibility tests deterministic in CI: `repo_compat_task_test.exs` and `repo_compatibility_test.exs` now build temporary Git workspaces with a valid harness and local `main` branch instead of asserting against an ambient checkout that may not have `origin/main` on GitHub Actions.
 - Re-ran the exact failing repo-compat suites successfully with `mix test test/symphony_elixir/repo_compat_task_test.exs test/symphony_elixir/repo_compatibility_test.exs` (`4 tests, 0 failures`) and confirmed `mix dialyzer --format short` remained clean after the test-only fix.

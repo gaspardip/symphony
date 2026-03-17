@@ -61,6 +61,66 @@ defmodule SymphonyElixir.RepoCompatibilityTest do
     end
   end
 
+  test "reports missing workspaces as incompatible" do
+    workspace = temp_workspace("repo-compat-missing")
+
+    assert {:ok, report} = RepoCompatibility.report(workspace)
+    refute report.compatible
+    assert "git_checkout" in report.failing_checks
+    assert "harness_valid" in report.failing_checks
+    assert "branch_base_setup" in report.failing_checks
+  end
+
+  test "reports missing base branches as incompatible" do
+    workspace = temp_workspace("repo-compat-no-base")
+
+    try do
+      init_git_workspace!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+      File.write!(
+        Path.join(workspace, ".symphony/harness.yml"),
+        """
+        version: 1
+        base_branch: release
+        preflight:
+          command:
+            - ./scripts/preflight.sh
+        validation:
+          command:
+            - ./scripts/validate.sh
+        smoke:
+          command:
+            - ./scripts/smoke.sh
+        post_merge:
+          command:
+            - ./scripts/post-merge.sh
+        artifacts:
+          command:
+            - ./scripts/artifacts.sh
+        verification:
+          behavioral_proof:
+            required: true
+            mode: unit_first
+            source_paths:
+              - lib/
+            test_paths:
+              - test/
+        pull_request:
+          required_checks:
+            - make-all
+        """
+      )
+
+      assert {:ok, compatible?, report} = RepoCompatibility.compatible?(workspace)
+      refute compatible?
+      refute report.compatible
+      assert "branch_base_setup" in report.failing_checks
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   defp temp_workspace(suffix) do
     Path.join(System.tmp_dir!(), "symphony-#{suffix}-#{System.unique_integer([:positive])}")
   end
