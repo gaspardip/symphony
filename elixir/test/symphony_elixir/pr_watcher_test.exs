@@ -122,8 +122,7 @@ defmodule SymphonyElixir.PRWatcherTest do
         thread_states: %{
           "comment:2" => %{
             "draft_state" => "posted",
-            "draft_reply" =>
-              "I addressed this concern locally and will include it in the next branch update. Updated the router.",
+            "draft_reply" => "I addressed this concern locally and will include it in the next branch update. Updated the router.",
             "posted_reply_id" => "3",
             "posted_reply_url" => "https://github.com/example/repo/pull/42#discussion_r3",
             "implementation_status" => "addressed",
@@ -137,6 +136,7 @@ defmodule SymphonyElixir.PRWatcherTest do
 
     assert comment_item.draft_state == "posted"
     assert comment_item.posted_reply_id == "3"
+
     assert comment_item.draft_reply ==
              "I addressed this concern locally and will include it in the next branch update. Updated the router."
 

@@ -97,7 +97,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient do
        reviews: [],
        comments: [
          %{
-           id: 2926989348,
+           id: 2_926_989_348,
            body: "Please confirm the branch includes the requested router update.",
            path: "lib/example.ex",
            line: 12,
@@ -105,8 +105,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient do
            replies: [
              %{
                id: "reply-2926989348",
-               body:
-                 "I addressed this concern locally and will include it in the next branch update. Updated the router.",
+               body: "I addressed this concern locally and will include it in the next branch update. Updated the router.",
                url: "#{pr_url}#reply-2926989348",
                author: "gaspardip",
                created_at: "2026-03-17T20:00:00Z",
@@ -363,8 +362,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
           "thread_key" => "comment:2926989348",
           "kind" => "comment",
           "draft_state" => "posted",
-          "draft_reply" =>
-            "I addressed this concern locally and will include it in the next branch update. Updated the router.",
+          "draft_reply" => "I addressed this concern locally and will include it in the next branch update. Updated the router.",
           "implementation_status" => "addressed",
           "resolution_recommendation" => "resolve_after_change",
           "posted_reply_id" => "reply-2926989348",
