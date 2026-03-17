@@ -31,7 +31,7 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
       assert state.await_checks_polls == 0
       assert state.merge_attempts == 0
       assert state.stage_transition_counts == %{}
-      assert state.last_check_statuses == [%{name: "ci / validate", status: "IN_PROGRESS"}]
+      assert [%{name: "ci / validate", status: "IN_PROGRESS"}] = state.last_check_statuses
       assert state.last_required_checks_state == nil
     after
       File.rm_rf(workspace)

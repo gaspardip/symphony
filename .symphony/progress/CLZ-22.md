@@ -328,6 +328,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   the pushed `e58922f` branch exposed two stale test assumptions in GitHub Actions: `delivery_runtime_phase6_backfill_test.exs` still expected the old pre-publish “next branch update” wording, and `repo_compat_task_test.exs` depended on a machine-specific `/Users/gaspar/src/events` checkout that does not exist on GitHub runners. The tests now assert the shipped “included on the branch” reply wording and use the current repository root as the known-compatible workspace, so local and CI environments exercise the same contract.
 - Latest focused CI-repair validation on March 17, 2026:
   `mix test test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs test/symphony_elixir/repo_compat_task_test.exs` passed with `38 tests, 0 failures`, and `mix dialyzer --format short` remained clean afterward (`Total errors: 165, Skipped: 165, Unnecessary Skips: 7`).
+- Final CI stale-test cleanup on March 17, 2026:
+  the next PR run on `dafd968` exposed one more group of stale assertions in the coverage/backfill suites: tests were still matching the old check-status map shape without `workflow_name`, and one recovery fixture intentionally preserved the older persisted shape. Those assertions now either include the normalized `workflow_name` field when testing `RunInspector` output or match only the stable persisted fields when validating older stored run-state payloads.
+- Latest focused stale-test cleanup validation on March 17, 2026:
+  `mix test test/symphony_elixir/phase6_coverage_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs test/symphony_elixir/delivery_runtime_phase6_backfill_test.exs test/symphony_elixir/repo_compat_task_test.exs` passed with `76 tests, 0 failures`, and `mix dialyzer --format short` remained clean afterward (`Total errors: 165, Skipped: 165, Unnecessary Skips: 7`).
 
 ## Next Step
-Push the CI follow-up test repair, rerun the fresh PR `#1` GitHub Actions checks, and confirm the branch is green with all review threads already resolved.
+Push the final stale-test cleanup, rerun PR `#1` GitHub Actions on the updated head, and confirm the branch is green with all review threads already resolved.
