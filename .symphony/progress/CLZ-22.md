@@ -18,6 +18,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Validate with the harness contract, tests, lint, and smoke coverage, then prepare the PR.
 
 ## Work Log
+- Added a repo-owned telemetry smoke test on March 17, 2026 that emits real stage, token, and debug-artifact telemetry, then proves `/metrics`, `/api/v1/state`, and `/api/v1/reports/delivery` stay usable operator surfaces during dogfood runs.
+- Added `docs/OBSERVABILITY_RUNBOOK.md` plus agent-index and harness-doc updates so agents can find dashboard/API endpoints, workspace `run_state.json`, metrics, and debug artifact roots without rediscovery.
 - Added an operator-facing `refresh_merge_readiness` control on March 17, 2026 so the dashboard can rerun PR hygiene without a full `retry_now`: the presenter forwards the new action, the orchestrator restarts passive merge-side work back at `merge_readiness`, and focused control coverage now proves the run-state transition through the real operator surface.
 - Stabilized the `make-all` coverage recovery for `codex/merge-readiness` on March 17, 2026 by replacing a hanging runtime-loop attempt with deterministic `refresh_merge_readiness/2` operator coverage: missing-run-state and paused-issue branches are now asserted directly in `orchestrator_controls_phase6_test.exs`, and the flaky posted-thread-refresh experiment was removed from `delivery_engine_phase6_test.exs`.
 - Added deterministic audit-lift coverage on March 17, 2026 for low-scoring helper seams that were still holding PR `#5` below the repo threshold: `github_cli_client_test.exs` now covers reply-update success/failure, invalid PR URLs, review-feedback fetch failures, and review-thread lookup/resolve failure paths while keeping `harness_check_task_test.exs` scoped to reachable task entrypoints only.
@@ -107,6 +109,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Verified the relay live on March 13, 2026: posting a signed `pull_request_review` webhook to the local stable runner at `http://127.0.0.1:4040/api/webhooks/github` advanced both stable and canary `github_webhooks.last_accepted_at`, and the canary `CLZ-22` run remained in `review_verification` with `next_human_action=nil`, confirming the forwarded webhook resumed on canary instead of requiring a direct GitHub target.
 
 ## Evidence
+- Telemetry smoke: `cd elixir && mise exec -- mix test test/symphony_elixir/telemetry_smoke_test.exs`
+- Repo smoke with telemetry proof: `./scripts/symphony-smoke.sh`
 - Linear issue: `CLZ-22`
 - Worktree: `/Users/gaspar/src/symphony-clz-22`
 - Branch: `codex/clz-22-observability`
@@ -381,4 +385,4 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   `mix test test/symphony_elixir/pr_watcher_test.exs test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `73 tests, 0 failures`, and `mix dialyzer --format short` remained clean afterward (`Total errors: 165, Skipped: 165, Unnecessary Skips: 7`).
 
 ## Next Step
-Run the full harness validation gate, then push the CI-webhook follow-up slice and wire GitHub `check_run` / `workflow_run` webhooks into the stable ingress so failed required checks can reopen Symphony autonomously.
+Dogfood one fresh self-host run from `main` with the telemetry smoke and observability runbook in place, then use the resulting traces, metrics, and issue-state payloads to define the next end-to-end telemetry gaps instead of reconstructing them from branch-local state.
