@@ -426,7 +426,7 @@ defmodule SymphonyElixir.ReviewEvidenceCollectorTest do
       })
 
     assert reply_plan.draft_reply =~ "addressed this concern locally"
-    assert reply_plan.draft_reply =~ "next branch update"
+    assert reply_plan.draft_reply =~ "included on the branch"
     assert reply_plan.draft_reply =~ "Normalized the metrics route"
     assert reply_plan.resolution_recommendation == "resolve_after_change"
   end
