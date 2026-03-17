@@ -211,6 +211,14 @@ defmodule SymphonyElixir.DeliveryEngine do
     do: finalize_published_review_threads(review_threads)
 
   @doc false
+  @spec maintain_merge_readiness_for_test(Path.t(), map(), map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def maintain_merge_readiness_for_test(workspace, issue, state, inspection, opts \\ [])
+      when is_binary(workspace) and is_map(issue) and is_map(state) and is_map(inspection) do
+    maybe_maintain_merge_readiness(workspace, issue, state, inspection, opts)
+  end
+
+  @doc false
   @spec maybe_resolve_autonomous_review_threads_for_test(
           map(),
           Path.t(),
@@ -1298,192 +1306,203 @@ defmodule SymphonyElixir.DeliveryEngine do
          inspection,
          opts
        ) do
-    state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
-    await_checks_polls = Map.get(state, :await_checks_polls, 0) + 1
-    required_checks = effective_required_checks(inspection, state)
-    check_rollup = RunInspector.required_checks_rollup(required_checks, inspection.check_statuses)
-    await_checks_attrs = await_checks_state_attrs(inspection, check_rollup, await_checks_polls)
-    policy_resolution = resolve_policy(issue, state, workspace)
-
-    effective_policy_class =
-      case policy_resolution do
-        {:ok, resolution} -> IssuePolicy.class_to_string(resolution.class)
-        _ -> Map.get(state, :effective_policy_class)
-      end
-
-    workflow_profile =
-      WorkflowProfile.resolve(
-        effective_policy_class,
-        policy_pack: Map.get(state, :policy_pack)
-      )
-
-    RunLedger.record("checks.polled", %{
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      stage: "await_checks",
-      actor_type: "runtime",
-      actor_id: "delivery_engine",
-      policy_class: effective_policy_class,
-      summary: "Checks state #{check_rollup.state}",
-      details: inspection.pr_url || "No PR URL",
-      metadata: %{
-        poll_count: await_checks_polls,
-        pr_url: inspection.pr_url,
-        required_state: check_rollup.state,
-        missing: check_rollup.missing,
-        pending: check_rollup.pending,
-        failed: check_rollup.failed,
-        cancelled: check_rollup.cancelled
-      }
-    })
-
-    cond do
-      match?({:error, _}, policy_resolution) ->
-        {:error, policy_reason} = policy_resolution
-
+    case maybe_maintain_merge_readiness(workspace, issue, state, inspection, opts) do
+      {:error, reason} ->
         block_issue(
           workspace,
           issue,
-          policy_reason.code,
-          Enum.join(policy_reason.labels, ", "),
+          :publish_failed,
+          "Merge readiness maintenance failed: #{inspect(reason)}",
           @blocked_state
         )
 
-      is_nil(inspection.pr_url) ->
-        block_issue(
-          workspace,
-          issue,
-          :publish_missing_pr,
-          "No PR is attached for the current branch.",
-          @blocked_state
-        )
+      {:ok, state} ->
+        await_checks_polls = Map.get(state, :await_checks_polls, 0) + 1
+        required_checks = effective_required_checks(inspection, state)
+        check_rollup = RunInspector.required_checks_rollup(required_checks, inspection.check_statuses)
+        await_checks_attrs = await_checks_state_attrs(inspection, check_rollup, await_checks_polls)
+        policy_resolution = resolve_policy(issue, state, workspace)
 
-      merged_pull_request?(inspection) ->
-        {:ok, _state} =
-          RunStateStore.transition(
-            workspace,
-            "post_merge",
-            Map.merge(await_checks_attrs, %{
-              last_merge: %{status: :already_merged, url: inspection.pr_url}
-            })
+        effective_policy_class =
+          case policy_resolution do
+            {:ok, resolution} -> IssuePolicy.class_to_string(resolution.class)
+            _ -> Map.get(state, :effective_policy_class)
+          end
+
+        workflow_profile =
+          WorkflowProfile.resolve(
+            effective_policy_class,
+            policy_pack: Map.get(state, :policy_pack)
           )
 
-        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+        RunLedger.record("checks.polled", %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          stage: "await_checks",
+          actor_type: "runtime",
+          actor_id: "delivery_engine",
+          policy_class: effective_policy_class,
+          summary: "Checks state #{check_rollup.state}",
+          details: inspection.pr_url || "No PR URL",
+          metadata: %{
+            poll_count: await_checks_polls,
+            pr_url: inspection.pr_url,
+            required_state: check_rollup.state,
+            missing: check_rollup.missing,
+            pending: check_rollup.pending,
+            failed: check_rollup.failed,
+            cancelled: check_rollup.cancelled
+          }
+        })
 
-      closed_pull_request?(inspection) ->
-        block_issue(
-          workspace,
-          issue,
-          :pr_closed,
-          "The PR closed before Symphony could merge it.",
-          @blocked_state
-        )
+        cond do
+          match?({:error, _}, policy_resolution) ->
+            {:error, policy_reason} = policy_resolution
 
-      check_rollup.state == :failed and ui_proof_checks_active?(state) and
-          ui_proof_checks_failed?(state, check_rollup) ->
-        block_issue(
-          workspace,
-          issue,
-          :ui_proof_checks_failed,
-          "Required UI proof checks failed on the PR: #{Enum.join(ui_proof_failed_checks(state, check_rollup), ", ")}",
-          @blocked_state
-        )
+            block_issue(
+              workspace,
+              issue,
+              policy_reason.code,
+              Enum.join(policy_reason.labels, ", "),
+              @blocked_state
+            )
 
-      check_rollup.state == :failed ->
-        block_issue(
-          workspace,
-          issue,
-          :required_checks_failed,
-          "Required checks failed on the PR: #{Enum.join(check_rollup.failed, ", ")}",
-          @blocked_state
-        )
+          is_nil(inspection.pr_url) ->
+            block_issue(
+              workspace,
+              issue,
+              :publish_missing_pr,
+              "No PR is attached for the current branch.",
+              @blocked_state
+            )
 
-      check_rollup.state == :cancelled ->
-        block_issue(
-          workspace,
-          issue,
-          :required_checks_cancelled,
-          "Required checks were cancelled on the PR: #{Enum.join(check_rollup.cancelled, ", ")}",
-          @blocked_state
-        )
+          merged_pull_request?(inspection) ->
+            {:ok, _state} =
+              RunStateStore.transition(
+                workspace,
+                "post_merge",
+                Map.merge(await_checks_attrs, %{
+                  last_merge: %{status: :already_merged, url: inspection.pr_url}
+                })
+              )
 
-      check_rollup.state == :missing and ui_proof_checks_active?(state) and
-        ui_proof_checks_missing?(state, check_rollup) and
-          await_checks_polls >= @await_checks_missing_limit ->
-        block_issue(
-          workspace,
-          issue,
-          :ui_proof_checks_missing,
-          "Required UI proof checks never appeared on the PR: #{Enum.join(ui_proof_missing_checks(state, check_rollup), ", ")}",
-          @blocked_state
-        )
+            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
-      check_rollup.state == :missing and await_checks_polls >= @await_checks_missing_limit ->
-        block_issue(
-          workspace,
-          issue,
-          :required_checks_missing,
-          "Required checks never appeared on the PR: #{Enum.join(check_rollup.missing, ", ")}",
-          @blocked_state
-        )
+          closed_pull_request?(inspection) ->
+            block_issue(
+              workspace,
+              issue,
+              :pr_closed,
+              "The PR closed before Symphony could merge it.",
+              @blocked_state
+            )
 
-      RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
-        risk_review_required?(workspace, inspection, workflow_profile, state) and
-          Map.get(state, :review_approved, false) == false ->
-        hold_for_policy_review(workspace, issue, state, await_checks_attrs, :risk_review_required)
+          check_rollup.state == :failed and ui_proof_checks_active?(state) and
+              ui_proof_checks_failed?(state, check_rollup) ->
+            block_issue(
+              workspace,
+              issue,
+              :ui_proof_checks_failed,
+              "Required UI proof checks failed on the PR: #{Enum.join(ui_proof_failed_checks(state, check_rollup), ", ")}",
+              @blocked_state
+            )
 
-      RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
-        Config.policy_automerge_on_green?() and
-        Map.get(state, :automerge_disabled, false) == false and
-          merge_window_deferred?(state) ->
-        defer_for_merge_window(workspace, issue, await_checks_attrs, state)
+          check_rollup.state == :failed ->
+            block_issue(
+              workspace,
+              issue,
+              :required_checks_failed,
+              "Required checks failed on the PR: #{Enum.join(check_rollup.failed, ", ")}",
+              @blocked_state
+            )
 
-      RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
-        Config.policy_automerge_on_green?() and
-          Map.get(state, :automerge_disabled, false) == false ->
-        {:ok, _state} =
-          RunStateStore.transition(workspace, "merge", await_checks_attrs)
+          check_rollup.state == :cancelled ->
+            block_issue(
+              workspace,
+              issue,
+              :required_checks_cancelled,
+              "Required checks were cancelled on the PR: #{Enum.join(check_rollup.cancelled, ", ")}",
+              @blocked_state
+            )
 
-        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+          check_rollup.state == :missing and ui_proof_checks_active?(state) and
+            ui_proof_checks_missing?(state, check_rollup) and
+              await_checks_polls >= @await_checks_missing_limit ->
+            block_issue(
+              workspace,
+              issue,
+              :ui_proof_checks_missing,
+              "Required UI proof checks never appeared on the PR: #{Enum.join(ui_proof_missing_checks(state, check_rollup), ", ")}",
+              @blocked_state
+            )
 
-      RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :review_gate and
-          Map.get(state, :review_approved, false) == true ->
-        {:ok, _state} =
-          RunStateStore.transition(workspace, "merge", await_checks_attrs)
+          check_rollup.state == :missing and await_checks_polls >= @await_checks_missing_limit ->
+            block_issue(
+              workspace,
+              issue,
+              :required_checks_missing,
+              "Required checks never appeared on the PR: #{Enum.join(check_rollup.missing, ", ")}",
+              @blocked_state
+            )
 
-        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+          RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
+            risk_review_required?(workspace, inspection, workflow_profile, state) and
+              Map.get(state, :review_approved, false) == false ->
+            hold_for_policy_review(workspace, issue, state, await_checks_attrs, :risk_review_required)
 
-      RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :review_gate ->
-        hold_for_policy_review(
-          workspace,
-          issue,
-          state,
-          await_checks_attrs,
-          :policy_review_required
-        )
+          RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
+            Config.policy_automerge_on_green?() and
+            Map.get(state, :automerge_disabled, false) == false and
+              merge_window_deferred?(state) ->
+            defer_for_merge_window(workspace, issue, await_checks_attrs, state)
 
-      RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :manual_only ->
-        hold_for_policy_review(
-          workspace,
-          issue,
-          state,
-          await_checks_attrs,
-          :policy_never_automerge
-        )
+          RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
+            Config.policy_automerge_on_green?() and
+              Map.get(state, :automerge_disabled, false) == false ->
+            {:ok, _state} =
+              RunStateStore.transition(workspace, "merge", await_checks_attrs)
 
-      RunInspector.ready_for_merge?(inspection) ->
-        hold_for_policy_review(
-          workspace,
-          issue,
-          state,
-          await_checks_attrs,
-          :policy_review_required
-        )
+            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
 
-      true ->
-        {:ok, _state} = RunStateStore.transition(workspace, "await_checks", await_checks_attrs)
+          RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :review_gate and
+              Map.get(state, :review_approved, false) == true ->
+            {:ok, _state} =
+              RunStateStore.transition(workspace, "merge", await_checks_attrs)
 
-        :ok
+            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+
+          RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :review_gate ->
+            hold_for_policy_review(
+              workspace,
+              issue,
+              state,
+              await_checks_attrs,
+              :policy_review_required
+            )
+
+          RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :manual_only ->
+            hold_for_policy_review(
+              workspace,
+              issue,
+              state,
+              await_checks_attrs,
+              :policy_never_automerge
+            )
+
+          RunInspector.ready_for_merge?(inspection) ->
+            hold_for_policy_review(
+              workspace,
+              issue,
+              state,
+              await_checks_attrs,
+              :policy_review_required
+            )
+
+          true ->
+            {:ok, _state} = RunStateStore.transition(workspace, "await_checks", await_checks_attrs)
+
+            :ok
+        end
     end
   end
 
@@ -2445,6 +2464,145 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp maybe_refresh_preflight_review_claims(review_claims, _workspace), do: review_claims
+
+  defp maybe_maintain_merge_readiness(workspace, issue, state, inspection, opts)
+       when is_binary(workspace) and is_map(issue) and is_map(state) and is_map(inspection) do
+    if merge_readiness_maintenance_needed?(state, inspection) do
+      reconciled_state = maybe_reconcile_live_review_feedback(state, workspace, opts)
+
+      with {:ok, pr_url, pr_body_validation} <-
+             maybe_refresh_merge_readiness_pr_body(
+               workspace,
+               issue,
+               reconciled_state,
+               inspection,
+               opts
+             ) do
+        updated_review_threads =
+          reconciled_state
+          |> Map.get(:review_threads, %{})
+          |> finalize_published_review_threads()
+          |> maybe_post_autonomous_review_replies(workspace, pr_url, reconciled_state, opts)
+          |> maybe_resolve_autonomous_review_threads(workspace, pr_url, reconciled_state, opts)
+
+        updated_state =
+          reconciled_state
+          |> Map.put(:pr_url, pr_url || Map.get(reconciled_state, :pr_url))
+          |> Map.put(:review_threads, updated_review_threads)
+          |> Map.put(
+            :last_merge_readiness,
+            merge_readiness_summary(pr_body_validation, updated_review_threads)
+          )
+          |> maybe_put_pr_body_validation(pr_body_validation)
+          |> Map.update(:resume_context, %{}, fn context ->
+            context
+            |> Map.put(:review_feedback_summary, review_feedback_summary(updated_review_threads))
+            |> maybe_put_review_feedback_pr_url(pr_url)
+          end)
+
+        if updated_state != state and Keyword.get(opts, :persist_merge_readiness, true) do
+          {:ok, persisted_state} =
+            RunStateStore.update(workspace, fn _persisted -> updated_state end)
+
+          {:ok, persisted_state}
+        else
+          {:ok, updated_state}
+        end
+      end
+    else
+      {:ok, state}
+    end
+  end
+
+  defp maybe_maintain_merge_readiness(_workspace, _issue, state, _inspection, _opts),
+    do: {:ok, state}
+
+  defp merge_readiness_maintenance_needed?(state, inspection)
+       when is_map(state) and is_map(inspection) do
+    pr_url = Map.get(state, :pr_url) || Map.get(inspection, :pr_url)
+    review_threads = Map.get(state, :review_threads, %{})
+
+    is_binary(pr_url) and String.trim(pr_url) != "" and
+      (map_size(review_threads) > 0 or pr_body_refresh_needed?(state))
+  end
+
+  defp merge_readiness_maintenance_needed?(_state, _inspection), do: false
+
+  defp pr_body_refresh_needed?(state) when is_map(state) do
+    validation_status =
+      state
+      |> Map.get(:last_pr_body_validation, %{})
+      |> Map.get(:status)
+      |> to_string()
+
+    check_name =
+      state
+      |> Map.get(:last_ci_failure)
+      |> Kernel.||(%{})
+      |> Map.get(:check_name)
+      |> to_string()
+
+    validation_status in ["", "failed", "error"] or
+      check_name in ["validate-pr-description", "pr-description-lint"]
+  end
+
+  defp maybe_refresh_merge_readiness_pr_body(workspace, issue, state, inspection, opts)
+       when is_binary(workspace) and is_map(state) and is_map(inspection) do
+    pr_url = Map.get(state, :pr_url) || Map.get(inspection, :pr_url)
+
+    if pr_body_refresh_needed?(state) and merge_readiness_pr_body_supported?(workspace) do
+      case PullRequestManager.ensure_pull_request(workspace, issue, state, opts) do
+        {:ok, pr} ->
+          {:ok, Map.get(pr, :url) || pr_url, Map.get(pr, :body_validation)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      {:ok, pr_url, Map.get(state, :last_pr_body_validation)}
+    end
+  end
+
+  defp maybe_refresh_merge_readiness_pr_body(_workspace, _issue, state, inspection, _opts) do
+    {:ok, Map.get(state, :pr_url) || Map.get(inspection, :pr_url), Map.get(state, :last_pr_body_validation)}
+  end
+
+  defp maybe_put_pr_body_validation(state, nil), do: state
+  defp maybe_put_pr_body_validation(state, validation), do: Map.put(state, :last_pr_body_validation, validation)
+
+  defp merge_readiness_pr_body_supported?(workspace) when is_binary(workspace) do
+    File.exists?(Path.join(workspace, ".github/pull_request_template.md")) and
+      File.exists?(Path.join([workspace, "elixir", "lib", "mix", "tasks", "pr_body.check.ex"]))
+  end
+
+  defp maybe_put_review_feedback_pr_url(context, pr_url) when is_map(context) and is_binary(pr_url),
+    do: Map.put(context, :review_feedback_pr_url, pr_url)
+
+  defp maybe_put_review_feedback_pr_url(context, _pr_url), do: context
+
+  defp merge_readiness_summary(pr_body_validation, review_threads) do
+    %{
+      checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      pr_body_validation_status: merge_readiness_validation_status(pr_body_validation),
+      posted_review_threads:
+        Enum.count(review_threads, fn {_thread_key, thread_state} ->
+          Map.get(thread_state, "draft_state") == "posted"
+        end),
+      pending_reply_refreshes:
+        Enum.count(review_threads, fn {_thread_key, thread_state} ->
+          Map.get(thread_state, "reply_refresh_needed") == true
+        end),
+      resolved_review_threads:
+        Enum.count(review_threads, fn {_thread_key, thread_state} ->
+          Map.get(thread_state, "resolution_state") == "resolved"
+        end)
+    }
+  end
+
+  defp merge_readiness_validation_status(nil), do: "unchanged"
+  defp merge_readiness_validation_status(%{status: status}) when is_binary(status), do: status
+  defp merge_readiness_validation_status(%{"status" => status}) when is_binary(status), do: status
+  defp merge_readiness_validation_status(_validation), do: "unknown"
 
   defp maybe_persist_reconciled_review_feedback(state, workspace, opts)
        when is_map(state) and is_binary(workspace) do

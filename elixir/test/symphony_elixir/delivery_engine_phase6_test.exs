@@ -25,6 +25,9 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.FakeGitHubClient do
   def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
 
   @impl true
+  def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+
+  @impl true
   def resolve_review_comment_thread(_pr_url, comment_id, _opts) do
     send(self(), {:resolved_review_thread, to_string(comment_id)})
     {:ok, %{thread_id: "thread-#{comment_id}", resolved: true, output: ""}}
@@ -55,7 +58,59 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test.FakeMergeFailureGitHubClient d
   def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
 
   @impl true
+  def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+
+  @impl true
   def resolve_review_comment_thread(_pr_url, _comment_id, _opts), do: {:error, :unsupported}
+end
+
+defmodule SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient do
+  @behaviour SymphonyElixir.GitHubClient
+
+  @impl true
+  def existing_pull_request(_workspace, opts) do
+    {:ok, %{url: Keyword.get(opts, :pr_url, "https://github.com/example/repo/pull/42"), state: "OPEN"}}
+  end
+
+  @impl true
+  def edit_pull_request(workspace, title, body_file, opts) do
+    send(opts[:test_pid], {:merge_readiness_pr_updated, workspace, title, File.read!(body_file)})
+    {:ok, %{url: Keyword.get(opts, :pr_url, "https://github.com/example/repo/pull/42"), state: "OPEN", output: ""}}
+  end
+
+  @impl true
+  def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts),
+    do: {:error, :unsupported}
+
+  @impl true
+  def merge_pull_request(_workspace, _opts), do: {:error, :unsupported}
+
+  @impl true
+  def review_feedback(_workspace, _opts), do: {:error, :review_feedback_unavailable}
+
+  @impl true
+  def review_feedback_by_pr_url(_pr_url, _opts), do: {:error, :review_feedback_unavailable}
+
+  @impl true
+  def persist_pr_url(_workspace, _branch, _url, _opts), do: :ok
+
+  @impl true
+  def post_review_comment_reply(pr_url, comment_id, body, opts) do
+    send(opts[:test_pid], {:merge_readiness_review_posted, pr_url, to_string(comment_id), body})
+    {:ok, %{id: "reply-#{comment_id}", url: "#{pr_url}#reply-#{comment_id}", output: ""}}
+  end
+
+  @impl true
+  def edit_review_comment_reply(pr_url, comment_id, body, opts) do
+    send(opts[:test_pid], {:merge_readiness_review_updated, pr_url, to_string(comment_id), body})
+    {:ok, %{id: to_string(comment_id), url: "#{pr_url}#reply-#{comment_id}", output: ""}}
+  end
+
+  @impl true
+  def resolve_review_comment_thread(pr_url, comment_id, opts) do
+    send(opts[:test_pid], {:merge_readiness_review_resolved, pr_url, to_string(comment_id)})
+    {:ok, %{thread_id: "thread-#{comment_id}", resolved: true, output: ""}}
+  end
 end
 
 defmodule SymphonyElixir.DeliveryEnginePhase6Test do
@@ -147,6 +202,89 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
 
     assert_received {:resolved_review_thread, "2926989511"}
     assert get_in(resolved, ["comment:2926989511", "resolution_state"]) == "resolved"
+  end
+
+  test "merge readiness refreshes the PR body after a pr-description CI failure" do
+    workspace = Path.expand("../../..", __DIR__)
+
+    issue = %Issue{
+      id: "issue-merge-readiness-pr",
+      identifier: "MT-PHASE6",
+      title: "Repair PR hygiene automatically",
+      url: "https://linear.app/test/issue/MT-PHASE6"
+    }
+
+    state = %{
+      branch: "codex/merge-readiness",
+      base_branch: "main",
+      stage: "await_checks",
+      pr_url: "https://github.com/example/repo/pull/42",
+      last_turn_result: %{summary: "Add merge-readiness maintenance during await_checks."},
+      last_validation: %{status: "passed"},
+      last_verifier: %{status: "passed"},
+      last_pr_body_validation: %{status: "passed"},
+      last_ci_failure: %{check_name: "validate-pr-description", conclusion: "failure"},
+      review_threads: %{}
+    }
+
+    assert {:ok, updated_state} =
+             DeliveryEngine.maintain_merge_readiness_for_test(
+               workspace,
+               issue,
+               state,
+               %{pr_url: state.pr_url},
+               github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient,
+               github_client_opts: [test_pid: self(), pr_url: state.pr_url],
+               persist_merge_readiness: false
+             )
+
+    assert_receive {:merge_readiness_pr_updated, ^workspace, title, body}
+    assert title == "MT-PHASE6: Repair PR hygiene automatically"
+    assert body =~ "#### Context"
+    assert body =~ "#### TL;DR"
+    assert get_in(updated_state, [:last_pr_body_validation, :status]) == "passed"
+    assert get_in(updated_state, [:last_merge_readiness, :pr_body_validation_status]) == "passed"
+  end
+
+  test "merge readiness refreshes and resolves posted review threads during await_checks" do
+    workspace = "/tmp/symphony-merge-readiness"
+    pr_url = "https://github.com/example/repo/pull/42"
+
+    state = %{
+      stage: "await_checks",
+      pr_url: pr_url,
+      policy_pack: :private_autopilot,
+      repo_url: "https://github.com/example/repo",
+      last_pr_body_validation: %{status: "passed"},
+      review_threads: %{
+        "comment:2926989348" => %{
+          "thread_key" => "comment:2926989348",
+          "kind" => "comment",
+          "draft_state" => "posted",
+          "draft_reply" => "I addressed this concern locally and will include it in the next branch update. Updated the router.",
+          "implementation_status" => "addressed",
+          "resolution_recommendation" => "resolve_after_change",
+          "posted_reply_id" => "reply-2926989348"
+        }
+      }
+    }
+
+    assert {:ok, updated_state} =
+             DeliveryEngine.maintain_merge_readiness_for_test(
+               workspace,
+               %{},
+               state,
+               %{pr_url: pr_url},
+               github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient,
+               github_client_opts: [test_pid: self(), pr_url: pr_url],
+               persist_merge_readiness: false
+             )
+
+    assert_receive {:merge_readiness_review_updated, ^pr_url, "reply-2926989348", body}
+    assert body =~ "it is now included on the branch"
+    assert_receive {:merge_readiness_review_resolved, ^pr_url, "2926989348"}
+    assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolution_state"]) == "resolved"
+    assert get_in(updated_state, [:last_merge_readiness, :resolved_review_threads]) == 1
   end
 
   test "checkout blocks when the harness is missing its version" do

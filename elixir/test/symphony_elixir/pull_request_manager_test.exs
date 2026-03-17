@@ -197,6 +197,9 @@ defmodule SymphonyElixir.PullRequestManagerTest do
       send(opts[:test_pid], {:adapter_persist_pr_url, workspace, branch, url})
       :ok
     end
+
+    @impl true
+    def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
   end
 
   defp body_file_from_args(args) do

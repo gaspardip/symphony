@@ -18,6 +18,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Validate with the harness contract, tests, lint, and smoke coverage, then prepare the PR.
 
 ## Work Log
+- Added `await_checks` merge-readiness maintenance on March 17, 2026 so owned autonomous runs can repair PR hygiene without this control thread: the delivery engine now refreshes the PR body after `validate-pr-description` failures, reconciles live review-thread state, refreshes posted addressed replies, and resolves safe outdated inline threads before deciding merge readiness.
+- Added focused coverage for the new seam in `delivery_engine_phase6_test.exs`, proving both PR-body remediation and posted-review-thread refresh/resolution during `await_checks`, and reran `pull_request_manager_test.exs` plus Dialyzer after the change.
 - Added task-level `Mix.Tasks.Harness.Check` coverage on March 17, 2026 for the two remaining runtime branches that were still dragging the total audit floor: outside-repo failure and invalid-harness failure now have deterministic tests in `harness_check_task_test.exs`.
 - Added two more `RepoCompatibility` coverage cases on March 17, 2026 to recover the final `make-all` coverage drift after the stale reply-test fix: one for missing workspaces and one for missing base branches via `compatible?/2`, targeting the `86.25%` repo audit floor without weakening the gate.
 - Fixed the next hidden `make-all` blocker on March 17, 2026 after the repo-compat repair: `review_evidence_collector_test.exs` now expects the published addressed-claim reply wording (`included on the branch`) instead of the older draft phrasing (`next branch update`), matching the runtime behavior already shipped on the branch.
@@ -102,6 +104,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Linear issue: `CLZ-22`
 - Worktree: `/Users/gaspar/src/symphony-clz-22`
 - Branch: `codex/clz-22-observability`
+- Merge-readiness focused validation on March 17, 2026:
+  `cd elixir && mise exec -- mix test test/symphony_elixir/delivery_engine_phase6_test.exs test/symphony_elixir/pull_request_manager_test.exs` -> `60 tests, 0 failures`
+- Merge-readiness Dialyzer on March 17, 2026:
+  `cd elixir && mise exec -- mix dialyzer --format short` -> passed
 - Runtime foundation commit: `2458ae5`
 - Local stack assets: `ops/observability/docker-compose.yml` and Grafana/Prometheus/Loki/Promtail/Tempo configs
 - Compose validation: `docker compose -f ops/observability/docker-compose.yml config`
