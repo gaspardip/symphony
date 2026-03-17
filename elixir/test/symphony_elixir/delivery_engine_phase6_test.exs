@@ -997,6 +997,32 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert state.last_required_checks_state == "pending"
   end
 
+  test "merge_readiness hands off to await_checks when PR hygiene is already clean" do
+    {workspace, issue} = git_stage_workspace!("merge-readiness-clean")
+
+    RunStateStore.transition(workspace, "merge_readiness", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      issue_source: issue.source,
+      pr_url: "https://github.com/example/repo/pull/30",
+      last_pr_body_validation: %{status: "passed"},
+      review_threads: %{}
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: "/definitely/missing/codex"
+    )
+
+    assert :ok =
+             DeliveryEngine.run(workspace, issue, nil, command_runner: &pending_merge_command_runner/3)
+
+    assert {:ok, state} = RunStateStore.load(workspace)
+    assert state.stage == "await_checks"
+    assert state.last_required_checks_state == "pending"
+  end
+
   test "await_checks blocks when required checks are cancelled" do
     {workspace, issue} = git_stage_workspace!("await-cancelled")
     issue_id = issue.id

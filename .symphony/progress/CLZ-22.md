@@ -369,6 +369,10 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
   after the first lift, GitHub Actions still missed the overall coverage floor by `0.06%`, so the follow-up slice covered two remaining low-cost branches instead of changing thresholds: `orchestrator_controls_phase6_test.exs` now proves `refresh_merge_readiness` rejects a run state that has no `pr_url`, and `pull_request_manager_test.exs` now proves `ensure_pull_request/4` fails cleanly when publication is attempted without a branch.
 - Latest focused merge-readiness final-nudge validation on March 17, 2026:
   `mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/pull_request_manager_test.exs` passed with `53 tests, 0 failures`, and `mix dialyzer --format short` remained clean afterward (`Total errors: 165, Skipped: 165, Unnecessary Skips: 7`).
+- Merge-readiness passive handoff coverage on March 17, 2026:
+  the audited total still missed by `0.04%`, so the next slice added one higher-yield runtime-path test instead of more threshold-chasing edge cases. `delivery_engine_phase6_test.exs` now proves a clean passive `merge_readiness` run hands off to `await_checks` and resumes normal required-check polling without booting Codex.
+- Latest focused passive-handoff validation on March 17, 2026:
+  `mix test test/symphony_elixir/delivery_engine_phase6_test.exs` passed with `57 tests, 0 failures`.
 
 ## Next Step
 Run the full harness validation gate, then push the CI-webhook follow-up slice and wire GitHub `check_run` / `workflow_run` webhooks into the stable ingress so failed required checks can reopen Symphony autonomously.
