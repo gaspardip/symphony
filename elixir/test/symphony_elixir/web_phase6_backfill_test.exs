@@ -228,6 +228,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                issue_identifier: issue.identifier,
                last_rule_id: "policy.review_required",
                last_failure_class: "policy",
+               last_merge_readiness: %{
+                 checked_at: "2026-03-17T08:30:00Z",
+                 pr_body_validation_status: "passed",
+                 posted_review_threads: 2,
+                 pending_reply_refreshes: 1,
+                 resolved_review_threads: 1
+               },
                last_decision_summary: "Blocked due to policy.review_required.",
                next_human_action: "Ask for human review.",
                last_decision: %{
@@ -268,6 +275,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.runtime_health.proof.compatibility_report_present
     assert payload.runtime_health.intake.company_mode == "client_safe"
     assert payload.runtime_health.summary == "Blocked due to policy.review_required."
+    assert payload.runtime_health.passive_stage.last_merge_readiness
+
+    assert payload.runtime_health.passive_stage.last_merge_readiness.pr_body_validation_status ==
+             "passed"
+
+    assert payload.runtime_health.passive_stage.last_merge_readiness.posted_review_threads == 2
     assert payload.last_decision.status == "failed"
     assert payload.last_decision.command == "./scripts/validate.sh"
     assert String.ends_with?(payload.last_decision.output, "…")

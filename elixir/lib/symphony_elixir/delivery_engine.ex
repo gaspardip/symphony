@@ -1542,7 +1542,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         block_issue(
           workspace,
           issue,
-          :publish_failed,
+          :merge_readiness_failed,
           "Merge readiness maintenance failed: #{inspect(reason)}",
           @blocked_state
         )

@@ -300,6 +300,11 @@ defmodule SymphonyElixir.RuleCatalog do
       failure_class: "publish",
       human_action: "Fix the publish failure, then retry or republish from the dashboard."
     },
+    merge_readiness_failed: %{
+      rule_id: "merge_readiness.failed",
+      failure_class: "pr_hygiene",
+      human_action: "Fix the PR hygiene maintenance failure, then refresh merge readiness from the dashboard."
+    },
     pr_closed: %{
       rule_id: "publish.closed_pr",
       failure_class: "publish",

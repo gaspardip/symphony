@@ -4449,6 +4449,7 @@ defmodule SymphonyElixir.Orchestrator do
       last_verifier_verdict: Map.get(run_state, :last_verifier_verdict),
       acceptance_summary: Map.get(run_state, :acceptance_summary),
       last_pr_body_validation: Map.get(run_state, :last_pr_body_validation),
+      last_merge_readiness: Map.get(run_state, :last_merge_readiness),
       last_post_merge: Map.get(run_state, :last_post_merge),
       base_branch: Map.get(run_state, :base_branch) || (inspection.harness && inspection.harness.base_branch),
       run_state_pr_url: Map.get(run_state, :pr_url),
@@ -6100,7 +6101,7 @@ defmodule SymphonyElixir.Orchestrator do
       %{passive?: true} ->
         :ok
 
-      %{stage: stage} when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
+      %{dispatch_stage: stage} when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
         :ok
 
       _ ->
@@ -6113,7 +6114,7 @@ defmodule SymphonyElixir.Orchestrator do
       %{passive?: true} ->
         terminate_running_issue(state, issue_id, false)
 
-      %{stage: stage} when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
+      %{dispatch_stage: stage} when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
         terminate_running_issue(state, issue_id, false)
 
       _ ->

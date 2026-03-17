@@ -628,6 +628,7 @@ defmodule SymphonyElixirWeb.Presenter do
         last_verifier_verdict: Map.get(run_state || %{}, :last_verifier_verdict),
         acceptance_summary: Map.get(run_state || %{}, :acceptance_summary),
         last_post_merge: Map.get(run_state || %{}, :last_post_merge),
+        last_merge_readiness: Map.get(run_state || %{}, :last_merge_readiness),
         last_deploy_preview: Map.get(run_state || %{}, :last_deploy_preview),
         last_deploy_production: Map.get(run_state || %{}, :last_deploy_production),
         last_post_deploy_verify: Map.get(run_state || %{}, :last_post_deploy_verify),
@@ -1688,7 +1689,12 @@ defmodule SymphonyElixirWeb.Presenter do
           review_approved: Map.get(run_state || %{}, :review_approved, false),
           deploy_approved: Map.get(run_state || %{}, :deploy_approved, false),
           merge_window_wait: Map.get(run_state || %{}, :merge_window_wait),
-          deploy_window_wait: Map.get(run_state || %{}, :deploy_window_wait)
+          deploy_window_wait: Map.get(run_state || %{}, :deploy_window_wait),
+          last_merge_readiness:
+            merge_readiness_payload(%{
+              last_merge_readiness: Map.get(run_state || %{}, :last_merge_readiness),
+              stage: Map.get(run_state || %{}, :stage)
+            })
         },
         tracker: %{
           source:
