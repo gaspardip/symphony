@@ -18,6 +18,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Validate with the harness contract, tests, lint, and smoke coverage, then prepare the PR.
 
 ## Work Log
+- Promoted PR hygiene from an `await_checks` side effect into a first-class `merge_readiness` stage on March 17, 2026: publish now enters `merge_readiness` first, that stage performs PR-body remediation plus review-thread refresh/resolution, and only then transitions into passive `await_checks` polling.
+- Threaded `merge_readiness` through orchestrator passive dispatch and retry metadata so the new stage behaves like the existing passive merge-side stages instead of being treated as active implementation work.
 - Added `await_checks` merge-readiness maintenance on March 17, 2026 so owned autonomous runs can repair PR hygiene without this control thread: the delivery engine now refreshes the PR body after `validate-pr-description` failures, reconciles live review-thread state, refreshes posted addressed replies, and resolves safe outdated inline threads before deciding merge readiness.
 - Added focused coverage for the new seam in `delivery_engine_phase6_test.exs`, proving both PR-body remediation and posted-review-thread refresh/resolution during `await_checks`, and reran `pull_request_manager_test.exs` plus Dialyzer after the change.
 - Added task-level `Mix.Tasks.Harness.Check` coverage on March 17, 2026 for the two remaining runtime branches that were still dragging the total audit floor: outside-repo failure and invalid-harness failure now have deterministic tests in `harness_check_task_test.exs`.
@@ -106,6 +108,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Branch: `codex/clz-22-observability`
 - Merge-readiness focused validation on March 17, 2026:
   `cd elixir && mise exec -- mix test test/symphony_elixir/delivery_engine_phase6_test.exs test/symphony_elixir/pull_request_manager_test.exs` -> `60 tests, 0 failures`
+- Explicit merge-readiness stage validation on March 17, 2026:
+  `cd elixir && mise exec -- mix test test/symphony_elixir/delivery_engine_phase6_test.exs test/symphony_elixir/pull_request_manager_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs` -> `102 tests, 0 failures`
 - Merge-readiness Dialyzer on March 17, 2026:
   `cd elixir && mise exec -- mix dialyzer --format short` -> passed
 - Runtime foundation commit: `2458ae5`

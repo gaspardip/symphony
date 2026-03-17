@@ -805,6 +805,10 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert DeliveryEngine.human_review_summary_for_test(:other) == "Waiting in Human Review."
   end
 
+  test "publish follow-up enters merge_readiness before awaiting checks" do
+    assert DeliveryEngine.publish_followup_stage_for_test() == "merge_readiness"
+  end
+
   test "handle_checkout_error_for_test treats invalid harness roots as invalid harness errors" do
     {workspace, issue} = git_stage_workspace!("checkout-invalid-root-helper")
 

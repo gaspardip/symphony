@@ -3658,6 +3658,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp continuation_metadata_for_running_entry(%{identifier: identifier})
        when is_binary(identifier) do
     case issue_run_state(identifier) do
+      %{stage: "merge_readiness"} = run_state ->
+        %{
+          delay_type: :passive_continuation,
+          passive_delay_ms: passive_delay_ms_for_await_checks(run_state)
+        }
+
       %{stage: "await_checks"} = run_state ->
         %{
           delay_type: :passive_continuation,
@@ -5136,6 +5142,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_state_for_stage(stage)
        when stage in [
               "publish",
+              "merge_readiness",
               "await_checks",
               "merge",
               "post_merge",
@@ -5627,7 +5634,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_function(active_dispatch_fun, 3) and is_function(passive_dispatch_fun, 3) do
     case normalize_dispatch_stage(issue) do
-      stage when stage in ["await_checks", "merge", "post_merge"] ->
+      stage when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
         passive_dispatch_fun.(state, issue, attempt)
 
       _ ->
@@ -5780,7 +5787,7 @@ defmodule SymphonyElixir.Orchestrator do
     persisted_pr_url = Map.get(state, :pr_url)
 
     inspection.git? and
-      stage in ["implement", "validate", "verify", "publish", "await_checks", "merge"] and
+      stage in ["implement", "validate", "verify", "publish", "merge_readiness", "await_checks", "merge"] and
       is_binary(expected_branch) and expected_branch != "" and
       is_binary(inspection.branch) and inspection.branch != "" and
       inspection.branch != expected_branch and

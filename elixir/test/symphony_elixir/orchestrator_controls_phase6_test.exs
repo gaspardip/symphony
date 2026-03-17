@@ -1970,6 +1970,29 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert metadata.passive_delay_ms == 30_000
   end
 
+  test "passive continuation metadata backs off merge_readiness retries based on poll count" do
+    identifier = "MT-MERGE-READINESS-DELAY"
+    workspace = Workspace.path_for_issue(identifier)
+
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "merge_readiness", %{
+               issue_id: "manual:merge-readiness-delay",
+               issue_identifier: identifier,
+               await_checks_polls: 6
+             })
+
+    metadata =
+      Orchestrator.continuation_metadata_for_running_entry_for_test(%{identifier: identifier})
+
+    assert metadata.delay_type == :passive_continuation
+    assert metadata.passive_delay_ms == 30_000
+  end
+
   test "blocked review-fix budget stop with addressed claim progress auto-continues" do
     identifier = "MT-REVIEW-FIX-AUTO-CONTINUE"
     workspace = Workspace.path_for_issue(identifier)
@@ -2406,6 +2429,47 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     init_git_workspace!(workspace, branch: "symphony/mt-runtime-passive")
 
     SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier
+    })
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    assert %{mode: :passive, issue: ^issue, attempt: 2} =
+             Orchestrator.dispatch_runtime_issue_for_test(
+               %State{},
+               issue,
+               2,
+               active_dispatch_fun: fn _state, dispatch_issue, attempt ->
+                 %{mode: :active, issue: dispatch_issue, attempt: attempt}
+               end,
+               passive_dispatch_fun: fn _state, dispatch_issue, attempt ->
+                 %{mode: :passive, issue: dispatch_issue, attempt: attempt}
+               end
+             )
+  end
+
+  test "stage-aware runtime dispatch routes merge_readiness issues to passive dispatch" do
+    workspace_root =
+      Path.join(System.tmp_dir!(), "orchestrator-merge-readiness-dispatch-#{System.unique_integer([:positive])}")
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-merge-readiness-passive",
+      identifier: "MT-MERGE-READINESS-PASSIVE",
+      title: "Merge readiness passive",
+      description: "dispatch routing",
+      state: "Merging",
+      labels: []
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-readiness-passive")
+
+    SymphonyElixir.RunStateStore.transition(workspace, "merge_readiness", %{
       issue_id: issue.id,
       issue_identifier: issue.identifier
     })
