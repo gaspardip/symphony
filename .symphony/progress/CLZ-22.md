@@ -18,6 +18,8 @@ Add full runtime observability to Symphony with a self-hosted/local-first stack 
 - Validate with the harness contract, tests, lint, and smoke coverage, then prepare the PR.
 
 ## Work Log
+- Fixed the remaining `make-all` PR blocker on March 17, 2026 by making the repo-compatibility tests deterministic in CI: `repo_compat_task_test.exs` and `repo_compatibility_test.exs` now build temporary Git workspaces with a valid harness and local `main` branch instead of asserting against an ambient checkout that may not have `origin/main` on GitHub Actions.
+- Re-ran the exact failing repo-compat suites successfully with `mix test test/symphony_elixir/repo_compat_task_test.exs test/symphony_elixir/repo_compatibility_test.exs` (`4 tests, 0 failures`) and confirmed `mix dialyzer --format short` remained clean after the test-only fix.
 - Cleared the live `verification.behavior_proof_missing` gate for the observability review-fix branch by adding repo-owned behavioral proof for the changed review surfaces: GitHub/tracker dedupe fallback hashing, observability metadata sanitization without atom creation, `/metrics` router wiring plus 405 handling, and Tempo YAML numeric parsing.
 - Hardened `webhook_first_intake_test.exs` to clear its resolved manual issue store before seeding a manual issue, removing a stale-state collision that only surfaced once the new proof tests were added and the suite was rerun repeatedly under dogfood.
 - Re-ran the full self-host validation contract successfully after the proof patch and formatting repair: `./scripts/symphony-validate.sh` passed end to end on March 16, 2026, including `harness.check`, build, `fmt-check`, lint, coverage audit (`853 tests, 0 failures`, total coverage `86.55%` vs `86.25%`), and Dialyzer.

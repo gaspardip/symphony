@@ -3,11 +3,20 @@ defmodule SymphonyElixir.RepoCompatibilityTest do
 
   alias SymphonyElixir.RepoCompatibility
 
-  test "reports events as autonomous-compatible" do
-    assert {:ok, report} = RepoCompatibility.report("/Users/gaspar/src/events")
-    assert report.compatible
-    assert report.failing_checks == []
-    assert Enum.any?(report.checks, &(&1.id == "behavioral_proof" and &1.status == :passed))
+  test "reports a fully configured workspace as autonomous-compatible" do
+    workspace = temp_workspace("repo-compat-compatible")
+
+    try do
+      write_compatible_workspace!(workspace)
+
+      assert {:ok, report} = RepoCompatibility.report(workspace)
+      assert report.compatible
+      assert report.failing_checks == []
+      assert Enum.any?(report.checks, &(&1.id == "behavioral_proof" and &1.status == :passed))
+      assert Enum.any?(report.checks, &(&1.id == "branch_base_setup" and &1.status == :passed))
+    after
+      File.rm_rf(workspace)
+    end
   end
 
   test "reports missing behavioral proof as incompatible" do
@@ -54,6 +63,45 @@ defmodule SymphonyElixir.RepoCompatibilityTest do
 
   defp temp_workspace(suffix) do
     Path.join(System.tmp_dir!(), "symphony-#{suffix}-#{System.unique_integer([:positive])}")
+  end
+
+  defp write_compatible_workspace!(workspace) do
+    init_git_workspace!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    File.write!(
+      Path.join(workspace, ".symphony/harness.yml"),
+      """
+      version: 1
+      base_branch: main
+      preflight:
+        command:
+          - ./scripts/preflight.sh
+      validation:
+        command:
+          - ./scripts/validate.sh
+      smoke:
+        command:
+          - ./scripts/smoke.sh
+      post_merge:
+        command:
+          - ./scripts/post-merge.sh
+      artifacts:
+        command:
+          - ./scripts/artifacts.sh
+      verification:
+        behavioral_proof:
+          required: true
+          mode: unit_first
+          source_paths:
+            - lib/
+          test_paths:
+            - test/
+      pull_request:
+        required_checks:
+          - make-all
+      """
+    )
   end
 
   defp init_git_workspace!(workspace) do
