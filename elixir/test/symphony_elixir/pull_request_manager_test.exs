@@ -125,6 +125,28 @@ defmodule SymphonyElixir.PullRequestManagerTest do
     assert_received {:adapter_persist_pr_url, ^workspace, "gaspar/test-pr-edit", "https://github.com/gaspardip/symphony/pull/22"}
   end
 
+  test "ensure_pull_request fails cleanly when the branch is missing" do
+    workspace = Path.join(System.tmp_dir!(), "symphony-pr-missing-branch-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue = %Issue{
+      id: "issue-pr-missing-branch",
+      identifier: "MT-905",
+      title: "Require a branch before publishing"
+    }
+
+    assert {:error, :missing_branch} =
+             PullRequestManager.ensure_pull_request(
+               workspace,
+               issue,
+               %{base_branch: "main"},
+               github_client: __MODULE__.FakeGitHubClient,
+               github_client_opts: [test_pid: self()]
+             )
+  end
+
   test "merge_pull_request is idempotent when the PR is already merged" do
     workspace = "/tmp/symphony-pr-merged"
 
