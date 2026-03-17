@@ -216,6 +216,9 @@ defmodule SymphonyElixirWeb.Presenter do
         "retry_now" ->
           Orchestrator.retry_issue_now(orchestrator, issue_identifier)
 
+        "refresh_merge_readiness" ->
+          Orchestrator.refresh_merge_readiness(orchestrator, issue_identifier)
+
         "approve_for_merge" ->
           Orchestrator.approve_issue_for_merge(orchestrator, issue_identifier)
 

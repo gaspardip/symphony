@@ -672,6 +672,78 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert get_in(posted_state, [:review_threads, "review:1", "draft_state"]) == "approved_to_post"
   end
 
+  test "refresh merge readiness restarts passive PR hygiene work" do
+    unique_suffix = System.unique_integer([:positive])
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-refresh-merge-readiness-#{unique_suffix}"
+      )
+
+    manual_store_root = Path.join(workspace_root, "manual-store")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      manual_store_root: manual_store_root
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    {:ok, issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "merge-readiness-refresh-#{unique_suffix}",
+        "identifier" => "MT-MERGE-READY-#{unique_suffix}",
+        "title" => "Refresh merge readiness",
+        "description" => "Restart passive PR hygiene work",
+        "acceptance_criteria" => ["Return the run to merge_readiness"],
+        "policy_class" => "fully_autonomous"
+      })
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    init_git_workspace!(workspace, branch: "symphony/mt-merge-ready")
+
+    {:ok, _} =
+      SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        pr_url: "https://github.com/example/repo/pull/22",
+        last_pr_body_validation: %{status: "failed"},
+        review_threads: %{
+          "comment:1" => %{
+            "thread_key" => "comment:1",
+            "draft_state" => "posted",
+            "reply_refresh_needed" => true
+          }
+        }
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :RefreshMergeReadinessOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    payload = Orchestrator.refresh_merge_readiness(orchestrator_name, issue.identifier)
+    assert payload.ok == true
+    assert payload.action == "refresh_merge_readiness"
+    assert payload.stage == "merge_readiness"
+    assert payload.pr_url == "https://github.com/example/repo/pull/22"
+    assert is_binary(payload.ledger_event_id)
+
+    {:ok, refreshed_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert refreshed_state.stage == "merge_readiness"
+    assert refreshed_state.await_checks_polls == 0
+    assert refreshed_state.last_rule_id == "operator.refresh_merge_readiness"
+    assert refreshed_state.last_failure_class == "pr_hygiene"
+    assert refreshed_state.next_human_action == nil
+  end
+
   test "retry now restores a blocked manual issue to its last actionable stage" do
     workspace_root =
       Path.join(

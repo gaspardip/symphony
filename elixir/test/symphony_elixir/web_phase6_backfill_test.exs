@@ -1088,6 +1088,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
            issue_identifier: "MT-ACTION"
          },
          {:retry_issue_now, "MT-ACTION"} => %{ok: true, action: "retry_now", issue_identifier: "MT-ACTION"},
+         {:refresh_merge_readiness, "MT-ACTION"} => %{
+           ok: true,
+           action: "refresh_merge_readiness",
+           issue_identifier: "MT-ACTION",
+           stage: "merge_readiness"
+         },
          {:approve_issue_for_merge, "MT-ACTION"} => {:error, :not_ready},
          {:reprioritize_issue, "MT-ACTION", 0} => %{
            ok: true,
@@ -1126,6 +1132,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert {:ok, %{action: "retry_now"}} =
              Presenter.control_payload("retry_now", "MT-ACTION", %{}, orchestrator_name)
 
+    assert {:ok, %{action: "refresh_merge_readiness", stage: "merge_readiness"}} =
+             Presenter.control_payload("refresh_merge_readiness", "MT-ACTION", %{}, orchestrator_name)
+
     assert {:error, :not_ready} =
              Presenter.control_payload("approve_for_merge", "MT-ACTION", %{}, orchestrator_name)
 
@@ -1150,6 +1159,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert_receive {:orchestrator_call, {:stop_issue, "MT-ACTION"}}
     assert_receive {:orchestrator_call, {:hold_issue_for_human_review, "MT-ACTION"}}
     assert_receive {:orchestrator_call, {:retry_issue_now, "MT-ACTION"}}
+    assert_receive {:orchestrator_call, {:refresh_merge_readiness, "MT-ACTION"}}
     assert_receive {:orchestrator_call, {:approve_issue_for_merge, "MT-ACTION"}}
     assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-ACTION", 0}}
     assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-ACTION", nil}}
