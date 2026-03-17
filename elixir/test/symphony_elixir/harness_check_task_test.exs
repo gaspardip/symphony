@@ -11,4 +11,60 @@ defmodule SymphonyElixir.HarnessCheckTaskTest do
              end) =~ "harness.check: self-development harness is valid"
     end)
   end
+
+  test "mix harness.check raises outside a Symphony repo root" do
+    workspace = temp_workspace("harness-check-missing")
+
+    try do
+      init_git_workspace!(workspace)
+
+      File.cd!(workspace, fn ->
+        Mix.Task.reenable("harness.check")
+
+        assert_raise RuntimeError, ~r/Unable to locate repo root for harness check/, fn ->
+          capture_io(fn ->
+            Mix.Tasks.Harness.Check.run([])
+          end)
+        end
+      end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "mix harness.check raises for invalid harness files" do
+    workspace = temp_workspace("harness-check-invalid")
+
+    try do
+      init_git_workspace!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.write!(Path.join(workspace, ".symphony/harness.yml"), ":\n")
+
+      File.cd!(workspace, fn ->
+        Mix.Task.reenable("harness.check")
+
+        assert_raise Mix.Error, ~r/harness\.check failed/, fn ->
+          capture_io(fn ->
+            Mix.Tasks.Harness.Check.run([])
+          end)
+        end
+      end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  defp temp_workspace(suffix) do
+    Path.join(System.tmp_dir!(), "symphony-#{suffix}-#{System.unique_integer([:positive])}")
+  end
+
+  defp init_git_workspace!(workspace) do
+    File.mkdir_p!(workspace)
+    System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+    System.cmd("git", ["config", "user.name", "Test User"], cd: workspace, stderr_to_stdout: true)
+    System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace, stderr_to_stdout: true)
+    File.write!(Path.join(workspace, "README.md"), "initial\n")
+    System.cmd("git", ["add", "README.md"], cd: workspace, stderr_to_stdout: true)
+    System.cmd("git", ["commit", "-m", "initial"], cd: workspace, stderr_to_stdout: true)
+  end
 end
