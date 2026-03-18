@@ -300,6 +300,53 @@ defmodule SymphonyElixir.CLIPhase6ExtraTest do
              CLI.main_result_for_test([@ack_flag, "WORKFLOW.md"], missing_deps)
   end
 
+  test "manual submit with default deps posts json payloads to the requested server" do
+    spec_dir = temp_dir("cli-manual-submit-ok")
+    File.mkdir_p!(spec_dir)
+    spec_path = Path.join(spec_dir, "issue.json")
+    File.write!(spec_path, Jason.encode!(%{"identifier" => "CLZ-31"}))
+
+    server_url =
+      start_http_server!(fn request ->
+        assert request =~ "\"identifier\":\"CLZ-31\""
+        {200, %{"ok" => true, "source" => "manual"}}
+      end)
+
+    assert {:ok, %{"ok" => true, "source" => "manual"}} =
+             CLI.evaluate(["manual", "submit", spec_path, "--server", server_url])
+  end
+
+  test "manual submit with default deps surfaces invalid payloads and server-side errors" do
+    invalid_spec_dir = temp_dir("cli-manual-submit-invalid")
+    File.mkdir_p!(invalid_spec_dir)
+    invalid_spec_path = Path.join(invalid_spec_dir, "issue.json")
+    File.write!(invalid_spec_path, Jason.encode!(["not", "a", "map"]))
+
+    assert {:error, "Manual submission failed: :invalid_json_payload"} =
+             CLI.evaluate(["manual", "submit", invalid_spec_path])
+
+    api_error_spec_dir = temp_dir("cli-manual-submit-api-error")
+    File.mkdir_p!(api_error_spec_dir)
+    api_error_spec_path = Path.join(api_error_spec_dir, "issue.json")
+    File.write!(api_error_spec_path, Jason.encode!(%{"identifier" => "CLZ-32"}))
+
+    api_error_url =
+      start_http_server!(fn _request ->
+        {422, %{"error" => %{"message" => "manual submission rejected"}}}
+      end)
+
+    assert {:error, "manual submission rejected"} =
+             CLI.evaluate(["manual", "submit", api_error_spec_path, "--server", api_error_url])
+
+    status_error_url =
+      start_http_server!(fn _request ->
+        {418, %{"status" => "teapot"}}
+      end)
+
+    assert {:error, "Manual submission failed: {:unexpected_status, 418}"} =
+             CLI.evaluate(["manual", "submit", api_error_spec_path, "--server", status_error_url])
+  end
+
   test "wait_for_shutdown_result_for_test reports missing, normal, and abnormal supervisor exits" do
     parent = self()
     missing_name = Module.concat(__MODULE__, :MissingSupervisor)
@@ -358,6 +405,113 @@ defmodule SymphonyElixir.CLIPhase6ExtraTest do
   defp temp_dir(prefix) do
     Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
   end
+
+  defp start_http_server!(handler) when is_function(handler, 1) do
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, packet: :raw, active: false, reuseaddr: true])
+    {:ok, {_ip, port}} = :inet.sockname(listener)
+
+    server =
+      spawn_link(fn ->
+        accept_http_connections(listener, handler)
+      end)
+
+    on_exit(fn ->
+      :gen_tcp.close(listener)
+
+      if Process.alive?(server) do
+        Process.exit(server, :shutdown)
+      end
+    end)
+
+    "http://127.0.0.1:#{port}"
+  end
+
+  defp accept_http_connections(listener, handler) do
+    case :gen_tcp.accept(listener) do
+      {:ok, socket} ->
+        serve_http_request(socket, handler)
+        accept_http_connections(listener, handler)
+
+      {:error, :closed} ->
+        :ok
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp serve_http_request(socket, handler) do
+    {:ok, headers, initial_body} = recv_until_headers(socket, "")
+    content_length = http_content_length(headers)
+    {:ok, body} = recv_exact(socket, content_length - byte_size(initial_body), initial_body)
+    {status, payload} = handler.(body)
+    response_body = Jason.encode!(payload)
+
+    response = [
+      "HTTP/1.1 ",
+      Integer.to_string(status),
+      " ",
+      http_status_reason(status),
+      "\r\n",
+      "content-type: application/json\r\n",
+      "content-length: ",
+      Integer.to_string(byte_size(response_body)),
+      "\r\n",
+      "connection: close\r\n\r\n",
+      response_body
+    ]
+
+    :ok = :gen_tcp.send(socket, response)
+    :gen_tcp.close(socket)
+  end
+
+  defp recv_until_headers(socket, acc) do
+    case String.split(acc, "\r\n\r\n", parts: 2) do
+      [headers, rest] ->
+        {:ok, headers, rest}
+
+      [_] ->
+        case :gen_tcp.recv(socket, 0, 5_000) do
+          {:ok, chunk} -> recv_until_headers(socket, acc <> chunk)
+          other -> other
+        end
+    end
+  end
+
+  defp recv_exact(_socket, 0, acc), do: {:ok, acc}
+
+  defp recv_exact(socket, remaining, acc) do
+    case :gen_tcp.recv(socket, remaining, 5_000) do
+      {:ok, chunk} ->
+        recv_exact(socket, remaining - byte_size(chunk), acc <> chunk)
+
+      other ->
+        other
+    end
+  end
+
+  defp http_content_length(headers) do
+    headers
+    |> String.split("\r\n", trim: true)
+    |> Enum.find_value(0, fn line ->
+      case String.split(line, ":", parts: 2) do
+        [name, value] ->
+          if String.downcase(String.trim(name)) == "content-length" do
+            value |> String.trim() |> String.to_integer()
+          else
+            false
+          end
+
+        _ ->
+          false
+      end
+    end)
+  end
+
+  defp http_status_reason(200), do: "OK"
+  defp http_status_reason(418), do: "I'm a teapot"
+  defp http_status_reason(422), do: "Unprocessable Entity"
+  defp http_status_reason(_status), do: "OK"
 
   defp restore_app_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_app_env(app, key, value), do: Application.put_env(app, key, value)
