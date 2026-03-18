@@ -3825,13 +3825,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp issue_run_stage(identifier) when is_binary(identifier) do
-    case issue_run_state(identifier) do
-      %{stage: stage} when is_binary(stage) -> stage
-      _ -> nil
-    end
-  end
-
   defp issue_run_state(identifier) when is_binary(identifier) do
     workspace = Workspace.path_for_issue(identifier)
 
@@ -6860,7 +6853,7 @@ defmodule SymphonyElixir.Orchestrator do
     terminate_running_issue(state, issue.id, false)
   end
 
-  defp block_dispatch_stage(workspace, %Issue{} = issue, summary, rule_key, metadata \\ %{})
+  defp block_dispatch_stage(workspace, %Issue{} = issue, summary, rule_key, metadata)
        when is_binary(workspace) and is_binary(summary) and is_atom(rule_key) and is_map(metadata) do
     rule = RuleCatalog.rule(rule_key)
 

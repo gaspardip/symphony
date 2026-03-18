@@ -263,13 +263,6 @@ defmodule SymphonyElixir.PullRequestManager do
     )
   end
 
-  defp truncate_line(text, max_length) when is_binary(text) do
-    text
-    |> String.replace(~r/\s+/, " ")
-    |> String.trim()
-    |> String.slice(0, max_length)
-  end
-
   defp shell_escape(value) do
     escaped = String.replace(value, "'", "'\"'\"'")
     "'#{escaped}'"
