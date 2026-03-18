@@ -358,7 +358,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       workspace = Path.join(workspace_root, "MT-MISSING-GIT")
       File.mkdir_p!(Path.join(workspace, ".symphony"))
-      File.write!(Path.join(workspace, "stale.txt"), "remove me\n")
 
       :ok =
         RunStateStore.save(workspace, %{
@@ -374,7 +373,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert recreated_workspace == workspace
       assert File.exists?(Path.join(workspace, ".git"))
       assert File.read!(Path.join(workspace, "README.md")) == "restored clone\n"
-      refute File.exists?(Path.join(workspace, "stale.txt"))
     after
       File.rm_rf(test_root)
     end

@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Workspace do
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
   @bootstrap_metadata_entries MapSet.new([".symphony"])
+  @runtime_metadata_entries MapSet.new([".symphony"])
 
   @spec create_for_issue(map() | String.t() | nil) :: {:ok, Path.t()} | {:error, term()}
   def create_for_issue(issue_or_identifier) do
@@ -50,7 +51,7 @@ defmodule SymphonyElixir.Workspace do
         prepare_bootstrap_workspace(workspace)
 
       File.dir?(workspace) ->
-        if reset_required?(workspace) do
+        if checkout_repair_required?(workspace) or reset_required?(workspace) do
           create_workspace(workspace)
         else
           clean_tmp_artifacts(workspace)
@@ -75,16 +76,25 @@ defmodule SymphonyElixir.Workspace do
   defp reset_required?(workspace) when is_binary(workspace) do
     case RunStateStore.load(workspace) do
       {:ok, run_state} ->
-        not RunStateStore.canonical_workspace_for_current_runtime?(workspace, run_state) or
-          checkout_reset_required?(workspace)
+        not RunStateStore.canonical_workspace_for_current_runtime?(workspace, run_state)
 
       _ ->
         false
     end
   end
 
-  defp checkout_reset_required?(workspace) do
-    Config.policy_require_checkout?() and not RunInspector.inspect(workspace).git?
+  defp checkout_repair_required?(workspace) do
+    Config.policy_require_checkout?() and
+      not RunInspector.inspect(workspace).git? and
+      stale_runtime_metadata_only?(workspace)
+  end
+
+  defp stale_runtime_metadata_only?(workspace) do
+    workspace
+    |> File.ls!()
+    |> Enum.reject(&MapSet.member?(@excluded_entries, &1))
+    |> MapSet.new()
+    |> MapSet.equal?(@runtime_metadata_entries)
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
