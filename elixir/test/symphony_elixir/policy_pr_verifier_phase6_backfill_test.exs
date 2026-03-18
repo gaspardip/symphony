@@ -596,14 +596,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   end
 
   test "run policy stops when output token budget is exceeded" do
-    configure_memory_tracker!(
-      policy_token_budget: %{per_turn_input: nil, per_issue_total: 50, per_issue_total_output: 5}
-    )
+    configure_memory_tracker!(policy_token_budget: %{per_turn_input: nil, per_issue_total: 50, per_issue_total_output: 5})
 
     issue = %Issue{id: "issue-output-budget", identifier: "MT-913", state: "In Progress"}
 
-    assert {:stop,
-            %RunPolicy.Violation{code: :per_issue_output_budget_exceeded, details: details}} =
+    assert {:stop, %RunPolicy.Violation{code: :per_issue_output_budget_exceeded, details: details}} =
              RunPolicy.maybe_stop_for_token_budget(issue, %{
                codex_input_tokens: 4,
                codex_output_tokens: 7,
@@ -618,9 +615,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   end
 
   test "run policy allows runs that stay within configured budgets" do
-    configure_memory_tracker!(
-      policy_token_budget: %{per_turn_input: 10, per_issue_total: 20, per_issue_total_output: 8}
-    )
+    configure_memory_tracker!(policy_token_budget: %{per_turn_input: 10, per_issue_total: 20, per_issue_total_output: 8})
 
     issue = %Issue{id: "issue-budget-ok", identifier: "MT-914", state: "In Progress"}
 
@@ -1185,10 +1180,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  codex_total_tokens: 185_018,
                  turn_started_input_tokens: 0,
                  resume_context: %{
-                   last_turn_summary:
-                     "The operator payload parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
-                   next_objective:
-                     "Continue in elixir/lib/symphony_elixir_web/presenter.ex and elixir/lib/symphony_elixir_web/router.ex without rediscovering the whole repo."
+                   last_turn_summary: "The operator payload parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
+                   next_objective: "Continue in elixir/lib/symphony_elixir_web/presenter.ex and elixir/lib/symphony_elixir_web/router.ex without rediscovering the whole repo."
                  }
                })
 
@@ -1230,8 +1223,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text:
-                           "The focused presenter retry is not enough on its own. The one exact next file needed is `elixir/lib/symphony_elixir_web/router.ex`."
+                         text: "The focused presenter retry is not enough on its own. The one exact next file needed is `elixir/lib/symphony_elixir_web/router.ex`."
                        }
                      }
                    }
@@ -1271,8 +1263,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      "elixir/lib/symphony_elixir_web/router.ex"
                    ],
                    next_required_path: "elixir/lib/symphony_elixir_web/router.ex",
-                   already_learned:
-                     "Stay inside elixir/lib/symphony_elixir_web/presenter.ex, elixir/lib/symphony_elixir_web/router.ex and avoid unrelated reads or repo-wide rediscovery."
+                   already_learned: "Stay inside elixir/lib/symphony_elixir_web/presenter.ex, elixir/lib/symphony_elixir_web/router.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
 
@@ -1341,8 +1332,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                    target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
                    next_required_path: ".github/pull_request_template.md",
                    budget_expansion_used: false,
-                   already_learned:
-                     "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
 
@@ -1363,8 +1353,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                    target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
                    next_required_path: ".github/pull_request_template.md",
                    budget_expansion_used: false,
-                   already_learned:
-                     "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
 
@@ -1588,8 +1577,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text:
-                           "The live stop is in `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the only file worth touching next."
+                         text: "The live stop is in `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the only file worth touching next."
                        }
                      }
                    }
@@ -1661,8 +1649,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text:
-                           "Focus the next retry inside `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the same path and should not be duplicated."
+                         text: "Focus the next retry inside `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the same path and should not be duplicated."
                        }
                      }
                    }
@@ -1672,8 +1659,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       assert %{
                resume_context: %{
                  target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
-                 already_learned:
-                   "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                }
              } = RunStateStore.load_or_default(workspace, issue)
     after
@@ -1748,8 +1734,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       assert %{
                resume_context: %{
                  target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
-                 already_learned:
-                   "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                }
              } = RunStateStore.load_or_default(workspace, issue)
     after
@@ -1808,8 +1793,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text:
-                           "The broad retry should stay inside `elixir/lib/symphony_elixir/delivery_engine.ex`."
+                         text: "The broad retry should stay inside `elixir/lib/symphony_elixir/delivery_engine.ex`."
                        }
                      }
                    }
@@ -1817,8 +1801,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  resume_context: %{}
                })
 
-      assert {:stop,
-              %RunPolicy.Violation{code: :broad_implement_focus_insufficient, details: details}} =
+      assert {:stop, %RunPolicy.Violation{code: :broad_implement_focus_insufficient, details: details}} =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  workspace: workspace,
                  stage: "implement",
@@ -1833,8 +1816,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                    budget_pressure_level: "high",
                    budget_auto_narrowed: true,
                    target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
-                   already_learned:
-                     "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
 
@@ -1847,8 +1829,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  budget_retry_count: 1,
                  budget_auto_narrowed: true,
                  target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
-                 already_learned:
-                   "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                },
                stop_reason: %{rule_id: "budget.broad_implement_focus_insufficient"}
              } = RunStateStore.load_or_default(workspace, issue)
@@ -1966,8 +1947,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text:
-                           "The stale-stage live retry should focus immediately on `elixir/lib/symphony_elixir/delivery_engine.ex`."
+                         text: "The stale-stage live retry should focus immediately on `elixir/lib/symphony_elixir/delivery_engine.ex`."
                        }
                      }
                    }
@@ -2479,9 +2459,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                github_client_opts: [
                  test_pid: self(),
                  existing_result: {:ok, %{url: "https://github.com/g/s/pull/20", state: "OPEN"}},
-                 edit_result:
-                   {:ok,
-                    %{url: "https://github.com/g/s/pull/20", state: "OPEN", output: "edited"}}
+                 edit_result: {:ok, %{url: "https://github.com/g/s/pull/20", state: "OPEN", output: "edited"}}
                ]
              )
 
@@ -2552,14 +2530,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                ]
              )
 
-    assert_receive {:created_pr, ^workspace, "gaspar/phase6-create", "main", "MT-923: Untitled",
-                    body}
+    assert_receive {:created_pr, ^workspace, "gaspar/phase6-create", "main", "MT-923: Untitled", body}
 
     assert body =~ "Issue: https://linear.app/test/issue/MT-923"
     refute_receive {:memory_tracker_attach_link, _, _, _}
 
-    assert_receive {:persist_pr_url, ^workspace, "gaspar/phase6-create",
-                    "https://github.com/g/s/pull/23"}
+    assert_receive {:persist_pr_url, ^workspace, "gaspar/phase6-create", "https://github.com/g/s/pull/23"}
   end
 
   test "pull request manager delegates existing and merge wrappers to the configured client" do
@@ -2696,8 +2672,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                )
     end)
 
-    assert_receive {:memory_tracker_attach_link, "issue-pr-default-create", "GitHub PR: MT-924",
-                    "https://github.com/g/s/pull/26"}
+    assert_receive {:memory_tracker_attach_link, "issue-pr-default-create", "GitHub PR: MT-924", "https://github.com/g/s/pull/26"}
   end
 
   test "pull request manager surfaces PR body lint failures before calling GitHub" do

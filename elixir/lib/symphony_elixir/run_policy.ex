@@ -185,8 +185,7 @@ defmodule SymphonyElixir.RunPolicy do
           auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
           total_extension_used: false,
           per_turn_input_soft: stage_budget[:per_turn_input_soft],
-          per_turn_input_hard:
-            stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+          per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
           max_turns_in_window: nil,
           per_issue_total_limit: token_budget[:per_issue_total],
           per_issue_total_extension: nil
@@ -194,8 +193,7 @@ defmodule SymphonyElixir.RunPolicy do
       else
         %{
           mode: "broad",
-          pressure_level:
-            if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
+          pressure_level: if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
           retry_count: 0,
           window_base_turn: nil,
           last_stop_code: nil,
@@ -205,8 +203,7 @@ defmodule SymphonyElixir.RunPolicy do
           auto_narrowed: false,
           total_extension_used: false,
           per_turn_input_soft: stage_budget[:per_turn_input_soft],
-          per_turn_input_hard:
-            stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+          per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
           max_turns_in_window: nil,
           per_issue_total_limit: token_budget[:per_issue_total],
           per_issue_total_extension: nil
@@ -324,9 +321,7 @@ defmodule SymphonyElixir.RunPolicy do
           {:error, reason} ->
             stop_issue(
               %{id: issue_id},
-              preflight_failed_violation(
-                "Unable to move issue to In Progress: #{inspect(reason)}"
-              )
+              preflight_failed_violation("Unable to move issue to In Progress: #{inspect(reason)}")
             )
         end
       else
@@ -485,9 +480,7 @@ defmodule SymphonyElixir.RunPolicy do
           :ok
 
         {:error, reason} ->
-          Logger.warning(
-            "Failed to create policy comment for #{issue_identifier}: #{inspect(reason)}"
-          )
+          Logger.warning("Failed to create policy comment for #{issue_identifier}: #{inspect(reason)}")
       end
 
       case IssueSource.update_issue_state(issue, violation.target_state) do
@@ -495,9 +488,7 @@ defmodule SymphonyElixir.RunPolicy do
           :ok
 
         {:error, reason} ->
-          Logger.warning(
-            "Failed to move #{issue_identifier} to #{violation.target_state}: #{inspect(reason)}"
-          )
+          Logger.warning("Failed to move #{issue_identifier} to #{violation.target_state}: #{inspect(reason)}")
       end
     end
 
@@ -541,8 +532,7 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp missing_checkout_violation(workspace) do
     violation(:missing_checkout,
-      summary:
-        "No repository checkout was found in the workspace, so the run stopped before turn 1.",
+      summary: "No repository checkout was found in the workspace, so the run stopped before turn 1.",
       details: "Expected a Git checkout under `#{workspace}`, but `.git` was missing."
     )
   end
@@ -556,10 +546,8 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp missing_harness_violation(workspace) do
     violation(:missing_harness,
-      summary:
-        "The repo harness contract is missing, so Symphony cannot validate this run autonomously.",
-      details:
-        "Expected `#{Path.join(workspace, ".symphony/harness.yml")}` to exist before dispatch."
+      summary: "The repo harness contract is missing, so Symphony cannot validate this run autonomously.",
+      details: "Expected `#{Path.join(workspace, ".symphony/harness.yml")}` to exist before dispatch."
     )
   end
 
@@ -622,10 +610,8 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp runner_overlap_violation(workspace) do
     violation(:runner_overlap,
-      summary:
-        "The target workspace overlaps the protected Symphony runner install or current checkout.",
-      details:
-        "Workspace `#{workspace}` overlaps one of: #{Enum.join(RunnerRuntime.protected_paths(), ", ")}."
+      summary: "The target workspace overlaps the protected Symphony runner install or current checkout.",
+      details: "Workspace `#{workspace}` overlaps one of: #{Enum.join(RunnerRuntime.protected_paths(), ", ")}."
     )
   end
 
@@ -635,8 +621,7 @@ defmodule SymphonyElixir.RunPolicy do
     violation(:repo_boundary_mismatch,
       summary: "The workspace checkout does not belong to the configured company/repo boundary.",
       details: "Expected origin `#{expected}`, but found `#{origin_url || "unknown"}`.",
-      human_action:
-        "Repair the checkout remote or discard the workspace so it points at the configured repo before retrying."
+      human_action: "Repair the checkout remote or discard the workspace so it points at the configured repo before retrying."
     )
   end
 
@@ -685,8 +670,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp review_fix_exhaustion_violation(:scope_exhausted, observed, metadata) do
     violation(:review_fix_scope_exhausted,
       summary: "Scoped review-fix retries exhausted the narrowest available scope.",
-      details:
-        "Observed per-turn input #{observed} with no smaller review-fix scope left to try.",
+      details: "Observed per-turn input #{observed} with no smaller review-fix scope left to try.",
       metadata: metadata
     )
   end
@@ -694,8 +678,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp review_fix_exhaustion_violation(:turn_window_exhausted, observed, metadata) do
     violation(:review_fix_turn_window_exhausted,
       summary: "Scoped review-fix retries exhausted the configured turn window.",
-      details:
-        "Observed per-turn input #{observed} after consuming the adaptive review-fix retry window.",
+      details: "Observed per-turn input #{observed} after consuming the adaptive review-fix retry window.",
       metadata: metadata
     )
   end
@@ -703,8 +686,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp review_fix_exhaustion_violation(:total_extension_exhausted, observed, metadata) do
     violation(:review_fix_total_extension_exhausted,
       summary: "Scoped review-fix retries exhausted the bounded total-budget extension.",
-      details:
-        "Observed total tokens #{observed} after consuming the review-fix total-budget extension.",
+      details: "Observed total tokens #{observed} after consuming the review-fix total-budget extension.",
       metadata: metadata
     )
   end
@@ -712,8 +694,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp broad_implement_exhaustion_violation(observed, metadata) do
     violation(:broad_implement_scope_exhausted,
       summary: "Broad implement retries exhausted the narrow retry lane.",
-      details:
-        "Observed per-turn input #{observed} after Symphony retried with a narrower broad-implement context and no smaller safe retry remained.",
+      details: "Observed per-turn input #{observed} after Symphony retried with a narrower broad-implement context and no smaller safe retry remained.",
       metadata: metadata
     )
   end
@@ -738,8 +719,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp broad_implement_expansion_exhaustion_violation(observed, metadata) do
     violation(:broad_implement_expansion_exhausted,
       summary: "The bounded broad-implement expansion retry was exhausted.",
-      details:
-        "Observed per-turn input #{observed} after Symphony retried with the focused file plus one explicit expansion path.",
+      details: "Observed per-turn input #{observed} after Symphony retried with the focused file plus one explicit expansion path.",
       metadata: metadata
     )
   end
@@ -1346,8 +1326,7 @@ defmodule SymphonyElixir.RunPolicy do
           actor_type: "runtime",
           actor_id: "run_policy",
           summary: "Scoped review-fix turn entered soft token pressure.",
-          details:
-            "Observed input tokens #{current_turn_input} above scoped soft budget #{soft_budget}.",
+          details: "Observed input tokens #{current_turn_input} above scoped soft budget #{soft_budget}.",
           metadata: %{
             stage: Map.get(running_entry, :stage),
             observed: current_turn_input,
@@ -1914,8 +1893,7 @@ defmodule SymphonyElixir.RunPolicy do
                 actor_type: "runtime",
                 actor_id: "run_policy",
                 summary: "Turn entered soft token pressure.",
-                details:
-                  "Observed implement/verify input tokens #{current_turn_input} above soft budget #{soft_budget}.",
+                details: "Observed implement/verify input tokens #{current_turn_input} above soft budget #{soft_budget}.",
                 metadata: %{
                   stage: stage,
                   observed: current_turn_input,
