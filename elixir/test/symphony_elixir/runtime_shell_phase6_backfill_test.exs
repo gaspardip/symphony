@@ -695,6 +695,17 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     assert {:ok, %Issue{identifier: "MT-9"}} = Client.fetch_issue_by_identifier("MT-9")
     assert {:error, :invalid_linear_issue_identifier} = Client.fetch_issue_by_identifier("bad-identifier")
 
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_endpoint: success_endpoint,
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      tracker_assignee: "worker-other"
+    )
+
+    assert {:ok, %Issue{identifier: "MT-9", assigned_to_worker: false}} =
+             Client.fetch_issue_by_identifier("MT-9")
+
     missing_viewer_endpoint =
       start_linear_server!(fn _body ->
         %{"data" => %{"viewer" => %{}}}

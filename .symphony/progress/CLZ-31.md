@@ -21,6 +21,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
   - `coordination.retry_dispatch_deferred`
 - Updated `SymphonyElixirWeb.Presenter` so issue detail payloads can fall back to the latest ledger decision when no workspace `run_state.json` exists yet, avoiding the old empty `Todo` shell after a deferred `retry_now`.
 - Fixed the underlying live dispatch bug after the new telemetry exposed it: `revalidate_issue_for_dispatch/3` now merges state-only tracker refreshes back onto the original issue envelope before checking dispatch eligibility, so a partial refresh cannot strip required issue fields like `title` and incorrectly mark a valid `Todo` issue as ineligible.
+- Normalized Linear identifier lookups so `fetch_issue_by_identifier/1` now honors the same routing assignee filter as `fetch_issue_by_id/1` and `fetch_issue_states_by_ids/1`, eliminating the live mismatch where `/api/v1/CLZ-31` looked assigned while `retry_now` correctly deferred it as unroutable.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -30,6 +31,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Local focused control/presenter coverage is green after the telemetry and revalidation fixes.
 - Live replay on `http://127.0.0.1:4046/api/v1/CLZ-31` now surfaces `coordination.retry_dispatch_deferred` with a concrete `why_here` and `human_action_required` instead of an empty `Todo` shell.
 - An isolated probe under the live workflow confirmed `CLZ-31` is dispatchable when evaluated against the full tracker issue, which narrowed the remaining bug to partial revalidation data rather than labels, routing, or concurrency.
+- Focused Linear client coverage now proves identifier-based issue fetches carry `assigned_to_worker: false` when the configured routing assignee does not match, keeping issue detail payloads aligned with `retry_now` dispatch gating.
 
 ## Next Step
-- Restart the runner on the latest local commit and replay `CLZ-31` again to verify that the merged revalidation envelope actually starts the live dispatch path instead of deferring it.
+- Restart the runner on the latest local commit and replay `CLZ-31` again to verify whether the remaining defer is a real routing gate on an unassigned issue or another control-plane mismatch.

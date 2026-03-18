@@ -4931,6 +4931,7 @@ defmodule SymphonyElixir.Orchestrator do
          false <- issue_paused?(state, issue) do
       state = cancel_retry(state, issue.id)
       {state, issue} = maybe_resume_blocked_issue(state, issue)
+      issue = retry_issue_control_envelope(issue)
 
       if not Map.has_key?(state.running, issue.id) do
         LeaseManager.release(issue.id)
@@ -5033,6 +5034,17 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp retry_issue_control_envelope(%Issue{source: :tracker} = issue) do
+    case revalidate_issue_for_dispatch(issue, &IssueSource.fetch_issue_states_by_ids/1, terminal_state_set()) do
+      {:ok, %Issue{} = refreshed_issue} -> refreshed_issue
+      {:skip, %Issue{} = refreshed_issue} -> refreshed_issue
+      _ -> issue
+    end
+  end
+
+  defp retry_issue_control_envelope(%Issue{} = issue), do: issue
+  defp retry_issue_control_envelope(issue), do: issue
+
   defp retry_issue_now_diagnostic(%Issue{} = issue, %State{} = state) do
     cond do
       available_slots(state) <= 0 ->
@@ -5098,7 +5110,18 @@ defmodule SymphonyElixir.Orchestrator do
     retry_issue_now_rule(
       :retry_dispatch_deferred,
       retry_issue_now_skip_summary(issue, reason),
-      %{issue_state: issue.state, blocked_by: Map.get(issue, :blocked_by, []), skip_reason: reason},
+      %{
+        issue_state: issue.state,
+        issue_source: issue.source,
+        skip_reason: reason,
+        blocked_by: Map.get(issue, :blocked_by, []),
+        title_present: is_binary(issue.title) and String.trim(issue.title) != "",
+        identifier_present: is_binary(issue.identifier) and String.trim(issue.identifier) != "",
+        id_present: is_binary(issue.id) and String.trim(issue.id) != "",
+        assigned_to_worker: Map.get(issue, :assigned_to_worker),
+        target_runner_channel: issue_target_runner_channel(issue),
+        label_gate: label_gate_status(issue)
+      },
       next_human_action_for_skip(reason)
     )
   end

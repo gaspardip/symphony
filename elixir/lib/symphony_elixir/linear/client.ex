@@ -215,7 +215,8 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, :missing_linear_project_slug}
 
       true ->
-        with {:ok, team_key, issue_number} <- parse_issue_identifier(identifier),
+        with {:ok, assignee_filter} <- routing_assignee_filter(),
+             {:ok, team_key, issue_number} <- parse_issue_identifier(identifier),
              {:ok, body} <-
                graphql(@query_by_identifier, %{
                  projectSlug: project_slug,
@@ -223,7 +224,7 @@ defmodule SymphonyElixir.Linear.Client do
                  number: issue_number,
                  relationFirst: @issue_page_size
                }),
-             {:ok, issues} <- decode_linear_response(body, nil) do
+             {:ok, issues} <- decode_linear_response(body, assignee_filter) do
           {:ok, List.first(issues)}
         end
     end
