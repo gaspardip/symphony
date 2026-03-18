@@ -252,7 +252,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "mkdir -p .git && echo bootstrapped > README.md"
+        hook_after_create:
+          "mkdir -p .git .symphony && echo bootstrapped > README.md && echo version: 1 > .symphony/harness.yml"
       )
 
       workspace = Path.join(workspace_root, "MT-BOOTSTRAP")
@@ -262,6 +263,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, ^workspace} = Workspace.create_for_issue("MT-BOOTSTRAP")
       assert File.dir?(Path.join(workspace, ".git"))
       assert File.read!(Path.join(workspace, "README.md")) == "bootstrapped\n"
+      assert File.read!(Path.join(workspace, ".symphony/harness.yml")) == "version: 1\n"
       assert File.read!(Path.join(workspace, ".symphony/run_state.json")) == ~s({"stage":"checkout"})
     after
       File.rm_rf(workspace_root)

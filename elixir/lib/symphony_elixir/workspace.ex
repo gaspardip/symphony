@@ -166,8 +166,7 @@ defmodule SymphonyElixir.Workspace do
 
     cond do
       File.dir?(preserved_dir) ->
-        File.rm_rf(target)
-        File.rename!(preserved_dir, target)
+        merge_preserved_workspace_metadata!(preserved_dir, target)
         :ok
 
       true ->
@@ -176,6 +175,26 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp restore_preserved_workspace_state(_workspace, _lifecycle), do: :ok
+
+  defp merge_preserved_workspace_metadata!(source_dir, target_dir)
+       when is_binary(source_dir) and is_binary(target_dir) do
+    File.mkdir_p!(target_dir)
+
+    Enum.each(File.ls!(source_dir), fn entry ->
+      source = Path.join(source_dir, entry)
+      target = Path.join(target_dir, entry)
+
+      cond do
+        File.dir?(source) ->
+          merge_preserved_workspace_metadata!(source, target)
+
+        true ->
+          File.cp!(source, target)
+      end
+    end)
+
+    File.rm_rf!(source_dir)
+  end
 
   defp bootstrap_only_workspace?(workspace) when is_binary(workspace) do
     case File.ls(workspace) do

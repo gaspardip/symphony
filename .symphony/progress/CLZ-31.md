@@ -23,6 +23,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Fixed the underlying live dispatch bug after the new telemetry exposed it: `revalidate_issue_for_dispatch/3` now merges state-only tracker refreshes back onto the original issue envelope before checking dispatch eligibility, so a partial refresh cannot strip required issue fields like `title` and incorrectly mark a valid `Todo` issue as ineligible.
 - Normalized Linear identifier lookups so `fetch_issue_by_identifier/1` now honors the same routing assignee filter as `fetch_issue_by_id/1` and `fetch_issue_states_by_ids/1`, eliminating the live mismatch where `/api/v1/CLZ-31` looked assigned while `retry_now` correctly deferred it as unroutable.
 - Fixed the dogfood checkout bootstrap seam: if the orchestrator has already created a metadata-only workspace with `.symphony/run_state.json`, `Workspace.create_for_issue/1` now preserves `.symphony`, reruns the `after_create` hook against an empty directory, and restores the runtime state afterward so checkout hooks can still materialize the Git repo.
+- Refined that bootstrap repair so restoring preserved `.symphony` state now merges runtime files back into the checked-out repo tree instead of replacing it, which keeps tracked repo files like `.symphony/harness.yml` available for pre-run policy enforcement.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -35,6 +36,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - An isolated probe under the live workflow confirmed `CLZ-31` is dispatchable when evaluated against the full tracker issue, which narrowed the remaining bug to partial revalidation data rather than labels, routing, or concurrency.
 - Focused Linear client coverage now proves identifier-based issue fetches carry `assigned_to_worker: false` when the configured routing assignee does not match, keeping issue detail payloads aligned with `retry_now` dispatch gating.
 - Focused workspace coverage now proves a metadata-only workspace reruns `after_create` and preserves `.symphony/run_state.json`, matching the live self-host retry path after a `retry_now` dispatch.
+- The workspace bootstrap regression now also proves checked-out `.symphony/harness.yml` survives the metadata restore, matching the live canary path that previously advanced from `checkout.missing_git` to `harness.missing`.
 
 ## Next Step
 - Rebuild the canary runner on the latest local commit and replay `CLZ-31` again to verify the live run gets past checkout and into a real agent turn.
