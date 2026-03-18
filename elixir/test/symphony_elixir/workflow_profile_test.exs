@@ -122,4 +122,57 @@ defmodule SymphonyElixir.WorkflowProfileTest do
     assert profile.approval_gate_state == "Client Approval"
     assert profile.merge_mode == :review_gate
   end
+
+  test "normalizes invalid workflow profile values back to safe defaults" do
+    path = Workflow.workflow_file_path()
+
+    File.write!(
+      path,
+      """
+      ---
+      tracker:
+        kind: linear
+        endpoint: https://api.linear.app/graphql
+        api_key: token
+        project_slug: project
+      profiles:
+        fully_autonomous:
+          merge_mode: invalid_mode
+          approval_gate_state: "   "
+          deploy_approval_gate_state: ""
+          preview_deploy_mode: invalid_preview
+          production_deploy_mode: invalid_production
+          max_turns_override: 0
+      ---
+
+      Ticket `{{ issue.identifier }}`.
+      """
+    )
+
+    SymphonyElixir.WorkflowStore.force_reload()
+
+    profile = WorkflowProfile.resolve("fully_autonomous")
+
+    assert profile.merge_mode == :automerge
+    assert profile.approval_gate_state == "Human Review"
+    assert profile.approval_gate_kind == "review"
+    assert profile.deploy_approval_gate_state == "Human Review"
+    assert profile.deploy_approval_gate_kind == "review"
+    assert profile.preview_deploy_mode == :disabled
+    assert profile.production_deploy_mode == :disabled
+    assert profile.max_turns_override == nil
+  end
+
+  test "helper accessors normalize gate kinds and profile names" do
+    assert WorkflowProfile.approval_gate_kind("Deploy Approval") == "deploy_approval"
+    assert WorkflowProfile.approval_gate_kind("Human Approval") == "review"
+    assert WorkflowProfile.approval_gate_kind("Something Else") == "approval"
+    assert WorkflowProfile.approval_gate_kind(nil) == "approval"
+
+    assert WorkflowProfile.name_string(:never_automerge) == "never_automerge"
+    assert WorkflowProfile.name_string(%WorkflowProfile{name: :review_required}) == "review_required"
+    assert WorkflowProfile.name_string(nil) == "nil"
+
+    refute WorkflowProfile.approval_gate_state?(nil)
+  end
 end
