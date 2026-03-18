@@ -175,4 +175,45 @@ defmodule SymphonyElixir.WorkflowProfileTest do
 
     refute WorkflowProfile.approval_gate_state?(nil)
   end
+
+  test "resolves valid deploy modes and unknown policy classes safely" do
+    path = Workflow.workflow_file_path()
+
+    File.write!(
+      path,
+      """
+      ---
+      tracker:
+        kind: linear
+        endpoint: https://api.linear.app/graphql
+        api_key: token
+        project_slug: project
+      profiles:
+        fully_autonomous:
+          deploy_approval_gate_state: Deploy Approval
+          preview_deploy_mode: after_merge
+          production_deploy_mode: after_preview
+          post_merge_verification_required: false
+          post_deploy_verification_required: false
+      ---
+
+      Ticket `{{ issue.identifier }}`.
+      """
+    )
+
+    SymphonyElixir.WorkflowStore.force_reload()
+
+    profile = WorkflowProfile.resolve("fully_autonomous")
+    fallback = WorkflowProfile.resolve("totally_unknown")
+
+    assert profile.deploy_approval_gate_state == "Deploy Approval"
+    assert profile.deploy_approval_gate_kind == "deploy_approval"
+    assert profile.preview_deploy_mode == :after_merge
+    assert profile.production_deploy_mode == :after_preview
+    refute profile.post_merge_verification_required
+    refute profile.post_deploy_verification_required
+
+    assert fallback.name == :fully_autonomous
+    assert fallback.merge_mode == :automerge
+  end
 end
