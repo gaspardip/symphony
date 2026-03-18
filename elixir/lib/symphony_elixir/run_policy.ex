@@ -436,8 +436,11 @@ defmodule SymphonyElixir.RunPolicy do
       })
 
     if is_binary(workspace) do
+      persisted_resume_context = persisted_resume_context_from_violation(violation, workspace)
+
       _ =
         RunStateStore.transition(workspace, "blocked", %{
+          resume_context: persisted_resume_context,
           stop_reason: %{
             code: Atom.to_string(violation.code),
             rule_id: violation.rule_id,
@@ -482,6 +485,24 @@ defmodule SymphonyElixir.RunPolicy do
     end
 
     {:stop, violation}
+  end
+
+  defp persisted_resume_context_from_violation(%Violation{metadata: metadata}, workspace)
+       when is_map(metadata) and is_binary(workspace) do
+    case Map.get(metadata, :resume_context) || Map.get(metadata, "resume_context") do
+      resume_context when is_map(resume_context) -> resume_context
+      _ -> persisted_resume_context_from_workspace(workspace)
+    end
+  end
+
+  defp persisted_resume_context_from_violation(_violation, workspace) when is_binary(workspace),
+    do: persisted_resume_context_from_workspace(workspace)
+
+  defp persisted_resume_context_from_workspace(workspace) when is_binary(workspace) do
+    case RunStateStore.load(workspace) do
+      {:ok, %{resume_context: resume_context}} when is_map(resume_context) -> resume_context
+      _ -> %{}
+    end
   end
 
   defp violation_comment(issue_identifier, %Violation{} = violation) do
@@ -1016,7 +1037,9 @@ defmodule SymphonyElixir.RunPolicy do
 
         persist_resume_context(issue, running_entry, persisted_resume_context)
 
-        metadata = broad_implement_budget_metadata(running_entry, persisted_resume_context)
+        metadata =
+          broad_implement_budget_metadata(running_entry, persisted_resume_context)
+          |> Map.put(:resume_context, persisted_resume_context)
 
         stop_issue(
           issue,
@@ -1035,11 +1058,17 @@ defmodule SymphonyElixir.RunPolicy do
             running_entry,
             "budget.broad_implement_expansion_exhausted",
             current_turn_input,
-            %{budget_pressure_level: "critical"}
+            %{
+              budget_pressure_level: "critical",
+              next_required_path: next_required_path
+            }
           )
 
         persist_resume_context(issue, running_entry, persisted_resume_context)
-        metadata = broad_implement_budget_metadata(running_entry, persisted_resume_context)
+
+        metadata =
+          broad_implement_budget_metadata(running_entry, persisted_resume_context)
+          |> Map.put(:resume_context, persisted_resume_context)
 
         stop_issue(
           issue,
@@ -1058,7 +1087,11 @@ defmodule SymphonyElixir.RunPolicy do
           )
 
         persist_resume_context(issue, running_entry, persisted_resume_context)
-        metadata = broad_implement_budget_metadata(running_entry, persisted_resume_context)
+
+        metadata =
+          broad_implement_budget_metadata(running_entry, persisted_resume_context)
+          |> Map.put(:resume_context, persisted_resume_context)
+
         stop_issue(issue, broad_implement_exhaustion_violation(current_turn_input, metadata), workspace)
     end
   end

@@ -1104,6 +1104,21 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                    already_learned: "Stay inside elixir/lib/symphony_elixir_web/presenter.ex, elixir/lib/symphony_elixir_web/router.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
+
+      assert %{
+               stage: "blocked",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 2,
+                 budget_expansion_used: true,
+                 target_paths: [
+                   "elixir/lib/symphony_elixir_web/presenter.ex",
+                   "elixir/lib/symphony_elixir_web/router.ex"
+                 ],
+                 next_required_path: "elixir/lib/symphony_elixir_web/router.ex"
+               },
+               stop_reason: %{rule_id: "budget.broad_implement_expansion_exhausted"}
+             } = RunStateStore.load_or_default(workspace, issue)
     after
       File.rm_rf(workspace_root)
     end
@@ -1457,6 +1472,18 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                })
 
       assert details =~ "no exact next file was surfaced"
+
+      assert %{
+               stage: "blocked",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_auto_narrowed: true,
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+               },
+               stop_reason: %{rule_id: "budget.broad_implement_focus_insufficient"}
+             } = RunStateStore.load_or_default(workspace, issue)
     after
       File.rm_rf(workspace_root)
     end

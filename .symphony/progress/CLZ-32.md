@@ -42,6 +42,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Replaced the old “smallest path cluster” retry contract with a stricter two-step lane: the first broad retry now collapses to one exact target file, and only a later retry that surfaces one exact `next_required_path` can expand to two files.
 - Added two new broad-mode stop rules so operators can distinguish “one file was not enough” from “the one-file expansion retry was still exhausted.”
 - Tightened the broad retry prompt to remove the old “adjacent helper” guidance and instead tell the model to stay inside one file, or two explicitly approved files, with no heuristic expansion language.
+- Fixed the blocked-state persistence seam in `RunPolicy.stop_issue/3` so budget stops preserve the already-persisted retry `resume_context` at the top level instead of dropping it while transitioning the workspace to `blocked`.
+- Preserved `next_required_path` through bounded broad-expansion exhaustion so a blocked workspace can resume with the same exact second-file request instead of losing it to the generic blocked-state shell.
 
 ## Evidence
 - Live dogfood failure proof:
@@ -63,6 +65,9 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/rule_catalog_test.exs`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix escript.build`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/rule_catalog_test.exs`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix escript.build`
 
 ## Next Step
-Commit the bounded file-only plus one-file-expansion retry lane, restart the dogfood runner on the new CLZ-32 head, and replay `CLZ-32` again to see whether the first retry now stops with `budget.broad_implement_focus_insufficient` or reaches the new bounded expansion path cleanly.
+Restart the dogfood runner on the latest CLZ-32 head and replay `CLZ-32` again to confirm the blocked workspace keeps `target_paths` plus `next_required_path` at top-level `resume_context`, then verify the bounded second-file expansion actually redispatches from that preserved state.
