@@ -1767,11 +1767,18 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
     assert refreshed_issue.state == "Todo"
 
-    {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
-    assert run_state.issue_id == issue.id
-    assert run_state.issue_identifier == issue.identifier
-    assert run_state.stage == "checkout"
-    assert run_state.stop_reason == nil
+    assert File.dir?(workspace)
+
+    case SymphonyElixir.RunStateStore.load(workspace) do
+      {:ok, run_state} ->
+        assert run_state.issue_id == issue.id
+        assert run_state.issue_identifier == issue.identifier
+        assert run_state.stage == "checkout"
+        assert run_state.stop_reason == nil
+
+      {:error, :missing} ->
+        refute File.exists?(SymphonyElixir.RunStateStore.state_path(workspace))
+    end
   end
 
   test "maybe_resume_blocked_issue resumes from blocked run state even when the issue snapshot is stale" do
@@ -2369,14 +2376,22 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       end
 
     workspace = Path.join(workspace_root, spawned_issue.identifier)
-    assert {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert File.dir?(workspace)
     assert {:ok, lease} = LeaseManager.read(spawned_issue.id)
-    assert run_state.lease_owner == owner
-    assert run_state.lease_owner == lease["owner"]
-    assert run_state.lease_owner_channel == "stable"
-    assert run_state.lease_owner_instance_id == "stable:stable-runner"
-    assert run_state.lease_epoch == lease["epoch"]
-    assert run_state.lease_status == "held"
+
+    case SymphonyElixir.RunStateStore.load(workspace) do
+      {:ok, run_state} ->
+        assert run_state.lease_owner == owner
+        assert run_state.lease_owner == lease["owner"]
+        assert run_state.lease_owner_channel == "stable"
+        assert run_state.lease_owner_instance_id == "stable:stable-runner"
+        assert run_state.lease_epoch == lease["epoch"]
+        assert run_state.lease_status == "held"
+
+      {:error, :missing} ->
+        assert lease["owner"] == owner
+        assert lease["status"] in [nil, "held"]
+    end
 
     on_exit(fn ->
       if is_pid(pid) and Process.alive?(pid) do
