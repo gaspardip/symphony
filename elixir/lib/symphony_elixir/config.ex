@@ -83,6 +83,8 @@ defmodule SymphonyElixir.Config do
   @default_policy_review_fix_per_issue_total_extension_budget 150_000
   @default_policy_review_fix_auto_retry_limit 3
   @default_policy_review_fix_narrow_scope_batch_size 1
+  @default_policy_broad_implement_enabled true
+  @default_policy_broad_implement_auto_retry_limit 2
   @default_codex_approval_policy %{
     "reject" => %{
       "sandbox_approval" => true,
@@ -388,6 +390,20 @@ defmodule SymphonyElixir.Config do
                                          narrow_scope_batch_size: [
                                            type: :pos_integer,
                                            default: @default_policy_review_fix_narrow_scope_batch_size
+                                         ]
+                                       ]
+                                     ],
+                                     broad_implement: [
+                                       type: :map,
+                                       default: %{},
+                                       keys: [
+                                         enabled: [
+                                           type: :boolean,
+                                           default: @default_policy_broad_implement_enabled
+                                         ],
+                                         auto_retry_limit: [
+                                           type: :non_neg_integer,
+                                           default: @default_policy_broad_implement_auto_retry_limit
                                          ]
                                        ]
                                      ]
@@ -1146,6 +1162,11 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:policy, :token_budget, :review_fix]) || %{}
   end
 
+  @spec policy_broad_implement_token_budget() :: map()
+  def policy_broad_implement_token_budget do
+    get_in(validated_workflow_options(), [:policy, :token_budget, :broad_implement]) || %{}
+  end
+
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
     case current_workflow() do
@@ -1830,6 +1851,10 @@ defmodule SymphonyElixir.Config do
     )
     |> put_if_present(:stages, policy_stage_token_budget_stages_value(Map.get(section, "stages")))
     |> put_if_present(:review_fix, policy_review_fix_token_budget_value(Map.get(section, "review_fix")))
+    |> put_if_present(
+      :broad_implement,
+      policy_broad_implement_token_budget_value(Map.get(section, "broad_implement"))
+    )
   end
 
   defp policy_token_budget_value(_value), do: :omit
@@ -1902,6 +1927,17 @@ defmodule SymphonyElixir.Config do
   end
 
   defp policy_review_fix_token_budget_value(_value), do: :omit
+
+  defp policy_broad_implement_token_budget_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
+    |> put_if_present(
+      :auto_retry_limit,
+      non_negative_integer_value(Map.get(section, "auto_retry_limit"))
+    )
+  end
+
+  defp policy_broad_implement_token_budget_value(_value), do: :omit
 
   defp reasoning_stages do
     overrides = get_in(validated_workflow_options(), [:codex, :reasoning, :stages]) || %{}

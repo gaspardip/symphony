@@ -310,15 +310,15 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           case {reason, RunPolicy.maybe_stop_for_token_budget(issue, running_entry)} do
             {:normal, {:retry, metadata}} ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive review-fix retry")
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive #{Map.get(metadata, :budget_mode, "budget")} retry")
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
                 delay_type: :continuation,
                 issue: running_entry.issue,
-                error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+                error: Map.get(metadata, :summary, "adaptive token retry"),
                 budget_retry: true,
-                budget_mode: "review_fix",
+                budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
                 budget_retry_count: Map.get(metadata, :retry_count),
                 budget_resume_context: Map.get(metadata, :resume_context)
               })
@@ -3155,7 +3155,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
-    run_state = retry_run_state(issue.identifier, issue)
+    retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
+    run_state = retry_run_state(issue.identifier, issue, retry_metadata)
     workspace = Workspace.path_for_issue(issue.identifier)
     stage = Map.get(run_state, :stage)
     dispatch_stage = normalize_dispatch_stage(issue)
@@ -3265,7 +3266,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_passive_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
-    run_state = retry_run_state(issue.identifier, issue)
+    retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
+    run_state = retry_run_state(issue.identifier, issue, retry_metadata)
     workspace = Workspace.path_for_issue(issue.identifier)
     stage = Map.get(run_state, :stage)
 
@@ -3453,6 +3455,8 @@ defmodule SymphonyElixir.Orchestrator do
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+
+    persist_retry_budget_resume_context(identifier, metadata)
 
     %{
       state
@@ -6554,9 +6558,9 @@ defmodule SymphonyElixir.Orchestrator do
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: Map.get(running_entry, :identifier) || issue_id,
           delay_type: :continuation,
-          error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+          error: Map.get(metadata, :summary, "adaptive token retry"),
           budget_retry: true,
-          budget_mode: "review_fix",
+          budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
           budget_retry_count: Map.get(metadata, :retry_count),
           budget_resume_context: Map.get(metadata, :resume_context)
         })
@@ -6602,13 +6606,60 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp retry_run_state(identifier, issue) when is_binary(identifier) and identifier != "" do
+  defp retry_run_state(identifier, issue, retry_metadata \\ %{})
+
+  defp retry_run_state(identifier, issue, retry_metadata)
+       when is_binary(identifier) and identifier != "" do
     identifier
     |> then(&Path.join(Config.workspace_root(), &1))
     |> load_run_state(issue)
+    |> merge_retry_budget_resume_context(retry_metadata)
   end
 
-  defp retry_run_state(_identifier, _issue), do: %{}
+  defp retry_run_state(_identifier, _issue, _retry_metadata), do: %{}
+
+  defp persist_retry_budget_resume_context(identifier, metadata)
+       when is_binary(identifier) and is_map(metadata) do
+    case Map.get(metadata, :budget_resume_context) do
+      resume_context when is_map(resume_context) ->
+        workspace = Workspace.path_for_issue(identifier)
+
+        if File.dir?(workspace) do
+          _ =
+            RunStateStore.update(workspace, fn persisted ->
+              merge_retry_budget_resume_context(persisted, %{budget_resume_context: resume_context})
+            end)
+        end
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp persist_retry_budget_resume_context(_identifier, _metadata), do: :ok
+
+  defp merge_retry_budget_resume_context(run_state, retry_metadata)
+       when is_map(run_state) and is_map(retry_metadata) do
+    case Map.get(retry_metadata, :budget_resume_context) do
+      resume_context when is_map(resume_context) ->
+        Map.update(run_state, :resume_context, resume_context, fn existing ->
+          existing_map =
+            case existing do
+              context when is_map(context) -> context
+              _ -> %{}
+            end
+
+          Map.merge(existing_map, resume_context)
+        end)
+
+      _ ->
+        run_state
+    end
+  end
+
+  defp merge_retry_budget_resume_context(run_state, _retry_metadata), do: run_state
 
   defp resolve_policy(%Issue{} = issue, %State{} = state) do
     pack = PolicyPack.resolve(policy_pack_name(issue, state))

@@ -141,6 +141,7 @@ defmodule SymphonyElixir.RunPolicy do
   def budget_runtime(issue, running_entry) do
     token_budget = Config.policy_token_budget()
     review_fix_budget = Config.policy_review_fix_token_budget()
+    broad_implement_budget = Config.policy_broad_implement_token_budget()
     resume_context = normalize_resume_context(Map.get(running_entry, :resume_context, %{}))
 
     if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
@@ -171,23 +172,43 @@ defmodule SymphonyElixir.RunPolicy do
     else
       stage_budget = current_stage_token_budget(issue, running_entry)
 
-      %{
-        mode: "broad",
-        pressure_level: if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
-        retry_count: 0,
-        window_base_turn: nil,
-        last_stop_code: nil,
-        last_observed_input_tokens: nil,
-        scope_kind: nil,
-        scope_ids: [],
-        auto_narrowed: false,
-        total_extension_used: false,
-        per_turn_input_soft: stage_budget[:per_turn_input_soft],
-        per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
-        max_turns_in_window: nil,
-        per_issue_total_limit: token_budget[:per_issue_total],
-        per_issue_total_extension: nil
-      }
+      if broad_implement_budget_mode?(resume_context, broad_implement_budget) do
+        %{
+          mode: "broad_implement",
+          pressure_level: Map.get(resume_context, :budget_pressure_level, "normal"),
+          retry_count: broad_implement_retry_count(resume_context),
+          window_base_turn: Map.get(resume_context, :budget_window_base_turn),
+          last_stop_code: Map.get(resume_context, :budget_last_stop_code),
+          last_observed_input_tokens: Map.get(resume_context, :budget_last_observed_input_tokens),
+          scope_kind: nil,
+          scope_ids: [],
+          auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
+          total_extension_used: false,
+          per_turn_input_soft: stage_budget[:per_turn_input_soft],
+          per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+          max_turns_in_window: nil,
+          per_issue_total_limit: token_budget[:per_issue_total],
+          per_issue_total_extension: nil
+        }
+      else
+        %{
+          mode: "broad",
+          pressure_level: if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
+          retry_count: 0,
+          window_base_turn: nil,
+          last_stop_code: nil,
+          last_observed_input_tokens: nil,
+          scope_kind: nil,
+          scope_ids: [],
+          auto_narrowed: false,
+          total_extension_used: false,
+          per_turn_input_soft: stage_budget[:per_turn_input_soft],
+          per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+          max_turns_in_window: nil,
+          per_issue_total_limit: token_budget[:per_issue_total],
+          per_issue_total_extension: nil
+        }
+      end
     end
   end
 
@@ -195,6 +216,7 @@ defmodule SymphonyElixir.RunPolicy do
   def maybe_stop_for_token_budget(issue, running_entry) do
     token_budget = Config.policy_token_budget()
     review_fix_budget = Config.policy_review_fix_token_budget()
+    broad_implement_budget = Config.policy_broad_implement_token_budget()
 
     workspace =
       Map.get(running_entry, :workspace_path) ||
@@ -223,6 +245,11 @@ defmodule SymphonyElixir.RunPolicy do
         output_total
       )
     else
+      stage =
+        Map.get(running_entry, :dispatch_stage) ||
+          Map.get(running_entry, :stage) ||
+          current_stage(issue, workspace, run_state)
+
       maybe_record_soft_budget_pressure(
         issue,
         running_entry,
@@ -232,21 +259,45 @@ defmodule SymphonyElixir.RunPolicy do
         run_state
       )
 
-      cond do
-        budget_exceeded?(
-          stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
-          current_turn_input
-        ) ->
-          stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
+      case maybe_enforce_broad_implement_token_budget(
+             issue,
+             running_entry,
+             workspace,
+             resume_context,
+             broad_implement_budget,
+             stage,
+             stage_budget,
+             current_turn_input,
+             run_state
+           ) do
+        :pass_through ->
+          cond do
+            budget_exceeded?(
+              stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+              current_turn_input
+            ) ->
+              stop_issue(
+                issue,
+                token_budget_violation(:per_turn_input, current_turn_input),
+                workspace
+              )
 
-        budget_exceeded?(total_budget, total_tokens) ->
-          stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+            budget_exceeded?(total_budget, total_tokens) ->
+              stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
 
-        budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-          stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
+            budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
+              stop_issue(
+                issue,
+                token_budget_violation(:per_issue_total_output, output_total),
+                workspace
+              )
 
-        true ->
-          :ok
+            true ->
+              :ok
+          end
+
+        result ->
+          result
       end
     end
   end
@@ -393,8 +444,11 @@ defmodule SymphonyElixir.RunPolicy do
       })
 
     if is_binary(workspace) do
+      persisted_resume_context = persisted_resume_context_from_violation(violation, workspace)
+
       _ =
         RunStateStore.transition(workspace, "blocked", %{
+          resume_context: persisted_resume_context,
           stop_reason: %{
             code: Atom.to_string(violation.code),
             rule_id: violation.rule_id,
@@ -439,6 +493,24 @@ defmodule SymphonyElixir.RunPolicy do
     end
 
     {:stop, violation}
+  end
+
+  defp persisted_resume_context_from_violation(%Violation{metadata: metadata}, workspace)
+       when is_map(metadata) and is_binary(workspace) do
+    case Map.get(metadata, :resume_context) || Map.get(metadata, "resume_context") do
+      resume_context when is_map(resume_context) -> resume_context
+      _ -> persisted_resume_context_from_workspace(workspace)
+    end
+  end
+
+  defp persisted_resume_context_from_violation(_violation, workspace) when is_binary(workspace),
+    do: persisted_resume_context_from_workspace(workspace)
+
+  defp persisted_resume_context_from_workspace(workspace) when is_binary(workspace) do
+    case RunStateStore.load(workspace) do
+      {:ok, %{resume_context: resume_context}} when is_map(resume_context) -> resume_context
+      _ -> %{}
+    end
   end
 
   defp violation_comment(issue_identifier, %Violation{} = violation) do
@@ -619,6 +691,39 @@ defmodule SymphonyElixir.RunPolicy do
     )
   end
 
+  defp broad_implement_exhaustion_violation(observed, metadata) do
+    violation(:broad_implement_scope_exhausted,
+      summary: "Broad implement retries exhausted the narrow retry lane.",
+      details: "Observed per-turn input #{observed} after Symphony retried with a narrower broad-implement context and no smaller safe retry remained.",
+      metadata: metadata
+    )
+  end
+
+  defp broad_implement_focus_insufficient_violation(observed, metadata, next_required_path) do
+    details =
+      case next_required_path do
+        path when is_binary(path) and path != "" ->
+          "Observed per-turn input #{observed} after a file-only retry. Symphony needs one additional exact path before it can continue: #{path}."
+
+        _ ->
+          "Observed per-turn input #{observed} after a file-only retry, but no exact next file was surfaced for a bounded expansion."
+      end
+
+    violation(:broad_implement_focus_insufficient,
+      summary: "The file-only broad retry was too narrow to finish the work.",
+      details: details,
+      metadata: metadata
+    )
+  end
+
+  defp broad_implement_expansion_exhaustion_violation(observed, metadata) do
+    violation(:broad_implement_expansion_exhausted,
+      summary: "The bounded broad-implement expansion retry was exhausted.",
+      details: "Observed per-turn input #{observed} after Symphony retried with the focused file plus one explicit expansion path.",
+      metadata: metadata
+    )
+  end
+
   defp workload_restricted_violation(summary, details, human_action) do
     violation(:policy_workload_restricted,
       summary: summary,
@@ -643,9 +748,13 @@ defmodule SymphonyElixir.RunPolicy do
     workspace =
       Map.get(running_entry, :workspace) ||
         Map.get(running_entry, :workspace_path) ||
-        Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier") || Map.get(running_entry, :identifier))
+        Workspace.path_for_issue(
+          Map.get(issue, :identifier) || Map.get(issue, "identifier") ||
+            Map.get(running_entry, :identifier)
+        )
 
-    run_state = if is_binary(workspace), do: RunStateStore.load_or_default(workspace, issue), else: %{}
+    run_state =
+      if is_binary(workspace), do: RunStateStore.load_or_default(workspace, issue), else: %{}
 
     stage =
       Map.get(running_entry, :stage) ||
@@ -656,6 +765,29 @@ defmodule SymphonyElixir.RunPolicy do
       stage == "implement" and
       Map.get(resume_context, :budget_mode) == "review_fix"
   end
+
+  defp broad_implement_budget_candidate?(stage, broad_implement_budget, run_state)
+       when is_binary(stage) and is_map(broad_implement_budget) and is_map(run_state) do
+    resume_context = normalize_resume_context(Map.get(run_state, :resume_context, %{}))
+
+    Map.get(broad_implement_budget, :enabled, true) and
+      stage == "implement" and
+      not review_fix_budget_candidate?(run_state, stage) and
+      Map.get(resume_context, :budget_mode) != "review_fix" and
+      Map.get(resume_context, :budget_scope_kind) not in [
+        "review_claim_batch",
+        "ci_failure_batch"
+      ] and
+      is_nil(Map.get(run_state, :last_ci_failure))
+  end
+
+  defp broad_implement_budget_mode?(resume_context, broad_implement_budget)
+       when is_map(resume_context) and is_map(broad_implement_budget) do
+    Map.get(broad_implement_budget, :enabled, true) and
+      Map.get(resume_context, :budget_mode) == "broad_implement"
+  end
+
+  defp broad_implement_budget_mode?(_resume_context, _broad_implement_budget), do: false
 
   defp maybe_enforce_review_fix_token_budget(
          issue,
@@ -670,7 +802,13 @@ defmodule SymphonyElixir.RunPolicy do
        ) do
     adaptive_budget = adaptive_review_fix_budget(review_fix_budget, resume_context)
 
-    maybe_record_review_fix_budget_pressure(issue, running_entry, resume_context, current_turn_input, adaptive_budget)
+    maybe_record_review_fix_budget_pressure(
+      issue,
+      running_entry,
+      resume_context,
+      current_turn_input,
+      adaptive_budget
+    )
 
     cond do
       budget_exceeded?(adaptive_budget.per_turn_input_hard, current_turn_input) ->
@@ -684,7 +822,12 @@ defmodule SymphonyElixir.RunPolicy do
           adaptive_budget
         )
 
-      review_fix_total_budget_exceeded?(token_budget, review_fix_budget, resume_context, total_tokens) ->
+      review_fix_total_budget_exceeded?(
+        token_budget,
+        review_fix_budget,
+        resume_context,
+        total_tokens
+      ) ->
         handle_review_fix_total_budget_stop(
           issue,
           running_entry,
@@ -696,7 +839,11 @@ defmodule SymphonyElixir.RunPolicy do
         )
 
       budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-        stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
+        stop_issue(
+          issue,
+          token_budget_violation(:per_issue_total_output, output_total),
+          workspace
+        )
 
       true ->
         maybe_activate_review_fix_total_extension(
@@ -716,16 +863,30 @@ defmodule SymphonyElixir.RunPolicy do
 
     hard_budget =
       cond do
-        retry_count >= 3 -> review_fix_budget[:retry_3_per_turn_input_hard] || review_fix_budget[:per_turn_input_hard]
-        retry_count >= 2 -> review_fix_budget[:retry_2_per_turn_input_hard] || review_fix_budget[:per_turn_input_hard]
-        true -> review_fix_budget[:per_turn_input_hard]
+        retry_count >= 3 ->
+          review_fix_budget[:retry_3_per_turn_input_hard] ||
+            review_fix_budget[:per_turn_input_hard]
+
+        retry_count >= 2 ->
+          review_fix_budget[:retry_2_per_turn_input_hard] ||
+            review_fix_budget[:per_turn_input_hard]
+
+        true ->
+          review_fix_budget[:per_turn_input_hard]
       end
 
     max_turns_in_window =
       cond do
-        retry_count >= 3 -> review_fix_budget[:retry_3_max_turns_in_window] || review_fix_budget[:max_turns_in_window]
-        retry_count >= 2 -> review_fix_budget[:retry_2_max_turns_in_window] || review_fix_budget[:max_turns_in_window]
-        true -> review_fix_budget[:max_turns_in_window]
+        retry_count >= 3 ->
+          review_fix_budget[:retry_3_max_turns_in_window] ||
+            review_fix_budget[:max_turns_in_window]
+
+        retry_count >= 2 ->
+          review_fix_budget[:retry_2_max_turns_in_window] ||
+            review_fix_budget[:max_turns_in_window]
+
+        true ->
+          review_fix_budget[:max_turns_in_window]
       end
 
     %{
@@ -737,8 +898,16 @@ defmodule SymphonyElixir.RunPolicy do
     }
   end
 
-  defp review_fix_total_budget_exceeded?(token_budget, review_fix_budget, resume_context, total_tokens) do
-    budget_exceeded?(effective_review_fix_total_budget(token_budget, review_fix_budget, resume_context), total_tokens)
+  defp review_fix_total_budget_exceeded?(
+         token_budget,
+         review_fix_budget,
+         resume_context,
+         total_tokens
+       ) do
+    budget_exceeded?(
+      effective_review_fix_total_budget(token_budget, review_fix_budget, resume_context),
+      total_tokens
+    )
   end
 
   defp maybe_activate_review_fix_total_extension(
@@ -787,6 +956,204 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
+  defp maybe_enforce_broad_implement_token_budget(
+         issue,
+         running_entry,
+         workspace,
+         resume_context,
+         broad_implement_budget,
+         stage,
+         stage_budget,
+         current_turn_input,
+         run_state
+       ) do
+    hard_budget = stage_budget[:per_turn_input_hard] || Config.policy_per_turn_input_budget()
+
+    cond do
+      not broad_implement_workspace_candidate?(running_entry) ->
+        :pass_through
+
+      not broad_implement_budget_candidate?(stage, broad_implement_budget, run_state) ->
+        :pass_through
+
+      not budget_exceeded?(hard_budget, current_turn_input) ->
+        :pass_through
+
+      true ->
+        handle_broad_implement_turn_budget_stop(
+          issue,
+          running_entry,
+          workspace,
+          resume_context,
+          broad_implement_budget,
+          current_turn_input
+        )
+    end
+  end
+
+  defp broad_implement_workspace_candidate?(running_entry) do
+    workspace = Map.get(running_entry, :workspace) || Map.get(running_entry, :workspace_path)
+
+    is_binary(workspace)
+  end
+
+  defp handle_broad_implement_turn_budget_stop(
+         issue,
+         running_entry,
+         workspace,
+         resume_context,
+         broad_implement_budget,
+         current_turn_input
+       ) do
+    retry_count = broad_implement_retry_count(resume_context)
+    can_retry? = retry_count < (broad_implement_budget[:auto_retry_limit] || 0)
+
+    primary_target_path = broad_implement_primary_target_path(running_entry, resume_context)
+    expansion_used? = truthy?(Map.get(resume_context, :budget_expansion_used))
+
+    next_required_path =
+      broad_implement_next_required_path(running_entry, resume_context, primary_target_path)
+
+    cond do
+      retry_count == 0 and can_retry? and is_binary(primary_target_path) ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.per_turn_input_exceeded",
+            current_turn_input,
+            %{
+              budget_retry_count: retry_count + 1,
+              budget_pressure_level: broad_implement_pressure_level_for_retry(retry_count + 1),
+              budget_auto_narrowed: true,
+              target_paths: [primary_target_path],
+              next_required_path: nil,
+              budget_expansion_used: false
+            }
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+
+        {:retry,
+         %{
+           kind: :broad_implement_budget_retry,
+           summary: "Adaptive broad-implement retry scheduled with one focused file.",
+           budget_mode: "broad_implement",
+           resume_context: persisted_resume_context,
+           observed_input_tokens: current_turn_input,
+           retry_count: retry_count + 1
+         }}
+
+      retry_count >= 1 and not expansion_used? and is_binary(primary_target_path) and
+          is_binary(next_required_path) ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.per_turn_input_exceeded",
+            current_turn_input,
+            %{
+              budget_retry_count: retry_count + 1,
+              budget_pressure_level: broad_implement_pressure_level_for_retry(retry_count + 1),
+              budget_auto_narrowed: true,
+              target_paths: [primary_target_path, next_required_path],
+              next_required_path: next_required_path,
+              budget_expansion_used: true
+            }
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+
+        {:retry,
+         %{
+           kind: :broad_implement_budget_expansion_retry,
+           summary: "Adaptive broad-implement retry scheduled with one explicit expansion file.",
+           budget_mode: "broad_implement",
+           resume_context: persisted_resume_context,
+           observed_input_tokens: current_turn_input,
+           retry_count: retry_count + 1
+         }}
+
+      retry_count >= 1 and not expansion_used? and is_binary(primary_target_path) ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.broad_implement_focus_insufficient",
+            current_turn_input,
+            %{
+              budget_pressure_level: "critical",
+              target_paths: [primary_target_path],
+              next_required_path: next_required_path,
+              budget_expansion_used: false
+            }
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+
+        metadata =
+          broad_implement_budget_metadata(running_entry, persisted_resume_context)
+          |> Map.put(:resume_context, persisted_resume_context)
+
+        stop_issue(
+          issue,
+          broad_implement_focus_insufficient_violation(
+            current_turn_input,
+            metadata,
+            next_required_path
+          ),
+          workspace
+        )
+
+      expansion_used? ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.broad_implement_expansion_exhausted",
+            current_turn_input,
+            %{
+              budget_pressure_level: "critical",
+              next_required_path: next_required_path
+            }
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+
+        metadata =
+          broad_implement_budget_metadata(running_entry, persisted_resume_context)
+          |> Map.put(:resume_context, persisted_resume_context)
+
+        stop_issue(
+          issue,
+          broad_implement_expansion_exhaustion_violation(current_turn_input, metadata),
+          workspace
+        )
+
+      true ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.broad_implement_scope_exhausted",
+            current_turn_input,
+            %{budget_pressure_level: "critical"}
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+
+        metadata =
+          broad_implement_budget_metadata(running_entry, persisted_resume_context)
+          |> Map.put(:resume_context, persisted_resume_context)
+
+        stop_issue(
+          issue,
+          broad_implement_exhaustion_violation(current_turn_input, metadata),
+          workspace
+        )
+    end
+  end
+
   defp review_fix_total_extension_eligible?(resume_context, extension_budget) do
     is_integer(extension_budget) and review_fix_progress_count(resume_context) >= 1
   end
@@ -800,9 +1167,14 @@ defmodule SymphonyElixir.RunPolicy do
       truthy?(Map.get(resume_context, :budget_total_extension_used)) or extension_eligible?
 
     cond do
-      not is_integer(base_budget) -> nil
-      extension_used_or_eligible? and is_integer(extension_budget) -> base_budget + extension_budget
-      true -> base_budget
+      not is_integer(base_budget) ->
+        nil
+
+      extension_used_or_eligible? and is_integer(extension_budget) ->
+        base_budget + extension_budget
+
+      true ->
+        base_budget
     end
   end
 
@@ -818,7 +1190,8 @@ defmodule SymphonyElixir.RunPolicy do
     base_budget = token_budget[:per_issue_total]
     extension_budget = review_fix_budget[:per_issue_total_extension]
 
-    if truthy?(Map.get(resume_context, :budget_total_extension_used)) and is_integer(base_budget) and is_integer(extension_budget) do
+    if truthy?(Map.get(resume_context, :budget_total_extension_used)) and is_integer(base_budget) and
+         is_integer(extension_budget) do
       metadata =
         review_fix_budget_metadata(
           running_entry,
@@ -836,7 +1209,12 @@ defmodule SymphonyElixir.RunPolicy do
         )
 
       persist_resume_context(issue, running_entry, persisted_resume_context)
-      stop_issue(issue, review_fix_exhaustion_violation(:total_extension_exhausted, total_tokens, metadata), workspace)
+
+      stop_issue(
+        issue,
+        review_fix_exhaustion_violation(:total_extension_exhausted, total_tokens, metadata),
+        workspace
+      )
     else
       stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
     end
@@ -855,7 +1233,10 @@ defmodule SymphonyElixir.RunPolicy do
     can_retry? = retry_count < (review_fix_budget[:auto_retry_limit] || 0)
     turns_in_window = review_fix_turns_in_window(running_entry, resume_context)
     current_scope_ids = normalize_scope_ids(Map.get(resume_context, :budget_scope_ids))
-    narrowed_scope_ids = narrow_review_fix_scope_ids(resume_context, adaptive_budget.narrow_scope_batch_size)
+
+    narrowed_scope_ids =
+      narrow_review_fix_scope_ids(resume_context, adaptive_budget.narrow_scope_batch_size)
+
     can_narrow_scope? = narrowed_scope_ids != current_scope_ids
 
     persisted_resume_context =
@@ -888,12 +1269,25 @@ defmodule SymphonyElixir.RunPolicy do
          }}
 
       turns_in_window >= adaptive_budget.max_turns_in_window ->
-        metadata = review_fix_budget_metadata(running_entry, persisted_resume_context, %{turns_in_window: turns_in_window})
-        stop_issue(issue, review_fix_exhaustion_violation(:turn_window_exhausted, current_turn_input, metadata), workspace)
+        metadata =
+          review_fix_budget_metadata(running_entry, persisted_resume_context, %{
+            turns_in_window: turns_in_window
+          })
+
+        stop_issue(
+          issue,
+          review_fix_exhaustion_violation(:turn_window_exhausted, current_turn_input, metadata),
+          workspace
+        )
 
       true ->
         metadata = review_fix_budget_metadata(running_entry, persisted_resume_context, %{})
-        stop_issue(issue, review_fix_exhaustion_violation(:scope_exhausted, current_turn_input, metadata), workspace)
+
+        stop_issue(
+          issue,
+          review_fix_exhaustion_violation(:scope_exhausted, current_turn_input, metadata),
+          workspace
+        )
     end
   end
 
@@ -909,7 +1303,8 @@ defmodule SymphonyElixir.RunPolicy do
        ) do
     soft_budget = adaptive_budget.per_turn_input_soft
 
-    if budget_exceeded?(soft_budget, current_turn_input) and Map.get(resume_context, :budget_pressure_level, "normal") == "normal" do
+    if budget_exceeded?(soft_budget, current_turn_input) and
+         Map.get(resume_context, :budget_pressure_level, "normal") == "normal" do
       persisted_resume_context =
         review_fix_resume_context_for_budget_retry(
           resume_context,
@@ -950,7 +1345,8 @@ defmodule SymphonyElixir.RunPolicy do
     workspace = workspace_for_issue(issue, running_entry)
 
     if is_binary(workspace) do
-      stage = Map.get(running_entry, :stage) || current_stage(issue, workspace, nil) || "implement"
+      stage =
+        Map.get(running_entry, :stage) || current_stage(issue, workspace, nil) || "implement"
 
       _ =
         RunStateStore.transition(workspace, stage, %{
@@ -968,7 +1364,10 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp current_stage_token_budget(issue, running_entry) do
     workspace = workspace_for_issue(issue, running_entry)
-    run_state = if is_binary(workspace), do: RunStateStore.load_or_default(workspace, issue), else: %{}
+
+    run_state =
+      if is_binary(workspace), do: RunStateStore.load_or_default(workspace, issue), else: %{}
+
     current_stage_token_budget(issue, running_entry, workspace, run_state)
   end
 
@@ -993,16 +1392,32 @@ defmodule SymphonyElixir.RunPolicy do
   defp review_fix_resume_context_key("budget_retry_count"), do: :budget_retry_count
   defp review_fix_resume_context_key("budget_window_base_turn"), do: :budget_window_base_turn
   defp review_fix_resume_context_key("budget_last_stop_code"), do: :budget_last_stop_code
-  defp review_fix_resume_context_key("budget_last_observed_input_tokens"), do: :budget_last_observed_input_tokens
+
+  defp review_fix_resume_context_key("budget_last_observed_input_tokens"),
+    do: :budget_last_observed_input_tokens
+
   defp review_fix_resume_context_key("budget_scope_kind"), do: :budget_scope_kind
   defp review_fix_resume_context_key("budget_scope_ids"), do: :budget_scope_ids
   defp review_fix_resume_context_key("budget_progress_count"), do: :budget_progress_count
-  defp review_fix_resume_context_key("budget_total_extension_used"), do: :budget_total_extension_used
+
+  defp review_fix_resume_context_key("budget_total_extension_used"),
+    do: :budget_total_extension_used
+
   defp review_fix_resume_context_key("budget_auto_narrowed"), do: :budget_auto_narrowed
+  defp review_fix_resume_context_key("target_paths"), do: :target_paths
+  defp review_fix_resume_context_key("already_learned"), do: :already_learned
+  defp review_fix_resume_context_key("next_required_path"), do: :next_required_path
+  defp review_fix_resume_context_key("budget_expansion_used"), do: :budget_expansion_used
   defp review_fix_resume_context_key("token_pressure"), do: :token_pressure
   defp review_fix_resume_context_key(_key), do: nil
 
-  defp review_fix_resume_context_for_budget_retry(resume_context, running_entry, stop_code, observed_tokens, overrides) do
+  defp review_fix_resume_context_for_budget_retry(
+         resume_context,
+         running_entry,
+         stop_code,
+         observed_tokens,
+         overrides
+       ) do
     default_scope_kind = Map.get(resume_context, :budget_scope_kind) || "review_claim_batch"
     turn_count = Map.get(running_entry, :turn_count, 0)
 
@@ -1012,7 +1427,10 @@ defmodule SymphonyElixir.RunPolicy do
     |> Map.put_new(:budget_retry_count, 0)
     |> Map.put_new(:budget_window_base_turn, turn_count)
     |> Map.put_new(:budget_scope_kind, default_scope_kind)
-    |> Map.put_new(:budget_scope_ids, normalize_scope_ids(Map.get(resume_context, :budget_scope_ids)))
+    |> Map.put_new(
+      :budget_scope_ids,
+      normalize_scope_ids(Map.get(resume_context, :budget_scope_ids))
+    )
     |> Map.put(:budget_last_stop_code, stop_code)
     |> Map.put(:budget_last_observed_input_tokens, observed_tokens)
     |> Map.put(:token_pressure, "high")
@@ -1054,6 +1472,293 @@ defmodule SymphonyElixir.RunPolicy do
     }
     |> Map.merge(extras)
   end
+
+  defp broad_implement_resume_context_for_budget_retry(
+         resume_context,
+         running_entry,
+         stop_code,
+         observed_tokens,
+         overrides
+       ) do
+    turn_count = Map.get(running_entry, :turn_count, 0)
+    override_map = Enum.into(overrides, %{})
+
+    target_paths =
+      Map.get(
+        override_map,
+        :target_paths,
+        broad_implement_target_paths(running_entry, resume_context)
+      )
+
+    already_learned = broad_implement_already_learned(running_entry, resume_context, target_paths)
+
+    resume_context
+    |> Map.put(:budget_mode, "broad_implement")
+    |> Map.put_new(:budget_pressure_level, "normal")
+    |> Map.put_new(:budget_retry_count, 0)
+    |> Map.put_new(:budget_window_base_turn, turn_count)
+    |> Map.put(:budget_last_stop_code, stop_code)
+    |> Map.put(:budget_last_observed_input_tokens, observed_tokens)
+    |> maybe_put_broad_retry_target_paths(target_paths)
+    |> maybe_put_broad_retry_learned(already_learned)
+    |> maybe_put_broad_retry_next_required_path(Map.get(override_map, :next_required_path))
+    |> Map.put(:token_pressure, "high")
+    |> Map.merge(override_map)
+  end
+
+  defp broad_implement_retry_count(resume_context) do
+    case Map.get(resume_context, :budget_retry_count, 0) do
+      value when is_integer(value) and value >= 0 -> value
+      _ -> 0
+    end
+  end
+
+  defp broad_implement_pressure_level_for_retry(retry_count) when retry_count >= 1,
+    do: "high"
+
+  defp broad_implement_pressure_level_for_retry(_retry_count), do: "normal"
+
+  defp broad_implement_budget_metadata(running_entry, resume_context) do
+    %{
+      stage: Map.get(running_entry, :stage),
+      retry_count: broad_implement_retry_count(resume_context),
+      pressure_level: Map.get(resume_context, :budget_pressure_level),
+      auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
+      target_paths: Map.get(resume_context, :target_paths, []),
+      next_required_path: Map.get(resume_context, :next_required_path),
+      expansion_used: truthy?(Map.get(resume_context, :budget_expansion_used))
+    }
+  end
+
+  defp broad_implement_primary_target_path(running_entry, resume_context)
+       when is_map(running_entry) and is_map(resume_context) do
+    resume_context
+    |> Map.get(:target_paths, [])
+    |> normalize_candidate_paths()
+    |> case do
+      [path | _rest] ->
+        path
+
+      [] ->
+        running_entry
+        |> broad_implement_candidate_paths(resume_context)
+        |> List.first()
+    end
+  end
+
+  defp broad_implement_primary_target_path(_running_entry, _resume_context), do: nil
+
+  defp broad_implement_next_required_path(running_entry, resume_context, primary_target_path)
+       when is_map(running_entry) and is_map(resume_context) and is_binary(primary_target_path) do
+    existing =
+      case Map.get(resume_context, :next_required_path) do
+        path when is_binary(path) and path != "" and path != primary_target_path -> path
+        _ -> nil
+      end
+
+    existing ||
+      running_entry
+      |> broad_implement_candidate_paths(resume_context)
+      |> Enum.reject(&(&1 == primary_target_path))
+      |> List.first()
+  end
+
+  defp broad_implement_next_required_path(_running_entry, _resume_context, _primary_target_path),
+    do: nil
+
+  defp broad_implement_candidate_paths(running_entry, resume_context)
+       when is_map(running_entry) and is_map(resume_context) do
+    existing_paths =
+      resume_context
+      |> Map.get(:target_paths, [])
+      |> normalize_candidate_paths()
+
+    dirty_paths =
+      running_entry
+      |> broad_implement_workspace_paths()
+      |> Enum.take(6)
+
+    summary_paths =
+      [
+        Map.get(resume_context, :last_turn_summary),
+        Map.get(resume_context, :next_objective),
+        Map.get(running_entry, :last_codex_message),
+        Map.get(running_entry, :recent_codex_updates, [])
+      ]
+      |> Enum.flat_map(&extract_candidate_paths/1)
+
+    existing_paths
+    |> Kernel.++(dirty_paths)
+    |> Kernel.++(summary_paths)
+    |> normalize_candidate_paths()
+    |> Enum.take(4)
+  end
+
+  defp broad_implement_candidate_paths(_running_entry, _resume_context), do: []
+
+  defp broad_implement_target_paths(running_entry, resume_context)
+       when is_map(running_entry) and is_map(resume_context) do
+    broad_implement_candidate_paths(running_entry, resume_context)
+  end
+
+  defp broad_implement_target_paths(_running_entry, _resume_context), do: []
+
+  defp broad_implement_workspace_paths(running_entry) do
+    workspace = Map.get(running_entry, :workspace) || Map.get(running_entry, :workspace_path)
+
+    if is_binary(workspace) do
+      workspace
+      |> RunInspector.changed_paths()
+      |> normalize_candidate_paths()
+    else
+      []
+    end
+  end
+
+  defp broad_implement_already_learned(running_entry, resume_context, target_paths)
+       when is_map(running_entry) and is_map(resume_context) do
+    existing =
+      case Map.get(resume_context, :already_learned) do
+        value when is_binary(value) and value != "" -> value
+        _ -> nil
+      end
+
+    summary =
+      [
+        Map.get(resume_context, :last_turn_summary),
+        Map.get(running_entry, :last_codex_message),
+        Map.get(running_entry, :recent_codex_updates, [])
+      ]
+      |> Enum.map(&summarizable_text/1)
+      |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))
+
+    cond do
+      target_paths != [] ->
+        "Stay inside #{Enum.join(target_paths, ", ")} and avoid unrelated reads or repo-wide rediscovery."
+
+      is_binary(existing) ->
+        existing
+
+      is_binary(summary) ->
+        summarized_text(summary, 220)
+
+      true ->
+        nil
+    end
+  end
+
+  defp broad_implement_already_learned(_running_entry, _resume_context, _target_paths), do: nil
+
+  defp maybe_put_broad_retry_target_paths(resume_context, []), do: resume_context
+
+  defp maybe_put_broad_retry_target_paths(resume_context, target_paths),
+    do: Map.put(resume_context, :target_paths, target_paths)
+
+  defp maybe_put_broad_retry_learned(resume_context, nil), do: resume_context
+
+  defp maybe_put_broad_retry_learned(resume_context, text),
+    do: Map.put(resume_context, :already_learned, text)
+
+  defp maybe_put_broad_retry_next_required_path(resume_context, nil),
+    do: Map.delete(resume_context, :next_required_path)
+
+  defp maybe_put_broad_retry_next_required_path(resume_context, path),
+    do: Map.put(resume_context, :next_required_path, path)
+
+  defp normalize_candidate_paths(paths) when is_list(paths) do
+    normalized =
+      paths
+      |> Enum.map(&to_string/1)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> normalize_diff_marker_paths()
+      |> Enum.uniq()
+
+    full_path_basenames =
+      normalized
+      |> Enum.filter(&String.contains?(&1, "/"))
+      |> Enum.map(&Path.basename/1)
+      |> MapSet.new()
+
+    normalized
+    |> Enum.reject(fn path ->
+      not String.contains?(path, "/") and MapSet.member?(full_path_basenames, path)
+    end)
+  end
+
+  defp normalize_candidate_paths(_paths), do: []
+
+  defp normalize_diff_marker_paths(paths) do
+    bare_paths = MapSet.new(paths)
+
+    diff_prefixed_tails =
+      paths
+      |> Enum.reduce(MapSet.new(), fn path, acc ->
+        case diff_marker_tail(path) do
+          {:ok, tail} ->
+            sibling_a = "a/" <> tail
+            sibling_b = "b/" <> tail
+
+            if MapSet.member?(bare_paths, tail) or
+                 (Enum.member?(paths, sibling_a) and Enum.member?(paths, sibling_b)) do
+              MapSet.put(acc, tail)
+            else
+              acc
+            end
+
+          :error ->
+            acc
+        end
+      end)
+
+    Enum.map(paths, fn path ->
+      case diff_marker_tail(path) do
+        {:ok, tail} ->
+          if MapSet.member?(diff_prefixed_tails, tail), do: tail, else: path
+
+        :error ->
+          path
+      end
+    end)
+  end
+
+  defp diff_marker_tail(<<"a/", rest::binary>>) when rest != "",
+    do: validate_diff_marker_tail(rest)
+
+  defp diff_marker_tail(<<"b/", rest::binary>>) when rest != "",
+    do: validate_diff_marker_tail(rest)
+
+  defp diff_marker_tail(_path), do: :error
+
+  defp validate_diff_marker_tail(rest) do
+    if String.contains?(rest, "/") and
+         Regex.match?(~r/\.(?:ex|exs|md|yaml|yml|json|sh)\z/, rest) do
+      {:ok, rest}
+    else
+      :error
+    end
+  end
+
+  defp extract_candidate_paths(nil), do: []
+
+  defp extract_candidate_paths(text) when is_binary(text) do
+    Regex.scan(
+      ~r{(?:^|[\s`'"])((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:ex|exs|md|yaml|yml|json|sh))(?=$|[\s`'".,;:])},
+      text,
+      capture: :all_but_first
+    )
+    |> List.flatten()
+    |> normalize_candidate_paths()
+  end
+
+  defp extract_candidate_paths(value) when is_map(value) or is_list(value) do
+    value
+    |> extract_text_fragments()
+    |> Enum.flat_map(&extract_candidate_paths/1)
+    |> normalize_candidate_paths()
+  end
+
+  defp extract_candidate_paths(_text), do: []
 
   defp narrow_review_fix_scope_ids(resume_context, batch_size) do
     resume_context
@@ -1109,7 +1814,8 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp current_stage(%{state: issue_state}, _workspace, run_state) when is_binary(issue_state) and is_map(run_state) do
+  defp current_stage(%{state: issue_state}, _workspace, run_state)
+       when is_binary(issue_state) and is_map(run_state) do
     Map.get(run_state, :stage) || fallback_stage_from_issue_state(issue_state)
   end
 
@@ -1408,6 +2114,85 @@ defmodule SymphonyElixir.RunPolicy do
       trimmed -> String.slice(trimmed, 0, 1_000)
     end
   end
+
+  defp summarized_text(nil, _limit), do: nil
+
+  defp summarized_text(value, limit) when is_integer(limit) and limit > 0 do
+    value
+    |> summarizable_text()
+    |> case do
+      nil ->
+        nil
+
+      text ->
+        text
+        |> String.trim()
+        |> case do
+          "" ->
+            nil
+
+          trimmed ->
+            if String.length(trimmed) <= limit do
+              trimmed
+            else
+              String.slice(trimmed, 0, max(limit - 3, 0)) <> "..."
+            end
+        end
+    end
+  end
+
+  defp summarizable_text(nil), do: nil
+
+  defp summarizable_text(value) when is_binary(value) do
+    case String.trim(value) do
+      "" ->
+        nil
+
+      text ->
+        text
+    end
+  end
+
+  defp summarizable_text(value) when is_list(value) or is_map(value) do
+    value
+    |> extract_text_fragments()
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+    |> case do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp summarizable_text(value), do: to_string(value)
+
+  defp extract_text_fragments(value) when is_binary(value), do: [value]
+
+  defp extract_text_fragments(value) when is_list(value) do
+    Enum.flat_map(value, &extract_text_fragments/1)
+  end
+
+  defp extract_text_fragments(value) when is_map(value) do
+    preferred =
+      [:text, "text", :message, "message", :payload, "payload", :raw, "raw", :content, "content"]
+      |> Enum.flat_map(fn key ->
+        case Map.fetch(value, key) do
+          {:ok, nested} -> extract_text_fragments(nested)
+          :error -> []
+        end
+      end)
+
+    if preferred != [] do
+      preferred
+    else
+      value
+      |> Map.values()
+      |> Enum.flat_map(&extract_text_fragments/1)
+    end
+  end
+
+  defp extract_text_fragments(_value), do: []
 
   defp normalize_repo_url(nil), do: nil
 
