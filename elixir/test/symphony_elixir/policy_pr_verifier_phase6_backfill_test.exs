@@ -1018,10 +1018,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  codex_total_tokens: 185_018,
                  turn_started_input_tokens: 0,
                  resume_context: %{
-                   last_turn_summary:
-                     "The operator payload parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
-                   next_objective:
-                     "Continue in elixir/lib/symphony_elixir_web/presenter.ex and elixir/lib/symphony_elixir_web/router.ex without rediscovering the whole repo."
+                   last_turn_summary: "The operator payload parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
+                   next_objective: "Continue in elixir/lib/symphony_elixir_web/presenter.ex and elixir/lib/symphony_elixir_web/router.ex without rediscovering the whole repo."
                  }
                })
 
@@ -1132,8 +1130,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                }
              } = RunStateStore.load_or_default(workspace, issue)
 
-      assert already_learned =~ "run_policy.ex"
-      assert already_learned =~ "delivery_engine.ex"
+      assert already_learned ==
+               "Stay inside elixir/lib/symphony_elixir/run_policy.ex, elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
     after
       File.rm_rf(workspace_root)
     end
@@ -1206,7 +1204,73 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                }
              } = RunStateStore.load_or_default(workspace, issue)
 
-      assert already_learned =~ "run_policy.ex"
+      assert already_learned ==
+               "Stay inside elixir/lib/symphony_elixir/run_policy.ex, elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement target paths drop basename duplicates when full paths are present" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-path-dedupe-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-broad-budget-dedupe", identifier: "MT-914BROADDEDUPE", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 150_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 recent_codex_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text: "The live stop is in `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the only file worth touching next."
+                       }
+                     }
+                   }
+                 ]
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"]
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
     after
       File.rm_rf(workspace_root)
     end

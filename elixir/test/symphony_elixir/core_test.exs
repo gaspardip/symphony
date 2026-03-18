@@ -424,6 +424,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Broad implement token pressure is active."
     assert prompt =~ "Execution hint:"
     assert prompt =~ "Focus path: `elixir/lib/symphony_elixir_web/presenter.ex`."
+    assert prompt =~ "Stay inside this path unless a directly adjacent helper is strictly required."
     assert prompt =~ "Already learned: The parity bug is concentrated"
     assert prompt =~ "Exact next objective:"
     assert prompt =~ "Advance the ticket by working only in `elixir/lib/symphony_elixir_web/presenter.ex`"
@@ -431,6 +432,8 @@ defmodule SymphonyElixir.CoreTest do
     refute prompt =~ "Pending PR review feedback"
     refute prompt =~ "Pending PR review claims"
     refute prompt =~ "Diff stat:"
+    refute prompt =~ "Dirty files:"
+    refute prompt =~ "Last implementation summary:"
     refute prompt =~ "Issue brief:"
     refute prompt =~ "Repo map:"
   end

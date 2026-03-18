@@ -665,8 +665,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp broad_implement_exhaustion_violation(observed, metadata) do
     violation(:broad_implement_scope_exhausted,
       summary: "Broad implement retries exhausted the narrow retry lane.",
-      details:
-        "Observed per-turn input #{observed} after Symphony retried with a narrower broad-implement context and no smaller safe retry remained.",
+      details: "Observed per-turn input #{observed} after Symphony retried with a narrower broad-implement context and no smaller safe retry remained.",
       metadata: metadata
     )
   end
@@ -1325,14 +1324,11 @@ defmodule SymphonyElixir.RunPolicy do
       is_binary(existing) ->
         existing
 
-      is_binary(summary) and target_paths != [] ->
-        "The retry should stay inside #{Enum.join(target_paths, ", ")}. #{summarized_text(summary, 220)}"
+      target_paths != [] ->
+        "Stay inside #{Enum.join(target_paths, ", ")} and avoid unrelated reads or repo-wide rediscovery."
 
       is_binary(summary) ->
-        summarized_text(summary, 260)
-
-      target_paths != [] ->
-        "The retry should stay inside #{Enum.join(target_paths, ", ")} and avoid rediscovering unrelated parts of the repo."
+        summarized_text(summary, 220)
 
       true ->
         nil
@@ -1348,11 +1344,23 @@ defmodule SymphonyElixir.RunPolicy do
   defp maybe_put_broad_retry_learned(resume_context, text), do: Map.put(resume_context, :already_learned, text)
 
   defp normalize_candidate_paths(paths) when is_list(paths) do
-    paths
-    |> Enum.map(&to_string/1)
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.uniq()
+    normalized =
+      paths
+      |> Enum.map(&to_string/1)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.uniq()
+
+    full_path_basenames =
+      normalized
+      |> Enum.filter(&String.contains?(&1, "/"))
+      |> Enum.map(&Path.basename/1)
+      |> MapSet.new()
+
+    normalized
+    |> Enum.reject(fn path ->
+      not String.contains?(path, "/") and MapSet.member?(full_path_basenames, path)
+    end)
   end
 
   defp normalize_candidate_paths(_paths), do: []

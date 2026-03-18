@@ -2455,15 +2455,17 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp broad_resume_context_block(resume_context) when is_map(resume_context) do
+    target_paths = Map.get(resume_context, :target_paths, [])
+
     [
       "Broad implement retry lane: active",
       maybe_named_line("Budget pressure", resume_context[:budget_pressure_level], 40),
       maybe_named_line("Budget retry count", resume_context[:budget_retry_count], 20),
-      maybe_named_list("Target paths", Map.get(resume_context, :target_paths, []), 6),
+      maybe_named_list("Target paths", target_paths, 6),
       maybe_named_multiline("Already learned", resume_context[:already_learned]),
       maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200),
-      maybe_named_line("Last implementation summary", resume_context[:last_turn_summary], 280),
-      maybe_named_list("Dirty files", Enum.take(Map.get(resume_context, :dirty_files, []), 8), 8)
+      maybe_broad_retry_summary_line(resume_context, target_paths),
+      maybe_broad_retry_dirty_files_line(resume_context, target_paths)
     ]
     |> Enum.reject(&is_nil/1)
     |> case do
@@ -2689,10 +2691,25 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp broad_retry_focus_line([]), do: "Focus path: choose one concrete file or subsystem before continuing."
-  defp broad_retry_focus_line(paths), do: "Focus path: #{Enum.map_join(paths, ", ", &"`#{&1}`")}."
+
+  defp broad_retry_focus_line(paths) do
+    "Focus path: #{Enum.map_join(paths, ", ", &"`#{&1}`")}. Stay inside this path unless a directly adjacent helper is strictly required."
+  end
 
   defp broad_retry_learned_line(nil), do: nil
   defp broad_retry_learned_line(text), do: "Already learned: #{text}"
+
+  defp maybe_broad_retry_summary_line(resume_context, []) when is_map(resume_context) do
+    maybe_named_line("Last implementation summary", resume_context[:last_turn_summary], 220)
+  end
+
+  defp maybe_broad_retry_summary_line(_resume_context, _target_paths), do: nil
+
+  defp maybe_broad_retry_dirty_files_line(resume_context, []) when is_map(resume_context) do
+    maybe_named_list("Dirty files", Enum.take(Map.get(resume_context, :dirty_files, []), 6), 6)
+  end
+
+  defp maybe_broad_retry_dirty_files_line(_resume_context, _target_paths), do: nil
 
   defp broad_retry_repo_hint_line(nil, paths) when paths != [], do: "Execution hint: stay inside the focus path unless a directly adjacent helper is required."
   defp broad_retry_repo_hint_line(nil, _paths), do: "Execution hint: stay inside the first concrete path you confirm and avoid broad discovery."
