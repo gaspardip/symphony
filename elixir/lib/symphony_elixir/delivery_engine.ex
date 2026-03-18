@@ -70,14 +70,20 @@ defmodule SymphonyElixir.DeliveryEngine do
     stage = current_stage(workspace, issue)
 
     if passive_stage?(stage) do
-      Logger.info("Skipping Codex session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}")
+      Logger.info(
+        "Skipping Codex session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}"
+      )
 
       do_run(nil, workspace, issue, codex_update_recipient, issue_state_fetcher, max_turns, opts)
     else
-      Logger.info("Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}")
+      Logger.info(
+        "Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}"
+      )
 
       with {:ok, app_session} <- AppServer.start_session(workspace) do
-        Logger.info("Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}")
+        Logger.info(
+          "Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}"
+        )
 
         try do
           do_run(
@@ -94,7 +100,9 @@ defmodule SymphonyElixir.DeliveryEngine do
         end
       else
         {:error, reason} = error ->
-          Logger.error("Codex session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
+          Logger.error(
+            "Codex session bootstrap failed for #{issue.identifier}: #{inspect(reason)}"
+          )
 
           error
       end
@@ -517,7 +525,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                 last_harness_init: Map.merge(attrs, %{status: "passed"}),
                 last_harness_check: %{
                   status: "passed",
-                  checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+                  checked_at:
+                    DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
                 },
                 harness_status: "ready",
                 harness_attempts: Map.get(state, :harness_attempts, 0) + 1
@@ -614,7 +623,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                 state,
                 before_snapshot,
                 %{
-                  next_objective: "Stop editing and let Symphony run the official validation contract."
+                  next_objective:
+                    "Stop editing and let Symphony run the official validation contract."
                 },
                 opts
               )
@@ -851,7 +861,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                 inspection,
                 %{
                   last_validation_summary: summarized_command_output(result.output, 800),
-                  next_objective: "Review validation output and confirm behavior against acceptance criteria."
+                  next_objective:
+                    "Review validation output and confirm behavior against acceptance criteria."
                 },
                 opts
               )
@@ -880,7 +891,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                   inspection,
                   %{
                     last_validation_summary: summarized_command_output(result.output, 800),
-                    next_objective: "Address the latest validation failure without rerunning the full repo validation in implement."
+                    next_objective:
+                      "Address the latest validation failure without rerunning the full repo validation in implement."
                   },
                   opts
                 )
@@ -1339,7 +1351,10 @@ defmodule SymphonyElixir.DeliveryEngine do
     else
       await_checks_polls = Map.get(state, :await_checks_polls, 0) + 1
       required_checks = effective_required_checks(inspection, state)
-      check_rollup = RunInspector.required_checks_rollup(required_checks, inspection.check_statuses)
+
+      check_rollup =
+        RunInspector.required_checks_rollup(required_checks, inspection.check_statuses)
+
       await_checks_attrs = await_checks_state_attrs(inspection, check_rollup, await_checks_polls)
       policy_resolution = resolve_policy(issue, state, workspace)
 
@@ -1468,7 +1483,13 @@ defmodule SymphonyElixir.DeliveryEngine do
         RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
           risk_review_required?(workspace, inspection, workflow_profile, state) and
             Map.get(state, :review_approved, false) == false ->
-          hold_for_policy_review(workspace, issue, state, await_checks_attrs, :risk_review_required)
+          hold_for_policy_review(
+            workspace,
+            issue,
+            state,
+            await_checks_attrs,
+            :risk_review_required
+          )
 
         RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
           Config.policy_automerge_on_green?() and
@@ -1750,7 +1771,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                   issue_identifier: issue.identifier,
                   issue_source: issue.source,
                   current_deploy_target: "preview",
-                  last_decision_summary: "Preview deployment completed. Running post-deploy verification."
+                  last_decision_summary:
+                    "Preview deployment completed. Running post-deploy verification."
                 })
 
               :ok
@@ -1820,7 +1842,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                     issue_identifier: issue.identifier,
                     issue_source: issue.source,
                     current_deploy_target: "production",
-                    last_decision_summary: "Production deployment completed. Running post-deploy verification."
+                    last_decision_summary:
+                      "Production deployment completed. Running post-deploy verification."
                   })
 
                 :ok
@@ -2043,7 +2066,8 @@ defmodule SymphonyElixir.DeliveryEngine do
             issue_id: issue.id,
             issue_identifier: issue.identifier,
             issue_source: issue.source,
-            last_decision_summary: "Post-deploy verification passed. Starting production deployment.",
+            last_decision_summary:
+              "Post-deploy verification passed. Starting production deployment.",
             effective_policy_class: Map.get(state, :effective_policy_class),
             current_deploy_target: "production"
           })
@@ -2224,7 +2248,10 @@ defmodule SymphonyElixir.DeliveryEngine do
             maybe_named_line("PR under review", Map.get(state, :pr_url), 200),
             "",
             "Scoped review claims for this turn:",
-            focused_review_claim_block(focused_review_claims, Map.get(state, :review_claims, %{})),
+            focused_review_claim_block(
+              focused_review_claims,
+              Map.get(state, :review_claims, %{})
+            ),
             token_pressure,
             "",
             "Review-fix rules:",
@@ -2315,7 +2342,8 @@ defmodule SymphonyElixir.DeliveryEngine do
       issue_identifier: issue.identifier,
       fingerprint: inspection.fingerprint,
       last_turn_summary: get_in(state, [:last_turn_result, :summary]),
-      last_validation_summary: summarized_command_output(get_in(state, [:last_validation, :output]), 800),
+      last_validation_summary:
+        summarized_command_output(get_in(state, [:last_validation, :output]), 800),
       last_verifier_summary:
         summarized_text(
           get_in(state, [:last_verifier, :summary]) || get_in(state, [:last_verifier, :output]),
@@ -2396,27 +2424,54 @@ defmodule SymphonyElixir.DeliveryEngine do
           maybe_named_line("Budget retry count", resume_context[:budget_retry_count], 20),
           maybe_named_line("Scope kind", resume_context[:budget_scope_kind], 60),
           maybe_named_list("Scope ids", resume_context[:budget_scope_ids], 8),
-          maybe_named_line("Last implementation summary", resume_context[:last_turn_summary], 280),
-          maybe_named_line("Latest validation summary", resume_context[:last_validation_summary], 400),
-          maybe_named_line("Latest verifier summary", resume_context[:last_verifier_summary], 400),
+          maybe_named_line(
+            "Last implementation summary",
+            resume_context[:last_turn_summary],
+            280
+          ),
+          maybe_named_line(
+            "Latest validation summary",
+            resume_context[:last_validation_summary],
+            400
+          ),
+          maybe_named_line(
+            "Latest verifier summary",
+            resume_context[:last_verifier_summary],
+            400
+          ),
           maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200),
-          maybe_named_list("Dirty files", Enum.take(Map.get(resume_context, :dirty_files, []), 8), 8)
+          maybe_named_list(
+            "Dirty files",
+            Enum.take(Map.get(resume_context, :dirty_files, []), 8),
+            8
+          )
         ]
       else
         [
-          maybe_named_line("Last implementation summary", resume_context[:last_turn_summary], 400),
+          maybe_named_line(
+            "Last implementation summary",
+            resume_context[:last_turn_summary],
+            400
+          ),
           maybe_named_line(
             "Latest validation summary",
             resume_context[:last_validation_summary],
             800
           ),
-          maybe_named_line("Latest verifier summary", resume_context[:last_verifier_summary], 800),
+          maybe_named_line(
+            "Latest verifier summary",
+            resume_context[:last_verifier_summary],
+            800
+          ),
           maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200),
           maybe_named_multiline(
             "Pending PR review feedback",
             resume_context[:review_feedback_summary]
           ),
-          maybe_named_multiline("Pending PR review claims", resume_context[:review_claim_summary]),
+          maybe_named_multiline(
+            "Pending PR review claims",
+            resume_context[:review_claim_summary]
+          ),
           maybe_named_list("Dirty files", resume_context[:dirty_files], 20),
           maybe_named_multiline("Diff stat", resume_context[:diff_summary])
         ]
@@ -2479,7 +2534,8 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp token_pressure_note(resume_context) when is_map(resume_context) do
     cond do
-      review_fix_budget_mode?(resume_context) and Map.get(resume_context, :budget_pressure_level) in ["soft", "high", "critical"] ->
+      review_fix_budget_mode?(resume_context) and
+          Map.get(resume_context, :budget_pressure_level) in ["soft", "high", "critical"] ->
         "\nScoped review-fix token pressure is active. Keep the turn limited to the current scope ids, avoid diff summaries, and do not restate old evidence."
 
       broad_implement_budget_mode?(resume_context) and
@@ -2531,10 +2587,18 @@ defmodule SymphonyElixir.DeliveryEngine do
         carry_forward_review_fix_budget_context(stored_resume_context)
 
       review_fix_scope_ids(state, "review_claim_batch") != [] ->
-        initial_review_fix_resume_context(state, "review_claim_batch", review_fix_scope_ids(state, "review_claim_batch"))
+        initial_review_fix_resume_context(
+          state,
+          "review_claim_batch",
+          review_fix_scope_ids(state, "review_claim_batch")
+        )
 
       review_fix_scope_ids(state, "ci_failure_batch") != [] ->
-        initial_review_fix_resume_context(state, "ci_failure_batch", review_fix_scope_ids(state, "ci_failure_batch"))
+        initial_review_fix_resume_context(
+          state,
+          "ci_failure_batch",
+          review_fix_scope_ids(state, "ci_failure_batch")
+        )
 
       true ->
         %{}
@@ -2660,11 +2724,17 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_resume_context_key("budget_retry_count"), do: :budget_retry_count
   defp normalize_resume_context_key("budget_window_base_turn"), do: :budget_window_base_turn
   defp normalize_resume_context_key("budget_last_stop_code"), do: :budget_last_stop_code
-  defp normalize_resume_context_key("budget_last_observed_input_tokens"), do: :budget_last_observed_input_tokens
+
+  defp normalize_resume_context_key("budget_last_observed_input_tokens"),
+    do: :budget_last_observed_input_tokens
+
   defp normalize_resume_context_key("budget_scope_kind"), do: :budget_scope_kind
   defp normalize_resume_context_key("budget_scope_ids"), do: :budget_scope_ids
   defp normalize_resume_context_key("budget_progress_count"), do: :budget_progress_count
-  defp normalize_resume_context_key("budget_total_extension_used"), do: :budget_total_extension_used
+
+  defp normalize_resume_context_key("budget_total_extension_used"),
+    do: :budget_total_extension_used
+
   defp normalize_resume_context_key("budget_auto_narrowed"), do: :budget_auto_narrowed
   defp normalize_resume_context_key("target_paths"), do: :target_paths
   defp normalize_resume_context_key("already_learned"), do: :already_learned
@@ -2679,7 +2749,11 @@ defmodule SymphonyElixir.DeliveryEngine do
         nil
 
       _ ->
-        ["", "Issue brief:", summarized_text(issue.description || "No description provided.", 1_200)]
+        [
+          "",
+          "Issue brief:",
+          summarized_text(issue.description || "No description provided.", 1_200)
+        ]
         |> Enum.join("\n")
     end
   end
@@ -2700,16 +2774,20 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp broad_retry_focus_line([]), do: "Focus path: choose one concrete file or subsystem before continuing."
+  defp broad_retry_focus_line([]),
+    do: "Focus path: choose one concrete file or subsystem before continuing."
 
   defp broad_retry_focus_line([path]),
-    do: "Focus path: `#{path}`. Stay inside this file. If one more file is strictly required, name the exact path instead of expanding heuristically."
+    do:
+      "Focus path: `#{path}`. Stay inside this file. If one more file is strictly required, name the exact path instead of expanding heuristically."
 
   defp broad_retry_focus_line([primary_path, expansion_path]),
-    do: "Focus path: `#{primary_path}` plus approved expansion `#{expansion_path}`. Do not read outside these two files in this retry."
+    do:
+      "Focus path: `#{primary_path}` plus approved expansion `#{expansion_path}`. Do not read outside these two files in this retry."
 
   defp broad_retry_focus_line(paths),
-    do: "Focus path: #{Enum.map_join(paths, ", ", &"`#{&1}`")}. Keep the retry limited to these explicit files."
+    do:
+      "Focus path: #{Enum.map_join(paths, ", ", &"`#{&1}`")}. Keep the retry limited to these explicit files."
 
   defp broad_retry_learned_line(nil), do: nil
   defp broad_retry_learned_line(text), do: "Already learned: #{text}"
@@ -2727,15 +2805,19 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp maybe_broad_retry_dirty_files_line(_resume_context, _target_paths), do: nil
 
   defp broad_retry_repo_hint_line(nil, [path]),
-    do: "Execution hint: make progress inside `#{path}`; if that file is insufficient, report one exact next file."
+    do:
+      "Execution hint: make progress inside `#{path}`; if that file is insufficient, report one exact next file."
 
   defp broad_retry_repo_hint_line(nil, [primary_path, expansion_path]),
-    do: "Execution hint: work only in `#{primary_path}` and `#{expansion_path}`; avoid any other repo reads."
+    do:
+      "Execution hint: work only in `#{primary_path}` and `#{expansion_path}`; avoid any other repo reads."
 
   defp broad_retry_repo_hint_line(nil, paths) when paths != [],
     do: "Execution hint: stay inside the explicit focus paths and avoid broad discovery."
 
-  defp broad_retry_repo_hint_line(nil, _paths), do: "Execution hint: stay inside the first concrete path you confirm and avoid broad discovery."
+  defp broad_retry_repo_hint_line(nil, _paths),
+    do:
+      "Execution hint: stay inside the first concrete path you confirm and avoid broad discovery."
 
   defp broad_retry_repo_hint_line(repo_map, paths) do
     platform =
@@ -2758,13 +2840,13 @@ defmodule SymphonyElixir.DeliveryEngine do
         "Execution hint: platform=#{platform}; #{proof}."
 
       platform && paths != [] ->
-        "Execution hint: platform=#{platform}; stay inside the focus path unless a directly adjacent helper is required."
+        "Execution hint: platform=#{platform}; stay inside the explicit focus path list for this retry."
 
       proof ->
         "Execution hint: #{proof}."
 
       true ->
-        "Execution hint: stay inside the focus path unless a directly adjacent helper is required."
+        "Execution hint: stay inside the explicit focus path list for this retry."
     end
   end
 
@@ -2824,7 +2906,8 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp default_next_objective(_state, []),
-    do: "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
+    do:
+      "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
 
   defp default_next_objective(state, focused_claims) do
     focused_review_next_objective(focused_claims, Map.get(state, :review_claims, %{}))
@@ -2904,7 +2987,8 @@ defmodule SymphonyElixir.DeliveryEngine do
        when is_map(review_claims) and is_integer(limit) and limit > 0 do
     review_claims
     |> Enum.sort_by(fn {thread_key, claim} ->
-      {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "", Map.get(claim, "line") || 0, thread_key}
+      {claim_priority_bucket(Map.get(claim, "claim_type")), Map.get(claim, "path") || "",
+       Map.get(claim, "line") || 0, thread_key}
     end)
     |> Enum.filter(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
     |> Enum.take(limit)
@@ -3042,19 +3126,23 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp maybe_refresh_merge_readiness_pr_body(_workspace, _issue, state, inspection, _opts) do
-    {:ok, Map.get(state, :pr_url) || Map.get(inspection, :pr_url), Map.get(state, :last_pr_body_validation)}
+    {:ok, Map.get(state, :pr_url) || Map.get(inspection, :pr_url),
+     Map.get(state, :last_pr_body_validation)}
   end
 
   defp maybe_put_pr_body_validation(state, nil), do: state
-  defp maybe_put_pr_body_validation(state, validation), do: Map.put(state, :last_pr_body_validation, validation)
+
+  defp maybe_put_pr_body_validation(state, validation),
+    do: Map.put(state, :last_pr_body_validation, validation)
 
   defp merge_readiness_pr_body_supported?(workspace) when is_binary(workspace) do
     File.exists?(Path.join(workspace, ".github/pull_request_template.md")) and
       File.exists?(Path.join([workspace, "elixir", "lib", "mix", "tasks", "pr_body.check.ex"]))
   end
 
-  defp maybe_put_review_feedback_pr_url(context, pr_url) when is_map(context) and is_binary(pr_url),
-    do: Map.put(context, :review_feedback_pr_url, pr_url)
+  defp maybe_put_review_feedback_pr_url(context, pr_url)
+       when is_map(context) and is_binary(pr_url),
+       do: Map.put(context, :review_feedback_pr_url, pr_url)
 
   defp maybe_put_review_feedback_pr_url(context, _pr_url), do: context
 
@@ -3232,7 +3320,11 @@ defmodule SymphonyElixir.DeliveryEngine do
           Map.put(
             acc,
             thread_key,
-            refreshed_review_thread_state(item, Map.get(persisted_threads, thread_key, %{}), pr_url)
+            refreshed_review_thread_state(
+              item,
+              Map.get(persisted_threads, thread_key, %{}),
+              pr_url
+            )
           )
 
         _ ->
@@ -4444,7 +4536,8 @@ defmodule SymphonyElixir.DeliveryEngine do
     %{
       verdict: Map.get(result, :verdict) || Map.get(result, "verdict"),
       summary: Map.get(result, :summary) || Map.get(result, "summary"),
-      acceptance_gaps: Map.get(result, :acceptance_gaps) || Map.get(result, "acceptance_gaps") || [],
+      acceptance_gaps:
+        Map.get(result, :acceptance_gaps) || Map.get(result, "acceptance_gaps") || [],
       risky_areas: Map.get(result, :risky_areas) || Map.get(result, "risky_areas") || [],
       evidence: Map.get(result, :evidence) || Map.get(result, "evidence") || [],
       output: Map.get(result, :raw_output) || Map.get(result, "raw_output"),

@@ -45,6 +45,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Fixed the blocked-state persistence seam in `RunPolicy.stop_issue/3` so budget stops preserve the already-persisted retry `resume_context` at the top level instead of dropping it while transitioning the workspace to `blocked`.
 - Preserved `next_required_path` through bounded broad-expansion exhaustion so a blocked workspace can resume with the same exact second-file request instead of losing it to the generic blocked-state shell.
 - Fixed the stale broad retry counter seam so an operator-driven replay with an already-known `next_required_path` can still take the bounded second-file expansion instead of being trapped forever in repeated file-only `focus_insufficient` stops.
+- Normalized diff-style `a/...` and `b/...` file markers out of broad retry target extraction when the same repo path is already known, so live `target_paths` no longer re-inflate from patch-format noise.
+- Removed the last broad-retry fallback wording about heuristic helper expansion and kept the runtime hint aligned to the explicit file list for the bounded retry lane.
 
 ## Evidence
 - Live dogfood failure proof:
@@ -72,6 +74,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/rule_catalog_test.exs`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix escript.build`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/rule_catalog_test.exs`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
 
 ## Next Step
-Restart the dogfood runner on the latest CLZ-32 head and replay `CLZ-32` again to confirm the preserved `next_required_path` now triggers the bounded second-file expansion even when the old broad retry count is already high from prior operator retries.
+Restart the dogfood runner on the latest CLZ-32 head and replay `CLZ-32` again to confirm the normalized target-path list trims the bounded two-file expansion below the hard cap instead of exhausting with diff-marker noise in `resume_context`.

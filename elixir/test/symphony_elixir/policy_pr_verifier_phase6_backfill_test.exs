@@ -227,13 +227,34 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     configure_memory_tracker!()
 
     issue = %Issue{id: "issue-validation-unavailable", identifier: "MT-909", state: "In Progress"}
-    refreshed_issue = %Issue{id: "issue-validation-unavailable", identifier: "MT-909", state: "In Progress"}
 
-    before_snapshot = %RunInspector.Snapshot{workspace: "/tmp/phase6-policy", fingerprint: 10, pr_url: nil}
-    after_snapshot = %RunInspector.Snapshot{workspace: "/tmp/phase6-policy", fingerprint: 11, pr_url: nil, harness: nil}
+    refreshed_issue = %Issue{
+      id: "issue-validation-unavailable",
+      identifier: "MT-909",
+      state: "In Progress"
+    }
+
+    before_snapshot = %RunInspector.Snapshot{
+      workspace: "/tmp/phase6-policy",
+      fingerprint: 10,
+      pr_url: nil
+    }
+
+    after_snapshot = %RunInspector.Snapshot{
+      workspace: "/tmp/phase6-policy",
+      fingerprint: 11,
+      pr_url: nil,
+      harness: nil
+    }
 
     assert {:stop, %RunPolicy.Violation{code: :validation_unavailable, details: details}} =
-             RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 0)
+             RunPolicy.evaluate_after_turn(
+               issue,
+               refreshed_issue,
+               before_snapshot,
+               after_snapshot,
+               0
+             )
 
     assert details == "No harness command configured."
     assert_receive {:memory_tracker_comment, "issue-validation-unavailable", body}
@@ -244,10 +265,23 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   test "run policy normalizes nil and blank validation failure output" do
     configure_memory_tracker!()
 
-    issue = %Issue{id: "issue-validation-output-normalized", identifier: "MT-909B", state: "In Progress"}
-    refreshed_issue = %Issue{id: "issue-validation-output-normalized", identifier: "MT-909B", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-validation-output-normalized",
+      identifier: "MT-909B",
+      state: "In Progress"
+    }
 
-    before_snapshot = %RunInspector.Snapshot{workspace: "/tmp/phase6-policy-output", fingerprint: 10, pr_url: nil}
+    refreshed_issue = %Issue{
+      id: "issue-validation-output-normalized",
+      identifier: "MT-909B",
+      state: "In Progress"
+    }
+
+    before_snapshot = %RunInspector.Snapshot{
+      workspace: "/tmp/phase6-policy-output",
+      fingerprint: 10,
+      pr_url: nil
+    }
 
     after_snapshot = %RunInspector.Snapshot{
       workspace: "/tmp/phase6-policy-output",
@@ -257,12 +291,26 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     }
 
     assert {:stop, %RunPolicy.Violation{code: :validation_failed, details: details}} =
-             RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 0, shell_runner: fn _workspace, "./scripts/validate.sh", _opts -> {nil, 1} end)
+             RunPolicy.evaluate_after_turn(
+               issue,
+               refreshed_issue,
+               before_snapshot,
+               after_snapshot,
+               0,
+               shell_runner: fn _workspace, "./scripts/validate.sh", _opts -> {nil, 1} end
+             )
 
     assert details == "No additional output was captured."
 
     assert {:stop, %RunPolicy.Violation{code: :validation_failed, details: blank_details}} =
-             RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 0, shell_runner: fn _workspace, "./scripts/validate.sh", _opts -> {"   \n", 1} end)
+             RunPolicy.evaluate_after_turn(
+               issue,
+               refreshed_issue,
+               before_snapshot,
+               after_snapshot,
+               0,
+               shell_runner: fn _workspace, "./scripts/validate.sh", _opts -> {"   \n", 1} end
+             )
 
     assert blank_details == "No additional output was captured."
   end
@@ -290,17 +338,39 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     issue = %Issue{id: "issue-noop-reset", identifier: "MT-911", state: "In Progress"}
     refreshed_issue = %Issue{id: "issue-noop-reset", identifier: "MT-911", state: "In Progress"}
 
-    before_snapshot = %RunInspector.Snapshot{workspace: "/tmp/phase6-noop-reset", fingerprint: 10, pr_url: nil}
-    after_snapshot = %RunInspector.Snapshot{workspace: "/tmp/phase6-noop-reset", fingerprint: 11, pr_url: nil}
+    before_snapshot = %RunInspector.Snapshot{
+      workspace: "/tmp/phase6-noop-reset",
+      fingerprint: 10,
+      pr_url: nil
+    }
 
-    assert {:ok, 0} = RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 4)
+    after_snapshot = %RunInspector.Snapshot{
+      workspace: "/tmp/phase6-noop-reset",
+      fingerprint: 11,
+      pr_url: nil
+    }
+
+    assert {:ok, 0} =
+             RunPolicy.evaluate_after_turn(
+               issue,
+               refreshed_issue,
+               before_snapshot,
+               after_snapshot,
+               4
+             )
+
     refute_receive {:memory_tracker_comment, "issue-noop-reset", _body}
   end
 
   test "run policy resumes noop evaluation after successful validation" do
     workspace = temp_workspace!("validation-passed")
     issue = %Issue{id: "issue-validation-passed", identifier: "MT-915", state: "In Progress"}
-    refreshed_issue = %Issue{id: "issue-validation-passed", identifier: "MT-915", state: "In Progress"}
+
+    refreshed_issue = %Issue{
+      id: "issue-validation-passed",
+      identifier: "MT-915",
+      state: "In Progress"
+    }
 
     write_script!(workspace, "scripts/validate.sh", "echo validation passed\nexit 0\n")
 
@@ -313,7 +383,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       harness: %RepoHarness{validation_command: "./scripts/validate.sh"}
     }
 
-    assert {:ok, 0} = RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 3)
+    assert {:ok, 0} =
+             RunPolicy.evaluate_after_turn(
+               issue,
+               refreshed_issue,
+               before_snapshot,
+               after_snapshot,
+               3
+             )
   end
 
   test "run policy stops when promoting a todo issue fails in the tracker" do
@@ -367,12 +444,26 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
   test "run policy validates human review issues even when fingerprints match" do
     workspace = temp_workspace!("human-review-validation")
-    issue = %Issue{id: "issue-human-review-validation", identifier: "MT-919", state: "Human Review"}
-    refreshed_issue = %Issue{id: "issue-human-review-validation", identifier: "MT-919", state: "Human Review"}
+
+    issue = %Issue{
+      id: "issue-human-review-validation",
+      identifier: "MT-919",
+      state: "Human Review"
+    }
+
+    refreshed_issue = %Issue{
+      id: "issue-human-review-validation",
+      identifier: "MT-919",
+      state: "Human Review"
+    }
 
     write_script!(workspace, "scripts/validate.sh", "echo validation passed\nexit 0\n")
 
-    before_snapshot = %RunInspector.Snapshot{workspace: workspace, fingerprint: 10, pr_url: "https://github.com/g/s/pull/919"}
+    before_snapshot = %RunInspector.Snapshot{
+      workspace: workspace,
+      fingerprint: 10,
+      pr_url: "https://github.com/g/s/pull/919"
+    }
 
     after_snapshot = %RunInspector.Snapshot{
       workspace: workspace,
@@ -381,15 +472,35 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       harness: %RepoHarness{validation_command: "./scripts/validate.sh"}
     }
 
-    assert {:ok, 0} = RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 2)
+    assert {:ok, 0} =
+             RunPolicy.evaluate_after_turn(
+               issue,
+               refreshed_issue,
+               before_snapshot,
+               after_snapshot,
+               2
+             )
   end
 
   test "run policy validates human review issues without a PR when review gating is disabled" do
-    configure_memory_tracker!(policy_require_pr_before_review: false, policy_stop_on_noop_turn: false)
+    configure_memory_tracker!(
+      policy_require_pr_before_review: false,
+      policy_stop_on_noop_turn: false
+    )
 
     workspace = temp_workspace!("human-review-validation-no-pr")
-    issue = %Issue{id: "issue-human-review-validation-no-pr", identifier: "MT-919C", state: "Human Review"}
-    refreshed_issue = %Issue{id: "issue-human-review-validation-no-pr", identifier: "MT-919C", state: "Human Review"}
+
+    issue = %Issue{
+      id: "issue-human-review-validation-no-pr",
+      identifier: "MT-919C",
+      state: "Human Review"
+    }
+
+    refreshed_issue = %Issue{
+      id: "issue-human-review-validation-no-pr",
+      identifier: "MT-919C",
+      state: "Human Review"
+    }
 
     write_script!(workspace, "scripts/validate.sh", "echo validation passed\nexit 0\n")
 
@@ -402,15 +513,32 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       harness: %RepoHarness{validation_command: "./scripts/validate.sh"}
     }
 
-    assert {:ok, 1} = RunPolicy.evaluate_after_turn(issue, refreshed_issue, before_snapshot, after_snapshot, 0)
+    assert {:ok, 1} =
+             RunPolicy.evaluate_after_turn(
+               issue,
+               refreshed_issue,
+               before_snapshot,
+               after_snapshot,
+               0
+             )
   end
 
   test "run policy blocks human review when no pull request exists" do
     configure_memory_tracker!()
 
     issue = %Issue{id: "issue-human-review-pr", identifier: "MT-919B", state: "Human Review"}
-    refreshed_issue = %Issue{id: "issue-human-review-pr", identifier: "MT-919B", state: "Human Review"}
-    snapshot = %RunInspector.Snapshot{workspace: "/tmp/phase6-human-review-pr", fingerprint: 10, pr_url: nil}
+
+    refreshed_issue = %Issue{
+      id: "issue-human-review-pr",
+      identifier: "MT-919B",
+      state: "Human Review"
+    }
+
+    snapshot = %RunInspector.Snapshot{
+      workspace: "/tmp/phase6-human-review-pr",
+      fingerprint: 10,
+      pr_url: nil
+    }
 
     assert {:stop, %RunPolicy.Violation{code: :publish_missing_pr}} =
              RunPolicy.evaluate_after_turn(issue, refreshed_issue, snapshot, snapshot, 0)
@@ -421,15 +549,35 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   test "run policy ignores non-binary review states when deciding validation and PR requirements" do
     configure_memory_tracker!(policy_stop_on_noop_turn: false)
 
-    issue = %Issue{id: "issue-human-review-non-binary", identifier: "MT-919D", state: "In Progress"}
-    refreshed_issue = %{id: "issue-human-review-non-binary", identifier: "MT-919D", state: :human_review}
-    snapshot = %RunInspector.Snapshot{workspace: "/tmp/phase6-human-review-non-binary", fingerprint: 10, pr_url: nil}
+    issue = %Issue{
+      id: "issue-human-review-non-binary",
+      identifier: "MT-919D",
+      state: "In Progress"
+    }
+
+    refreshed_issue = %{
+      id: "issue-human-review-non-binary",
+      identifier: "MT-919D",
+      state: :human_review
+    }
+
+    snapshot = %RunInspector.Snapshot{
+      workspace: "/tmp/phase6-human-review-non-binary",
+      fingerprint: 10,
+      pr_url: nil
+    }
 
     assert {:ok, 1} = RunPolicy.evaluate_after_turn(issue, refreshed_issue, snapshot, snapshot, 0)
   end
 
   test "run policy stops when total token budget is exceeded" do
-    configure_memory_tracker!(policy_token_budget: %{per_turn_input: nil, per_issue_total: 10, per_issue_total_output: nil})
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: nil,
+        per_issue_total: 10,
+        per_issue_total_output: nil
+      }
+    )
 
     issue = %Issue{id: "issue-total-budget", identifier: "MT-912", state: "In Progress"}
 
@@ -448,11 +596,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   end
 
   test "run policy stops when output token budget is exceeded" do
-    configure_memory_tracker!(policy_token_budget: %{per_turn_input: nil, per_issue_total: 50, per_issue_total_output: 5})
+    configure_memory_tracker!(
+      policy_token_budget: %{per_turn_input: nil, per_issue_total: 50, per_issue_total_output: 5}
+    )
 
     issue = %Issue{id: "issue-output-budget", identifier: "MT-913", state: "In Progress"}
 
-    assert {:stop, %RunPolicy.Violation{code: :per_issue_output_budget_exceeded, details: details}} =
+    assert {:stop,
+            %RunPolicy.Violation{code: :per_issue_output_budget_exceeded, details: details}} =
              RunPolicy.maybe_stop_for_token_budget(issue, %{
                codex_input_tokens: 4,
                codex_output_tokens: 7,
@@ -467,7 +618,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   end
 
   test "run policy allows runs that stay within configured budgets" do
-    configure_memory_tracker!(policy_token_budget: %{per_turn_input: 10, per_issue_total: 20, per_issue_total_output: 8})
+    configure_memory_tracker!(
+      policy_token_budget: %{per_turn_input: 10, per_issue_total: 20, per_issue_total_output: 8}
+    )
 
     issue = %Issue{id: "issue-budget-ok", identifier: "MT-914", state: "In Progress"}
 
@@ -777,7 +930,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-review-fix-running-entry-budget-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-review-budget-running-entry", identifier: "MT-914G", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-review-budget-running-entry",
+      identifier: "MT-914G",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -918,7 +1075,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-review-fix-total-budget-base-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-review-total-budget-base", identifier: "MT-914I", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-review-total-budget-base",
+      identifier: "MT-914I",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -959,7 +1120,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   end
 
   test "run policy ignores malformed token budget values" do
-    configure_memory_tracker!(policy_token_budget: %{per_turn_input: "ten", per_issue_total: %{}, per_issue_total_output: []})
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: "ten",
+        per_issue_total: %{},
+        per_issue_total_output: []
+      }
+    )
 
     issue = %Issue{id: "issue-budget-malformed", identifier: "MT-914B", state: "In Progress"}
 
@@ -1018,8 +1185,10 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  codex_total_tokens: 185_018,
                  turn_started_input_tokens: 0,
                  resume_context: %{
-                   last_turn_summary: "The operator payload parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
-                   next_objective: "Continue in elixir/lib/symphony_elixir_web/presenter.ex and elixir/lib/symphony_elixir_web/router.ex without rediscovering the whole repo."
+                   last_turn_summary:
+                     "The operator payload parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
+                   next_objective:
+                     "Continue in elixir/lib/symphony_elixir_web/presenter.ex and elixir/lib/symphony_elixir_web/router.ex without rediscovering the whole repo."
                  }
                })
 
@@ -1061,7 +1230,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text: "The focused presenter retry is not enough on its own. The one exact next file needed is `elixir/lib/symphony_elixir_web/router.ex`."
+                         text:
+                           "The focused presenter retry is not enough on its own. The one exact next file needed is `elixir/lib/symphony_elixir_web/router.ex`."
                        }
                      }
                    }
@@ -1101,7 +1271,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      "elixir/lib/symphony_elixir_web/router.ex"
                    ],
                    next_required_path: "elixir/lib/symphony_elixir_web/router.ex",
-                   already_learned: "Stay inside elixir/lib/symphony_elixir_web/presenter.ex, elixir/lib/symphony_elixir_web/router.ex and avoid unrelated reads or repo-wide rediscovery."
+                   already_learned:
+                     "Stay inside elixir/lib/symphony_elixir_web/presenter.ex, elixir/lib/symphony_elixir_web/router.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
 
@@ -1149,7 +1320,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-broad-budget-known-expansion-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-broad-budget-known-expansion", identifier: "MT-914BROADKNOWN", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-broad-budget-known-expansion",
+      identifier: "MT-914BROADKNOWN",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1166,7 +1341,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                    target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
                    next_required_path: ".github/pull_request_template.md",
                    budget_expansion_used: false,
-                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                   already_learned:
+                     "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
 
@@ -1187,7 +1363,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                    target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
                    next_required_path: ".github/pull_request_template.md",
                    budget_expansion_used: false,
-                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                   already_learned:
+                     "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
 
@@ -1233,7 +1410,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-broad-budget-codex-paths-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-broad-budget-codex", identifier: "MT-914BROADLOG", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-broad-budget-codex",
+      identifier: "MT-914BROADLOG",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1303,7 +1484,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-broad-budget-recent-updates-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-broad-budget-recent", identifier: "MT-914BROADRECENT", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-broad-budget-recent",
+      identifier: "MT-914BROADRECENT",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1376,7 +1561,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-broad-budget-path-dedupe-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-broad-budget-dedupe", identifier: "MT-914BROADDEDUPE", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-broad-budget-dedupe",
+      identifier: "MT-914BROADDEDUPE",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1399,7 +1588,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text: "The live stop is in `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the only file worth touching next."
+                         text:
+                           "The live stop is in `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the only file worth touching next."
                        }
                      }
                    }
@@ -1441,7 +1631,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-broad-budget-learned-override-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-broad-budget-learned", identifier: "MT-914BROADLEARNED", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-broad-budget-learned",
+      identifier: "MT-914BROADLEARNED",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1467,7 +1661,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text: "Focus the next retry inside `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the same path and should not be duplicated."
+                         text:
+                           "Focus the next retry inside `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the same path and should not be duplicated."
                        }
                      }
                    }
@@ -1477,7 +1672,84 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       assert %{
                resume_context: %{
                  target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
-                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 already_learned:
+                   "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement target paths normalize diff-style a and b prefixes out of retry focus" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-diff-paths-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-diff-paths",
+      identifier: "MT-914BROADDIFF",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 150_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 recent_codex_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text: """
+                         diff --git a/elixir/lib/symphony_elixir/delivery_engine.ex b/elixir/lib/symphony_elixir/delivery_engine.ex
+                         --- a/elixir/lib/symphony_elixir/delivery_engine.ex
+                         +++ b/elixir/lib/symphony_elixir/delivery_engine.ex
+                         The retry should stay inside elixir/lib/symphony_elixir/delivery_engine.ex.
+                         """
+                       }
+                     }
+                   }
+                 ]
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                 already_learned:
+                   "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                }
              } = RunStateStore.load_or_default(workspace, issue)
     after
@@ -1510,7 +1782,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-broad-budget-focus-insufficient-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-broad-budget-focus-insufficient", identifier: "MT-914BROADFOCUS", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-broad-budget-focus-insufficient",
+      identifier: "MT-914BROADFOCUS",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1530,13 +1806,19 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  recent_codex_updates: [
                    %{
                      event: :commentary,
-                     message: %{payload: %{text: "The broad retry should stay inside `elixir/lib/symphony_elixir/delivery_engine.ex`."}}
+                     message: %{
+                       payload: %{
+                         text:
+                           "The broad retry should stay inside `elixir/lib/symphony_elixir/delivery_engine.ex`."
+                       }
+                     }
                    }
                  ],
                  resume_context: %{}
                })
 
-      assert {:stop, %RunPolicy.Violation{code: :broad_implement_focus_insufficient, details: details}} =
+      assert {:stop,
+              %RunPolicy.Violation{code: :broad_implement_focus_insufficient, details: details}} =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  workspace: workspace,
                  stage: "implement",
@@ -1551,7 +1833,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                    budget_pressure_level: "high",
                    budget_auto_narrowed: true,
                    target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
-                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                   already_learned:
+                     "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                  }
                })
 
@@ -1564,7 +1847,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  budget_retry_count: 1,
                  budget_auto_narrowed: true,
                  target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
-                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 already_learned:
+                   "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                },
                stop_reason: %{rule_id: "budget.broad_implement_focus_insufficient"}
              } = RunStateStore.load_or_default(workspace, issue)
@@ -1651,7 +1935,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-broad-budget-stale-stage-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-broad-budget-stale-stage", identifier: "MT-914BROADSTALE", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-broad-budget-stale-stage",
+      identifier: "MT-914BROADSTALE",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1678,7 +1966,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                      event: :commentary,
                      message: %{
                        payload: %{
-                         text: "The stale-stage live retry should focus immediately on `elixir/lib/symphony_elixir/delivery_engine.ex`."
+                         text:
+                           "The stale-stage live retry should focus immediately on `elixir/lib/symphony_elixir/delivery_engine.ex`."
                        }
                      }
                    }
@@ -1721,7 +2010,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       }
     )
 
-    workspace_root = Path.join(System.tmp_dir!(), "symphony-elixir-review-fix-budget-#{System.unique_integer([:positive])}")
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-budget-#{System.unique_integer([:positive])}"
+      )
+
     issue = %Issue{id: "issue-review-fix-budget", identifier: "MT-914D", state: "In Progress"}
 
     try do
@@ -1789,7 +2083,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-review-fix-budget-single-scope-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-review-fix-budget-single-scope", identifier: "MT-914D2", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-review-fix-budget-single-scope",
+      identifier: "MT-914D2",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1854,7 +2152,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-review-fix-budget-fallback-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-review-fix-budget-fallback", identifier: "MT-914D3", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-review-fix-budget-fallback",
+      identifier: "MT-914D3",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -1968,7 +2270,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       }
     )
 
-    workspace_root = Path.join(System.tmp_dir!(), "symphony-elixir-review-fix-extension-#{System.unique_integer([:positive])}")
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-extension-#{System.unique_integer([:positive])}"
+      )
+
     issue = %Issue{id: "issue-review-fix-extension", identifier: "MT-914F", state: "In Progress"}
 
     try do
@@ -2104,7 +2411,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         "symphony-elixir-review-fix-persisted-stop-#{System.unique_integer([:positive])}"
       )
 
-    issue = %Issue{id: "issue-review-fix-persisted-stop", identifier: "MT-914G2", state: "In Progress"}
+    issue = %Issue{
+      id: "issue-review-fix-persisted-stop",
+      identifier: "MT-914G2",
+      state: "In Progress"
+    }
 
     try do
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -2159,12 +2470,18 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
              PullRequestManager.ensure_pull_request(
                workspace,
                issue,
-               %{branch: "gaspar/phase6-edit", last_validation: %{status: "passed"}, last_verifier: %{status: "passed"}},
+               %{
+                 branch: "gaspar/phase6-edit",
+                 last_validation: %{status: "passed"},
+                 last_verifier: %{status: "passed"}
+               },
                github_client: __MODULE__.FakeGitHubClient,
                github_client_opts: [
                  test_pid: self(),
                  existing_result: {:ok, %{url: "https://github.com/g/s/pull/20", state: "OPEN"}},
-                 edit_result: {:ok, %{url: "https://github.com/g/s/pull/20", state: "OPEN", output: "edited"}}
+                 edit_result:
+                   {:ok,
+                    %{url: "https://github.com/g/s/pull/20", state: "OPEN", output: "edited"}}
                ]
              )
 
@@ -2221,7 +2538,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     assert {:ok, %{url: "https://github.com/g/s/pull/23", body_validation: %{status: "skipped"}}} =
              PullRequestManager.ensure_pull_request(
                workspace,
-               %{"identifier" => "MT-923", "title" => nil, "url" => "https://linear.app/test/issue/MT-923"},
+               %{
+                 "identifier" => "MT-923",
+                 "title" => nil,
+                 "url" => "https://linear.app/test/issue/MT-923"
+               },
                %{branch: "gaspar/phase6-create"},
                github_client: __MODULE__.FakeGitHubClient,
                github_client_opts: [
@@ -2231,10 +2552,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                ]
              )
 
-    assert_receive {:created_pr, ^workspace, "gaspar/phase6-create", "main", "MT-923: Untitled", body}
+    assert_receive {:created_pr, ^workspace, "gaspar/phase6-create", "main", "MT-923: Untitled",
+                    body}
+
     assert body =~ "Issue: https://linear.app/test/issue/MT-923"
     refute_receive {:memory_tracker_attach_link, _, _, _}
-    assert_receive {:persist_pr_url, ^workspace, "gaspar/phase6-create", "https://github.com/g/s/pull/23"}
+
+    assert_receive {:persist_pr_url, ^workspace, "gaspar/phase6-create",
+                    "https://github.com/g/s/pull/23"}
   end
 
   test "pull request manager delegates existing and merge wrappers to the configured client" do
@@ -2254,7 +2579,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                github_client: __MODULE__.FakeGitHubClient,
                github_client_opts: [
                  test_pid: self(),
-                 merge_result: {:ok, %{merged: true, url: "https://github.com/g/s/pull/24", output: "merged", status: :merged}}
+                 merge_result:
+                   {:ok,
+                    %{
+                      merged: true,
+                      url: "https://github.com/g/s/pull/24",
+                      output: "merged",
+                      status: :merged
+                    }}
                ]
              )
 
@@ -2307,7 +2639,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   test "pull request manager default ensure wrapper creates a PR via gh on PATH" do
     workspace = temp_workspace!("pull-request-default-create")
     bin_dir = temp_workspace!("pull-request-default-create-bin")
-    issue = %Issue{id: "issue-pr-default-create", identifier: "MT-924", title: "Create via gh", url: "https://linear.app/test/issue/MT-924"}
+
+    issue = %Issue{
+      id: "issue-pr-default-create",
+      identifier: "MT-924",
+      title: "Create via gh",
+      url: "https://linear.app/test/issue/MT-924"
+    }
 
     configure_memory_tracker!()
     File.mkdir_p!(Path.join(workspace, ".git"))
@@ -2345,7 +2683,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     )
 
     with_path_prefix(bin_dir, fn ->
-      assert {:ok, %{url: "https://github.com/g/s/pull/26", state: "OPEN", body_validation: %{status: "skipped"}}} =
+      assert {:ok,
+              %{
+                url: "https://github.com/g/s/pull/26",
+                state: "OPEN",
+                body_validation: %{status: "skipped"}
+              }} =
                PullRequestManager.ensure_pull_request(
                  workspace,
                  issue,
@@ -2353,7 +2696,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                )
     end)
 
-    assert_receive {:memory_tracker_attach_link, "issue-pr-default-create", "GitHub PR: MT-924", "https://github.com/g/s/pull/26"}
+    assert_receive {:memory_tracker_attach_link, "issue-pr-default-create", "GitHub PR: MT-924",
+                    "https://github.com/g/s/pull/26"}
   end
 
   test "pull request manager surfaces PR body lint failures before calling GitHub" do
@@ -2362,7 +2706,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     File.mkdir_p!(Path.join(workspace, ".github"))
     File.write!(Path.join(workspace, ".github/pull_request_template.md"), "template\n")
     File.mkdir_p!(Path.join([workspace, "elixir", "lib", "mix", "tasks"]))
-    File.write!(Path.join([workspace, "elixir", "lib", "mix", "tasks", "pr_body.check.ex"]), "# marker\n")
+
+    File.write!(
+      Path.join([workspace, "elixir", "lib", "mix", "tasks", "pr_body.check.ex"]),
+      "# marker\n"
+    )
 
     assert {:error, {:pr_body_invalid, status, output}} =
              PullRequestManager.ensure_pull_request(
@@ -2396,7 +2744,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   test "verifier runner blocks results when the verifier mutated the workspace" do
     workspace = git_workspace!("verifier-mutated")
     issue = verifier_issue("issue-verifier-mutated", "MT-930")
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
     write_behavioral_proof!(workspace)
@@ -2420,13 +2772,20 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     assert result.verdict == "blocked"
     assert result.summary =~ "mutated the workspace"
-    assert result.risky_areas == ["Verification must not change files, git state, or PR metadata."]
+
+    assert result.risky_areas == [
+             "Verification must not change files, git state, or PR metadata."
+           ]
   end
 
   test "verifier runner blocks invalid structured verifier results" do
     workspace = git_workspace!("verifier-invalid")
     issue = verifier_issue("issue-verifier-invalid", "MT-931")
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
     write_behavioral_proof!(workspace)
@@ -2446,7 +2805,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   test "verifier runner blocks session failures before a result is produced" do
     workspace = git_workspace!("verifier-session-error")
     issue = verifier_issue("issue-verifier-session-error", "MT-932")
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
     write_behavioral_proof!(workspace)
@@ -2469,7 +2832,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     workspace = git_workspace_in_root!(workspace_root, "MT-933")
     codex_binary = write_fake_verifier_codex!(test_root, :valid)
     issue = verifier_issue("issue-verifier-app-valid", "MT-933")
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
@@ -2479,7 +2846,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
     write_behavioral_proof!(workspace)
 
-    result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
+    result =
+      VerifierRunner.verify(
+        workspace,
+        issue,
+        %{last_validation: %{output: "validation ok"}},
+        inspection
+      )
 
     assert result.verdict == "pass"
     assert result.summary == "Ready to ship"
@@ -2500,7 +2873,10 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       description: nil
     }
 
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
@@ -2510,7 +2886,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
     write_behavioral_proof!(workspace)
 
-    result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
+    result =
+      VerifierRunner.verify(
+        workspace,
+        issue,
+        %{last_validation: %{output: "validation ok"}},
+        inspection
+      )
 
     assert result.verdict == "pass"
     assert result.summary == "Ready to ship"
@@ -2522,7 +2904,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     workspace = git_workspace_in_root!(workspace_root, "MT-934")
     codex_binary = write_fake_verifier_codex!(test_root, :missing_result)
     issue = verifier_issue("issue-verifier-app-missing", "MT-934")
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
@@ -2532,7 +2918,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
     write_behavioral_proof!(workspace)
 
-    result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
+    result =
+      VerifierRunner.verify(
+        workspace,
+        issue,
+        %{last_validation: %{output: "validation ok"}},
+        inspection
+      )
 
     assert result.verdict == "blocked"
     assert result.summary =~ "without reporting"
@@ -2545,7 +2937,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     workspace = git_workspace_in_root!(workspace_root, "MT-935")
     codex_binary = write_fake_verifier_codex!(test_root, :invalid_result)
     issue = verifier_issue("issue-verifier-app-invalid", "MT-935")
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
@@ -2555,7 +2951,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
     write_behavioral_proof!(workspace)
 
-    result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
+    result =
+      VerifierRunner.verify(
+        workspace,
+        issue,
+        %{last_validation: %{output: "validation ok"}},
+        inspection
+      )
 
     assert result.verdict == "blocked"
     assert result.summary =~ "invalid structured result"
@@ -2568,7 +2970,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     workspace = git_workspace_in_root!(workspace_root, "MT-936")
     codex_binary = write_fake_verifier_codex!(test_root, :unsupported_tool)
     issue = verifier_issue("issue-verifier-app-unsupported", "MT-936")
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
@@ -2579,7 +2985,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     write_behavioral_proof!(workspace)
 
     result =
-      VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection,
+      VerifierRunner.verify(
+        workspace,
+        issue,
+        %{last_validation: %{output: "validation ok"}},
+        inspection,
         on_message: fn
           %{event: :tool_call_failed} ->
             Process.put({:symphony_verifier_result, issue.id}, :unexpected_payload)
@@ -2607,7 +3017,10 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       description: "## Acceptance Criteria\n- verifier accepts plain maps"
     }
 
-    inspection = %RunInspector.Snapshot{workspace: workspace, harness: %RepoHarness{smoke_command: "./smoke.sh"}}
+    inspection = %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "./smoke.sh"}
+    }
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: workspace_root,
@@ -2617,7 +3030,13 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     write_script!(workspace, "smoke.sh", "echo smoke passed\nexit 0\n")
     write_behavioral_proof!(workspace)
 
-    result = VerifierRunner.verify(workspace, issue, %{last_validation: %{output: "validation ok"}}, inspection)
+    result =
+      VerifierRunner.verify(
+        workspace,
+        issue,
+        %{last_validation: %{output: "validation ok"}},
+        inspection
+      )
 
     assert result.verdict == "pass"
     assert result.summary == "Ready to ship"
@@ -2633,7 +3052,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
   test "verifier runner delegates post-merge verification to the harness command" do
     result =
-      VerifierRunner.post_merge_verify("/tmp/phase6-post-merge", %RepoHarness{post_merge_command: "./post-merge.sh"},
+      VerifierRunner.post_merge_verify(
+        "/tmp/phase6-post-merge",
+        %RepoHarness{post_merge_command: "./post-merge.sh"},
         shell_runner: fn _workspace, "./post-merge.sh", _opts -> {"post-merge ok\n", 0} end
       )
 
@@ -2661,13 +3082,26 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     @impl true
     def edit_pull_request(workspace, title, body_file, opts) do
       send(opts[:test_pid], {:edited_pr, workspace, title, File.read!(body_file)})
-      Keyword.get(opts, :edit_result, {:ok, %{url: "https://github.com/g/s/pull/1", state: "OPEN", output: "edited"}})
+
+      Keyword.get(
+        opts,
+        :edit_result,
+        {:ok, %{url: "https://github.com/g/s/pull/1", state: "OPEN", output: "edited"}}
+      )
     end
 
     @impl true
     def create_pull_request(workspace, branch, base_branch, title, body_file, opts) do
-      send(opts[:test_pid], {:created_pr, workspace, branch, base_branch, title, File.read!(body_file)})
-      Keyword.get(opts, :create_result, {:ok, %{url: "https://github.com/g/s/pull/2", state: "OPEN"}})
+      send(
+        opts[:test_pid],
+        {:created_pr, workspace, branch, base_branch, title, File.read!(body_file)}
+      )
+
+      Keyword.get(
+        opts,
+        :create_result,
+        {:ok, %{url: "https://github.com/g/s/pull/2", state: "OPEN"}}
+      )
     end
 
     @impl true
@@ -2677,7 +3111,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     end
 
     @impl true
-    def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
+    def review_feedback(_workspace, _opts),
+      do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
 
     @impl true
     def persist_pr_url(workspace, branch, url, opts) do
@@ -2691,7 +3126,11 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
   end
 
   defp configure_memory_tracker!(workflow_overrides \\ []) do
-    write_workflow_file!(Workflow.workflow_file_path(), Keyword.put(workflow_overrides, :tracker_kind, "memory"))
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      Keyword.put(workflow_overrides, :tracker_kind, "memory")
+    )
+
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
     on_exit(fn ->
