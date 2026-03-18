@@ -76,6 +76,12 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix escript.build`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/rule_catalog_test.exs`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
+- Live replay on the restarted `http://127.0.0.1:4046` canary at committed head `d5ee432` ended with:
+  - `rule_id = budget.broad_implement_expansion_exhausted`
+  - `budget_last_observed_input_tokens = 126182`
+  - `target_paths = ["elixir/lib/symphony_elixir/delivery_engine.ex", ".github/pull_request_template.md"]`
+  - `already_learned = "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex, .github/pull_request_template.md and avoid unrelated reads or repo-wide rediscovery."`
+- That live blocked state proves the diff-marker pollution is gone after restarting the runner on the new code; the remaining gap is now only the last ~6k above the bounded two-file hard cap.
 
 ## Next Step
-Restart the dogfood runner on the latest CLZ-32 head and replay `CLZ-32` again to confirm the normalized target-path list trims the bounded two-file expansion below the hard cap instead of exhausting with diff-marker noise in `resume_context`.
+Trim the remaining two-file expansion overhead so the bounded `delivery_engine.ex` plus `.github/pull_request_template.md` retry can finish under the `120k` hard cap instead of stopping at `126182`.
