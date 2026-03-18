@@ -25,6 +25,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Added a lean broad retry prompt path in `DeliveryEngine` that trims issue context and avoids duplicated review-oriented sections.
 - Persisted concrete `target_paths` and a compact `already_learned` summary into broad retry `resume_context` so the next turn can continue from a file-level target instead of rediscovering the whole repo.
 - Tightened the broad retry prompt to drop the issue brief entirely once target paths exist, replace the repo map with a short execution hint, and make the next objective path-specific.
+- Live replay showed the first cut still dropped `target_paths` and `already_learned` because broad budget stops often only have structured Codex commentary payloads, not a plain `last_turn_summary`.
+- Extended broad retry mining in `RunPolicy` to extract paths and compact continuity from structured `last_codex_message` payloads, including real `response.output_text.done` commentary.
 - Generalized orchestrator retry metadata so broad-mode retries reuse the same automatic continuation path as review-fix retries without being mislabeled as review-fix work.
 - Added direct regression coverage for the new broad retry lane, the CI-recovery exclusion, the new stop rule, and the narrowed prompt text.
 - Found the live completion seam: worker shutdown was still falling through to the generic budget stop because the broad retry gate required persisted `run_state.stage == "implement"` even when the live `dispatch_stage` was already `implement`.
@@ -40,6 +42,7 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Live dogfood replay on `http://127.0.0.1:4046` for `CLZ-32` auto-retried the first broad implement overrun into `budget_mode = "broad_implement"` with `retry_count = 1`, `budget_auto_narrowed = true`, and `budget_last_observed_input_tokens = 146909`.
 - The narrowed retry then stopped on the broad-specific exhaustion rule instead of the generic budget stop:
   `/Users/gaspar/code/symphony-workspaces-dogfood/CLZ-32/.symphony/run_state.json` ended with `budget.broad_implement_scope_exhausted`, `budget_retry_count = 2`, and observed narrowed-turn input `135797`.
+- Runtime Codex logs in `/Users/gaspar/src/symphony-local/.codex-runtime-dogfood/logs_1.sqlite` confirmed the live worker emitted file-level commentary such as ``maybe_stop_for_token_budget/2`` and ``implement_prompt/...`` before the budget stop, which is the continuity source now mined into broad retry state.
 
 ## Next Step
 Replay `CLZ-32` live and measure whether the persisted path-specific retry shape drops the narrowed turn materially below the prior `135797` observed-input result.

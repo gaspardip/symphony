@@ -1068,6 +1068,77 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     end
   end
 
+  test "broad implement budget retry mines target paths from structured codex updates" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-codex-paths-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-broad-budget-codex", identifier: "MT-914BROADLOG", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 150_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 last_codex_message: %{
+                   event: :commentary,
+                   message: %{
+                     payload: %{
+                       text:
+                         "I have the insertion points now: `elixir/lib/symphony_elixir/run_policy.ex` still hard-stops broad mode, and `elixir/lib/symphony_elixir/delivery_engine.ex` still emits the full broad context block."
+                     }
+                   }
+                 }
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: [
+                   "elixir/lib/symphony_elixir/run_policy.ex",
+                   "elixir/lib/symphony_elixir/delivery_engine.ex"
+                 ],
+                 already_learned: already_learned
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+
+      assert already_learned =~ "run_policy.ex"
+      assert already_learned =~ "delivery_engine.ex"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "broad implement budget does not intercept explicit ci-failure recovery" do
     configure_memory_tracker!(
       policy_token_budget: %{

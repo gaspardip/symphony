@@ -1316,6 +1316,7 @@ defmodule SymphonyElixir.RunPolicy do
         Map.get(resume_context, :last_turn_summary),
         Map.get(running_entry, :last_codex_message)
       ]
+      |> Enum.map(&summarizable_text/1)
       |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))
 
     cond do
@@ -1359,6 +1360,13 @@ defmodule SymphonyElixir.RunPolicy do
   defp extract_candidate_paths(text) when is_binary(text) do
     Regex.scan(~r{(?:^|[\s`'"])((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:ex|exs|md|yaml|yml|json|sh))(?=$|[\s`'".,;:])}, text, capture: :all_but_first)
     |> List.flatten()
+    |> normalize_candidate_paths()
+  end
+
+  defp extract_candidate_paths(value) when is_map(value) or is_list(value) do
+    value
+    |> extract_text_fragments()
+    |> Enum.flat_map(&extract_candidate_paths/1)
     |> normalize_candidate_paths()
   end
 
@@ -1722,20 +1730,80 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp summarized_text(value, limit) when is_integer(limit) and limit > 0 do
     value
-    |> to_string()
-    |> String.trim()
+    |> summarizable_text()
     |> case do
+      nil ->
+        nil
+
+      text ->
+        text
+        |> String.trim()
+        |> case do
+          "" ->
+            nil
+
+          trimmed ->
+            if String.length(trimmed) <= limit do
+              trimmed
+            else
+              String.slice(trimmed, 0, max(limit - 3, 0)) <> "..."
+            end
+        end
+    end
+  end
+
+  defp summarizable_text(nil), do: nil
+
+  defp summarizable_text(value) when is_binary(value) do
+    case String.trim(value) do
       "" ->
         nil
 
       text ->
-        if String.length(text) <= limit do
-          text
-        else
-          String.slice(text, 0, max(limit - 3, 0)) <> "..."
-        end
+        text
     end
   end
+
+  defp summarizable_text(value) when is_list(value) or is_map(value) do
+    value
+    |> extract_text_fragments()
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
+    |> case do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp summarizable_text(value), do: to_string(value)
+
+  defp extract_text_fragments(value) when is_binary(value), do: [value]
+
+  defp extract_text_fragments(value) when is_list(value) do
+    Enum.flat_map(value, &extract_text_fragments/1)
+  end
+
+  defp extract_text_fragments(value) when is_map(value) do
+    preferred =
+      [:text, "text", :message, "message", :payload, "payload", :raw, "raw", :content, "content"]
+      |> Enum.flat_map(fn key ->
+        case Map.fetch(value, key) do
+          {:ok, nested} -> extract_text_fragments(nested)
+          :error -> []
+        end
+      end)
+
+    if preferred != [] do
+      preferred
+    else
+      value
+      |> Map.values()
+      |> Enum.flat_map(&extract_text_fragments/1)
+    end
+  end
+
+  defp extract_text_fragments(_value), do: []
 
   defp normalize_repo_url(nil), do: nil
 
