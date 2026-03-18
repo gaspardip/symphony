@@ -1725,13 +1725,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
+    run_state = retry_run_state(issue.identifier, issue)
 
     case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
-        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state)
+        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
@@ -1774,6 +1775,7 @@ defmodule SymphonyElixir.Orchestrator do
             policy_override: policy_override,
             policy_class: policy_class,
             policy_source: policy_source,
+            resume_context: Map.get(run_state, :resume_context, %{}),
             last_ledger_event_id: Map.get(ledger_event, :event_id),
             started_at: DateTime.utc_now()
           })
@@ -1819,6 +1821,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_passive_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
+    run_state = retry_run_state(issue.identifier, issue)
 
     case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
            workspace =
@@ -1843,7 +1846,7 @@ defmodule SymphonyElixir.Orchestrator do
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
-        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state)
+        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
         Logger.info("Dispatching issue to passive runtime worker: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
@@ -1887,6 +1890,7 @@ defmodule SymphonyElixir.Orchestrator do
             policy_override: policy_override,
             policy_class: policy_class,
             policy_source: policy_source,
+            resume_context: Map.get(run_state, :resume_context, %{}),
             last_ledger_event_id: Map.get(ledger_event, :event_id),
             passive?: true,
             started_at: DateTime.utc_now()

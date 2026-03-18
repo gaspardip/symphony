@@ -1352,6 +1352,74 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     end)
   end
 
+  test "spawned running entries retain persisted review-fix resume context for budget enforcement" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-running-entry-review-fix-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-running-entry-review-fix",
+      identifier: "MT-RUNNING-ENTRY-REVIEW-FIX",
+      title: "Running entry review-fix resume context",
+      description: "Keep adaptive budget metadata on the running entry.",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Workspace.path_for_issue(issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+               resume_context: %{
+                 budget_mode: "review_fix",
+                 budget_pressure_level: "high",
+                 budget_retry_count: 2,
+                 budget_scope_kind: "ci_failure_batch",
+                 budget_scope_ids: ["make-all"],
+                 budget_last_stop_code: "budget.per_turn_input_exceeded",
+                 budget_last_observed_input_tokens: 127_643,
+                 token_pressure: "high"
+               }
+             })
+
+    state =
+      Orchestrator.do_spawn_issue_worker_for_test(
+        %State{lease_owner: "wrapper-owner-review-fix"},
+        issue,
+        1,
+        self(),
+        start_child_fun: fn _supervisor, fun ->
+          Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun)
+        end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+    pid = Map.fetch!(running_entry, :pid)
+
+    assert running_entry.resume_context.budget_mode == "review_fix"
+    assert running_entry.resume_context.budget_scope_kind == "ci_failure_batch"
+    assert running_entry.resume_context.budget_scope_ids == ["make-all"]
+    assert running_entry.resume_context.budget_retry_count == 2
+
+    on_exit(fn ->
+      if is_pid(pid) and Process.alive?(pid) do
+        Process.exit(pid, :kill)
+      end
+
+      LeaseManager.release(issue.id, "wrapper-owner-review-fix")
+      File.rm_rf(workspace_root)
+    end)
+  end
+
   test "revalidate passthrough and retry scheduling helpers cover fallback and timer cancellation branches" do
     assert {:ok, %{id: "passthrough"}} =
              Orchestrator.revalidate_issue_passthrough_for_test(%{id: "passthrough"})
