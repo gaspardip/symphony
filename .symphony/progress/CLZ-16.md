@@ -31,6 +31,7 @@ Make the self-development harness the required contract for Symphony self-host r
 - Added adaptive review-fix caps, bounded per-issue total extension, and review-fix-specific stop rules in `RunPolicy` and `RuleCatalog`.
 - Added automatic scoped retry scheduling in the orchestrator so review-fix budget stops can narrow and continue without an operator retry for the first recovery steps.
 - Narrowed `implement` prompts for review-fix lanes to one scope batch with reduced resume context and operator-visible budget state in presenter payloads.
+- Fixed the live worker-exit seam so review-fix budget enforcement still persists or auto-retries when the decisive token overrun is only visible at process completion.
 
 ## Evidence
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test`
@@ -41,6 +42,7 @@ Make the self-development harness the required contract for Symphony self-host r
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/rule_catalog_test.exs test/symphony_elixir/workspace_and_config_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/core_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix harness.check`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix dialyzer --format short` still exits nonzero on the repo's existing warning baseline; this slice did not attempt to clear unrelated warnings.
 
 ## Next Step

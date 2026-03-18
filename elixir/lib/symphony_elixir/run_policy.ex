@@ -810,7 +810,8 @@ defmodule SymphonyElixir.RunPolicy do
     persist_resume_context(issue, running_entry, persisted_resume_context)
 
     cond do
-      can_retry? and turns_in_window < adaptive_budget.max_turns_in_window and can_narrow_scope? ->
+      can_retry? and turns_in_window < adaptive_budget.max_turns_in_window and
+          review_fix_retry_continues?(retry_count, can_narrow_scope?) ->
         {:retry,
          %{
            kind: :review_fix_budget_retry,
@@ -830,6 +831,9 @@ defmodule SymphonyElixir.RunPolicy do
         stop_issue(issue, review_fix_exhaustion_violation(:scope_exhausted, current_turn_input, metadata), workspace)
     end
   end
+
+  defp review_fix_retry_continues?(retry_count, _can_narrow_scope?) when retry_count < 3, do: true
+  defp review_fix_retry_continues?(_retry_count, can_narrow_scope?), do: can_narrow_scope?
 
   defp maybe_record_review_fix_budget_pressure(
          issue,

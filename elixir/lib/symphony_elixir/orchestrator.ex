@@ -288,10 +288,30 @@ defmodule SymphonyElixir.Orchestrator do
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
+        issue = Map.get(running_entry, :issue, %{})
+        next_attempt = next_retry_attempt_from_running(running_entry) || 1
 
         state =
-          case reason do
-            :normal ->
+          case {reason, RunPolicy.maybe_stop_for_token_budget(issue, running_entry)} do
+            {:normal, {:retry, metadata}} ->
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive review-fix retry")
+
+              schedule_issue_retry(state, issue_id, next_attempt, %{
+                identifier: running_entry.identifier,
+                delay_type: :continuation,
+                issue: running_entry.issue,
+                error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+                budget_retry: true,
+                budget_mode: "review_fix",
+                budget_retry_count: Map.get(metadata, :retry_count),
+                budget_resume_context: Map.get(metadata, :resume_context)
+              })
+
+            {:normal, {:stop, _violation}} ->
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; recorded token-budget stop")
+              state
+
+            {:normal, :ok} ->
               continuation = continuation_metadata_for_running_entry(running_entry)
               continuation_delay_type = Map.get(continuation, :delay_type, :continuation)
 
@@ -317,10 +337,8 @@ defmodule SymphonyElixir.Orchestrator do
                   )
               end
 
-            _ ->
+            {_other_reason, _budget_result} ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,

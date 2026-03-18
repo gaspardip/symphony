@@ -634,6 +634,71 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     end
   end
 
+  test "review-fix budget still retries when the scope is already narrowed to one item" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        review_fix: %{
+          enabled: true,
+          per_turn_input_soft: 60_000,
+          per_turn_input_hard: 120_000,
+          retry_2_per_turn_input_hard: 150_000,
+          retry_3_per_turn_input_hard: 220_000,
+          max_turns_in_window: 3,
+          retry_2_max_turns_in_window: 5,
+          retry_3_max_turns_in_window: 7,
+          per_issue_total_extension: 150_000,
+          auto_retry_limit: 3,
+          narrow_scope_batch_size: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-budget-single-scope-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-review-fix-budget-single-scope", identifier: "MT-914D2", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :review_fix_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 130_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 130_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   budget_mode: "review_fix",
+                   budget_scope_kind: "review_claim_batch",
+                   budget_scope_ids: ["comment:1"]
+                 }
+               })
+
+      assert %{
+               resume_context: %{
+                 budget_mode: "review_fix",
+                 budget_retry_count: 1,
+                 budget_scope_ids: ["comment:1"],
+                 budget_auto_narrowed: false
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "review-fix budget raises per-turn cap on later retries" do
     configure_memory_tracker!(
       policy_token_budget: %{

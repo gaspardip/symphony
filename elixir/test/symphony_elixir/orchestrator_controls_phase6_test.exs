@@ -1544,6 +1544,82 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert get_in(retry_entry, [:budget_resume_context, :budget_scope_ids]) == ["comment:1"]
   end
 
+  test "normal worker completion still schedules adaptive retry when final token totals exceed the review-fix budget" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-down-retry-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    issue = %Issue{
+      id: "issue-review-fix-down-retry",
+      identifier: "MT-REVIEW-FIX-DOWN-RETRY",
+      title: "Retry review fix after normal exit",
+      description: "adaptive retry on down",
+      state: "In Progress",
+      labels: []
+    }
+
+    workspace = Workspace.path_for_issue(issue.identifier)
+    File.mkdir_p!(workspace)
+    assert {:ok, _state} = SymphonyElixir.RunStateStore.transition(workspace, "implement", %{})
+
+    ref = make_ref()
+
+    {:noreply, next_state} =
+      Orchestrator.handle_info(
+        {:DOWN, ref, :process, self(), :normal},
+        %State{
+          lease_owner: "review-fix-down-owner",
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+          claimed: MapSet.new([issue.id]),
+          running: %{
+            issue.id => %{
+              pid: self(),
+              ref: ref,
+              identifier: issue.identifier,
+              issue: issue,
+              workspace: workspace,
+              stage: "implement",
+              started_at: DateTime.utc_now(),
+              turn_count: 1,
+              retry_attempt: 0,
+              codex_input_tokens: 130_000,
+              codex_output_tokens: 0,
+              codex_total_tokens: 130_000,
+              turn_started_input_tokens: 0,
+              resume_context: %{
+                budget_mode: "review_fix",
+                budget_scope_kind: "review_claim_batch",
+                budget_scope_ids: ["comment:1"]
+              }
+            }
+          }
+        }
+      )
+
+    refute Map.has_key?(next_state.running, issue.id)
+
+    retry_entry = Map.fetch!(next_state.retry_attempts, issue.id)
+    assert retry_entry.attempt == 1
+    assert retry_entry.identifier == issue.identifier
+    assert retry_entry.delay_type == :continuation
+    assert retry_entry.budget_retry == true
+    assert retry_entry.budget_mode == "review_fix"
+    assert retry_entry.budget_retry_count == 1
+    assert get_in(retry_entry, [:budget_resume_context, :budget_scope_ids]) == ["comment:1"]
+
+    on_exit(fn ->
+      Process.cancel_timer(retry_entry.timer_ref)
+      File.rm_rf(workspace_root)
+    end)
+  end
+
   test "passive retry path uses issue lookup instead of candidate list fetch" do
     issue_id = "manual:issue-passive-retry"
     identifier = "MT-PASSIVE-RETRY"
