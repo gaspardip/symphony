@@ -32,6 +32,11 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Live dogfood failure proof:
   `/Users/gaspar/code/symphony-workspaces-dogfood/CLZ-30/.symphony/run_state.json` stopped with `budget.per_turn_input_exceeded` after observed input `185018` on March 18, 2026.
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/rule_catalog_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix escript.build`
+- Live dogfood replay on `http://127.0.0.1:4046` for `CLZ-32` auto-retried the first broad implement overrun into `budget_mode = "broad_implement"` with `retry_count = 1`, `budget_auto_narrowed = true`, and `budget_last_observed_input_tokens = 146909`.
+- The narrowed retry then stopped on the broad-specific exhaustion rule instead of the generic budget stop:
+  `/Users/gaspar/code/symphony-workspaces-dogfood/CLZ-32/.symphony/run_state.json` ended with `budget.broad_implement_scope_exhausted`, `budget_retry_count = 2`, and observed narrowed-turn input `135797`.
 
 ## Next Step
-Run the focused policy tests and rebuild the escript, then replay `CLZ-32` live to confirm the broad lane auto-retries instead of stopping generically at worker completion.
+Push this branch and open the PR once you want the broad-implement retry lane reviewed upstream.
