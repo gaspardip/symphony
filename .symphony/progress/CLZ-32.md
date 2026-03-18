@@ -25,6 +25,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Added a lean broad retry prompt path in `DeliveryEngine` that trims issue context and avoids duplicated review-oriented sections.
 - Generalized orchestrator retry metadata so broad-mode retries reuse the same automatic continuation path as review-fix retries without being mislabeled as review-fix work.
 - Added direct regression coverage for the new broad retry lane, the CI-recovery exclusion, the new stop rule, and the narrowed prompt text.
+- Found the live completion seam: worker shutdown was still falling through to the generic budget stop because the broad retry gate required persisted `run_state.stage == "implement"` even when the live `dispatch_stage` was already `implement`.
+- Relaxed that gate to trust the live implement dispatch stage and added a regression for a stale persisted blocked state on retry.
 
 ## Evidence
 - Live dogfood failure proof:
@@ -32,4 +34,4 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/rule_catalog_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
 
 ## Next Step
-Run `mix harness.check`, review the diff, and commit the bounded broad-implement shaping slice before replaying the live dogfood issue.
+Run the focused policy tests and rebuild the escript, then replay `CLZ-32` live to confirm the broad lane auto-retries instead of stopping generically at worker completion.

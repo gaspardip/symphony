@@ -6,6 +6,7 @@ source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - elixir/lib/symphony_elixir/github_webhook_relay.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
+  - elixir/lib/symphony_elixir/run_policy.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
 acceptance_signals:
   - Deterministic stage execution from checkout through post_merge

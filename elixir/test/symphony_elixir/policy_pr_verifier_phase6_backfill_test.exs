@@ -1104,6 +1104,68 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     end
   end
 
+  test "broad implement budget trusts live implement dispatch when persisted stage is stale" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-stale-stage-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-broad-budget-stale-stage", identifier: "MT-914BROADSTALE", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "blocked", %{
+                 stop_reason: %{rule_id: "budget.per_turn_input_exceeded"}
+               })
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace_path: workspace,
+                 dispatch_stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 185_018,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 185_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{}
+               })
+
+      assert %{
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_last_stop_code: "budget.per_turn_input_exceeded",
+                 budget_auto_narrowed: true
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "review-fix budget retries narrow scope and persist retry state" do
     configure_memory_tracker!(
       policy_token_budget: %{

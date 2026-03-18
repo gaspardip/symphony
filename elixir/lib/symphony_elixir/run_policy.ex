@@ -715,7 +715,6 @@ defmodule SymphonyElixir.RunPolicy do
 
     Map.get(broad_implement_budget, :enabled, true) and
       stage == "implement" and
-      Map.get(run_state, :stage) == "implement" and
       not review_fix_budget_candidate?(run_state, stage) and
       Map.get(resume_context, :budget_mode) != "review_fix" and
       Map.get(resume_context, :budget_scope_kind) not in ["review_claim_batch", "ci_failure_batch"] and
