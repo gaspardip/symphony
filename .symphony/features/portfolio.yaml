@@ -11,5 +11,4 @@ acceptance_signals:
   - Delivery reports summarize proof, approvals, and finalization
 dependencies:
   - runtime-core
-last_updated_by_issue: seed
-
+last_updated_by_issue: CLZ-16

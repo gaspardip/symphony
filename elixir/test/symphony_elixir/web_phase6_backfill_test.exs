@@ -896,7 +896,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              RunStateStore.transition(workspace, "validate", %{
                issue_id: "issue-runstate",
                issue_identifier: "MT-RUNSTATE",
-               last_decision: "plain-text validation output"
+               last_decision: "plain-text validation output",
+               stop_reason: %{
+                 code: "review_fix_scope_exhausted",
+                 rule_id: "budget.review_fix_scope_exhausted",
+                 failure_class: "budget",
+                 summary: "Scoped review-fix retries exhausted the narrowest available scope."
+               }
              })
 
     assert {:ok, run_state_payload} = Presenter.issue_payload("MT-RUNSTATE", orchestrator_name, 50)
@@ -906,6 +912,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              status: nil,
              command: nil,
              output: "plain-text validation output"
+           }
+
+    assert run_state_payload.stop_reason == %{
+             code: "review_fix_scope_exhausted",
+             rule_id: "budget.review_fix_scope_exhausted",
+             failure_class: "budget",
+             summary: "Scoped review-fix retries exhausted the narrowest available scope."
            }
 
     assert run_state_payload.tracked == %{}

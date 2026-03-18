@@ -33,6 +33,7 @@ Make the self-development harness the required contract for Symphony self-host r
 - Narrowed `implement` prompts for review-fix lanes to one scope batch with reduced resume context and operator-visible budget state in presenter payloads.
 - Fixed the live worker-exit seam so review-fix budget enforcement still persists or auto-retries when the decisive token overrun is only visible at process completion.
 - Fixed the live running-entry metadata seam by carrying `stage` and `workspace` into orchestrator running entries and falling back to persisted stage state in `RunPolicy`, so seeded review-fix retries are classified as `review_fix` in the real dogfood runtime instead of silently falling back to broad implement budgets.
+- Fixed the issue API operator surface so top-level `stop_reason` mirrors the persisted blocked run state for review-fix exhaustion, instead of forcing operators to dig into nested publish/runtime fields.
 
 ## Evidence
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test`
@@ -46,6 +47,7 @@ Make the self-development harness the required contract for Symphony self-host r
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix dialyzer --format short` still exits nonzero on the repo's existing warning baseline; this slice did not attempt to clear unrelated warnings.
 - Live dogfood adaptive-budget proof on `http://127.0.0.1:4046`: after rebuilding `elixir/bin/symphony` with `mise exec -- mix escript.build`, seeded `CLZ-22` retries entered `budget_runtime.mode = "review_fix"` with the expected `120k` base cap, then auto-continued twice without manual intervention. The running issue payload advanced from `retry_count = 0` to `retry_count = 1` and then `retry_count = 2`, and the second live retry picked up the bounded `150k` hard cap / `5`-turn window (`budget_runtime.per_turn_input_hard = 150000`, `max_turns_in_window = 5`) instead of stopping immediately on the old generic `budget.per_turn_input_exceeded` path.
+- Live dogfood exhaustion proof on `http://127.0.0.1:4046`: `CLZ-22` ultimately blocked with `budget.review_fix_scope_exhausted`, and the canonical workspace state plus the issue API now both expose the same structured stop reason (`review_fix_scope_exhausted`, `retry_count = 4`, `budget_last_observed_input_tokens = 242954`) instead of returning a top-level `null`.
 
 ## Next Step
-Continue the live `CLZ-22` proof until the adaptive review-fix lane either reaches `validate` or stops with one of the new review-fix-specific exhaustion rules, then publish the branch once the end-to-end dogfood evidence is complete.
+Publish the adaptive review-fix budget branch and let CI/review validate the live-proven retry and exhaustion behavior.

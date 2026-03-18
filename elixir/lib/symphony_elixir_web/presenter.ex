@@ -311,6 +311,7 @@ defmodule SymphonyElixirWeb.Presenter do
             decision_history
           ),
         last_decision: normalize_command_result(Map.get(run_state || %{}, :last_decision)),
+        stop_reason: Map.get(run_state || %{}, :stop_reason),
         compatibility_report: compatibility_report_from(run_state),
         last_rule_id: Map.get(run_state || %{}, :last_rule_id),
         last_failure_class: Map.get(run_state || %{}, :last_failure_class),
