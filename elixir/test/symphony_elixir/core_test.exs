@@ -264,20 +264,16 @@ defmodule SymphonyElixir.CoreTest do
     prompt = SymphonyElixir.DeliveryEngine.implement_prompt_for_test(issue, state, [], 1, 3)
 
     assert prompt =~ "This is a scoped review-fix turn. Do not rediscover the issue or rescan the repo."
-    assert prompt =~ "Scoped review claims for this turn:"
-    assert prompt =~ "lib/one.ex:10"
-    refute prompt =~ "lib/two.ex:20"
-    refute prompt =~ "lib/three.ex:30"
-    assert prompt =~ "Additional verified claims remain after this batch: 2"
-    assert prompt =~ "If you complete this claim batch but additional verified review claims remain"
+    assert prompt =~ "Scoped review-fix lane: active"
+    assert prompt =~ "Scope kind: review_claim_batch"
+    assert prompt =~ "Scope ids:\n- comment:1\n- comment:2\n- comment:3"
+    assert prompt =~ "Address the scoped review_claim_batch items only: comment:1, comment:2, comment:3."
     refute prompt =~ "Issue brief:"
     refute prompt =~ "Repo map:"
-    refute prompt =~ "Scoped review feedback:"
-    assert String.split(prompt, "Scoped review claims") |> length() == 2
     refute prompt =~ "Last implementation summary:"
   end
 
-  test "implement prompt narrows high-pressure review turns to one claim at a time" do
+  test "implement prompt narrows high-pressure review-fix retries to one scope id" do
     issue = %Issue{
       id: "issue-review-fix-pressure",
       identifier: "MT-REVIEW-PRESSURE",
@@ -304,14 +300,126 @@ defmodule SymphonyElixir.CoreTest do
           "body" => "Second verified review claim."
         }
       },
-      resume_context: %{token_pressure: "high"}
+      resume_context: %{
+        budget_mode: "review_fix",
+        budget_pressure_level: "soft",
+        budget_retry_count: 1,
+        budget_scope_kind: "review_claim_batch",
+        budget_scope_ids: ["comment:1"],
+        budget_auto_narrowed: true,
+        token_pressure: "high"
+      }
     }
 
     prompt = SymphonyElixir.DeliveryEngine.implement_prompt_for_test(issue, state, [], 1, 3)
 
-    assert prompt =~ "lib/one.ex:10"
-    refute prompt =~ "lib/two.ex:20"
-    assert prompt =~ "Additional verified claims remain after this batch: 1"
+    assert prompt =~ "Scoped review-fix lane: active"
+    assert prompt =~ "Scope ids:\n- comment:1"
+    refute prompt =~ "- comment:2"
+    assert prompt =~ "Address the scoped review_claim_batch items only: comment:1."
+  end
+
+  test "implement prompt narrows resume context for scoped review-fix retries" do
+    issue = %Issue{
+      id: "issue-review-fix-budget",
+      identifier: "MT-REVIEW-FIX",
+      title: "Address scoped review feedback",
+      description: "Keep the prompt focused on the current review-fix batch."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          review_threads: %{
+            "comment:1" => %{"draft_state" => "drafted"},
+            "comment:2" => %{"draft_state" => "drafted"}
+          },
+          resume_context: %{
+            budget_mode: "review_fix",
+            budget_pressure_level: "high",
+            budget_retry_count: 1,
+            budget_scope_kind: "review_claim_batch",
+            budget_scope_ids: ["comment:1"],
+            budget_auto_narrowed: true,
+            token_pressure: "high",
+            last_turn_summary: "Adjusted the first claim locally.",
+            diff_summary: " lib/foo.ex | 10 +-"
+          }
+        },
+        [],
+        2,
+        5
+      )
+
+    assert prompt =~ "Scoped review-fix lane: active"
+    assert prompt =~ "Scope ids:\n- comment:1"
+    assert prompt =~ "Scoped review-fix token pressure is active."
+    assert prompt =~ "Address the scoped review_claim_batch items only: comment:1."
+    refute prompt =~ "Diff stat:"
+  end
+
+  test "implement prompt enters scoped ci-failure budget lane from failed checks" do
+    issue = %Issue{
+      id: "issue-ci-failure-prompt",
+      identifier: "MT-CI-FAILURE",
+      title: "Fix the failing required check",
+      description: "Keep the recovery turn scoped to CI failures."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          last_failing_required_checks: ["make-all"],
+          implementation_turns: 2
+        },
+        [],
+        3,
+        5
+      )
+
+    assert prompt =~ "Scoped review-fix lane: active"
+    assert prompt =~ "Scope kind: ci_failure_batch"
+    assert prompt =~ "Scope ids:\n- make-all"
+    assert prompt =~ "Address the scoped ci_failure_batch items only: make-all."
+  end
+
+  test "implement prompt enters scoped review-fix budget lane from accepted review claims" do
+    issue = %Issue{
+      id: "issue-review-fix-prompt",
+      identifier: "MT-REVIEW-FIX",
+      title: "Address accepted review claims",
+      description: "Keep the recovery turn scoped to accepted review feedback."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          review_claims: %{
+            "comment:1" => %{
+              "disposition" => "accepted",
+              "actionable" => true,
+              "implementation_status" => "pending"
+            },
+            "comment:2" => %{
+              "disposition" => "dismissed",
+              "actionable" => false,
+              "implementation_status" => "not_needed"
+            }
+          },
+          implementation_turns: 4
+        },
+        [],
+        5,
+        7
+      )
+
+    assert prompt =~ "Scoped review-fix lane: active"
+    assert prompt =~ "Scope kind: review_claim_batch"
+    assert prompt =~ "Scope ids:\n- comment:1"
+    assert prompt =~ "Address the scoped review_claim_batch items only: comment:1."
   end
 
   test "implement prompt skips review claims already addressed in prior turns" do
@@ -347,9 +455,9 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = SymphonyElixir.DeliveryEngine.implement_prompt_for_test(issue, state, [], 1, 3)
 
-    refute prompt =~ "lib/one.ex:10"
-    assert prompt =~ "lib/two.ex:20"
-    refute prompt =~ "Additional verified claims remain after this batch: 1"
+    refute prompt =~ "- comment:1"
+    assert prompt =~ "Scope ids:\n- comment:2"
+    assert prompt =~ "Address the scoped review_claim_batch items only: comment:2."
   end
 
   test "implement prompt keeps the last blocking rule in focused review context" do

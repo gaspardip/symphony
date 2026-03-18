@@ -372,6 +372,7 @@ defmodule SymphonyElixirWeb.Presenter do
             decision_history
           ),
         last_decision: normalize_command_result(Map.get(run_state || %{}, :last_decision)),
+        stop_reason: Map.get(run_state || %{}, :stop_reason),
         compatibility_report: compatibility_report_from(run_state),
         last_rule_id: Map.get(run_state || %{}, :last_rule_id),
         last_failure_class: Map.get(run_state || %{}, :last_failure_class),
@@ -725,6 +726,7 @@ defmodule SymphonyElixirWeb.Presenter do
       runtime_health: runtime_health_payload(entry, workspace, harness, review),
       review_approved: Map.get(entry, :review_approved, false),
       token_pressure: Map.get(entry, :token_pressure),
+      budget_runtime: normalize_budget_runtime(Map.get(entry, :budget_runtime)),
       status_summary: status_summary_payload(entry, review),
       operator_summary: operator_summary_payload(entry, review),
       policy_class: Map.get(entry, :policy_class),
@@ -2145,22 +2147,72 @@ defmodule SymphonyElixirWeb.Presenter do
   defp present_value?(value), do: not is_nil(value)
 
   defp policy_token_budget_payload(entry) do
+    budget_runtime = normalize_budget_runtime(Map.get(entry, :budget_runtime))
+
     %{
       per_turn_input:
         budget_status_payload(
           Map.get(entry, :current_turn_input_tokens, 0),
-          Config.policy_per_turn_input_budget()
+          Map.get(budget_runtime, :per_turn_input_hard) || Config.policy_per_turn_input_budget()
         ),
       per_issue_total:
         budget_status_payload(
           Map.get(entry, :codex_total_tokens, 0),
-          Config.policy_per_issue_total_budget()
+          Map.get(budget_runtime, :per_issue_total_limit) || Config.policy_per_issue_total_budget()
         ),
       per_issue_total_output:
         budget_status_payload(
           Map.get(entry, :codex_output_tokens, 0),
           Config.policy_per_issue_total_output_budget()
-        )
+        ),
+      review_fix: budget_runtime
+    }
+  end
+
+  defp normalize_budget_runtime(runtime) when is_map(runtime) do
+    %{
+      mode: Map.get(runtime, :mode) || Map.get(runtime, "mode") || "broad",
+      pressure_level: Map.get(runtime, :pressure_level) || Map.get(runtime, "pressure_level") || "normal",
+      retry_count: Map.get(runtime, :retry_count) || Map.get(runtime, "retry_count") || 0,
+      window_base_turn: Map.get(runtime, :window_base_turn) || Map.get(runtime, "window_base_turn"),
+      last_stop_code: Map.get(runtime, :last_stop_code) || Map.get(runtime, "last_stop_code"),
+      last_observed_input_tokens:
+        Map.get(runtime, :last_observed_input_tokens) ||
+          Map.get(runtime, "last_observed_input_tokens"),
+      scope_kind: Map.get(runtime, :scope_kind) || Map.get(runtime, "scope_kind"),
+      scope_ids: Map.get(runtime, :scope_ids) || Map.get(runtime, "scope_ids") || [],
+      auto_narrowed: Map.get(runtime, :auto_narrowed) || Map.get(runtime, "auto_narrowed") || false,
+      total_extension_used:
+        Map.get(runtime, :total_extension_used) ||
+          Map.get(runtime, "total_extension_used") ||
+          false,
+      per_turn_input_soft: Map.get(runtime, :per_turn_input_soft) || Map.get(runtime, "per_turn_input_soft"),
+      per_turn_input_hard: Map.get(runtime, :per_turn_input_hard) || Map.get(runtime, "per_turn_input_hard"),
+      max_turns_in_window: Map.get(runtime, :max_turns_in_window) || Map.get(runtime, "max_turns_in_window"),
+      per_issue_total_limit: Map.get(runtime, :per_issue_total_limit) || Map.get(runtime, "per_issue_total_limit"),
+      per_issue_total_extension:
+        Map.get(runtime, :per_issue_total_extension) ||
+          Map.get(runtime, "per_issue_total_extension")
+    }
+  end
+
+  defp normalize_budget_runtime(_runtime) do
+    %{
+      mode: "broad",
+      pressure_level: "normal",
+      retry_count: 0,
+      window_base_turn: nil,
+      last_stop_code: nil,
+      last_observed_input_tokens: nil,
+      scope_kind: nil,
+      scope_ids: [],
+      auto_narrowed: false,
+      total_extension_used: false,
+      per_turn_input_soft: nil,
+      per_turn_input_hard: nil,
+      max_turns_in_window: nil,
+      per_issue_total_limit: nil,
+      per_issue_total_extension: nil
     }
   end
 

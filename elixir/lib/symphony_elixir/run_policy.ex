@@ -137,9 +137,64 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  @spec maybe_stop_for_token_budget(map(), map()) :: :ok | {:stop, violation()}
+  @spec budget_runtime(map(), map()) :: map()
+  def budget_runtime(issue, running_entry) do
+    token_budget = Config.policy_token_budget()
+    review_fix_budget = Config.policy_review_fix_token_budget()
+    resume_context = normalize_resume_context(Map.get(running_entry, :resume_context, %{}))
+
+    if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
+      adaptive_budget = adaptive_review_fix_budget(review_fix_budget, resume_context)
+
+      %{
+        mode: "review_fix",
+        pressure_level: Map.get(resume_context, :budget_pressure_level, "normal"),
+        retry_count: review_fix_retry_count(resume_context),
+        window_base_turn: Map.get(resume_context, :budget_window_base_turn),
+        last_stop_code: Map.get(resume_context, :budget_last_stop_code),
+        last_observed_input_tokens: Map.get(resume_context, :budget_last_observed_input_tokens),
+        scope_kind: Map.get(resume_context, :budget_scope_kind),
+        scope_ids: normalize_scope_ids(Map.get(resume_context, :budget_scope_ids)),
+        auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
+        total_extension_used: truthy?(Map.get(resume_context, :budget_total_extension_used)),
+        per_turn_input_soft: adaptive_budget.per_turn_input_soft,
+        per_turn_input_hard: adaptive_budget.per_turn_input_hard,
+        max_turns_in_window: adaptive_budget.max_turns_in_window,
+        per_issue_total_limit:
+          effective_review_fix_total_budget(
+            token_budget,
+            review_fix_budget,
+            resume_context
+          ),
+        per_issue_total_extension: review_fix_budget[:per_issue_total_extension]
+      }
+    else
+      stage_budget = current_stage_token_budget(issue, running_entry)
+
+      %{
+        mode: "broad",
+        pressure_level: if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
+        retry_count: 0,
+        window_base_turn: nil,
+        last_stop_code: nil,
+        last_observed_input_tokens: nil,
+        scope_kind: nil,
+        scope_ids: [],
+        auto_narrowed: false,
+        total_extension_used: false,
+        per_turn_input_soft: stage_budget[:per_turn_input_soft],
+        per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+        max_turns_in_window: nil,
+        per_issue_total_limit: token_budget[:per_issue_total],
+        per_issue_total_extension: nil
+      }
+    end
+  end
+
+  @spec maybe_stop_for_token_budget(map(), map()) :: :ok | {:retry, map()} | {:stop, violation()}
   def maybe_stop_for_token_budget(issue, running_entry) do
     token_budget = Config.policy_token_budget()
+    review_fix_budget = Config.policy_review_fix_token_budget()
 
     workspace =
       Map.get(running_entry, :workspace_path) ||
@@ -153,35 +208,46 @@ defmodule SymphonyElixir.RunPolicy do
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
     turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
     current_turn_input = max(0, input_total - turn_started_input)
+    resume_context = normalize_resume_context(Map.get(running_entry, :resume_context, %{}))
 
-    maybe_record_soft_budget_pressure(
-      issue,
-      running_entry,
-      current_turn_input,
-      stage_budget,
-      workspace,
-      run_state
-    )
+    if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
+      maybe_enforce_review_fix_token_budget(
+        issue,
+        running_entry,
+        workspace,
+        resume_context,
+        review_fix_budget,
+        token_budget,
+        current_turn_input,
+        total_tokens,
+        output_total
+      )
+    else
+      maybe_record_soft_budget_pressure(
+        issue,
+        running_entry,
+        current_turn_input,
+        stage_budget,
+        workspace,
+        run_state
+      )
 
-    cond do
-      budget_exceeded?(
-        stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
-        current_turn_input
-      ) ->
-        stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
+      cond do
+        budget_exceeded?(
+          stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+          current_turn_input
+        ) ->
+          stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
 
-      budget_exceeded?(total_budget, total_tokens) ->
-        stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+        budget_exceeded?(total_budget, total_tokens) ->
+          stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
 
-      budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-        stop_issue(
-          issue,
-          token_budget_violation(:per_issue_total_output, output_total),
-          workspace
-        )
+        budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
+          stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
 
-      true ->
-        :ok
+        true ->
+          :ok
+      end
     end
   end
 
@@ -529,6 +595,30 @@ defmodule SymphonyElixir.RunPolicy do
     )
   end
 
+  defp review_fix_exhaustion_violation(:scope_exhausted, observed, metadata) do
+    violation(:review_fix_scope_exhausted,
+      summary: "Scoped review-fix retries exhausted the narrowest available scope.",
+      details: "Observed per-turn input #{observed} with no smaller review-fix scope left to try.",
+      metadata: metadata
+    )
+  end
+
+  defp review_fix_exhaustion_violation(:turn_window_exhausted, observed, metadata) do
+    violation(:review_fix_turn_window_exhausted,
+      summary: "Scoped review-fix retries exhausted the configured turn window.",
+      details: "Observed per-turn input #{observed} after consuming the adaptive review-fix retry window.",
+      metadata: metadata
+    )
+  end
+
+  defp review_fix_exhaustion_violation(:total_extension_exhausted, observed, metadata) do
+    violation(:review_fix_total_extension_exhausted,
+      summary: "Scoped review-fix retries exhausted the bounded total-budget extension.",
+      details: "Observed total tokens #{observed} after consuming the review-fix total-budget extension.",
+      metadata: metadata
+    )
+  end
+
   defp workload_restricted_violation(summary, details, human_action) do
     violation(:policy_workload_restricted,
       summary: summary,
@@ -546,6 +636,442 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp budget_exceeded?(nil, _observed), do: false
   defp budget_exceeded?(budget, observed) when is_integer(budget), do: observed > budget
+
+  defp review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
+    issue = Map.get(running_entry, :issue, %{})
+
+    workspace =
+      Map.get(running_entry, :workspace) ||
+        Map.get(running_entry, :workspace_path) ||
+        Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier") || Map.get(running_entry, :identifier))
+
+    run_state = if is_binary(workspace), do: RunStateStore.load_or_default(workspace, issue), else: %{}
+
+    stage =
+      Map.get(running_entry, :stage) ||
+        Map.get(running_entry, :dispatch_stage) ||
+        current_stage(issue, workspace, run_state)
+
+    Map.get(review_fix_budget, :enabled, true) and
+      stage == "implement" and
+      Map.get(resume_context, :budget_mode) == "review_fix"
+  end
+
+  defp maybe_enforce_review_fix_token_budget(
+         issue,
+         running_entry,
+         workspace,
+         resume_context,
+         review_fix_budget,
+         token_budget,
+         current_turn_input,
+         total_tokens,
+         output_total
+       ) do
+    adaptive_budget = adaptive_review_fix_budget(review_fix_budget, resume_context)
+
+    maybe_record_review_fix_budget_pressure(issue, running_entry, resume_context, current_turn_input, adaptive_budget)
+
+    cond do
+      budget_exceeded?(adaptive_budget.per_turn_input_hard, current_turn_input) ->
+        handle_review_fix_turn_budget_stop(
+          issue,
+          running_entry,
+          workspace,
+          resume_context,
+          review_fix_budget,
+          current_turn_input,
+          adaptive_budget
+        )
+
+      review_fix_total_budget_exceeded?(token_budget, review_fix_budget, resume_context, total_tokens) ->
+        handle_review_fix_total_budget_stop(
+          issue,
+          running_entry,
+          workspace,
+          resume_context,
+          review_fix_budget,
+          token_budget,
+          total_tokens
+        )
+
+      budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
+        stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
+
+      true ->
+        maybe_activate_review_fix_total_extension(
+          issue,
+          running_entry,
+          workspace,
+          resume_context,
+          review_fix_budget,
+          token_budget,
+          total_tokens
+        )
+    end
+  end
+
+  defp adaptive_review_fix_budget(review_fix_budget, resume_context) do
+    retry_count = review_fix_retry_count(resume_context)
+
+    hard_budget =
+      cond do
+        retry_count >= 3 -> review_fix_budget[:retry_3_per_turn_input_hard] || review_fix_budget[:per_turn_input_hard]
+        retry_count >= 2 -> review_fix_budget[:retry_2_per_turn_input_hard] || review_fix_budget[:per_turn_input_hard]
+        true -> review_fix_budget[:per_turn_input_hard]
+      end
+
+    max_turns_in_window =
+      cond do
+        retry_count >= 3 -> review_fix_budget[:retry_3_max_turns_in_window] || review_fix_budget[:max_turns_in_window]
+        retry_count >= 2 -> review_fix_budget[:retry_2_max_turns_in_window] || review_fix_budget[:max_turns_in_window]
+        true -> review_fix_budget[:max_turns_in_window]
+      end
+
+    %{
+      per_turn_input_soft: review_fix_budget[:per_turn_input_soft],
+      per_turn_input_hard: hard_budget,
+      max_turns_in_window: max_turns_in_window,
+      narrow_scope_batch_size: review_fix_budget[:narrow_scope_batch_size] || 1,
+      auto_retry_limit: review_fix_budget[:auto_retry_limit] || 0
+    }
+  end
+
+  defp review_fix_total_budget_exceeded?(token_budget, review_fix_budget, resume_context, total_tokens) do
+    budget_exceeded?(effective_review_fix_total_budget(token_budget, review_fix_budget, resume_context), total_tokens)
+  end
+
+  defp maybe_activate_review_fix_total_extension(
+         issue,
+         running_entry,
+         workspace,
+         resume_context,
+         review_fix_budget,
+         token_budget,
+         total_tokens
+       ) do
+    base_budget = token_budget[:per_issue_total]
+    extension_budget = review_fix_budget[:per_issue_total_extension]
+
+    cond do
+      not is_integer(base_budget) ->
+        :ok
+
+      not is_integer(extension_budget) ->
+        :ok
+
+      total_tokens <= base_budget ->
+        :ok
+
+      truthy?(Map.get(resume_context, :budget_total_extension_used)) ->
+        :ok
+
+      not review_fix_total_extension_eligible?(resume_context, extension_budget) ->
+        stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+
+      true ->
+        persisted_resume_context =
+          review_fix_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.review_fix_total_extension_activated",
+            total_tokens,
+            %{
+              budget_total_extension_used: true,
+              budget_pressure_level: "critical"
+            }
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+        :ok
+    end
+  end
+
+  defp review_fix_total_extension_eligible?(resume_context, extension_budget) do
+    is_integer(extension_budget) and review_fix_progress_count(resume_context) >= 1
+  end
+
+  defp effective_review_fix_total_budget(token_budget, review_fix_budget, resume_context) do
+    base_budget = token_budget[:per_issue_total]
+    extension_budget = review_fix_budget[:per_issue_total_extension]
+    extension_eligible? = review_fix_total_extension_eligible?(resume_context, extension_budget)
+
+    extension_used_or_eligible? =
+      truthy?(Map.get(resume_context, :budget_total_extension_used)) or extension_eligible?
+
+    cond do
+      not is_integer(base_budget) -> nil
+      extension_used_or_eligible? and is_integer(extension_budget) -> base_budget + extension_budget
+      true -> base_budget
+    end
+  end
+
+  defp handle_review_fix_total_budget_stop(
+         issue,
+         running_entry,
+         workspace,
+         resume_context,
+         review_fix_budget,
+         token_budget,
+         total_tokens
+       ) do
+    base_budget = token_budget[:per_issue_total]
+    extension_budget = review_fix_budget[:per_issue_total_extension]
+
+    if truthy?(Map.get(resume_context, :budget_total_extension_used)) and is_integer(base_budget) and is_integer(extension_budget) do
+      metadata =
+        review_fix_budget_metadata(
+          running_entry,
+          resume_context,
+          %{base_budget: base_budget, extension_budget: extension_budget}
+        )
+
+      persisted_resume_context =
+        review_fix_resume_context_for_budget_retry(
+          resume_context,
+          running_entry,
+          "budget.review_fix_total_extension_exhausted",
+          total_tokens,
+          %{budget_pressure_level: "critical"}
+        )
+
+      persist_resume_context(issue, running_entry, persisted_resume_context)
+      stop_issue(issue, review_fix_exhaustion_violation(:total_extension_exhausted, total_tokens, metadata), workspace)
+    else
+      stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+    end
+  end
+
+  defp handle_review_fix_turn_budget_stop(
+         issue,
+         running_entry,
+         workspace,
+         resume_context,
+         review_fix_budget,
+         current_turn_input,
+         adaptive_budget
+       ) do
+    retry_count = review_fix_retry_count(resume_context)
+    can_retry? = retry_count < (review_fix_budget[:auto_retry_limit] || 0)
+    turns_in_window = review_fix_turns_in_window(running_entry, resume_context)
+    current_scope_ids = normalize_scope_ids(Map.get(resume_context, :budget_scope_ids))
+    narrowed_scope_ids = narrow_review_fix_scope_ids(resume_context, adaptive_budget.narrow_scope_batch_size)
+    can_narrow_scope? = narrowed_scope_ids != current_scope_ids
+
+    persisted_resume_context =
+      review_fix_resume_context_for_budget_retry(
+        resume_context,
+        running_entry,
+        "budget.per_turn_input_exceeded",
+        current_turn_input,
+        %{
+          budget_retry_count: retry_count + 1,
+          budget_pressure_level: review_fix_pressure_level_for_retry(retry_count + 1),
+          budget_scope_ids: narrowed_scope_ids,
+          budget_auto_narrowed: narrowed_scope_ids != current_scope_ids
+        }
+      )
+
+    persist_resume_context(issue, running_entry, persisted_resume_context)
+
+    cond do
+      can_retry? and turns_in_window < adaptive_budget.max_turns_in_window and
+          review_fix_retry_continues?(retry_count, can_narrow_scope?) ->
+        {:retry,
+         %{
+           kind: :review_fix_budget_retry,
+           summary: "Adaptive review-fix retry scheduled after token budget pressure.",
+           resume_context: persisted_resume_context,
+           observed_input_tokens: current_turn_input,
+           retry_count: retry_count + 1,
+           max_turns_in_window: adaptive_budget.max_turns_in_window
+         }}
+
+      turns_in_window >= adaptive_budget.max_turns_in_window ->
+        metadata = review_fix_budget_metadata(running_entry, persisted_resume_context, %{turns_in_window: turns_in_window})
+        stop_issue(issue, review_fix_exhaustion_violation(:turn_window_exhausted, current_turn_input, metadata), workspace)
+
+      true ->
+        metadata = review_fix_budget_metadata(running_entry, persisted_resume_context, %{})
+        stop_issue(issue, review_fix_exhaustion_violation(:scope_exhausted, current_turn_input, metadata), workspace)
+    end
+  end
+
+  defp review_fix_retry_continues?(retry_count, _can_narrow_scope?) when retry_count < 3, do: true
+  defp review_fix_retry_continues?(_retry_count, can_narrow_scope?), do: can_narrow_scope?
+
+  defp maybe_record_review_fix_budget_pressure(
+         issue,
+         running_entry,
+         resume_context,
+         current_turn_input,
+         adaptive_budget
+       ) do
+    soft_budget = adaptive_budget.per_turn_input_soft
+
+    if budget_exceeded?(soft_budget, current_turn_input) and Map.get(resume_context, :budget_pressure_level, "normal") == "normal" do
+      persisted_resume_context =
+        review_fix_resume_context_for_budget_retry(
+          resume_context,
+          running_entry,
+          "budget.review_fix_soft_pressure",
+          current_turn_input,
+          %{
+            budget_pressure_level: "soft",
+            token_pressure: "high"
+          }
+        )
+
+      persist_resume_context(issue, running_entry, persisted_resume_context)
+
+      _ =
+        RunLedger.record("policy.decided", %{
+          issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+          issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
+          actor_type: "runtime",
+          actor_id: "run_policy",
+          summary: "Scoped review-fix turn entered soft token pressure.",
+          details: "Observed input tokens #{current_turn_input} above scoped soft budget #{soft_budget}.",
+          metadata: %{
+            stage: Map.get(running_entry, :stage),
+            observed: current_turn_input,
+            soft_budget: soft_budget,
+            budget_mode: "review_fix"
+          }
+        })
+
+      :ok
+    else
+      :ok
+    end
+  end
+
+  defp persist_resume_context(issue, running_entry, resume_context) do
+    workspace = workspace_for_issue(issue, running_entry)
+
+    if is_binary(workspace) do
+      stage = Map.get(running_entry, :stage) || current_stage(issue, workspace, nil) || "implement"
+
+      _ =
+        RunStateStore.transition(workspace, stage, %{
+          resume_context: resume_context
+        })
+    end
+
+    :ok
+  end
+
+  defp workspace_for_issue(issue, running_entry) do
+    Map.get(running_entry, :workspace) ||
+      Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+  end
+
+  defp current_stage_token_budget(issue, running_entry) do
+    workspace = workspace_for_issue(issue, running_entry)
+    run_state = if is_binary(workspace), do: RunStateStore.load_or_default(workspace, issue), else: %{}
+    current_stage_token_budget(issue, running_entry, workspace, run_state)
+  end
+
+  defp normalize_resume_context(context) when is_map(context) do
+    context
+    |> Enum.into(%{}, fn
+      {key, value} when is_binary(key) ->
+        case review_fix_resume_context_key(key) do
+          nil -> {key, value}
+          atom_key -> {atom_key, value}
+        end
+
+      {key, value} ->
+        {key, value}
+    end)
+  end
+
+  defp normalize_resume_context(_context), do: %{}
+
+  defp review_fix_resume_context_key("budget_mode"), do: :budget_mode
+  defp review_fix_resume_context_key("budget_pressure_level"), do: :budget_pressure_level
+  defp review_fix_resume_context_key("budget_retry_count"), do: :budget_retry_count
+  defp review_fix_resume_context_key("budget_window_base_turn"), do: :budget_window_base_turn
+  defp review_fix_resume_context_key("budget_last_stop_code"), do: :budget_last_stop_code
+  defp review_fix_resume_context_key("budget_last_observed_input_tokens"), do: :budget_last_observed_input_tokens
+  defp review_fix_resume_context_key("budget_scope_kind"), do: :budget_scope_kind
+  defp review_fix_resume_context_key("budget_scope_ids"), do: :budget_scope_ids
+  defp review_fix_resume_context_key("budget_progress_count"), do: :budget_progress_count
+  defp review_fix_resume_context_key("budget_total_extension_used"), do: :budget_total_extension_used
+  defp review_fix_resume_context_key("budget_auto_narrowed"), do: :budget_auto_narrowed
+  defp review_fix_resume_context_key("token_pressure"), do: :token_pressure
+  defp review_fix_resume_context_key(_key), do: nil
+
+  defp review_fix_resume_context_for_budget_retry(resume_context, running_entry, stop_code, observed_tokens, overrides) do
+    default_scope_kind = Map.get(resume_context, :budget_scope_kind) || "review_claim_batch"
+    turn_count = Map.get(running_entry, :turn_count, 0)
+
+    resume_context
+    |> Map.put_new(:budget_mode, "review_fix")
+    |> Map.put_new(:budget_pressure_level, "normal")
+    |> Map.put_new(:budget_retry_count, 0)
+    |> Map.put_new(:budget_window_base_turn, turn_count)
+    |> Map.put_new(:budget_scope_kind, default_scope_kind)
+    |> Map.put_new(:budget_scope_ids, normalize_scope_ids(Map.get(resume_context, :budget_scope_ids)))
+    |> Map.put(:budget_last_stop_code, stop_code)
+    |> Map.put(:budget_last_observed_input_tokens, observed_tokens)
+    |> Map.put(:token_pressure, "high")
+    |> Map.merge(Enum.into(overrides, %{}))
+  end
+
+  defp review_fix_retry_count(resume_context) do
+    case Map.get(resume_context, :budget_retry_count, 0) do
+      value when is_integer(value) and value >= 0 -> value
+      _ -> 0
+    end
+  end
+
+  defp review_fix_turns_in_window(running_entry, resume_context) do
+    turn_count = Map.get(running_entry, :turn_count, 0)
+    base_turn = Map.get(resume_context, :budget_window_base_turn, turn_count)
+    max(turn_count - base_turn + 1, 1)
+  end
+
+  defp review_fix_progress_count(resume_context) do
+    case Map.get(resume_context, :budget_progress_count, 0) do
+      value when is_integer(value) and value >= 0 -> value
+      _ -> 0
+    end
+  end
+
+  defp review_fix_pressure_level_for_retry(retry_count) when retry_count >= 3, do: "critical"
+  defp review_fix_pressure_level_for_retry(retry_count) when retry_count >= 2, do: "high"
+  defp review_fix_pressure_level_for_retry(_retry_count), do: "soft"
+
+  defp review_fix_budget_metadata(running_entry, resume_context, extras) do
+    %{
+      stage: Map.get(running_entry, :stage),
+      retry_count: review_fix_retry_count(resume_context),
+      pressure_level: Map.get(resume_context, :budget_pressure_level),
+      scope_kind: Map.get(resume_context, :budget_scope_kind),
+      scope_ids: normalize_scope_ids(Map.get(resume_context, :budget_scope_ids)),
+      total_extension_used: truthy?(Map.get(resume_context, :budget_total_extension_used))
+    }
+    |> Map.merge(extras)
+  end
+
+  defp narrow_review_fix_scope_ids(resume_context, batch_size) do
+    resume_context
+    |> Map.get(:budget_scope_ids, [])
+    |> normalize_scope_ids()
+    |> Enum.take(max(batch_size || 1, 1))
+  end
+
+  defp normalize_scope_ids(ids) when is_list(ids) do
+    ids
+    |> Enum.map(&to_string/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp normalize_scope_ids(_ids), do: []
+
+  defp truthy?(value), do: value in [true, "true", 1, "1"]
 
   defp current_stage_token_budget(issue, running_entry, workspace, run_state) do
     stage =
@@ -583,9 +1109,26 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
+  defp current_stage(%{state: issue_state}, _workspace, run_state) when is_binary(issue_state) and is_map(run_state) do
+    Map.get(run_state, :stage) || fallback_stage_from_issue_state(issue_state)
+  end
+
+  defp current_stage(_issue, _workspace, _run_state), do: nil
+
   defp current_stage(issue, workspace) when is_binary(workspace) do
     case RunStateStore.load_or_default(workspace, issue) do
       %{stage: stage} when is_binary(stage) -> stage
+      _ -> nil
+    end
+  end
+
+  defp fallback_stage_from_issue_state(issue_state) when is_binary(issue_state) do
+    case String.downcase(String.trim(issue_state)) do
+      "todo" -> "checkout"
+      "in progress" -> "implement"
+      "review" -> "review"
+      "merging" -> "await_checks"
+      "done" -> "done"
       _ -> nil
     end
   end

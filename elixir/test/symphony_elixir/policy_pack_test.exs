@@ -166,4 +166,84 @@ defmodule SymphonyElixir.PolicyPackTest do
     assert :allowed =
              PolicyPack.workload_label_status(pack, ["scope:maintenance", "symphony:events"])
   end
+
+  test "resolves map overrides through normalization helpers" do
+    pack =
+      PolicyPack.resolve(%{
+        "name" => "client_safe",
+        "description" => "  Client-safe custom pack  ",
+        "operating_mode" => "  custom_shadow  ",
+        "default_issue_class" => "never_automerge",
+        "approval_gate_state" => "  Client Review  ",
+        "deploy_approval_gate_state" => "  Deploy Review  ",
+        "preview_deploy_mode" => "after_merge",
+        "production_deploy_mode" => "after_preview",
+        "allowed_policy_classes" => ["review_required", "never_automerge", "never_automerge", "unknown"],
+        "required_any_issue_labels" => "scope:ops, scope:ops, scope:maintenance",
+        "forbidden_issue_labels" => ["scope:feature", " ", nil],
+        "tracker_mutation_mode" => "allowed",
+        "pr_posting_mode" => "draft_only",
+        "thread_resolution_mode" => "allowed",
+        "external_comment_mode" => "forbidden",
+        "draft_first_required" => false,
+        "confidence_language" => "  plain  ",
+        "allowed_external_channels" => ["pull_request", "tracker", "tracker"],
+        "preview_deploy_allowed" => true,
+        "production_deploy_allowed" => true,
+        "max_concurrent_runs_per_company" => 3,
+        "max_merges_per_day_per_repo" => 9,
+        "repo_frozen" => true,
+        "company_frozen" => false,
+        "merge_window" => %{"timezone" => "Etc/UTC", "days" => ["mon", "bad"], "start_hour" => "9", "end_hour" => "17"},
+        "production_deploy_window" => %{"timezone" => "Etc/UTC", "days" => [2], "start_hour" => 10, "end_hour" => 12}
+      })
+
+    assert pack.name == :client_safe_shadow
+    assert pack.description == "Client-safe custom pack"
+    assert pack.operating_mode == "custom_shadow"
+    assert pack.default_issue_class == "never_automerge"
+    assert pack.approval_gate_state == "Client Review"
+    assert pack.deploy_approval_gate_state == "Deploy Review"
+    assert pack.preview_deploy_mode == :after_merge
+    assert pack.production_deploy_mode == :after_preview
+    assert pack.allowed_policy_classes == ["review_required", "never_automerge"]
+    assert pack.required_any_issue_labels == ["scope:ops", "scope:maintenance"]
+    assert pack.forbidden_issue_labels == ["scope:feature"]
+    assert pack.tracker_mutation_mode == "allowed"
+    assert pack.pr_posting_mode == "draft_only"
+    assert pack.thread_resolution_mode == "allowed"
+    assert pack.external_comment_mode == "forbidden"
+    assert PolicyPack.draft_first_required?(pack)
+    assert pack.confidence_language == "measured"
+    assert pack.allowed_external_channels == ["pull_request"]
+    assert pack.preview_deploy_allowed
+    assert pack.production_deploy_allowed
+    assert pack.max_concurrent_runs_per_company == 3
+    assert pack.max_merges_per_day_per_repo == 9
+    assert pack.repo_frozen
+    refute pack.company_frozen
+    assert PolicyPack.repo_or_company_frozen?(pack)
+    assert pack.merge_window == %{timezone: "Etc/UTC", days: [1], start_hour: 9, end_hour: 17}
+    assert pack.production_deploy_window == %{timezone: "Etc/UTC", days: [2], start_hour: 10, end_hour: 12}
+    assert PolicyPack.allows?(pack, :never_automerge)
+    refute PolicyPack.allows?(pack, :fully_autonomous)
+    refute PolicyPack.contractor_mode?(pack)
+    assert PolicyPack.name_string(pack) == "client_safe_shadow"
+  end
+
+  test "window helpers allow open windows and invalid timezones fall back to allowed" do
+    open_pack = %PolicyPack{
+      name: :private_autopilot,
+      description: "open window",
+      default_issue_class: "fully_autonomous",
+      allowed_policy_classes: ["fully_autonomous"],
+      merge_window: %{timezone: "Etc/UTC", days: [1], start_hour: 9, end_hour: 17},
+      production_deploy_window: %{timezone: "Bad/Timezone", days: [1], start_hour: 9, end_hour: 17}
+    }
+
+    monday_morning = DateTime.from_naive!(~N[2026-03-09 10:00:00], "Etc/UTC")
+
+    assert :allowed = PolicyPack.automerge_window_status(open_pack, monday_morning)
+    assert :allowed = PolicyPack.production_deploy_window_status(open_pack, monday_morning)
+  end
 end

@@ -54,6 +54,36 @@ defmodule SymphonyElixir.HarnessCheckTaskTest do
     end
   end
 
+  test "mix harness.check formats list-based harness validation errors" do
+    workspace = temp_workspace("harness-check-invalid-base-branch")
+    repo_root = Path.expand("../../..", __DIR__)
+    harness_path = Path.join(repo_root, ".symphony/harness.yml")
+
+    try do
+      init_git_workspace!(workspace)
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+      invalid_harness =
+        harness_path
+        |> File.read!()
+        |> String.replace("base_branch: main", "base_branch: \"   \"")
+
+      File.write!(Path.join(workspace, ".symphony/harness.yml"), invalid_harness)
+
+      File.cd!(workspace, fn ->
+        Mix.Task.reenable("harness.check")
+
+        assert_raise Mix.Error, ~r/harness\.check failed: invalid_harness_value: base_branch/, fn ->
+          capture_io(fn ->
+            Mix.Tasks.Harness.Check.run([])
+          end)
+        end
+      end)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   defp temp_workspace(suffix) do
     Path.join(System.tmp_dir!(), "symphony-#{suffix}-#{System.unique_integer([:positive])}")
   end

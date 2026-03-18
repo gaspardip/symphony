@@ -72,6 +72,17 @@ defmodule SymphonyElixir.Config do
   @default_policy_implement_per_turn_input_hard_budget 120_000
   @default_policy_verify_per_turn_input_soft_budget 40_000
   @default_policy_verify_per_turn_input_hard_budget 80_000
+  @default_policy_review_fix_enabled true
+  @default_policy_review_fix_per_turn_input_soft_budget 60_000
+  @default_policy_review_fix_per_turn_input_hard_budget 120_000
+  @default_policy_review_fix_retry_2_per_turn_input_hard_budget 150_000
+  @default_policy_review_fix_retry_3_per_turn_input_hard_budget 220_000
+  @default_policy_review_fix_max_turns_in_window 3
+  @default_policy_review_fix_retry_2_max_turns_in_window 5
+  @default_policy_review_fix_retry_3_max_turns_in_window 7
+  @default_policy_review_fix_per_issue_total_extension_budget 150_000
+  @default_policy_review_fix_auto_retry_limit 3
+  @default_policy_review_fix_narrow_scope_batch_size 1
   @default_codex_approval_policy %{
     "reject" => %{
       "sandbox_approval" => true,
@@ -329,6 +340,56 @@ defmodule SymphonyElixir.Config do
                                            ]
                                          ]
                                        ]
+                                     ],
+                                     review_fix: [
+                                       type: :map,
+                                       default: %{},
+                                       keys: [
+                                         enabled: [
+                                           type: :boolean,
+                                           default: @default_policy_review_fix_enabled
+                                         ],
+                                         per_turn_input_soft: [
+                                           type: {:or, [:non_neg_integer, nil]},
+                                           default: @default_policy_review_fix_per_turn_input_soft_budget
+                                         ],
+                                         per_turn_input_hard: [
+                                           type: {:or, [:non_neg_integer, nil]},
+                                           default: @default_policy_review_fix_per_turn_input_hard_budget
+                                         ],
+                                         retry_2_per_turn_input_hard: [
+                                           type: {:or, [:non_neg_integer, nil]},
+                                           default: @default_policy_review_fix_retry_2_per_turn_input_hard_budget
+                                         ],
+                                         retry_3_per_turn_input_hard: [
+                                           type: {:or, [:non_neg_integer, nil]},
+                                           default: @default_policy_review_fix_retry_3_per_turn_input_hard_budget
+                                         ],
+                                         max_turns_in_window: [
+                                           type: :non_neg_integer,
+                                           default: @default_policy_review_fix_max_turns_in_window
+                                         ],
+                                         retry_2_max_turns_in_window: [
+                                           type: :non_neg_integer,
+                                           default: @default_policy_review_fix_retry_2_max_turns_in_window
+                                         ],
+                                         retry_3_max_turns_in_window: [
+                                           type: :non_neg_integer,
+                                           default: @default_policy_review_fix_retry_3_max_turns_in_window
+                                         ],
+                                         per_issue_total_extension: [
+                                           type: {:or, [:non_neg_integer, nil]},
+                                           default: @default_policy_review_fix_per_issue_total_extension_budget
+                                         ],
+                                         auto_retry_limit: [
+                                           type: :non_neg_integer,
+                                           default: @default_policy_review_fix_auto_retry_limit
+                                         ],
+                                         narrow_scope_batch_size: [
+                                           type: :pos_integer,
+                                           default: @default_policy_review_fix_narrow_scope_batch_size
+                                         ]
+                                       ]
                                      ]
                                    ]
                                  ]
@@ -514,6 +575,19 @@ defmodule SymphonyElixir.Config do
                 per_turn_input_soft: non_neg_integer() | nil,
                 per_turn_input_hard: non_neg_integer() | nil
               }
+            },
+            review_fix: %{
+              enabled: boolean(),
+              per_turn_input_soft: non_neg_integer() | nil,
+              per_turn_input_hard: non_neg_integer() | nil,
+              retry_2_per_turn_input_hard: non_neg_integer() | nil,
+              retry_3_per_turn_input_hard: non_neg_integer() | nil,
+              max_turns_in_window: non_neg_integer(),
+              retry_2_max_turns_in_window: non_neg_integer(),
+              retry_3_max_turns_in_window: non_neg_integer(),
+              per_issue_total_extension: non_neg_integer() | nil,
+              auto_retry_limit: non_neg_integer(),
+              narrow_scope_batch_size: pos_integer()
             }
           }
         }
@@ -1065,6 +1139,11 @@ defmodule SymphonyElixir.Config do
 
   def policy_stage_token_budget(stage) when is_atom(stage) do
     get_in(validated_workflow_options(), [:policy, :token_budget, :stages, stage]) || %{}
+  end
+
+  @spec policy_review_fix_token_budget() :: map()
+  def policy_review_fix_token_budget do
+    get_in(validated_workflow_options(), [:policy, :token_budget, :review_fix]) || %{}
   end
 
   @spec workflow_prompt() :: String.t()
@@ -1750,6 +1829,7 @@ defmodule SymphonyElixir.Config do
       non_negative_integer_value(Map.get(section, "per_issue_total_output"))
     )
     |> put_if_present(:stages, policy_stage_token_budget_stages_value(Map.get(section, "stages")))
+    |> put_if_present(:review_fix, policy_review_fix_token_budget_value(Map.get(section, "review_fix")))
   end
 
   defp policy_token_budget_value(_value), do: :omit
@@ -1775,6 +1855,53 @@ defmodule SymphonyElixir.Config do
   end
 
   defp policy_stage_token_budget_stage_value(_value), do: :omit
+
+  defp policy_review_fix_token_budget_value(section) when is_map(section) do
+    %{}
+    |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
+    |> put_if_present(
+      :per_turn_input_soft,
+      non_negative_integer_value(Map.get(section, "per_turn_input_soft"))
+    )
+    |> put_if_present(
+      :per_turn_input_hard,
+      non_negative_integer_value(Map.get(section, "per_turn_input_hard"))
+    )
+    |> put_if_present(
+      :retry_2_per_turn_input_hard,
+      non_negative_integer_value(Map.get(section, "retry_2_per_turn_input_hard"))
+    )
+    |> put_if_present(
+      :retry_3_per_turn_input_hard,
+      non_negative_integer_value(Map.get(section, "retry_3_per_turn_input_hard"))
+    )
+    |> put_if_present(
+      :max_turns_in_window,
+      non_negative_integer_value(Map.get(section, "max_turns_in_window"))
+    )
+    |> put_if_present(
+      :retry_2_max_turns_in_window,
+      non_negative_integer_value(Map.get(section, "retry_2_max_turns_in_window"))
+    )
+    |> put_if_present(
+      :retry_3_max_turns_in_window,
+      non_negative_integer_value(Map.get(section, "retry_3_max_turns_in_window"))
+    )
+    |> put_if_present(
+      :per_issue_total_extension,
+      non_negative_integer_value(Map.get(section, "per_issue_total_extension"))
+    )
+    |> put_if_present(
+      :auto_retry_limit,
+      non_negative_integer_value(Map.get(section, "auto_retry_limit"))
+    )
+    |> put_if_present(
+      :narrow_scope_batch_size,
+      positive_integer_value(Map.get(section, "narrow_scope_batch_size"))
+    )
+  end
+
+  defp policy_review_fix_token_budget_value(_value), do: :omit
 
   defp reasoning_stages do
     overrides = get_in(validated_workflow_options(), [:codex, :reasoning, :stages]) || %{}

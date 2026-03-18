@@ -94,6 +94,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.policy_stage_token_budget("implement")[:per_turn_input_hard] == 120_000
     assert Config.policy_stage_token_budget("verify")[:per_turn_input_soft] == 40_000
     assert Config.policy_stage_token_budget("verify")[:per_turn_input_hard] == 80_000
+    assert Config.policy_review_fix_token_budget()[:enabled] == true
+    assert Config.policy_review_fix_token_budget()[:per_turn_input_soft] == 60_000
+    assert Config.policy_review_fix_token_budget()[:per_turn_input_hard] == 120_000
+    assert Config.policy_review_fix_token_budget()[:retry_2_per_turn_input_hard] == 150_000
+    assert Config.policy_review_fix_token_budget()[:retry_3_per_turn_input_hard] == 220_000
+    assert Config.policy_review_fix_token_budget()[:max_turns_in_window] == 3
+    assert Config.policy_review_fix_token_budget()[:retry_2_max_turns_in_window] == 5
+    assert Config.policy_review_fix_token_budget()[:retry_3_max_turns_in_window] == 7
+    assert Config.policy_review_fix_token_budget()[:per_issue_total_extension] == 150_000
+    assert Config.policy_review_fix_token_budget()[:auto_retry_limit] == 3
+    assert Config.policy_review_fix_token_budget()[:narrow_scope_batch_size] == 1
   end
 
   test "config exposes normalized runner channel and instance identity" do

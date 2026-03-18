@@ -304,10 +304,30 @@ defmodule SymphonyElixir.Orchestrator do
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
+        issue = Map.get(running_entry, :issue, %{})
+        next_attempt = next_retry_attempt_from_running(running_entry) || 1
 
         state =
-          case reason do
-            :normal ->
+          case {reason, RunPolicy.maybe_stop_for_token_budget(issue, running_entry)} do
+            {:normal, {:retry, metadata}} ->
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive review-fix retry")
+
+              schedule_issue_retry(state, issue_id, next_attempt, %{
+                identifier: running_entry.identifier,
+                delay_type: :continuation,
+                issue: running_entry.issue,
+                error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+                budget_retry: true,
+                budget_mode: "review_fix",
+                budget_retry_count: Map.get(metadata, :retry_count),
+                budget_resume_context: Map.get(metadata, :resume_context)
+              })
+
+            {:normal, {:stop, _violation}} ->
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; recorded token-budget stop")
+              release_issue_claim(state, issue_id)
+
+            {:normal, :ok} ->
               continuation = continuation_metadata_for_running_entry(running_entry)
               continuation_delay_type = Map.get(continuation, :delay_type, :continuation)
 
@@ -333,10 +353,8 @@ defmodule SymphonyElixir.Orchestrator do
                   )
               end
 
-            _ ->
+            {_other_reason, _budget_result} ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
@@ -3137,7 +3155,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
-    workspace = Workspace.path_for_issue(issue)
+    run_state = retry_run_state(issue.identifier, issue)
+    workspace = Workspace.path_for_issue(issue.identifier)
+    stage = Map.get(run_state, :stage)
     dispatch_stage = normalize_dispatch_stage(issue)
 
     case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
@@ -3145,7 +3165,7 @@ defmodule SymphonyElixir.Orchestrator do
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
-        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state)
+        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
@@ -3190,6 +3210,9 @@ defmodule SymphonyElixir.Orchestrator do
             policy_override: policy_override,
             policy_class: policy_class,
             policy_source: policy_source,
+            workspace: workspace,
+            stage: stage,
+            resume_context: Map.get(run_state, :resume_context, %{}),
             last_ledger_event_id: Map.get(ledger_event, :event_id),
             started_at: DateTime.utc_now()
           })
@@ -3242,6 +3265,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_passive_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
+    run_state = retry_run_state(issue.identifier, issue)
+    workspace = Workspace.path_for_issue(issue.identifier)
+    stage = Map.get(run_state, :stage)
 
     case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
            workspace =
@@ -3269,8 +3295,7 @@ defmodule SymphonyElixir.Orchestrator do
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
-        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state)
-        workspace = Workspace.path_for_issue(issue)
+        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
         dispatch_stage = normalize_dispatch_stage(issue)
 
         Logger.info("Dispatching issue to passive runtime worker: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
@@ -3317,6 +3342,9 @@ defmodule SymphonyElixir.Orchestrator do
             policy_override: policy_override,
             policy_class: policy_class,
             policy_source: policy_source,
+            workspace: workspace,
+            stage: stage,
+            resume_context: Map.get(run_state, :resume_context, %{}),
             last_ledger_event_id: Map.get(ledger_event, :event_id),
             passive?: true,
             started_at: DateTime.utc_now()
@@ -3794,13 +3822,6 @@ defmodule SymphonyElixir.Orchestrator do
       1 -> true
       "1" -> true
       _ -> false
-    end
-  end
-
-  defp issue_run_stage(identifier) when is_binary(identifier) do
-    case issue_run_state(identifier) do
-      %{stage: stage} when is_binary(stage) -> stage
-      _ -> nil
     end
   end
 
@@ -4395,6 +4416,18 @@ defmodule SymphonyElixir.Orchestrator do
     {policy_class, policy_source, policy_override} =
       policy_snapshot_values(metadata.issue, state, run_state)
 
+    budget_runtime =
+      RunPolicy.budget_runtime(metadata.issue, %{
+        stage: Map.get(run_state, :stage),
+        workspace: workspace_path,
+        turn_count: Map.get(metadata, :turn_count, 0),
+        codex_input_tokens: Map.get(metadata, :codex_input_tokens, 0),
+        codex_output_tokens: Map.get(metadata, :codex_output_tokens, 0),
+        codex_total_tokens: Map.get(metadata, :codex_total_tokens, 0),
+        turn_started_input_tokens: Map.get(metadata, :turn_started_input_tokens, 0),
+        resume_context: Map.get(run_state, :resume_context, %{})
+      })
+
     %{
       issue_id: issue_id,
       identifier: metadata.identifier,
@@ -4457,6 +4490,7 @@ defmodule SymphonyElixir.Orchestrator do
       deploy_approved: Map.get(run_state, :deploy_approved, false),
       deploy_window_wait: Map.get(run_state, :deploy_window_wait),
       token_pressure: get_in(run_state, [:resume_context, :token_pressure]),
+      budget_runtime: budget_runtime,
       merge_sha: Map.get(run_state, :merge_sha),
       stop_reason: Map.get(run_state, :stop_reason),
       last_decision: Map.get(run_state, :last_decision),
@@ -4565,9 +4599,7 @@ defmodule SymphonyElixir.Orchestrator do
           Path.join(Config.workspace_root(), entry.identifier || entry.issue_id || "issue")
 
         run_state = load_run_state(workspace_path, entry.issue)
-
-        {policy_class, policy_source, policy_override} =
-          policy_snapshot_values(entry.issue, state, run_state)
+        {policy_class, policy_source, policy_override} = policy_snapshot_values(entry.issue, state, run_state)
 
         {last_rule_id, last_failure_class, last_decision_summary, next_human_action} =
           queue_policy_reason(entry.issue, state, run_state)
@@ -6514,6 +6546,21 @@ defmodule SymphonyElixir.Orchestrator do
       :ok ->
         state
 
+      {:retry, metadata} ->
+        next_attempt = next_retry_attempt_from_running(running_entry) || 1
+
+        state
+        |> terminate_running_issue(issue_id, false)
+        |> schedule_issue_retry(issue_id, next_attempt, %{
+          identifier: Map.get(running_entry, :identifier) || issue_id,
+          delay_type: :continuation,
+          error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+          budget_retry: true,
+          budget_mode: "review_fix",
+          budget_retry_count: Map.get(metadata, :retry_count),
+          budget_resume_context: Map.get(metadata, :resume_context)
+        })
+
       {:stop, _violation} ->
         continuation = continuation_metadata_for_running_entry(running_entry)
         continuation_delay_type = Map.get(continuation, :delay_type, :none)
@@ -6806,7 +6853,7 @@ defmodule SymphonyElixir.Orchestrator do
     terminate_running_issue(state, issue.id, false)
   end
 
-  defp block_dispatch_stage(workspace, %Issue{} = issue, summary, rule_key, metadata \\ %{})
+  defp block_dispatch_stage(workspace, %Issue{} = issue, summary, rule_key, metadata)
        when is_binary(workspace) and is_binary(summary) and is_atom(rule_key) and is_map(metadata) do
     rule = RuleCatalog.rule(rule_key)
 

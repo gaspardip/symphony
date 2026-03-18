@@ -190,6 +190,21 @@ defmodule SymphonyElixir.RuleCatalog do
       failure_class: "budget",
       human_action: "Reduce agent verbosity or split the work into smaller issues."
     },
+    review_fix_scope_exhausted: %{
+      rule_id: "budget.review_fix_scope_exhausted",
+      failure_class: "budget",
+      human_action: "Split the scoped review-fix work further or intervene manually because Symphony cannot narrow it any more."
+    },
+    review_fix_turn_window_exhausted: %{
+      rule_id: "budget.review_fix_turn_window_exhausted",
+      failure_class: "budget",
+      human_action: "Inspect the repeated scoped retry attempts and either reduce the scope further or intervene manually."
+    },
+    review_fix_total_extension_exhausted: %{
+      rule_id: "budget.review_fix_total_extension_exhausted",
+      failure_class: "budget",
+      human_action: "The bounded review-fix extension is exhausted; split the remaining work or intervene manually."
+    },
     tracker_rate_limited: %{
       rule_id: "tracker.rate_limited",
       failure_class: "coordination",
