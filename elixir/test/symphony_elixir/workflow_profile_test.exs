@@ -215,5 +215,7 @@ defmodule SymphonyElixir.WorkflowProfileTest do
 
     assert fallback.name == :fully_autonomous
     assert fallback.merge_mode == :automerge
+    assert fallback.approval_gate_state == "Human Review"
+    assert WorkflowProfile.default_profiles()[:fully_autonomous][:merge_mode] == :automerge
   end
 end
