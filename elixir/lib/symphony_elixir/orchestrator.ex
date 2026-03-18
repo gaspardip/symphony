@@ -3380,6 +3380,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
+        refreshed_issue = merge_dispatch_refresh_issue(issue, refreshed_issue)
+
         cond do
           retry_candidate_issue?(refreshed_issue, terminal_states) ->
             {:ok, refreshed_issue}
@@ -3400,6 +3402,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
+
+  defp merge_dispatch_refresh_issue(%Issue{} = issue, %Issue{} = refreshed_issue) do
+    issue_map = Map.from_struct(issue)
+
+    refreshed_issue
+    |> Map.from_struct()
+    |> Enum.reduce(issue_map, fn
+      {_key, nil}, acc -> acc
+      {key, value}, acc -> Map.put(acc, key, value)
+    end)
+    |> then(&struct(Issue, &1))
+  end
+
+  defp merge_dispatch_refresh_issue(issue, _refreshed_issue), do: issue
 
   defp manual_dispatch_resume_override?(
          %Issue{source: :manual, state: issue_state} = issue,
