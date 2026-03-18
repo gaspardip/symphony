@@ -1,11 +1,11 @@
 # Symphony Elixir
 
-This directory contains the current Elixir/OTP implementation of Symphony, based on
-[`SPEC.md`](../SPEC.md) at the repository root.
+This directory contains the active Elixir/OTP implementation for the `gaspardip/symphony` fork,
+grounded in [`SPEC.md`](../SPEC.md) at the repository root.
 
 > [!WARNING]
-> Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
-> We recommend implementing your own hardened version based on `SPEC.md`.
+> Symphony Elixir is still prototype software intended for trusted environments and active
+> dogfooding.
 
 ## Screenshot
 
@@ -13,18 +13,22 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 ## How it works
 
-1. Polls Linear for candidate work
+1. Accepts candidate work from Linear or the manual-run API
 2. Creates an isolated workspace per issue
 3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
    workspace
 4. Sends a workflow prompt to Codex
 5. Keeps Codex working on the issue until the work is done
+6. Exposes dashboard, API, metrics, and webhook surfaces for operators
 
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
+
+This fork also includes GitHub webhook intake for PR review follow-up and a self-host harness under
+[`../.symphony/harness.yml`](../.symphony/harness.yml).
 
 ## How to use it
 
@@ -48,29 +52,71 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 We recommend using [mise](https://mise.jdx.dev/) to manage Elixir/Erlang versions.
 
+Required local tools for the repo-owned quickstart:
+
+- `git`
+- `gh` with an authenticated session
+- `mise`
+- `make`
+- `codex`
+
+For the checked-in `WORKFLOW.md`, also export `LINEAR_API_KEY`.
+
 ```bash
 mise install
 mise exec -- elixir --version
 ```
 
+## Quickstart
+
+From a fresh checkout:
+
+```bash
+git clone https://github.com/gaspardip/symphony.git
+cd symphony
+export LINEAR_API_KEY=your_linear_token
+./scripts/symphony-preflight.sh
+cd elixir
+mise exec -- ./bin/symphony \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+  --port 4040 \
+  ./WORKFLOW.md
+```
+
+Then open:
+
+- dashboard: `http://127.0.0.1:4040/`
+- state API: `http://127.0.0.1:4040/api/v1/state`
+- metrics: `http://127.0.0.1:4040/metrics`
+
 ## Run
 
 ```bash
-git clone https://github.com/openai/symphony
+git clone https://github.com/gaspardip/symphony.git
 cd symphony/elixir
 mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+mise exec -- ./bin/symphony \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+  ./WORKFLOW.md
 ```
 
 ## Configuration
 
+The CLI requires the explicit guardrails acknowledgement switch:
+
+```bash
+--i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+./bin/symphony \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+  /path/to/custom/WORKFLOW.md
 ```
 
 If no path is passed, Symphony defaults to `./WORKFLOW.md`.
@@ -154,6 +200,7 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - LiveView for the dashboard at `/`
 - JSON API for operational debugging under `/api/v1/*`
+- webhook intake under `/api/webhooks/linear` and `/api/webhooks/github`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
 
@@ -168,6 +215,14 @@ The observability UI now runs on a minimal Phoenix stack:
 
 ```bash
 make all
+```
+
+From the repo root, the self-host harness wrappers are:
+
+```bash
+./scripts/symphony-preflight.sh
+./scripts/symphony-validate.sh
+./scripts/symphony-smoke.sh
 ```
 
 ## FAQ
