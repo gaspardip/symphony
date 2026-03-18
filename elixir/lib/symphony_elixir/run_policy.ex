@@ -990,7 +990,7 @@ defmodule SymphonyElixir.RunPolicy do
            retry_count: retry_count + 1
          }}
 
-      retry_count >= 1 and can_retry? and not expansion_used? and is_binary(primary_target_path) and
+      retry_count >= 1 and not expansion_used? and is_binary(primary_target_path) and
           is_binary(next_required_path) ->
         persisted_resume_context =
           broad_implement_resume_context_for_budget_retry(

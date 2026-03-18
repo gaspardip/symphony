@@ -34,6 +34,7 @@ acceptance_signals:
   - The broad implement retry lane does not steal explicit review-fix or CI-failure recovery work, so scoped follow-up keeps its own budget rules
   - Broad implement retries stop on specific broad-mode rules instead of the generic `budget.per_turn_input_exceeded` stop, distinguishing focus-insufficient from expansion-exhausted outcomes
   - When a bounded broad retry stops, the blocked workspace keeps its top-level `resume_context` target-path and next-required-path fields instead of forcing operators or the next retry to recover them only from nested decision metadata
+  - If an operator replays a blocked broad retry after the exact `next_required_path` is already known, the runtime can still take the bounded second-file expansion instead of refusing it because the historical broad retry counter is already high
   - Repeated high-pressure review retries can relax the implement stage token budget modestly only after the first soft-budget retry has already been observed for accepted PR claims
   - Repeated high-pressure review retries with an active scoped turn window can take one additional bounded step up to `220k` input tokens, so live accepted-claim follow-up is not blocked solely by the repo’s baseline prompt footprint
   - Accepted-claim follow-up that already retired at least one review claim can exceed the base `per_issue_total` budget by a bounded amount, so dogfood does not stop one or two comments short of clearing the PR

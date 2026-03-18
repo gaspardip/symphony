@@ -1124,6 +1124,90 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     end
   end
 
+  test "broad implement budget still expands when an exact next file is already known from a prior blocked retry" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 2
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-known-expansion-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-broad-budget-known-expansion", identifier: "MT-914BROADKNOWN", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "blocked", %{
+                 resume_context: %{
+                   budget_mode: "broad_implement",
+                   budget_retry_count: 10,
+                   budget_pressure_level: "critical",
+                   budget_auto_narrowed: true,
+                   target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                   next_required_path: ".github/pull_request_template.md",
+                   budget_expansion_used: false,
+                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 }
+               })
+
+      assert {:retry, %{kind: :broad_implement_budget_expansion_retry, retry_count: 11}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace_path: workspace,
+                 dispatch_stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 124_190,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 124_190,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   budget_mode: "broad_implement",
+                   budget_retry_count: 10,
+                   budget_pressure_level: "critical",
+                   budget_auto_narrowed: true,
+                   target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                   next_required_path: ".github/pull_request_template.md",
+                   budget_expansion_used: false,
+                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 }
+               })
+
+      assert %{
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 11,
+                 budget_expansion_used: true,
+                 target_paths: [
+                   "elixir/lib/symphony_elixir/delivery_engine.ex",
+                   ".github/pull_request_template.md"
+                 ],
+                 next_required_path: ".github/pull_request_template.md"
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "broad implement budget retry mines target paths from structured codex updates" do
     configure_memory_tracker!(
       policy_token_budget: %{
