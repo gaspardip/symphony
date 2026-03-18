@@ -386,7 +386,7 @@ defmodule SymphonyElixir.Config do
                                            default: @default_policy_review_fix_auto_retry_limit
                                          ],
                                          narrow_scope_batch_size: [
-                                           type: :non_neg_integer,
+                                           type: :pos_integer,
                                            default: @default_policy_review_fix_narrow_scope_batch_size
                                          ]
                                        ]
@@ -587,7 +587,7 @@ defmodule SymphonyElixir.Config do
               retry_3_max_turns_in_window: non_neg_integer(),
               per_issue_total_extension: non_neg_integer() | nil,
               auto_retry_limit: non_neg_integer(),
-              narrow_scope_batch_size: non_neg_integer()
+              narrow_scope_batch_size: pos_integer()
             }
           }
         }
@@ -1897,7 +1897,7 @@ defmodule SymphonyElixir.Config do
     )
     |> put_if_present(
       :narrow_scope_batch_size,
-      non_negative_integer_value(Map.get(section, "narrow_scope_batch_size"))
+      positive_integer_value(Map.get(section, "narrow_scope_batch_size"))
     )
   end
 

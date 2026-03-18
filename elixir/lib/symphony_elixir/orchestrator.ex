@@ -325,7 +325,7 @@ defmodule SymphonyElixir.Orchestrator do
 
             {:normal, {:stop, _violation}} ->
               Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; recorded token-budget stop")
-              state
+              release_issue_claim(state, issue_id)
 
             {:normal, :ok} ->
               continuation = continuation_metadata_for_running_entry(running_entry)

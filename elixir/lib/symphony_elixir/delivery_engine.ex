@@ -4289,7 +4289,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp normalize_state(_state), do: ""
 
-  defp truthy?(value), do: value in [true, "true", true, 1, "1"]
+  defp truthy?(value), do: value in [true, "true", 1, "1"]
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_state(state_name)
