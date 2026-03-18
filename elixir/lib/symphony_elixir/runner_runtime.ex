@@ -18,7 +18,8 @@ defmodule SymphonyElixir.RunnerRuntime do
   @spec info() :: map()
   def info do
     install_root = Config.runner_install_root()
-    current_root = active_checkout_root()
+    active_root = active_checkout_root()
+    checkout_root = current_checkout_root()
     metadata_result = read_metadata(install_root)
     metadata = metadata_from_result(metadata_result)
     history = recent_history(install_root, @default_history_limit)
@@ -44,10 +45,13 @@ defmodule SymphonyElixir.RunnerRuntime do
       channel: Config.runner_channel(),
       install_root: install_root,
       workspace_root: Config.workspace_root(),
-      current_checkout_root: current_root,
+      current_checkout_root: checkout_root,
+      active_checkout_root: active_root,
       current_link_target: current_link_target,
-      current_version_sha: current_version_sha(current_root) || Map.get(metadata, "current_version_sha"),
-      runtime_version: current_version_sha(current_root) || Map.get(metadata, "current_version_sha"),
+      current_version_sha:
+        current_version_sha(active_root) || Map.get(metadata, "current_version_sha"),
+      runtime_version:
+        current_version_sha(active_root) || Map.get(metadata, "current_version_sha"),
       promoted_release_sha: Map.get(metadata, "promoted_release_sha"),
       promoted_ref: Map.get(metadata, "promoted_ref"),
       promoted_at: Map.get(metadata, "promoted_at"),
@@ -64,7 +68,8 @@ defmodule SymphonyElixir.RunnerRuntime do
       rollback_recommended: Map.get(metadata, "rollback_recommended", false),
       rollback_target_path: rollback_target_path,
       rollback_target_exists: release_exists?(rollback_target_path),
-      effective_required_labels: effective_required_labels(Config.linear_required_labels(), metadata),
+      effective_required_labels:
+        effective_required_labels(Config.linear_required_labels(), metadata),
       rule_id: runner_rule_id(metadata),
       rollback_rule_id: rollback_rule_id(metadata),
       repo_url: Map.get(metadata, "repo_url"),
@@ -114,7 +119,8 @@ defmodule SymphonyElixir.RunnerRuntime do
     %{
       inspect: "bash #{script} inspect",
       promote: "bash #{script} promote <git-ref> [--canary-label <label>]",
-      record_canary: "bash #{script} record-canary <pass|fail> [--issue <LINEAR-ID>] [--pr <URL>] [--note <text>]",
+      record_canary:
+        "bash #{script} record-canary <pass|fail> [--issue <LINEAR-ID>] [--pr <URL>] [--note <text>]",
       rollback: "bash #{script} rollback [release-sha]"
     }
   end
@@ -244,16 +250,16 @@ defmodule SymphonyElixir.RunnerRuntime do
   @spec active_checkout_root() :: Path.t()
   def active_checkout_root do
     install_root = Config.runner_install_root()
+    current_target = current_link_target(install_root)
+    metadata = load_metadata(install_root)
+    promoted_release_path = normalize_path(Map.get(metadata, "promoted_release_path"))
 
     cond do
-      release_exists?(current_link_target(install_root)) ->
-        current_link_target(install_root) |> Path.expand()
+      release_exists?(current_target) ->
+        Path.expand(current_target)
 
-      release_exists?(normalize_path(Map.get(load_metadata(install_root), "promoted_release_path"))) ->
-        load_metadata(install_root)
-        |> Map.get("promoted_release_path")
-        |> normalize_path()
-        |> Path.expand()
+      release_exists?(promoted_release_path) ->
+        Path.expand(promoted_release_path)
 
       true ->
         current_checkout_root()

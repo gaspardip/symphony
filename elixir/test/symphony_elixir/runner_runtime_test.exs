@@ -77,7 +77,8 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
       assert info.channel == "canary"
       assert info.install_root == runner_root
       assert info.workspace_root == Config.workspace_root()
-      assert info.current_checkout_root == release_path
+      assert info.current_checkout_root == RunnerRuntime.current_checkout_root()
+      assert info.active_checkout_root == release_path
       assert info.current_link_target == release_path
       assert info.promoted_release_sha == "promoted123"
       assert info.previous_release_sha == "previous456"
@@ -87,7 +88,12 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
       assert info.dispatch_enabled == true
       assert info.canary_required_labels == ["canary:symphony"]
       assert info.effective_required_labels == ["dogfood:symphony", "canary:symphony"]
-      assert info.canary_evidence == %{issues: ["CLZ-10"], prs: ["https://github.com/gaspardip/symphony/pull/10"]}
+
+      assert info.canary_evidence == %{
+               issues: ["CLZ-10"],
+               prs: ["https://github.com/gaspardip/symphony/pull/10"]
+             }
+
       assert info.release_manifest_path == manifest_path
       assert info.release_manifest["commit_sha"] == "promoted123"
       assert info.repo_url == "git@github.com:gaspardip/symphony.git"
@@ -135,6 +141,41 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
       File.cd!(runner_root, fn ->
         assert RunnerRuntime.current_checkout_root() == Path.expand(File.cwd!())
         assert RunnerRuntime.active_checkout_root() == release_path
+      end)
+    after
+      File.rm_rf(runner_root)
+    end
+  end
+
+  test "active checkout root reuses current target and metadata lookups once per call" do
+    runner_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runner-runtime-active-root-io-#{System.unique_integer([:positive])}"
+      )
+
+    release_path = Path.join(runner_root, "releases/promoted123")
+
+    try do
+      File.mkdir_p!(release_path)
+      File.ln_s!(release_path, Path.join(runner_root, "current"))
+
+      File.write!(
+        RunnerRuntime.metadata_path(runner_root),
+        Jason.encode!(%{
+          "promoted_release_sha" => "promoted123",
+          "promoted_release_path" => release_path,
+          "runner_mode" => "stable"
+        })
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(), runner_install_root: runner_root)
+
+      File.cd!(runner_root, fn ->
+        assert RunnerRuntime.active_checkout_root() == release_path
+        info = RunnerRuntime.info()
+        assert info.current_checkout_root == Path.expand(File.cwd!())
+        assert info.active_checkout_root == release_path
       end)
     after
       File.rm_rf(runner_root)
@@ -204,7 +245,9 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
         })
       )
 
-      release_missing_health = RunnerRuntime.runner_health(["dogfood:symphony"], release_missing_root)
+      release_missing_health =
+        RunnerRuntime.runner_health(["dogfood:symphony"], release_missing_root)
+
       assert release_missing_health.rule_id == "runner.current_missing"
     after
       File.rm_rf(base_root)
@@ -395,7 +438,11 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
     assert promote_payload.action == "promote"
     assert promote_payload.output == "runner command ok"
     assert promote_payload.command =~ "promote"
-    assert_receive {:runner_runtime_cmd, "bash", [script_path, "promote", "main", "--canary-label", "canary:symphony"], options}
+
+    assert_receive {:runner_runtime_cmd, "bash",
+                    [script_path, "promote", "main", "--canary-label", "canary:symphony"],
+                    options}
+
     assert script_path == RunnerRuntime.promotion_script_path()
     assert options[:stderr_to_stdout] == true
 
@@ -407,7 +454,19 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
              )
 
     assert canary_payload.action == "record_canary"
-    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "record-canary", "pass", "--issue", "CLZ-22", "--pr", "https://github.com/gaspardip/symphony/pull/1", "--note", "healthy"], _options}
+
+    assert_receive {:runner_runtime_cmd, "bash",
+                    [
+                      _script_path,
+                      "record-canary",
+                      "pass",
+                      "--issue",
+                      "CLZ-22",
+                      "--pr",
+                      "https://github.com/gaspardip/symphony/pull/1",
+                      "--note",
+                      "healthy"
+                    ], _options}
 
     assert {:ok, rollback_payload} = RunnerRuntime.rollback("deadbeef")
     assert rollback_payload.action == "rollback"
@@ -458,6 +517,8 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
     assert failed_payload.error == "command_failed"
     assert failed_payload.exit_status == 7
     assert failed_payload.output == "runner failed"
-    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "record-canary", "fail"], _options}
+
+    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "record-canary", "fail"],
+                    _options}
   end
 end

@@ -236,7 +236,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join(second_workspace, "README.md")) == "changed\n"
       assert File.read!(Path.join(second_workspace, "local-progress.txt")) == "in progress\n"
       assert File.read!(Path.join([second_workspace, "deps", "cache.txt"])) == "cached deps\n"
-      assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) == "compiled artifact\n"
+
+      assert File.read!(Path.join([second_workspace, "_build", "artifact.txt"])) ==
+               "compiled artifact\n"
+
       refute File.exists?(Path.join([second_workspace, "tmp", "scratch.txt"]))
     after
       File.rm_rf(workspace_root)
@@ -375,6 +378,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert File.read!(Path.join(workspace, "README.md")) == "restored clone\n"
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  test "workspace metadata-only probe ignores concurrent directory read errors" do
+    workspace_root =
+      Path.join(System.tmp_dir!(), "workspace-ls-race-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace = Path.join(workspace_root, "CLZ-22")
+
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.rm_rf!(workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        policy_require_checkout: true
+      )
+
+      assert {:ok, recreated_workspace} = Workspace.create_for_issue("CLZ-22")
+      assert recreated_workspace == workspace
+      assert File.dir?(workspace)
+    after
+      File.rm_rf(workspace_root)
     end
   end
 
@@ -541,7 +567,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     try do
       target_workspace = Path.join(workspace_root, "S_1")
-      untouched_workspace = Path.join(workspace_root, "OTHER-#{System.unique_integer([:positive])}")
+
+      untouched_workspace =
+        Path.join(workspace_root, "OTHER-#{System.unique_integer([:positive])}")
 
       File.mkdir_p!(target_workspace)
       File.mkdir_p!(untouched_workspace)
@@ -665,9 +693,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Client.helper_for_test(:build_assignee_filter, ["   "]) == {:ok, nil}
     assert match?({:error, _}, Client.helper_for_test(:build_assignee_filter, ["me"]))
-    assert Client.helper_for_test(:assigned_to_worker, [%{}, %{match_values: MapSet.new(["user-1"])}]) == false
+
+    assert Client.helper_for_test(:assigned_to_worker, [
+             %{},
+             %{match_values: MapSet.new(["user-1"])}
+           ]) == false
+
     assert Client.helper_for_test(:assigned_to_worker, [nil, :invalid]) == false
-    assert Client.helper_for_test(:truncate_error_body, [String.duplicate("a", 1_050)]) =~ "...<truncated>"
+
+    assert Client.helper_for_test(:truncate_error_body, [String.duplicate("a", 1_050)]) =~
+             "...<truncated>"
+
     assert Client.helper_for_test(:normalize_assignee_match_value, [nil]) == nil
     assert {:ok, _headers} = Client.helper_for_test(:graphql_headers, [])
   end
@@ -839,7 +875,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
 
     assert skipped_issue.identifier == "MT-1005"
-    assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+
+    assert skipped_issue.blocked_by == [
+             %{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}
+           ]
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -868,7 +907,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "echo after_create > after_create.log\necho call >> \"#{after_create_counter}\"",
+        hook_after_create:
+          "echo after_create > after_create.log\necho call >> \"#{after_create_counter}\"",
         hook_before_remove: "echo before_remove > \"#{before_remove_marker}\""
       )
 
@@ -1013,7 +1053,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
 
     assert Config.codex_thread_sandbox() == "workspace-write"
-    assert Config.codex_runtime_profile() == %{codex_home: nil, inherit_env: true, env_allowlist: []}
+
+    assert Config.codex_runtime_profile() == %{
+             codex_home: nil,
+             inherit_env: true,
+             env_allowlist: []
+           }
 
     assert Config.codex_turn_sandbox_policy() == %{
              "type" => "workspaceWrite",
@@ -1028,7 +1073,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.codex_read_timeout_ms() == 5_000
     assert Config.codex_stall_timeout_ms() == 300_000
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: "codex app-server --model gpt-5.3-codex"
+    )
+
     assert Config.codex_command() == "codex app-server --model gpt-5.3-codex"
 
     codex_home_env_var = "SYMP_CODEX_HOME_#{System.unique_integer([:positive])}"
@@ -1044,7 +1092,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_runtime_profile_env_allowlist: ["HOME", "PATH", "GH_TOKEN"],
       codex_approval_policy: "on-request",
       codex_thread_sandbox: "workspace-write",
-      codex_turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["/tmp/workspace", "/tmp/cache"]}
+      codex_turn_sandbox_policy: %{
+        type: "workspaceWrite",
+        writableRoots: ["/tmp/workspace", "/tmp/cache"]
+      }
     )
 
     assert Config.codex_runtime_profile() == %{
@@ -1092,7 +1143,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     assert Config.linear_active_states() == ["Todo", "In Progress"]
-    assert Config.linear_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+
+    assert Config.linear_terminal_states() == [
+             "Closed",
+             "Cancelled",
+             "Canceled",
+             "Duplicate",
+             "Done"
+           ]
+
     assert Config.poll_interval_ms() == 600_000
     assert Config.healing_poll_interval_ms() == 1_800_000
     assert Config.workspace_root() == Path.join(System.tmp_dir!(), "symphony_workspaces")

@@ -1,7 +1,15 @@
 defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{GitHubEvent, GitHubEventInbox, LeaseManager, ManualIssueStore, RunStateStore, Workspace}
+  alias SymphonyElixir.{
+    GitHubEvent,
+    GitHubEventInbox,
+    LeaseManager,
+    ManualIssueStore,
+    RunStateStore,
+    Workspace
+  }
+
   alias SymphonyElixir.Orchestrator.State
 
   defmodule PostingGitHubClient do
@@ -28,7 +36,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     @impl true
     def post_review_comment_reply(_pr_url, comment_id, _body, _opts) do
-      {:ok, %{id: "reply-#{comment_id}", url: "https://github.com/example/reply/#{comment_id}", output: ""}}
+      {:ok,
+       %{
+         id: "reply-#{comment_id}",
+         url: "https://github.com/example/reply/#{comment_id}",
+         output: ""
+       }}
     end
   end
 
@@ -73,7 +86,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     @impl true
     def post_review_comment_reply(_pr_url, comment_id, _body, _opts) do
-      {:ok, %{id: "reply-#{comment_id}", url: "https://github.com/example/reply/#{comment_id}", output: ""}}
+      {:ok,
+       %{
+         id: "reply-#{comment_id}",
+         url: "https://github.com/example/reply/#{comment_id}",
+         output: ""
+       }}
     end
   end
 
@@ -193,7 +211,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       |> Map.put(:skipped_issues, [skipped_entry])
       |> Map.put(:last_candidate_issues, [queue_issue])
       |> Map.put(:priority_overrides, %{"MT-QUEUE" => 0})
-      |> Map.put(:retry_attempts, %{"issue-queue" => %{attempt: 2, due_at_ms: now_ms + 5_000, identifier: "MT-QUEUE"}})
+      |> Map.put(:retry_attempts, %{
+        "issue-queue" => %{attempt: 2, due_at_ms: now_ms + 5_000, identifier: "MT-QUEUE"}
+      })
       |> Map.put(:candidate_fetch_error, nil)
       |> Map.put(:next_poll_due_at_ms, now_ms - 1)
 
@@ -241,6 +261,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       runner_channel: "canary"
     )
 
+    previous_client = Application.get_env(:symphony_elixir, :pr_watcher_github_client)
     Application.put_env(:symphony_elixir, :pr_watcher_github_client, ReviewFeedbackGitHubClient)
     GitHubEventInbox.reset()
 
@@ -279,6 +300,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     on_exit(fn ->
       if Process.alive?(pid) do
         Process.exit(pid, :normal)
+      end
+
+      if is_nil(previous_client) do
+        Application.delete_env(:symphony_elixir, :pr_watcher_github_client)
+      else
+        Application.put_env(:symphony_elixir, :pr_watcher_github_client, previous_client)
       end
 
       GitHubEventInbox.reset()
@@ -322,7 +349,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         assert get_in(snapshot, [:runner, :runner_health]) == "invalid"
         assert get_in(snapshot, [:github_inbox, :last_drained_at]) != nil
         assert get_in(snapshot, [:github_inbox, :depth]) == 0
-        assert get_in(snapshot, [:github_inbox, :last_assignment, :assignment_state]) == "processed"
+
+        assert get_in(snapshot, [:github_inbox, :last_assignment, :assignment_state]) ==
+                 "processed"
 
         assert get_in(snapshot, [:github_inbox, :last_assignment, :assignment_reason]) ==
                  "review_feedback_persisted"
@@ -353,6 +382,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       runner_channel: "canary"
     )
 
+    previous_client = Application.get_env(:symphony_elixir, :pr_watcher_github_client)
     Application.put_env(:symphony_elixir, :pr_watcher_github_client, ReviewFeedbackGitHubClient)
     GitHubEventInbox.reset()
 
@@ -407,6 +437,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         Process.exit(pid, :normal)
       end
 
+      if is_nil(previous_client) do
+        Application.delete_env(:symphony_elixir, :pr_watcher_github_client)
+      else
+        Application.put_env(:symphony_elixir, :pr_watcher_github_client, previous_client)
+      end
+
       GitHubEventInbox.reset()
       File.rm_rf(workspace_root)
     end)
@@ -444,7 +480,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         {:ok, canonical_state} = RunStateStore.load(workspace)
         {:ok, archived_state} = RunStateStore.load(archived_workspace)
 
-        assert get_in(canonical_state, [:review_threads, "comment:91", "draft_state"]) == "drafted"
+        assert get_in(canonical_state, [:review_threads, "comment:91", "draft_state"]) ==
+                 "drafted"
+
         assert get_in(archived_state, [:review_threads, "comment:91", "draft_state"]) == "posted"
       end,
       60
@@ -555,7 +593,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       end
     end)
 
-    set_payload = Orchestrator.set_policy_class(orchestrator_name, issue.identifier, "never_automerge")
+    set_payload =
+      Orchestrator.set_policy_class(orchestrator_name, issue.identifier, "never_automerge")
+
     assert set_payload.ok == true
     assert set_payload.policy_class == "never_automerge"
     assert set_payload.policy_source == "override"
@@ -952,8 +992,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert is_binary(approve_payload.ledger_event_id)
 
     {:ok, approved_state} = SymphonyElixir.RunStateStore.load(workspace)
-    assert get_in(approved_state, [:review_threads, "review:1", "draft_state"]) == "approved_to_post"
-    assert get_in(approved_state, [:review_threads, "comment:2", "draft_state"]) == "approved_to_post"
+
+    assert get_in(approved_state, [:review_threads, "review:1", "draft_state"]) ==
+             "approved_to_post"
+
+    assert get_in(approved_state, [:review_threads, "comment:2", "draft_state"]) ==
+             "approved_to_post"
 
     posted_payload = Orchestrator.mark_review_threads_posted(orchestrator_name, issue.identifier)
     assert posted_payload.ok == true
@@ -1062,7 +1106,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert get_in(posted_state, [:review_threads, "comment:2", "draft_state"]) == "posted"
     assert is_binary(get_in(posted_state, [:review_threads, "comment:2", "posted_reply_id"]))
     assert is_binary(get_in(posted_state, [:review_threads, "comment:2", "posted_reply_url"]))
-    assert get_in(posted_state, [:review_threads, "review:1", "draft_state"]) == "approved_to_post"
+
+    assert get_in(posted_state, [:review_threads, "review:1", "draft_state"]) ==
+             "approved_to_post"
   end
 
   test "refresh merge readiness restarts passive PR hygiene work" do
@@ -1547,7 +1593,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
     assert retry_payload.ok == true
 
-    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    {:ok, refreshed_issue} =
+      SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+
     assert refreshed_issue.state == "In Progress"
 
     {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
@@ -1693,7 +1741,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
     assert retry_payload.ok == true
 
-    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    {:ok, refreshed_issue} =
+      SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+
     assert refreshed_issue.state == "In Progress"
 
     {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
@@ -1764,19 +1814,21 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
     assert retry_payload.ok == true
 
-    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
-    assert refreshed_issue.state == "Todo"
+    {:ok, refreshed_issue} =
+      SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
 
-    assert File.dir?(workspace)
+    assert refreshed_issue.state == "Todo"
 
     case SymphonyElixir.RunStateStore.load(workspace) do
       {:ok, run_state} ->
+        assert File.dir?(workspace)
         assert run_state.issue_id == issue.id
         assert run_state.issue_identifier == issue.identifier
         assert run_state.stage == "checkout"
         assert run_state.stop_reason == nil
 
       {:error, :missing} ->
+        refute File.dir?(workspace)
         refute File.exists?(SymphonyElixir.RunStateStore.state_path(workspace))
     end
   end
@@ -1989,7 +2041,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
     assert retry_payload.ok == true
 
-    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    {:ok, refreshed_issue} =
+      SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+
     assert refreshed_issue.state == "In Progress"
 
     {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
@@ -2103,7 +2157,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
     assert retry_payload.ok == true
 
-    {:ok, refreshed_issue} = SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+    {:ok, refreshed_issue} =
+      SymphonyElixir.ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+
     assert refreshed_issue.state == "In Progress"
 
     {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
@@ -2154,7 +2210,11 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       SymphonyElixir.ManualIssueStore.load_record_by_identifier(issue.identifier)
 
     assert record.last_decision_summary == "Moved to Blocked"
-    assert Enum.any?(record.comments, &String.contains?(Map.get(&1, "body", ""), "policy.pack_disallows_class"))
+
+    assert Enum.any?(
+             record.comments,
+             &String.contains?(Map.get(&1, "body", ""), "policy.pack_disallows_class")
+           )
   end
 
   test "dispatch helper functions cover label gates blockers and revalidation outcomes" do
@@ -2178,7 +2238,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       Map.put(eligible_issue, :blocked_by, [%{state: "In Progress"}])
 
     missing_label_issue =
-      %{eligible_issue | id: "issue-missing-label", identifier: "MT-MISSING-LABEL", labels: ["ops"]}
+      %{
+        eligible_issue
+        | id: "issue-missing-label",
+          identifier: "MT-MISSING-LABEL",
+          labels: ["ops"]
+      }
 
     claimed_state = %State{
       max_concurrent_agents: 1,
@@ -2186,9 +2251,18 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(eligible_issue, claimed_state) == false
-    assert Orchestrator.should_dispatch_issue_for_test(blocked_todo, %State{max_concurrent_agents: 1}) == false
-    assert Orchestrator.should_dispatch_issue_for_test(missing_label_issue, %State{max_concurrent_agents: 1}) == false
-    assert Orchestrator.should_dispatch_issue_for_test(eligible_issue, %State{max_concurrent_agents: 1}) == true
+
+    assert Orchestrator.should_dispatch_issue_for_test(blocked_todo, %State{
+             max_concurrent_agents: 1
+           }) == false
+
+    assert Orchestrator.should_dispatch_issue_for_test(missing_label_issue, %State{
+             max_concurrent_agents: 1
+           }) == false
+
+    assert Orchestrator.should_dispatch_issue_for_test(eligible_issue, %State{
+             max_concurrent_agents: 1
+           }) == true
 
     second_issue = %{eligible_issue | id: "issue-second", identifier: "MT-SECOND", priority: 4}
     third_issue = %{eligible_issue | id: "issue-third", identifier: "MT-THIRD", priority: 0}
@@ -2202,7 +2276,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert Enum.map(sorted, & &1.identifier) == ["MT-SECOND", "MT-ELIGIBLE", "MT-THIRD"]
 
     assert {:skip, :missing} =
-             Orchestrator.revalidate_issue_for_dispatch_for_test(eligible_issue, fn [_id] -> {:ok, []} end)
+             Orchestrator.revalidate_issue_for_dispatch_for_test(eligible_issue, fn [_id] ->
+               {:ok, []}
+             end)
 
     manual_issue = %Issue{
       id: "manual:issue-seeded",
@@ -2282,7 +2358,11 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         attempt: 3,
         issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
         dispatch_fun: fn state, refreshed_issue, attempt ->
-          send(self(), {:dispatch_fun_called, refreshed_issue.identifier, refreshed_issue.state, attempt})
+          send(
+            self(),
+            {:dispatch_fun_called, refreshed_issue.identifier, refreshed_issue.state, attempt}
+          )
+
           %{state | candidate_fetch_error: refreshed_issue.state}
         end
       )
@@ -2293,7 +2373,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     missing_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:ok, []} end)
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
+                   issue_fetcher: fn [_id] -> {:ok, []} end
+                 )
       end)
 
     assert missing_log =~
@@ -2302,7 +2384,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     stale_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "Done"}]} end)
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
+                   issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 )
       end)
 
     assert stale_log =~
@@ -2314,7 +2398,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     error_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:error, :boom} end)
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
+                   issue_fetcher: fn [_id] -> {:error, :boom} end
+                 )
       end)
 
     assert error_log =~
@@ -2628,7 +2714,11 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
                nil
              )
 
-    spawned_issue = %{issue | id: "issue-wrapper-default-spawn", identifier: "MT-WRAPPER-DEFAULT-SPAWN"}
+    spawned_issue = %{
+      issue
+      | id: "issue-wrapper-default-spawn",
+        identifier: "MT-WRAPPER-DEFAULT-SPAWN"
+    }
 
     state =
       Orchestrator.do_spawn_issue_worker_for_test(
@@ -4396,9 +4486,15 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
   test "stage-aware runtime dispatch routes await_checks issues to passive dispatch" do
     workspace_root =
-      Path.join(System.tmp_dir!(), "orchestrator-runtime-dispatch-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-runtime-dispatch-#{System.unique_integer([:positive])}"
+      )
 
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, tracker_kind: "memory")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      tracker_kind: "memory"
+    )
 
     issue = %Issue{
       id: "issue-runtime-passive",
@@ -4437,9 +4533,15 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
   test "stage-aware runtime dispatch routes merge_readiness issues to passive dispatch" do
     workspace_root =
-      Path.join(System.tmp_dir!(), "orchestrator-merge-readiness-dispatch-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-merge-readiness-dispatch-#{System.unique_integer([:positive])}"
+      )
 
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, tracker_kind: "memory")
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      tracker_kind: "memory"
+    )
 
     issue = %Issue{
       id: "issue-merge-readiness-passive",
@@ -4580,7 +4682,10 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     File.mkdir_p!(workspace)
     assert {_, 0} = System.cmd("git", ["init", "-b", branch], cd: workspace)
     assert {_, 0} = System.cmd("git", ["config", "user.name", "Symphony Test"], cd: workspace)
-    assert {_, 0} = System.cmd("git", ["config", "user.email", "symfony@example.com"], cd: workspace)
+
+    assert {_, 0} =
+             System.cmd("git", ["config", "user.email", "symfony@example.com"], cd: workspace)
+
     File.write!(Path.join(workspace, "README.md"), "# test\n")
     assert {_, 0} = System.cmd("git", ["add", "README.md"], cd: workspace)
     assert {_, 0} = System.cmd("git", ["commit", "-m", "init"], cd: workspace)

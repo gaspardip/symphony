@@ -33,7 +33,10 @@ defmodule SymphonyElixir.Workspace do
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
-        Logger.error("Workspace creation failed #{issue_log_context(issue_context)} error=#{Exception.message(error)}")
+        Logger.error(
+          "Workspace creation failed #{issue_log_context(issue_context)} error=#{Exception.message(error)}"
+        )
+
         {:error, error}
     end
   end
@@ -51,7 +54,7 @@ defmodule SymphonyElixir.Workspace do
         prepare_bootstrap_workspace(workspace)
 
       File.dir?(workspace) ->
-        if checkout_repair_required?(workspace) or reset_required?(workspace) do
+        if reset_required?(workspace) or checkout_repair_required?(workspace) do
           create_workspace(workspace)
         else
           clean_tmp_artifacts(workspace)
@@ -90,11 +93,16 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp stale_runtime_metadata_only?(workspace) do
-    workspace
-    |> File.ls!()
-    |> Enum.reject(&MapSet.member?(@excluded_entries, &1))
-    |> MapSet.new()
-    |> MapSet.equal?(@runtime_metadata_entries)
+    case File.ls(workspace) do
+      {:ok, entries} ->
+        entries
+        |> Enum.reject(&MapSet.member?(@excluded_entries, &1))
+        |> MapSet.new()
+        |> MapSet.equal?(@runtime_metadata_entries)
+
+      {:error, _reason} ->
+        false
+    end
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
@@ -283,7 +291,9 @@ defmodule SymphonyElixir.Workspace do
   defp run_hook(command, workspace, issue_context, hook_name) do
     timeout_ms = Config.workspace_hooks()[:timeout_ms]
 
-    Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace}")
+    Logger.info(
+      "Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace}"
+    )
 
     task =
       Task.async(fn ->
@@ -297,7 +307,9 @@ defmodule SymphonyElixir.Workspace do
       nil ->
         Task.shutdown(task, :brutal_kill)
 
-        Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} timeout_ms=#{timeout_ms}")
+        Logger.warning(
+          "Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} timeout_ms=#{timeout_ms}"
+        )
 
         {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
     end
@@ -310,7 +322,9 @@ defmodule SymphonyElixir.Workspace do
   defp handle_hook_command_result({output, status}, workspace, issue_context, hook_name) do
     sanitized_output = sanitize_hook_output_for_log(output)
 
-    Logger.warning("Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}")
+    Logger.warning(
+      "Workspace hook failed hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} status=#{status} output=#{inspect(sanitized_output)}"
+    )
 
     {:error, {:workspace_hook_failed, hook_name, status, output}}
   end
