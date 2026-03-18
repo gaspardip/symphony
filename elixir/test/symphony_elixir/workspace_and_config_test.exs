@@ -332,6 +332,54 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace recreates canonical runtime directories when the git checkout is missing" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-missing-git-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "restored clone\n")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone --depth 1 #{template_repo} ."
+      )
+
+      workspace = Path.join(workspace_root, "MT-MISSING-GIT")
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.write!(Path.join(workspace, "stale.txt"), "remove me\n")
+
+      :ok =
+        RunStateStore.save(workspace, %{
+          issue_id: "issue-missing-git",
+          issue_identifier: "MT-MISSING-GIT",
+          issue_source: "manual",
+          runner_instance_id: Config.runner_instance_id(),
+          runner_workspace_root: workspace_root,
+          stage: "checkout"
+        })
+
+      assert {:ok, recreated_workspace} = Workspace.create_for_issue("MT-MISSING-GIT")
+      assert recreated_workspace == workspace
+      assert File.exists?(Path.join(workspace, ".git"))
+      assert File.read!(Path.join(workspace, "README.md")) == "restored clone\n"
+      refute File.exists?(Path.join(workspace, "stale.txt"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace replaces stale non-directory paths" do
     workspace_root =
       Path.join(

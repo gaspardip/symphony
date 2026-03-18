@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, RunStateStore}
+  alias SymphonyElixir.{Config, RunInspector, RunStateStore}
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
   @bootstrap_metadata_entries MapSet.new([".symphony"])
@@ -75,11 +75,16 @@ defmodule SymphonyElixir.Workspace do
   defp reset_required?(workspace) when is_binary(workspace) do
     case RunStateStore.load(workspace) do
       {:ok, run_state} ->
-        not RunStateStore.canonical_workspace_for_current_runtime?(workspace, run_state)
+        not RunStateStore.canonical_workspace_for_current_runtime?(workspace, run_state) or
+          checkout_reset_required?(workspace)
 
       _ ->
         false
     end
+  end
+
+  defp checkout_reset_required?(workspace) do
+    Config.policy_require_checkout?() and not RunInspector.inspect(workspace).git?
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
