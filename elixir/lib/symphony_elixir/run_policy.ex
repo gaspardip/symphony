@@ -670,6 +670,31 @@ defmodule SymphonyElixir.RunPolicy do
     )
   end
 
+  defp broad_implement_focus_insufficient_violation(observed, metadata, next_required_path) do
+    details =
+      case next_required_path do
+        path when is_binary(path) and path != "" ->
+          "Observed per-turn input #{observed} after a file-only retry. Symphony needs one additional exact path before it can continue: #{path}."
+
+        _ ->
+          "Observed per-turn input #{observed} after a file-only retry, but no exact next file was surfaced for a bounded expansion."
+      end
+
+    violation(:broad_implement_focus_insufficient,
+      summary: "The file-only broad retry was too narrow to finish the work.",
+      details: details,
+      metadata: metadata
+    )
+  end
+
+  defp broad_implement_expansion_exhaustion_violation(observed, metadata) do
+    violation(:broad_implement_expansion_exhausted,
+      summary: "The bounded broad-implement expansion retry was exhausted.",
+      details: "Observed per-turn input #{observed} after Symphony retried with the focused file plus one explicit expansion path.",
+      metadata: metadata
+    )
+  end
+
   defp workload_restricted_violation(summary, details, human_action) do
     violation(:policy_workload_restricted,
       summary: summary,
@@ -910,34 +935,131 @@ defmodule SymphonyElixir.RunPolicy do
     retry_count = broad_implement_retry_count(resume_context)
     can_retry? = retry_count < (broad_implement_budget[:auto_retry_limit] || 0)
 
-    persisted_resume_context =
-      broad_implement_resume_context_for_budget_retry(
-        resume_context,
-        running_entry,
-        "budget.per_turn_input_exceeded",
-        current_turn_input,
-        %{
-          budget_retry_count: retry_count + 1,
-          budget_pressure_level: broad_implement_pressure_level_for_retry(retry_count + 1),
-          budget_auto_narrowed: true
-        }
-      )
+    primary_target_path = broad_implement_primary_target_path(running_entry, resume_context)
+    expansion_used? = truthy?(Map.get(resume_context, :budget_expansion_used))
+    next_required_path = broad_implement_next_required_path(running_entry, resume_context, primary_target_path)
 
-    persist_resume_context(issue, running_entry, persisted_resume_context)
+    cond do
+      retry_count == 0 and can_retry? and is_binary(primary_target_path) ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.per_turn_input_exceeded",
+            current_turn_input,
+            %{
+              budget_retry_count: retry_count + 1,
+              budget_pressure_level: broad_implement_pressure_level_for_retry(retry_count + 1),
+              budget_auto_narrowed: true,
+              target_paths: [primary_target_path],
+              next_required_path: nil,
+              budget_expansion_used: false
+            }
+          )
 
-    if can_retry? do
-      {:retry,
-       %{
-         kind: :broad_implement_budget_retry,
-         summary: "Adaptive broad-implement retry scheduled after token budget pressure.",
-         budget_mode: "broad_implement",
-         resume_context: persisted_resume_context,
-         observed_input_tokens: current_turn_input,
-         retry_count: retry_count + 1
-       }}
-    else
-      metadata = broad_implement_budget_metadata(running_entry, persisted_resume_context)
-      stop_issue(issue, broad_implement_exhaustion_violation(current_turn_input, metadata), workspace)
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+
+        {:retry,
+         %{
+           kind: :broad_implement_budget_retry,
+           summary: "Adaptive broad-implement retry scheduled with one focused file.",
+           budget_mode: "broad_implement",
+           resume_context: persisted_resume_context,
+           observed_input_tokens: current_turn_input,
+           retry_count: retry_count + 1
+         }}
+
+      retry_count >= 1 and can_retry? and not expansion_used? and is_binary(primary_target_path) and
+          is_binary(next_required_path) ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.per_turn_input_exceeded",
+            current_turn_input,
+            %{
+              budget_retry_count: retry_count + 1,
+              budget_pressure_level: broad_implement_pressure_level_for_retry(retry_count + 1),
+              budget_auto_narrowed: true,
+              target_paths: [primary_target_path, next_required_path],
+              next_required_path: next_required_path,
+              budget_expansion_used: true
+            }
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+
+        {:retry,
+         %{
+           kind: :broad_implement_budget_expansion_retry,
+           summary: "Adaptive broad-implement retry scheduled with one explicit expansion file.",
+           budget_mode: "broad_implement",
+           resume_context: persisted_resume_context,
+           observed_input_tokens: current_turn_input,
+           retry_count: retry_count + 1
+         }}
+
+      retry_count >= 1 and not expansion_used? and is_binary(primary_target_path) ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.broad_implement_focus_insufficient",
+            current_turn_input,
+            %{
+              budget_pressure_level: "critical",
+              target_paths: [primary_target_path],
+              next_required_path: next_required_path,
+              budget_expansion_used: false
+            }
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+
+        metadata = broad_implement_budget_metadata(running_entry, persisted_resume_context)
+
+        stop_issue(
+          issue,
+          broad_implement_focus_insufficient_violation(
+            current_turn_input,
+            metadata,
+            next_required_path
+          ),
+          workspace
+        )
+
+      expansion_used? ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.broad_implement_expansion_exhausted",
+            current_turn_input,
+            %{budget_pressure_level: "critical"}
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+        metadata = broad_implement_budget_metadata(running_entry, persisted_resume_context)
+
+        stop_issue(
+          issue,
+          broad_implement_expansion_exhaustion_violation(current_turn_input, metadata),
+          workspace
+        )
+
+      true ->
+        persisted_resume_context =
+          broad_implement_resume_context_for_budget_retry(
+            resume_context,
+            running_entry,
+            "budget.broad_implement_scope_exhausted",
+            current_turn_input,
+            %{budget_pressure_level: "critical"}
+          )
+
+        persist_resume_context(issue, running_entry, persisted_resume_context)
+        metadata = broad_implement_budget_metadata(running_entry, persisted_resume_context)
+        stop_issue(issue, broad_implement_exhaustion_violation(current_turn_input, metadata), workspace)
     end
   end
 
@@ -1155,6 +1277,8 @@ defmodule SymphonyElixir.RunPolicy do
   defp review_fix_resume_context_key("budget_auto_narrowed"), do: :budget_auto_narrowed
   defp review_fix_resume_context_key("target_paths"), do: :target_paths
   defp review_fix_resume_context_key("already_learned"), do: :already_learned
+  defp review_fix_resume_context_key("next_required_path"), do: :next_required_path
+  defp review_fix_resume_context_key("budget_expansion_used"), do: :budget_expansion_used
   defp review_fix_resume_context_key("token_pressure"), do: :token_pressure
   defp review_fix_resume_context_key(_key), do: nil
 
@@ -1219,7 +1343,8 @@ defmodule SymphonyElixir.RunPolicy do
          overrides
        ) do
     turn_count = Map.get(running_entry, :turn_count, 0)
-    target_paths = broad_implement_target_paths(running_entry, resume_context)
+    override_map = Enum.into(overrides, %{})
+    target_paths = Map.get(override_map, :target_paths, broad_implement_target_paths(running_entry, resume_context))
     already_learned = broad_implement_already_learned(running_entry, resume_context, target_paths)
 
     resume_context
@@ -1231,8 +1356,9 @@ defmodule SymphonyElixir.RunPolicy do
     |> Map.put(:budget_last_observed_input_tokens, observed_tokens)
     |> maybe_put_broad_retry_target_paths(target_paths)
     |> maybe_put_broad_retry_learned(already_learned)
+    |> maybe_put_broad_retry_next_required_path(Map.get(override_map, :next_required_path))
     |> Map.put(:token_pressure, "high")
-    |> Map.merge(Enum.into(overrides, %{}))
+    |> Map.merge(override_map)
   end
 
   defp broad_implement_retry_count(resume_context) do
@@ -1253,11 +1379,48 @@ defmodule SymphonyElixir.RunPolicy do
       retry_count: broad_implement_retry_count(resume_context),
       pressure_level: Map.get(resume_context, :budget_pressure_level),
       auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
-      target_paths: Map.get(resume_context, :target_paths, [])
+      target_paths: Map.get(resume_context, :target_paths, []),
+      next_required_path: Map.get(resume_context, :next_required_path),
+      expansion_used: truthy?(Map.get(resume_context, :budget_expansion_used))
     }
   end
 
-  defp broad_implement_target_paths(running_entry, resume_context)
+  defp broad_implement_primary_target_path(running_entry, resume_context)
+       when is_map(running_entry) and is_map(resume_context) do
+    resume_context
+    |> Map.get(:target_paths, [])
+    |> normalize_candidate_paths()
+    |> case do
+      [path | _rest] ->
+        path
+
+      [] ->
+        running_entry
+        |> broad_implement_candidate_paths(resume_context)
+        |> List.first()
+    end
+  end
+
+  defp broad_implement_primary_target_path(_running_entry, _resume_context), do: nil
+
+  defp broad_implement_next_required_path(running_entry, resume_context, primary_target_path)
+       when is_map(running_entry) and is_map(resume_context) and is_binary(primary_target_path) do
+    existing =
+      case Map.get(resume_context, :next_required_path) do
+        path when is_binary(path) and path != "" and path != primary_target_path -> path
+        _ -> nil
+      end
+
+    existing ||
+      running_entry
+      |> broad_implement_candidate_paths(resume_context)
+      |> Enum.reject(&(&1 == primary_target_path))
+      |> List.first()
+  end
+
+  defp broad_implement_next_required_path(_running_entry, _resume_context, _primary_target_path), do: nil
+
+  defp broad_implement_candidate_paths(running_entry, resume_context)
        when is_map(running_entry) and is_map(resume_context) do
     existing_paths =
       resume_context
@@ -1282,7 +1445,14 @@ defmodule SymphonyElixir.RunPolicy do
     |> Kernel.++(dirty_paths)
     |> Kernel.++(summary_paths)
     |> normalize_candidate_paths()
-    |> Enum.take(3)
+    |> Enum.take(4)
+  end
+
+  defp broad_implement_candidate_paths(_running_entry, _resume_context), do: []
+
+  defp broad_implement_target_paths(running_entry, resume_context)
+       when is_map(running_entry) and is_map(resume_context) do
+    broad_implement_candidate_paths(running_entry, resume_context)
   end
 
   defp broad_implement_target_paths(_running_entry, _resume_context), do: []
@@ -1342,6 +1512,11 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp maybe_put_broad_retry_learned(resume_context, nil), do: resume_context
   defp maybe_put_broad_retry_learned(resume_context, text), do: Map.put(resume_context, :already_learned, text)
+
+  defp maybe_put_broad_retry_next_required_path(resume_context, nil), do: Map.delete(resume_context, :next_required_path)
+
+  defp maybe_put_broad_retry_next_required_path(resume_context, path),
+    do: Map.put(resume_context, :next_required_path, path)
 
   defp normalize_candidate_paths(paths) when is_list(paths) do
     normalized =

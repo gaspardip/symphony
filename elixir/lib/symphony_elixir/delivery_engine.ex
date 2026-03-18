@@ -2150,7 +2150,8 @@ defmodule SymphonyElixir.DeliveryEngine do
             maybe_broad_retry_issue_brief(issue, resume_context),
             "",
             "Broad-budget retry rules:",
-            "- First identify the smallest code path that can advance the ticket and limit the turn to that path.",
+            "- First identify the smallest code path that can advance the ticket and limit the turn to that exact file.",
+            "- If that file is insufficient, name one exact next file instead of broadening the retry heuristically.",
             "- Do not rescan the full repo, reread long docs, or dump broad diffs.",
             "- Prefer 1 to 3 targeted file reads before editing.",
             "- Do not run full validation, smoke, build, or test commands during `implement`.",
@@ -2456,12 +2457,14 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp broad_resume_context_block(resume_context) when is_map(resume_context) do
     target_paths = Map.get(resume_context, :target_paths, [])
+    next_required_path = Map.get(resume_context, :next_required_path)
 
     [
       "Broad implement retry lane: active",
       maybe_named_line("Budget pressure", resume_context[:budget_pressure_level], 40),
       maybe_named_line("Budget retry count", resume_context[:budget_retry_count], 20),
       maybe_named_list("Target paths", target_paths, 6),
+      maybe_named_line("Next required path", next_required_path, 200),
       maybe_named_multiline("Already learned", resume_context[:already_learned]),
       maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200),
       maybe_broad_retry_summary_line(resume_context, target_paths),
@@ -2507,11 +2510,14 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp broad_retry_next_objective(resume_context) when is_map(resume_context) do
     case Map.get(resume_context, :target_paths, []) do
       [path] ->
-        "Advance the ticket by working only in `#{path}` and any directly adjacent helper needed to complete that path."
+        "Advance the ticket by working only in `#{path}`. If one additional file is strictly required, name the exact path and stop instead of broadening the retry."
+
+      [primary_path, expansion_path] ->
+        "Advance the ticket by working only in `#{primary_path}` and `#{expansion_path}`. Do not read or edit any other repo paths in this retry."
 
       paths when is_list(paths) and paths != [] ->
-        joined = Enum.map_join(Enum.take(paths, 3), ", ", &"`#{&1}`")
-        "Advance the ticket by working only in the smallest path cluster: #{joined}."
+        joined = Enum.map_join(Enum.take(paths, 2), ", ", &"`#{&1}`")
+        "Advance the ticket by working only in the explicitly approved paths: #{joined}."
 
       _ ->
         Map.get(resume_context, :next_objective) ||
@@ -2549,6 +2555,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         :budget_auto_narrowed,
         :target_paths,
         :already_learned,
+        :next_required_path,
+        :budget_expansion_used,
         :token_pressure
       ])
     else
@@ -2660,6 +2668,8 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_resume_context_key("budget_auto_narrowed"), do: :budget_auto_narrowed
   defp normalize_resume_context_key("target_paths"), do: :target_paths
   defp normalize_resume_context_key("already_learned"), do: :already_learned
+  defp normalize_resume_context_key("next_required_path"), do: :next_required_path
+  defp normalize_resume_context_key("budget_expansion_used"), do: :budget_expansion_used
   defp normalize_resume_context_key("token_pressure"), do: :token_pressure
   defp normalize_resume_context_key(_key), do: nil
 
@@ -2675,7 +2685,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp broad_retry_execution_hint(repo_map, resume_context) when is_map(resume_context) do
-    target_paths = Map.get(resume_context, :target_paths, []) |> Enum.take(3)
+    target_paths = Map.get(resume_context, :target_paths, []) |> Enum.take(2)
     already_learned = summarized_text(Map.get(resume_context, :already_learned), 220)
 
     [
@@ -2692,9 +2702,14 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp broad_retry_focus_line([]), do: "Focus path: choose one concrete file or subsystem before continuing."
 
-  defp broad_retry_focus_line(paths) do
-    "Focus path: #{Enum.map_join(paths, ", ", &"`#{&1}`")}. Stay inside this path unless a directly adjacent helper is strictly required."
-  end
+  defp broad_retry_focus_line([path]),
+    do: "Focus path: `#{path}`. Stay inside this file. If one more file is strictly required, name the exact path instead of expanding heuristically."
+
+  defp broad_retry_focus_line([primary_path, expansion_path]),
+    do: "Focus path: `#{primary_path}` plus approved expansion `#{expansion_path}`. Do not read outside these two files in this retry."
+
+  defp broad_retry_focus_line(paths),
+    do: "Focus path: #{Enum.map_join(paths, ", ", &"`#{&1}`")}. Keep the retry limited to these explicit files."
 
   defp broad_retry_learned_line(nil), do: nil
   defp broad_retry_learned_line(text), do: "Already learned: #{text}"
@@ -2711,7 +2726,15 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp maybe_broad_retry_dirty_files_line(_resume_context, _target_paths), do: nil
 
-  defp broad_retry_repo_hint_line(nil, paths) when paths != [], do: "Execution hint: stay inside the focus path unless a directly adjacent helper is required."
+  defp broad_retry_repo_hint_line(nil, [path]),
+    do: "Execution hint: make progress inside `#{path}`; if that file is insufficient, report one exact next file."
+
+  defp broad_retry_repo_hint_line(nil, [primary_path, expansion_path]),
+    do: "Execution hint: work only in `#{primary_path}` and `#{expansion_path}`; avoid any other repo reads."
+
+  defp broad_retry_repo_hint_line(nil, paths) when paths != [],
+    do: "Execution hint: stay inside the explicit focus paths and avoid broad discovery."
+
   defp broad_retry_repo_hint_line(nil, _paths), do: "Execution hint: stay inside the first concrete path you confirm and avoid broad discovery."
 
   defp broad_retry_repo_hint_line(repo_map, paths) do

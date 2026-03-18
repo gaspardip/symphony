@@ -404,7 +404,7 @@ defmodule SymphonyElixir.CoreTest do
             budget_auto_narrowed: true,
             token_pressure: "high",
             last_turn_summary: "Mapped the parity bug to the issue payload presenter path.",
-            already_learned: "The parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
+            already_learned: "The parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex.",
             target_paths: ["elixir/lib/symphony_elixir_web/presenter.ex"],
             last_blocking_rule: "budget.per_turn_input_exceeded",
             dirty_files: ["elixir/lib/symphony_elixir_web/presenter.ex"],
@@ -424,10 +424,11 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Broad implement token pressure is active."
     assert prompt =~ "Execution hint:"
     assert prompt =~ "Focus path: `elixir/lib/symphony_elixir_web/presenter.ex`."
-    assert prompt =~ "Stay inside this path unless a directly adjacent helper is strictly required."
+    assert prompt =~ "If one more file is strictly required, name the exact path instead of expanding heuristically."
     assert prompt =~ "Already learned: The parity bug is concentrated"
     assert prompt =~ "Exact next objective:"
-    assert prompt =~ "Advance the ticket by working only in `elixir/lib/symphony_elixir_web/presenter.ex`"
+    assert prompt =~ "Advance the ticket by working only in `elixir/lib/symphony_elixir_web/presenter.ex`."
+    assert prompt =~ "If one additional file is strictly required, name the exact path and stop"
     assert prompt =~ "Target paths:\n- elixir/lib/symphony_elixir_web/presenter.ex"
     refute prompt =~ "Pending PR review feedback"
     refute prompt =~ "Pending PR review claims"
@@ -436,6 +437,46 @@ defmodule SymphonyElixir.CoreTest do
     refute prompt =~ "Last implementation summary:"
     refute prompt =~ "Issue brief:"
     refute prompt =~ "Repo map:"
+  end
+
+  test "implement prompt bounds broad implement expansion retries to two explicit files" do
+    issue = %Issue{
+      id: "issue-broad-budget-expansion-prompt",
+      identifier: "MT-BROAD-EXPANSION",
+      title: "Shape bounded broad implement expansion",
+      description: "If one extra file is needed, the retry should stay inside exactly two explicit files."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          resume_context: %{
+            budget_mode: "broad_implement",
+            budget_pressure_level: "high",
+            budget_retry_count: 2,
+            budget_auto_narrowed: true,
+            budget_expansion_used: true,
+            token_pressure: "high",
+            already_learned: "Stay inside elixir/lib/symphony_elixir_web/presenter.ex, elixir/lib/symphony_elixir_web/router.ex and avoid unrelated reads or repo-wide rediscovery.",
+            target_paths: [
+              "elixir/lib/symphony_elixir_web/presenter.ex",
+              "elixir/lib/symphony_elixir_web/router.ex"
+            ],
+            next_required_path: "elixir/lib/symphony_elixir_web/router.ex",
+            last_blocking_rule: "budget.broad_implement_focus_insufficient"
+          }
+        },
+        [],
+        3,
+        3
+      )
+
+    assert prompt =~ "Focus path: `elixir/lib/symphony_elixir_web/presenter.ex` plus approved expansion `elixir/lib/symphony_elixir_web/router.ex`."
+    assert prompt =~ "Do not read outside these two files in this retry."
+    assert prompt =~ "Next required path: elixir/lib/symphony_elixir_web/router.ex"
+    assert prompt =~ "Advance the ticket by working only in `elixir/lib/symphony_elixir_web/presenter.ex` and `elixir/lib/symphony_elixir_web/router.ex`."
+    refute prompt =~ "adjacent helper"
   end
 
   test "implement prompt enters scoped review-fix budget lane from accepted review claims" do

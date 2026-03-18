@@ -5,8 +5,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 
 ## Acceptance
 - Broad implement runs keep the existing hard budget on the first turn.
-- A real persisted broad implement run can take one bounded narrow retry after `budget.per_turn_input_exceeded`.
-- The broad retry uses a leaner implement prompt than the default broad implement path.
+- A real persisted broad implement run can take one bounded file-only retry after `budget.per_turn_input_exceeded`.
+- If the file-only retry proves one more file is required, Symphony can take one bounded second retry with exactly one explicit expansion path.
 - Broad retry logic does not steal scoped review-fix or explicit CI-failure recovery work.
 - Exhausted broad retries stop with a broad-mode-specific rule instead of the generic budget rule.
 
@@ -15,7 +15,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Persist a bounded broad-mode retry state in `resume_context`.
 - Build a narrower broad implement retry prompt in `DeliveryEngine`.
 - Auto-reschedule the first broad retry without increasing the cap.
-- Stop on a specific broad-mode exhaustion rule if the narrowed retry still overruns the budget.
+- Allow one explicit bounded second retry when the first focused file surfaces one exact next required path.
+- Stop on a specific broad-mode rule if the file-only retry is insufficient or the bounded expansion retry still overruns the budget.
 
 ## Work Log
 - Created `CLZ-32` from the live dogfood failure on `CLZ-30`, where the first real self-host implement turn stopped at `budget.per_turn_input_exceeded` with observed input `185018`.
@@ -38,6 +39,9 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Added direct regression coverage for the new broad retry lane, the CI-recovery exclusion, the new stop rule, and the narrowed prompt text.
 - Found the live completion seam: worker shutdown was still falling through to the generic budget stop because the broad retry gate required persisted `run_state.stage == "implement"` even when the live `dispatch_stage` was already `implement`.
 - Relaxed that gate to trust the live implement dispatch stage and added a regression for a stale persisted blocked state on retry.
+- Replaced the old “smallest path cluster” retry contract with a stricter two-step lane: the first broad retry now collapses to one exact target file, and only a later retry that surfaces one exact `next_required_path` can expand to two files.
+- Added two new broad-mode stop rules so operators can distinguish “one file was not enough” from “the one-file expansion retry was still exhausted.”
+- Tightened the broad retry prompt to remove the old “adjacent helper” guidance and instead tell the model to stay inside one file, or two explicitly approved files, with no heuristic expansion language.
 
 ## Evidence
 - Live dogfood failure proof:
@@ -56,6 +60,9 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Tightened prompt-shaping follow-up:
   `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/core_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
 - Live replay after the prompt-tightening follow-up reduced the narrowed broad retry to observed input `130231` while still stopping on `budget.broad_implement_scope_exhausted`; the remaining gap is now the last ~10k of broad retry overhead, not missing retry continuity.
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/rule_catalog_test.exs`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix escript.build`
 
 ## Next Step
-Commit the tighter broad retry prompt, restart the dogfood runner on the new CLZ-32 head, and replay `CLZ-32` again to see whether the narrowed retry can finally drop below the `120k` hard cap.
+Commit the bounded file-only plus one-file-expansion retry lane, restart the dogfood runner on the new CLZ-32 head, and replay `CLZ-32` again to see whether the first retry now stops with `budget.broad_implement_focus_insufficient` or reaches the new bounded expansion path cleanly.

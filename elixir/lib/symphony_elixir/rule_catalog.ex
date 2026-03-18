@@ -210,6 +210,16 @@ defmodule SymphonyElixir.RuleCatalog do
       failure_class: "budget",
       human_action: "The narrowed broad-implement retry is exhausted; trim the issue context further or intervene manually."
     },
+    broad_implement_focus_insufficient: %{
+      rule_id: "budget.broad_implement_focus_insufficient",
+      failure_class: "budget",
+      human_action: "Symphony proved one focused file is insufficient; approve the exact next file path or intervene manually."
+    },
+    broad_implement_expansion_exhausted: %{
+      rule_id: "budget.broad_implement_expansion_exhausted",
+      failure_class: "budget",
+      human_action: "The bounded broad-implement expansion retry is exhausted; split the work further or intervene manually."
+    },
     tracker_rate_limited: %{
       rule_id: "tracker.rate_limited",
       failure_class: "coordination",

@@ -84,7 +84,7 @@ defmodule SymphonyElixir.Config do
   @default_policy_review_fix_auto_retry_limit 3
   @default_policy_review_fix_narrow_scope_batch_size 1
   @default_policy_broad_implement_enabled true
-  @default_policy_broad_implement_auto_retry_limit 1
+  @default_policy_broad_implement_auto_retry_limit 2
   @default_codex_approval_policy %{
     "reject" => %{
       "sandbox_approval" => true,
