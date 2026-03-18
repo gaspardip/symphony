@@ -1,0 +1,27 @@
+id: observability
+title: Runtime Observability
+status: active
+summary: Telemetry, traces, metrics, structured logs, bounded debug replay, and repo-owned local stable/canary bootstrap for Symphony runtime behavior, with local observability defaults hardened to localhost-only Grafana exposure and anonymous viewer access.
+source_paths:
+  - docs/OBSERVABILITY_IMPLEMENTATION_PLAN.md
+  - docs/OBSERVABILITY_RUNBOOK.md
+  - docs/LOCAL_DOGFOOD_TOPOLOGY.md
+  - ops/local-topology.sh
+  - ops/observability
+  - elixir/lib/symphony_elixir/coverage_audit.ex
+  - elixir/lib/symphony_elixir/debug_artifacts.ex
+  - elixir/lib/symphony_elixir/log_file.ex
+  - elixir/test/symphony_elixir/telemetry_smoke_test.exs
+  - elixir/lib/symphony_elixir/http_server.ex
+  - elixir/lib/symphony_elixir_web/router.ex
+  - scripts/symphony-smoke.sh
+acceptance_signals:
+  - Symphony emits stage, token, proof, review, and operator observability signals with stable metadata
+  - Operators can inspect metrics, traces, logs, and bounded debug artifacts from a local self-host stack
+  - Operators can bootstrap local stable and canary runners with shared observability using repo-owned scripts and docs
+  - The local Grafana bootstrap remains usable for dogfood while avoiding anonymous admin access on a non-loopback bind
+  - Repo-owned smoke proves `/metrics`, `/api/v1/state`, `/api/v1/reports/delivery`, and bounded debug artifacts stay usable for dogfood debugging
+dependencies:
+  - runtime-core
+  - dogfood
+last_updated_by_issue: CLZ-22

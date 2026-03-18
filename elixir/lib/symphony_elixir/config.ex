@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Config do
   @default_workspace_root Path.join(System.tmp_dir!(), "symphony_workspaces")
   @default_runner_install_root Path.join(System.user_home!(), ".local/share/symphony-runner")
   @default_runner_instance_name "default"
+  @default_runner_channel "stable"
   @default_author_profile_path Path.join([System.get_env("CODEX_HOME") || Path.join(System.user_home!(), ".codex"), "symphony", "author_profile.json"])
   @default_credential_registry_path Path.join([System.get_env("CODEX_HOME") || Path.join(System.user_home!(), ".codex"), "symphony", "credential_registry.json"])
   @default_hook_timeout_ms 60_000
@@ -94,6 +95,14 @@ defmodule SymphonyElixir.Config do
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000
   @default_observability_render_interval_ms 16
+  @default_observability_metrics_enabled true
+  @default_observability_metrics_path "/metrics"
+  @default_observability_tracing_enabled true
+  @default_observability_structured_logs true
+  @default_observability_debug_artifacts_enabled true
+  @default_observability_debug_capture_on_failure true
+  @default_observability_debug_artifact_max_bytes 262_144
+  @default_observability_debug_artifact_tail_bytes 131_072
   @default_server_host "127.0.0.1"
   @workflow_options_schema NimbleOptions.new!(
                              tracker: [
@@ -165,6 +174,10 @@ defmodule SymphonyElixir.Config do
                                  instance_name: [
                                    type: {:or, [:string, nil]},
                                    default: @default_runner_instance_name
+                                 ],
+                                 channel: [
+                                   type: {:or, [:string, nil]},
+                                   default: @default_runner_channel
                                  ],
                                  self_host_project: [
                                    type: :boolean,
@@ -454,6 +467,45 @@ defmodule SymphonyElixir.Config do
                                  render_interval_ms: [
                                    type: :integer,
                                    default: @default_observability_render_interval_ms
+                                 ],
+                                 metrics_enabled: [
+                                   type: :boolean,
+                                   default: @default_observability_metrics_enabled
+                                 ],
+                                 metrics_path: [
+                                   type: :string,
+                                   default: @default_observability_metrics_path
+                                 ],
+                                 tracing_enabled: [
+                                   type: :boolean,
+                                   default: @default_observability_tracing_enabled
+                                 ],
+                                 structured_logs: [
+                                   type: :boolean,
+                                   default: @default_observability_structured_logs
+                                 ],
+                                 debug_artifacts: [
+                                   type: :map,
+                                   default: %{},
+                                   keys: [
+                                     enabled: [
+                                       type: :boolean,
+                                       default: @default_observability_debug_artifacts_enabled
+                                     ],
+                                     capture_on_failure: [
+                                       type: :boolean,
+                                       default: @default_observability_debug_capture_on_failure
+                                     ],
+                                     root: [type: {:or, [:string, nil]}, default: nil],
+                                     max_bytes: [
+                                       type: :pos_integer,
+                                       default: @default_observability_debug_artifact_max_bytes
+                                     ],
+                                     tail_bytes: [
+                                       type: :pos_integer,
+                                       default: @default_observability_debug_artifact_tail_bytes
+                                     ]
+                                   ]
                                  ]
                                ]
                              ],
@@ -478,7 +530,9 @@ defmodule SymphonyElixir.Config do
   @type tracker_kind :: String.t() | nil
   @type runner_settings :: %{
           install_root: String.t() | nil,
-          instance_name: String.t() | nil
+          instance_name: String.t() | nil,
+          channel: String.t(),
+          self_host_project: boolean()
         }
   @type manual_settings :: %{
           enabled: boolean(),
@@ -570,6 +624,22 @@ defmodule SymphonyElixir.Config do
           after_run: String.t() | nil,
           before_remove: String.t() | nil,
           timeout_ms: pos_integer()
+        }
+  @type observability_settings :: %{
+          dashboard_enabled: boolean(),
+          refresh_ms: pos_integer(),
+          render_interval_ms: pos_integer(),
+          metrics_enabled: boolean(),
+          metrics_path: String.t(),
+          tracing_enabled: boolean(),
+          structured_logs: boolean(),
+          debug_artifacts: %{
+            enabled: boolean(),
+            capture_on_failure: boolean(),
+            root: String.t(),
+            max_bytes: pos_integer(),
+            tail_bytes: pos_integer()
+          }
         }
 
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
@@ -703,6 +773,7 @@ defmodule SymphonyElixir.Config do
     %{
       install_root: runner_install_root(),
       instance_name: runner_instance_name(),
+      channel: runner_channel(),
       self_host_project: runner_self_host_project?()
     }
   end
@@ -729,6 +800,19 @@ defmodule SymphonyElixir.Config do
       _ ->
         @default_runner_instance_name
     end
+  end
+
+  @spec runner_channel() :: String.t()
+  def runner_channel do
+    validated_workflow_options()
+    |> get_in([:runner, :channel])
+    |> resolve_env_value(System.get_env("SYMPHONY_RUNNER_CHANNEL"))
+    |> normalize_runner_channel()
+  end
+
+  @spec runner_instance_id() :: String.t()
+  def runner_instance_id do
+    "#{runner_channel()}:#{runner_instance_name()}"
   end
 
   @spec runner_self_host_project?() :: boolean()
@@ -1078,6 +1162,26 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:observability, :dashboard_enabled])
   end
 
+  @spec observability() :: observability_settings()
+  def observability do
+    %{
+      dashboard_enabled: observability_enabled?(),
+      refresh_ms: observability_refresh_ms(),
+      render_interval_ms: observability_render_interval_ms(),
+      metrics_enabled: observability_metrics_enabled?(),
+      metrics_path: observability_metrics_path(),
+      tracing_enabled: observability_tracing_enabled?(),
+      structured_logs: observability_structured_logs?(),
+      debug_artifacts: %{
+        enabled: observability_debug_artifacts_enabled?(),
+        capture_on_failure: observability_debug_capture_on_failure?(),
+        root: observability_debug_artifact_root(),
+        max_bytes: observability_debug_artifact_max_bytes(),
+        tail_bytes: observability_debug_artifact_tail_bytes()
+      }
+    }
+  end
+
   @spec observability_refresh_ms() :: pos_integer()
   def observability_refresh_ms do
     get_in(validated_workflow_options(), [:observability, :refresh_ms])
@@ -1086,6 +1190,53 @@ defmodule SymphonyElixir.Config do
   @spec observability_render_interval_ms() :: pos_integer()
   def observability_render_interval_ms do
     get_in(validated_workflow_options(), [:observability, :render_interval_ms])
+  end
+
+  @spec observability_metrics_enabled?() :: boolean()
+  def observability_metrics_enabled? do
+    get_in(validated_workflow_options(), [:observability, :metrics_enabled])
+  end
+
+  @spec observability_metrics_path() :: String.t()
+  def observability_metrics_path do
+    get_in(validated_workflow_options(), [:observability, :metrics_path])
+  end
+
+  @spec observability_tracing_enabled?() :: boolean()
+  def observability_tracing_enabled? do
+    get_in(validated_workflow_options(), [:observability, :tracing_enabled])
+  end
+
+  @spec observability_structured_logs?() :: boolean()
+  def observability_structured_logs? do
+    get_in(validated_workflow_options(), [:observability, :structured_logs])
+  end
+
+  @spec observability_debug_artifacts_enabled?() :: boolean()
+  def observability_debug_artifacts_enabled? do
+    get_in(validated_workflow_options(), [:observability, :debug_artifacts, :enabled])
+  end
+
+  @spec observability_debug_capture_on_failure?() :: boolean()
+  def observability_debug_capture_on_failure? do
+    get_in(validated_workflow_options(), [:observability, :debug_artifacts, :capture_on_failure])
+  end
+
+  @spec observability_debug_artifact_root() :: String.t()
+  def observability_debug_artifact_root do
+    validated_workflow_options()
+    |> get_in([:observability, :debug_artifacts, :root])
+    |> resolve_path_value(default_debug_artifact_root())
+  end
+
+  @spec observability_debug_artifact_max_bytes() :: pos_integer()
+  def observability_debug_artifact_max_bytes do
+    get_in(validated_workflow_options(), [:observability, :debug_artifacts, :max_bytes])
+  end
+
+  @spec observability_debug_artifact_tail_bytes() :: pos_integer()
+  def observability_debug_artifact_tail_bytes do
+    get_in(validated_workflow_options(), [:observability, :debug_artifacts, :tail_bytes])
   end
 
   @spec server_port() :: non_neg_integer() | nil
@@ -1480,7 +1631,20 @@ defmodule SymphonyElixir.Config do
     %{}
     |> put_if_present(:install_root, binary_value(Map.get(section, "install_root")))
     |> put_if_present(:instance_name, scalar_string_value(Map.get(section, "instance_name")))
+    |> put_if_present(:channel, scalar_string_value(Map.get(section, "channel")))
+    |> put_if_present(:self_host_project, boolean_value(Map.get(section, "self_host_project")))
   end
+
+  defp normalize_runner_channel(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "canary" -> "canary"
+      "experimental" -> "experimental"
+      "stable" -> "stable"
+      _ -> @default_runner_channel
+    end
+  end
+
+  defp normalize_runner_channel(_value), do: @default_runner_channel
 
   defp default_manual_store_root do
     case Application.get_env(:symphony_elixir, :log_file) do
@@ -1493,6 +1657,19 @@ defmodule SymphonyElixir.Config do
 
       _ ->
         Path.join(File.cwd!(), "manual_issues")
+    end
+  end
+
+  defp default_debug_artifact_root do
+    case Application.get_env(:symphony_elixir, :log_file) do
+      value when is_binary(value) ->
+        value
+        |> Path.expand()
+        |> Path.dirname()
+        |> Path.join("artifacts")
+
+      _ ->
+        Path.join(File.cwd!(), Path.join("log", "artifacts"))
     end
   end
 
@@ -1619,6 +1796,11 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:dashboard_enabled, boolean_value(Map.get(section, "dashboard_enabled")))
     |> put_if_present(:refresh_ms, integer_value(Map.get(section, "refresh_ms")))
     |> put_if_present(:render_interval_ms, integer_value(Map.get(section, "render_interval_ms")))
+    |> put_if_present(:metrics_enabled, boolean_value(Map.get(section, "metrics_enabled")))
+    |> put_if_present(:metrics_path, scalar_string_value(Map.get(section, "metrics_path")))
+    |> put_if_present(:tracing_enabled, boolean_value(Map.get(section, "tracing_enabled")))
+    |> put_if_present(:structured_logs, boolean_value(Map.get(section, "structured_logs")))
+    |> put_if_present(:debug_artifacts, extract_debug_artifact_options(Map.get(section, "debug_artifacts")))
   end
 
   defp extract_server_options(section) do
@@ -1626,6 +1808,17 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:port, non_negative_integer_value(Map.get(section, "port")))
     |> put_if_present(:host, scalar_string_value(Map.get(section, "host")))
   end
+
+  defp extract_debug_artifact_options(section) when is_map(section) do
+    %{}
+    |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
+    |> put_if_present(:capture_on_failure, boolean_value(Map.get(section, "capture_on_failure")))
+    |> put_if_present(:root, binary_value(Map.get(section, "root")))
+    |> put_if_present(:max_bytes, positive_integer_value(Map.get(section, "max_bytes")))
+    |> put_if_present(:tail_bytes, positive_integer_value(Map.get(section, "tail_bytes")))
+  end
+
+  defp extract_debug_artifact_options(_section), do: %{}
 
   defp policy_token_budget_value(section) when is_map(section) do
     %{}

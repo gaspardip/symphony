@@ -73,29 +73,75 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
 
   test "turn result rejects malformed contracts" do
     assert {:error, :invalid_turn_result} = TurnResult.normalize(:bad)
-    assert {:error, :invalid_files_touched} = TurnResult.normalize(valid_turn_result(files_touched: :bad))
-    assert {:error, {:invalid_boolean, :needs_another_turn}} = TurnResult.normalize(valid_turn_result(needs_another_turn: "yes"))
-    assert {:error, :unexpected_blocker_type} = TurnResult.normalize(valid_turn_result(blocker_type: "validation"))
-    assert {:error, :invalid_blocker_type} = TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "unknown"))
+
+    assert {:error, :invalid_files_touched} =
+             TurnResult.normalize(valid_turn_result(files_touched: :bad))
+
+    assert {:error, {:invalid_boolean, :needs_another_turn}} =
+             TurnResult.normalize(valid_turn_result(needs_another_turn: "yes"))
+
+    assert {:ok, %TurnResult{blocked: true, blocker_type: :implementation}} =
+             TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "unknown"))
 
     assert {:error, {:missing_keys, missing}} = TurnResult.normalize(%{})
     assert :summary in missing
     assert :files_touched in missing
   end
 
+  test "turn result coerces noisy non-blocking blocker types to none" do
+    assert {:ok, %TurnResult{blocked: false, blocker_type: :none}} =
+             TurnResult.normalize(valid_turn_result(blocker_type: "validation"))
+
+    assert {:ok, %TurnResult{blocked: false, blocker_type: :none}} =
+             TurnResult.normalize(valid_turn_result(blocker_type: "unknown"))
+  end
+
   test "turn result handles blank blocker types and invalid summary values" do
     assert {:error, :empty_summary} = TurnResult.normalize(valid_turn_result(summary: "   "))
     assert {:error, :invalid_summary} = TurnResult.normalize(valid_turn_result(summary: 123))
-    assert {:error, {:invalid_boolean, :blocked}} = TurnResult.normalize(valid_turn_result(blocked: "no"))
+
+    assert {:error, {:invalid_boolean, :blocked}} =
+             TurnResult.normalize(valid_turn_result(blocked: "no"))
 
     assert {:ok, %TurnResult{blocker_type: :none, blocked: true}} =
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "   "))
 
-    assert {:error, :invalid_blocker_type} =
+    assert {:ok, %TurnResult{blocker_type: :implementation, blocked: true}} =
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: "ok"))
 
-    assert {:error, :invalid_blocker_type} =
+    assert {:ok, %TurnResult{blocker_type: :implementation, blocked: true}} =
              TurnResult.normalize(valid_turn_result(blocked: true, blocker_type: 123))
+  end
+
+  test "turn result downgrades runtime-owned git blockers and preserves follow-up intent" do
+    assert {:ok, %TurnResult{} = result} =
+             TurnResult.normalize(
+               valid_turn_result(
+                 blocked: true,
+                 blocker_type: "implementation",
+                 summary:
+                   "Updated observability metadata normalization. Commit could not be created because git metadata for this worktree is outside the writable sandbox and escalation is disallowed in this session. One additional verified review claim remains for a subsequent turn."
+               )
+             )
+
+    assert result.blocked == false
+    assert result.blocker_type == :none
+    assert result.needs_another_turn == true
+  end
+
+  test "turn result keeps real implementation blockers intact" do
+    assert {:ok, %TurnResult{} = result} =
+             TurnResult.normalize(
+               valid_turn_result(
+                 blocked: true,
+                 blocker_type: "implementation",
+                 summary: "The referenced module still fails to compile due to an undefined function."
+               )
+             )
+
+    assert result.blocked == true
+    assert result.blocker_type == :implementation
+    assert result.needs_another_turn == false
   end
 
   test "log file configure creates the directory and tolerates repeated setup" do
@@ -156,7 +202,9 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
       end)
 
     assert log =~ "Failed to configure rotating log file handler"
-    assert {:error, {:not_found, :symphony_disk_log}} = :logger.get_handler_config(:symphony_disk_log)
+
+    assert {:error, {:not_found, :symphony_disk_log}} =
+             :logger.get_handler_config(:symphony_disk_log)
   end
 
   test "specs check handles direct files, ignores non-elixir files, and raises on parse errors" do
@@ -250,7 +298,10 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     end
     """)
 
-    assert Enum.map(SpecsCheck.missing_public_specs([module_path]), &SpecsCheck.finding_identifier/1) == [
+    assert Enum.map(
+             SpecsCheck.missing_public_specs([module_path]),
+             &SpecsCheck.finding_identifier/1
+           ) == [
              "ResetSpec.dropped/1"
            ]
   end
@@ -281,6 +332,7 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     assert Config.runner() == %{
              install_root: Path.join(runner_root, "install"),
              instance_name: "default",
+             channel: "stable",
              self_host_project: false
            }
 
@@ -389,6 +441,7 @@ defmodule SymphonyElixir.UtilityPhase6BackfillTest do
     assert :ok = Adapter.attach_link("issue-1", "Spec", "https://example.test/spec")
 
     assert_receive {:graphql_called, attachment_query, %{issueId: "issue-1", title: "Spec", url: "https://example.test/spec"}}
+
     assert attachment_query =~ "attachmentCreate"
 
     Process.put(

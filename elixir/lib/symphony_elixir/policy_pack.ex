@@ -186,9 +186,7 @@ defmodule SymphonyElixir.PolicyPack do
         |> normalize_issue_class(default_default_issue_class(normalize_name(pack.name) || :private_autopilot)),
       approval_gate_state:
         pack.approval_gate_state
-        |> normalize_approval_gate_state(
-          default_approval_gate_state(normalize_name(pack.name) || :private_autopilot)
-        ),
+        |> normalize_approval_gate_state(default_approval_gate_state(normalize_name(pack.name) || :private_autopilot)),
       preview_deploy_mode:
         pack.preview_deploy_mode
         |> normalize_preview_deploy_mode(default_preview_deploy_mode(normalize_name(pack.name) || :private_autopilot)),
@@ -225,23 +223,17 @@ defmodule SymphonyElixir.PolicyPack do
           pack.external_comment_mode,
           default_external_comment_mode(normalize_name(pack.name) || :private_autopilot)
         ),
-      draft_first_required:
-        normalize_boolean(pack.draft_first_required, default_draft_first_required(normalize_name(pack.name) || :private_autopilot)),
+      draft_first_required: normalize_boolean(pack.draft_first_required, default_draft_first_required(normalize_name(pack.name) || :private_autopilot)),
       confidence_language:
         normalize_string_setting(
           pack.confidence_language,
           default_confidence_language(normalize_name(pack.name) || :private_autopilot)
         ),
-      allowed_external_channels:
-        normalize_issue_labels(pack.allowed_external_channels),
-      preview_deploy_allowed:
-        normalize_boolean(pack.preview_deploy_allowed, default_preview_deploy_allowed(normalize_name(pack.name) || :private_autopilot)),
-      production_deploy_allowed:
-        normalize_boolean(pack.production_deploy_allowed, default_production_deploy_allowed(normalize_name(pack.name) || :private_autopilot)),
-      max_concurrent_runs_per_company:
-        normalize_optional_positive_integer(pack.max_concurrent_runs_per_company),
-      max_merges_per_day_per_repo:
-        normalize_optional_positive_integer(pack.max_merges_per_day_per_repo),
+      allowed_external_channels: normalize_issue_labels(pack.allowed_external_channels),
+      preview_deploy_allowed: normalize_boolean(pack.preview_deploy_allowed, default_preview_deploy_allowed(normalize_name(pack.name) || :private_autopilot)),
+      production_deploy_allowed: normalize_boolean(pack.production_deploy_allowed, default_production_deploy_allowed(normalize_name(pack.name) || :private_autopilot)),
+      max_concurrent_runs_per_company: normalize_optional_positive_integer(pack.max_concurrent_runs_per_company),
+      max_merges_per_day_per_repo: normalize_optional_positive_integer(pack.max_merges_per_day_per_repo),
       repo_frozen: normalize_boolean(pack.repo_frozen, false),
       company_frozen: normalize_boolean(pack.company_frozen, false),
       merge_window: normalize_merge_window(pack.merge_window),
@@ -629,7 +621,9 @@ defmodule SymphonyElixir.PolicyPack do
   @spec normalize_name(String.t() | atom() | nil) :: atom() | nil
   def normalize_name(value) when is_atom(value) do
     case value do
-      :client_safe -> :client_safe_shadow
+      :client_safe ->
+        :client_safe_shadow
+
       name ->
         if Map.has_key?(@default_packs, name), do: name, else: nil
     end

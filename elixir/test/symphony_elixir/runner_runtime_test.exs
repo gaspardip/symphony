@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.RunnerRuntimeTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.RunnerRuntime
+  alias SymphonyElixir.{Config, RunnerRuntime}
 
   test "runner runtime exposes health provenance manifest and canary evidence" do
     runner_root =
@@ -15,6 +15,7 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
 
     try do
       File.mkdir_p!(release_path)
+
       File.write!(
         manifest_path,
         Jason.encode!(%{
@@ -64,12 +65,18 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         runner_install_root: runner_root,
+        runner_instance_name: "dogfood-runner",
+        runner_channel: "canary",
         tracker_required_labels: ["dogfood:symphony"]
       )
 
       info = RunnerRuntime.info()
 
+      assert info.instance_id == "canary:dogfood-runner"
+      assert info.instance_name == "dogfood-runner"
+      assert info.channel == "canary"
       assert info.install_root == runner_root
+      assert info.workspace_root == Config.workspace_root()
       assert info.current_link_target == release_path
       assert info.promoted_release_sha == "promoted123"
       assert info.previous_release_sha == "previous456"
@@ -88,6 +95,7 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
       assert info.rollback_target_exists == false
       assert info.rule_id == "runner.canary_active"
       assert info.rollback_rule_id == "runner.rollback_recommended"
+      assert is_binary(info.runtime_version)
       assert [%{"event_type" => "runner.promoted"}] = info.history
 
       assert RunnerRuntime.effective_required_labels(
@@ -152,6 +160,7 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
       assert mismatch_health.dispatch_enabled == false
 
       File.mkdir_p!(release_missing_root)
+
       File.write!(
         RunnerRuntime.metadata_path(release_missing_root),
         Jason.encode!(%{
@@ -317,5 +326,104 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
     after
       File.rm_rf(runner_root)
     end
+  end
+
+  test "runner control wrappers expose command templates and execute the promotion script" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn command, args, opts ->
+        send(self(), {:runner_runtime_cmd, command, args, opts})
+        {"runner command ok\n", 0}
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    commands = RunnerRuntime.commands()
+    assert commands.inspect =~ "inspect"
+    assert commands.promote =~ "promote <git-ref>"
+    assert commands.record_canary =~ "record-canary <pass|fail>"
+    assert commands.rollback =~ "rollback [release-sha]"
+
+    assert {:ok, promote_payload} =
+             RunnerRuntime.promote("main", canary_labels: ["canary:symphony"])
+
+    assert promote_payload.ok == true
+    assert promote_payload.action == "promote"
+    assert promote_payload.output == "runner command ok"
+    assert promote_payload.command =~ "promote"
+    assert_receive {:runner_runtime_cmd, "bash", [script_path, "promote", "main", "--canary-label", "canary:symphony"], options}
+    assert script_path == RunnerRuntime.promotion_script_path()
+    assert options[:stderr_to_stdout] == true
+
+    assert {:ok, canary_payload} =
+             RunnerRuntime.record_canary("pass",
+               issues: ["CLZ-22"],
+               prs: ["https://github.com/gaspardip/symphony/pull/1"],
+               note: "healthy"
+             )
+
+    assert canary_payload.action == "record_canary"
+    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "record-canary", "pass", "--issue", "CLZ-22", "--pr", "https://github.com/gaspardip/symphony/pull/1", "--note", "healthy"], _options}
+
+    assert {:ok, rollback_payload} = RunnerRuntime.rollback("deadbeef")
+    assert rollback_payload.action == "rollback"
+    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "rollback", "deadbeef"], _options}
+
+    assert {:error, invalid_payload} = RunnerRuntime.record_canary("unknown")
+    assert invalid_payload.error == "invalid_result"
+  end
+
+  test "runner control wrappers expose rollback default path and command failures" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn command, args, opts ->
+        send(self(), {:runner_runtime_cmd, command, args, opts})
+
+        case args do
+          [_script_path, "rollback"] ->
+            {"rollback ok\n", 0}
+
+          [_script_path, "record-canary", "fail"] ->
+            {"runner failed\n", 7}
+
+          _ ->
+            {"unexpected\n", 1}
+        end
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    assert {:ok, rollback_payload} = RunnerRuntime.rollback()
+    assert rollback_payload.action == "rollback"
+    assert rollback_payload.output == "rollback ok"
+    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "rollback"], options}
+    assert options[:stderr_to_stdout] == true
+
+    assert {:error, failed_payload} = RunnerRuntime.record_canary("fail", note: "   ")
+    assert failed_payload.action == "record_canary"
+    assert failed_payload.error == "command_failed"
+    assert failed_payload.exit_status == 7
+    assert failed_payload.output == "runner failed"
+    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "record-canary", "fail"], _options}
   end
 end

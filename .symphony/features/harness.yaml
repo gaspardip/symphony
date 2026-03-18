@@ -3,12 +3,16 @@ title: Repo Harness
 status: active
 summary: Strict repo contract parsing, self-development harness, and publish-gated knowledge/progress artifacts for Symphony self-host runs.
 source_paths:
+  - AGENTS.md
   - .symphony/harness.yml
+  - .symphony/knowledge/codebase-map.md
+  - docs/AGENT_HARNESS.md
   - elixir/lib/symphony_elixir/repo_harness.ex
   - elixir/lib/symphony_elixir/agent_harness.ex
 acceptance_signals:
   - Repos fail fast when harness structure or artifacts are invalid
   - Self-host runs require knowledge, progress, and feature updates
+  - Agents can discover the harness and observability entrypoints from repo-owned docs instead of ad hoc instructions
 dependencies:
   - runtime-core
-last_updated_by_issue: CLZ-16
+last_updated_by_issue: CLZ-22

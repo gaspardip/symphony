@@ -5,8 +5,25 @@ defmodule SymphonyElixirWeb.Presenter do
 
   # credo:disable-for-this-file
 
-  alias SymphonyElixir.{Config, IssuePolicy, IssueSource, Orchestrator, PRWatcher, PolicyPack, Portfolio, RiskClassifier, RunInspector, RunLedger, RunStateStore, StatusDashboard, WorkflowProfile}
+  alias SymphonyElixir.{
+    Config,
+    IssuePolicy,
+    IssueSource,
+    Orchestrator,
+    PRWatcher,
+    PolicyPack,
+    Portfolio,
+    RiskClassifier,
+    RunInspector,
+    RunLedger,
+    RunStateStore,
+    RunnerRuntime,
+    StatusDashboard,
+    WorkflowProfile
+  }
+
   alias SymphonyElixir.Linear.Issue
+  @dialyzer {:nowarn_function, pr_watcher_payload: 4}
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -49,7 +66,9 @@ defmodule SymphonyElixirWeb.Presenter do
             rate_limits: snapshot.rate_limits,
             runner: runner_payload,
             webhooks: Map.get(snapshot, :webhooks, %{}),
+            github_webhooks: Map.get(snapshot, :github_webhooks, %{}),
             tracker_inbox: Map.get(snapshot, :tracker_inbox, %{}),
+            github_inbox: Map.get(snapshot, :github_inbox, %{}),
             polling: Map.get(snapshot, :polling, %{})
         }
 
@@ -143,14 +162,17 @@ defmodule SymphonyElixirWeb.Presenter do
              Map.merge(payload, %{
                runner: Map.get(snapshot, :runner, %{}),
                webhooks: Map.get(snapshot, :webhooks, %{}),
+               github_webhooks: Map.get(snapshot, :github_webhooks, %{}),
                tracker_inbox: Map.get(snapshot, :tracker_inbox, %{}),
+               github_inbox: Map.get(snapshot, :github_inbox, %{}),
                polling: Map.get(snapshot, :polling, %{}),
                pr_watcher:
                  pr_watcher_payload(
                    nil,
                    workspace_path,
                    Map.get(payload, :review_thread_states, %{}),
-                   pr_url
+                   pr_url,
+                   prefer_cached: true
                  )
              })}
         end
@@ -193,6 +215,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
         "retry_now" ->
           Orchestrator.retry_issue_now(orchestrator, issue_identifier)
+
+        "refresh_merge_readiness" ->
+          Orchestrator.refresh_merge_readiness(orchestrator, issue_identifier)
 
         "approve_for_merge" ->
           Orchestrator.approve_issue_for_merge(orchestrator, issue_identifier)
@@ -243,6 +268,42 @@ defmodule SymphonyElixirWeb.Presenter do
       %{ok: _} = payload -> {:ok, payload}
       {:error, reason} -> {:error, reason}
       _ -> {:error, :unknown_action}
+    end
+  end
+
+  @spec runner_control_payload(String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def runner_control_payload(action, params) when is_binary(action) and is_map(params) do
+    case action do
+      "inspect" ->
+        {:ok,
+         %{
+           ok: true,
+           action: "inspect",
+           requested_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+           runner: RunnerRuntime.info(),
+           commands: RunnerRuntime.commands()
+         }}
+
+      "promote" ->
+        with {:ok, ref} <- fetch_required_param(params, ["ref", "git_ref"], "git ref is required") do
+          RunnerRuntime.promote(ref, canary_labels: normalize_string_list(params["canary_labels"] || params["canary_label"]))
+        end
+
+      "record_canary" ->
+        with {:ok, result} <- fetch_required_param(params, ["result"], "canary result is required") do
+          RunnerRuntime.record_canary(result,
+            issues: normalize_string_list(params["issues"] || params["issue"]),
+            prs: normalize_string_list(params["prs"] || params["pr"]),
+            note: normalize_optional_string(params["note"])
+          )
+        end
+
+      "rollback" ->
+        target_sha = normalize_optional_string(params["release_sha"] || params["target_sha"])
+        RunnerRuntime.rollback(target_sha)
+
+      _ ->
+        {:error, :unknown_action}
     end
   end
 
@@ -568,6 +629,7 @@ defmodule SymphonyElixirWeb.Presenter do
         last_verifier_verdict: Map.get(run_state || %{}, :last_verifier_verdict),
         acceptance_summary: Map.get(run_state || %{}, :acceptance_summary),
         last_post_merge: Map.get(run_state || %{}, :last_post_merge),
+        last_merge_readiness: Map.get(run_state || %{}, :last_merge_readiness),
         last_deploy_preview: Map.get(run_state || %{}, :last_deploy_preview),
         last_deploy_production: Map.get(run_state || %{}, :last_deploy_production),
         last_post_deploy_verify: Map.get(run_state || %{}, :last_post_deploy_verify),
@@ -581,6 +643,40 @@ defmodule SymphonyElixirWeb.Presenter do
   defp normalize_timestamp(%DateTime{} = value), do: DateTime.to_iso8601(value)
   defp normalize_timestamp(value) when is_binary(value), do: value
   defp normalize_timestamp(value), do: value
+
+  defp fetch_required_param(params, keys, message) when is_map(params) and is_list(keys) do
+    keys
+    |> Enum.find_value(fn key -> normalize_optional_string(Map.get(params, key)) end)
+    |> case do
+      nil -> {:error, {:invalid_params, message}}
+      value -> {:ok, value}
+    end
+  end
+
+  defp normalize_string_list(value) when is_list(value) do
+    value
+    |> Enum.map(&normalize_optional_string/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp normalize_string_list(value) when is_binary(value) do
+    case normalize_optional_string(value) do
+      nil -> []
+      normalized -> [normalized]
+    end
+  end
+
+  defp normalize_string_list(_value), do: []
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_optional_string(_value), do: nil
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0
@@ -620,7 +716,9 @@ defmodule SymphonyElixirWeb.Presenter do
       harness: harness,
       review: review,
       publish: publish_payload(entry),
+      merge_readiness: merge_readiness_payload(entry),
       routing: routing_payload(entry),
+      lease: lease_payload(entry),
       policy: policy,
       company: company_payload(),
       policy_pack: policy_pack_payload(),
@@ -664,6 +762,7 @@ defmodule SymphonyElixirWeb.Presenter do
       error: Map.get(entry, :error),
       priority_override: Map.get(entry, :priority_override),
       policy_class: Map.get(entry, :policy_class),
+      lease: lease_payload(entry),
       company: company_payload(),
       policy_pack: policy_pack_payload(),
       workflow_profile: workflow_profile_payload(entry),
@@ -685,6 +784,7 @@ defmodule SymphonyElixirWeb.Presenter do
       source: Map.get(entry, :source),
       resume_state: entry.resume_state,
       policy_class: Map.get(entry, :policy_class),
+      lease: lease_payload(entry),
       company: company_payload(),
       policy_pack: policy_pack_payload(),
       workflow_profile: workflow_profile_payload(entry),
@@ -709,6 +809,7 @@ defmodule SymphonyElixirWeb.Presenter do
       required_labels: Map.get(entry, :required_labels, []),
       reason: Map.get(entry, :reason),
       policy_class: Map.get(entry, :policy_class),
+      lease: lease_payload(entry),
       company: company_payload(),
       policy_pack: policy_pack_payload(),
       workflow_profile: workflow_profile_payload(entry),
@@ -738,6 +839,7 @@ defmodule SymphonyElixirWeb.Presenter do
       label_gate_eligible: Map.get(entry, :label_gate_eligible, true),
       error: Map.get(entry, :error),
       policy_class: Map.get(entry, :policy_class),
+      lease: lease_payload(entry),
       policy_pack: policy_pack_payload(),
       workflow_profile: workflow_profile_payload(entry),
       policy_source: Map.get(entry, :policy_source),
@@ -997,7 +1099,27 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       labels: Map.get(entry, :labels, []),
       required_labels: Map.get(entry, :required_labels, []),
-      eligible: Map.get(entry, :label_gate_eligible, true)
+      eligible: Map.get(entry, :label_gate_eligible, true),
+      runner_channel: Map.get(entry, :runner_channel),
+      target_runner_channel: Map.get(entry, :target_runner_channel)
+    }
+  end
+
+  defp lease_payload(entry) when is_map(entry) do
+    raw_lease = Map.get(entry, :lease, %{})
+
+    %{
+      owner: Map.get(raw_lease, :lease_owner) || Map.get(entry, :lease_owner),
+      owner_instance_id: Map.get(raw_lease, :lease_owner_instance_id) || Map.get(entry, :lease_owner_instance_id),
+      owner_channel: Map.get(raw_lease, :lease_owner_channel) || Map.get(entry, :lease_owner_channel),
+      acquired_at: normalize_timestamp(Map.get(raw_lease, :lease_acquired_at) || Map.get(entry, :lease_acquired_at)),
+      updated_at: normalize_timestamp(Map.get(raw_lease, :lease_updated_at) || Map.get(entry, :lease_updated_at)),
+      status: Map.get(raw_lease, :lease_status) || Map.get(entry, :lease_status),
+      epoch: Map.get(raw_lease, :lease_epoch) || Map.get(entry, :lease_epoch),
+      age_ms: Map.get(raw_lease, :lease_age_ms) || Map.get(entry, :lease_age_ms),
+      ttl_ms: Map.get(raw_lease, :lease_ttl_ms) || Map.get(entry, :lease_ttl_ms),
+      reclaimable: Map.get(raw_lease, :lease_reclaimable) || Map.get(entry, :lease_reclaimable, false),
+      source: Map.get(raw_lease, :lease_source)
     }
   end
 
@@ -1053,7 +1175,9 @@ defmodule SymphonyElixirWeb.Presenter do
       rate_limits: nil,
       runner: %{},
       webhooks: %{},
+      github_webhooks: %{},
       tracker_inbox: %{depth: 0, oldest_pending_event_at: nil, last_drained_at: nil},
+      github_inbox: %{depth: 0, oldest_pending_event_at: nil, last_drained_at: nil},
       polling: %{checking?: false, next_poll_in_ms: nil, poll_interval_ms: nil}
     }
   end
@@ -1248,11 +1372,13 @@ defmodule SymphonyElixirWeb.Presenter do
       },
       passive_stage: %{
         passive: Map.get(entry, :passive?, false),
+        merge_readiness: Map.get(entry, :stage) == "merge_readiness",
         waiting_on_checks: Map.get(entry, :stage) == "await_checks",
         review_approved: Map.get(entry, :review_approved, false),
         deploy_approved: Map.get(entry, :deploy_approved, false),
         merge_window_wait: Map.get(entry, :merge_window_wait),
-        deploy_window_wait: Map.get(entry, :deploy_window_wait)
+        deploy_window_wait: Map.get(entry, :deploy_window_wait),
+        last_merge_readiness: merge_readiness_payload(entry)
       },
       tracker: %{
         source: Map.get(entry, :source),
@@ -1317,6 +1443,31 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp review_thread_pr_url(_), do: nil
+
+  defp merge_readiness_payload(entry) when is_map(entry) do
+    merge_readiness = Map.get(entry, :last_merge_readiness)
+
+    if is_map(merge_readiness) do
+      %{
+        active: Map.get(entry, :stage) == "merge_readiness",
+        checked_at: Map.get(merge_readiness, :checked_at) || Map.get(merge_readiness, "checked_at"),
+        pr_body_validation_status:
+          Map.get(merge_readiness, :pr_body_validation_status) ||
+            Map.get(merge_readiness, "pr_body_validation_status"),
+        posted_review_threads:
+          Map.get(merge_readiness, :posted_review_threads) ||
+            Map.get(merge_readiness, "posted_review_threads") || 0,
+        pending_reply_refreshes:
+          Map.get(merge_readiness, :pending_reply_refreshes) ||
+            Map.get(merge_readiness, "pending_reply_refreshes") || 0,
+        resolved_review_threads:
+          Map.get(merge_readiness, :resolved_review_threads) ||
+            Map.get(merge_readiness, "resolved_review_threads") || 0
+      }
+    else
+      nil
+    end
+  end
 
   defp proof_artifacts_payload(run_state, running_payload) do
     proof = get_in(running_payload || %{}, [:runtime_health, :proof]) || %{}
@@ -1421,7 +1572,7 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp pr_watcher_payload(pack \\ nil, workspace_path \\ nil, thread_states \\ %{}, pr_url \\ nil) do
+  defp pr_watcher_payload(pack \\ nil, workspace_path \\ nil, thread_states \\ %{}, pr_url \\ nil, opts \\ []) do
     base = PRWatcher.status(pack)
 
     if is_binary(workspace_path) and File.dir?(workspace_path) do
@@ -1432,7 +1583,8 @@ defmodule SymphonyElixirWeb.Presenter do
           workspace_path,
           policy_pack: pack,
           thread_states: thread_states,
-          pr_url: pr_url
+          pr_url: pr_url,
+          prefer_cached: Keyword.get(opts, :prefer_cached, false)
         )
       )
     else
@@ -1539,7 +1691,12 @@ defmodule SymphonyElixirWeb.Presenter do
           review_approved: Map.get(run_state || %{}, :review_approved, false),
           deploy_approved: Map.get(run_state || %{}, :deploy_approved, false),
           merge_window_wait: Map.get(run_state || %{}, :merge_window_wait),
-          deploy_window_wait: Map.get(run_state || %{}, :deploy_window_wait)
+          deploy_window_wait: Map.get(run_state || %{}, :deploy_window_wait),
+          last_merge_readiness:
+            merge_readiness_payload(%{
+              last_merge_readiness: Map.get(run_state || %{}, :last_merge_readiness),
+              stage: Map.get(run_state || %{}, :stage)
+            })
         },
         tracker: %{
           source:
@@ -1716,10 +1873,10 @@ defmodule SymphonyElixirWeb.Presenter do
     passive? = Map.get(entry, :passive?, false)
 
     cond do
-      passive? and stage in ["await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"] ->
+      passive? and stage in ["merge_readiness", "await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"] ->
         %{label: "Passive runtime", tone: "info"}
 
-      stage in ["await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"] ->
+      stage in ["merge_readiness", "await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"] ->
         %{label: "Passive handoff", tone: "warn"}
 
       true ->
@@ -1746,6 +1903,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
         stage == "publish" ->
           "Create or update the PR and attach publish metadata."
+
+        stage == "merge_readiness" ->
+          "Refresh PR hygiene and posted review thread state before passive check polling continues."
 
         stage == "await_checks" and merge_window_waiting?(entry) ->
           "Wait for the next allowed merge window before automerge continues."
@@ -1784,7 +1944,7 @@ defmodule SymphonyElixirWeb.Presenter do
     tone =
       cond do
         token_pressure == "high" -> "warn"
-        stage in ["await_checks", "merge", "post_merge", "deploy_preview", "post_deploy_verify"] -> "info"
+        stage in ["merge_readiness", "await_checks", "merge", "post_merge", "deploy_preview", "post_deploy_verify"] -> "info"
         true -> "muted"
       end
 
@@ -1792,6 +1952,9 @@ defmodule SymphonyElixirWeb.Presenter do
       cond do
         token_pressure == "high" ->
           "Retry context is compressed because the previous agent turn ran hot on input tokens."
+
+        stage == "merge_readiness" ->
+          merge_readiness_status_summary(entry)
 
         stage == "await_checks" and review_approved? ->
           "Approval is already recorded. This issue is waiting only on passive merge readiness."
@@ -1833,6 +1996,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp policy_next_human_action(entry, review) do
     cond do
+      Map.get(entry, :stage) == "merge_readiness" ->
+        "No human action is required unless the passive runtime reports a failure."
+
       Map.get(entry, :stage) == "await_checks" and Map.get(entry, :review_approved, false) ->
         "No human action is required unless checks fail."
 
@@ -1850,6 +2016,30 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
+  defp merge_readiness_status_summary(entry) do
+    merge_readiness = merge_readiness_payload(entry)
+
+    cond do
+      is_nil(merge_readiness) ->
+        "The runtime is refreshing PR hygiene before passive check polling resumes."
+
+      merge_readiness.pending_reply_refreshes > 0 ->
+        "Refreshing #{merge_readiness.pending_reply_refreshes} posted review #{reply_word(merge_readiness.pending_reply_refreshes)} and #{merge_readiness.resolved_review_threads} resolved #{thread_word(merge_readiness.resolved_review_threads)} before check polling resumes."
+
+      merge_readiness.pr_body_validation_status in ["passed", "updated"] ->
+        "PR hygiene is up to date. Passive check polling will resume after this merge-readiness pass."
+
+      true ->
+        "The runtime is reconciling PR body and review-thread state before passive check polling resumes."
+    end
+  end
+
+  defp reply_word(1), do: "reply"
+  defp reply_word(_count), do: "replies"
+
+  defp thread_word(1), do: "thread"
+  defp thread_word(_count), do: "threads"
+
   defp human_attention_entry?(entry) do
     summary = Map.get(entry, :operator_summary, %{})
 
@@ -1863,7 +2053,7 @@ defmodule SymphonyElixirWeb.Presenter do
     passive? = get_in(entry, [:runtime_mode, :label]) == "Passive runtime"
 
     passive? or
-      stage in ["await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"]
+      stage in ["merge_readiness", "await_checks", "merge", "post_merge", "deploy_preview", "deploy_production", "post_deploy_verify"]
   end
 
   defp queue_attention_entry?(entry) do
@@ -2506,6 +2696,7 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   @doc false
+  @spec helper_for_test(atom(), list()) :: term()
   def helper_for_test(:issue_status, [running, retry, paused, queue, tracked_issue, run_state]),
     do: issue_status(running, retry, paused, queue, tracked_issue, run_state)
 

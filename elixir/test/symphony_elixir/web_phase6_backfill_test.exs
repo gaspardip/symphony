@@ -228,6 +228,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                issue_identifier: issue.identifier,
                last_rule_id: "policy.review_required",
                last_failure_class: "policy",
+               last_merge_readiness: %{
+                 checked_at: "2026-03-17T08:30:00Z",
+                 pr_body_validation_status: "passed",
+                 posted_review_threads: 2,
+                 pending_reply_refreshes: 1,
+                 resolved_review_threads: 1
+               },
                last_decision_summary: "Blocked due to policy.review_required.",
                next_human_action: "Ask for human review.",
                last_decision: %{
@@ -268,6 +275,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.runtime_health.proof.compatibility_report_present
     assert payload.runtime_health.intake.company_mode == "client_safe"
     assert payload.runtime_health.summary == "Blocked due to policy.review_required."
+    assert payload.runtime_health.passive_stage.last_merge_readiness
+
+    assert payload.runtime_health.passive_stage.last_merge_readiness.pr_body_validation_status ==
+             "passed"
+
+    assert payload.runtime_health.passive_stage.last_merge_readiness.posted_review_threads == 2
     assert payload.last_decision.status == "failed"
     assert payload.last_decision.command == "./scripts/validate.sh"
     assert String.ends_with?(payload.last_decision.output, "…")
@@ -318,6 +331,51 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              Presenter.control_payload("bogus", "MT-WEB", %{}, orchestrator_name)
   end
 
+  test "presenter runner control payload validates params and executes runner commands" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn command, args, opts ->
+        send(self(), {:runner_runtime_cmd, command, args, opts})
+        {"runner ok\n", 0}
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    assert {:error, {:invalid_params, "git ref is required"}} =
+             Presenter.runner_control_payload("promote", %{})
+
+    assert {:ok, inspect_payload} = Presenter.runner_control_payload("inspect", %{})
+    assert inspect_payload.ok == true
+    assert is_map(inspect_payload.runner)
+    assert inspect_payload.commands.promote =~ "promote <git-ref>"
+
+    assert {:ok, promote_payload} =
+             Presenter.runner_control_payload("promote", %{
+               "ref" => "main",
+               "canary_labels" => ["canary:symphony"]
+             })
+
+    assert promote_payload.ok == true
+    assert promote_payload.action == "promote"
+    assert_receive {:runner_runtime_cmd, "bash", [_script, "promote", "main", "--canary-label", "canary:symphony"], _opts}
+
+    assert {:ok, rollback_payload} =
+             Presenter.runner_control_payload("rollback", %{"release_sha" => "deadbeef"})
+
+    assert rollback_payload.action == "rollback"
+    assert_receive {:runner_runtime_cmd, "bash", [_script, "rollback", "deadbeef"], _opts}
+  end
+
   test "observability api control returns 400 for unknown actions and 503 for unavailable orchestrators" do
     orchestrator_name = Module.concat(__MODULE__, :ApiControlOrchestrator)
 
@@ -335,6 +393,107 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                  "message" => "Orchestrator is unavailable"
                }
              }
+  end
+
+  test "observability api runner control returns validation and command payloads" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn _command, args, _opts ->
+        send(self(), {:runner_api_cmd, args})
+        {"runner api ok\n", 0}
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    orchestrator_name = Module.concat(__MODULE__, :ApiRunnerControlOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()})
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert json_response(post(build_conn(), "/api/v1/runner/actions/promote", %{}), 400) ==
+             %{
+               "error" => %{
+                 "code" => "invalid_params",
+                 "message" => "git ref is required"
+               }
+             }
+
+    response =
+      post(build_conn(), "/api/v1/runner/actions/promote", %{
+        "ref" => "main",
+        "canary_labels" => ["canary:symphony"]
+      })
+      |> json_response(200)
+
+    assert response["ok"] == true
+    assert response["action"] == "promote"
+    assert_receive {:runner_api_cmd, [_script, "promote", "main", "--canary-label", "canary:symphony"]}
+  end
+
+  test "observability api runner control maps inspect record_canary and command failures" do
+    previous_cmd_fun = Application.get_env(:symphony_elixir, :runner_runtime_cmd_fun)
+
+    Application.put_env(
+      :symphony_elixir,
+      :runner_runtime_cmd_fun,
+      fn _command, args, _opts ->
+        send(self(), {:runner_api_cmd, args})
+
+        case args do
+          [_script, "record-canary", "fail" | _rest] ->
+            {"runner command failed\n", 9}
+
+          _ ->
+            {"runner api ok\n", 0}
+        end
+      end
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_cmd_fun) do
+        Application.delete_env(:symphony_elixir, :runner_runtime_cmd_fun)
+      else
+        Application.put_env(:symphony_elixir, :runner_runtime_cmd_fun, previous_cmd_fun)
+      end
+    end)
+
+    orchestrator_name = Module.concat(__MODULE__, :ApiRunnerControlFailureOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot()})
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    inspect_response =
+      post(build_conn(), "/api/v1/runner/actions/inspect", %{})
+      |> json_response(200)
+
+    assert inspect_response["ok"] == true
+    assert inspect_response["action"] == "inspect"
+    assert is_map(inspect_response["runner"])
+
+    error_response =
+      post(build_conn(), "/api/v1/runner/actions/record_canary", %{
+        "result" => "fail",
+        "issue" => "CLZ-22",
+        "pr" => "https://github.com/gaspardip/symphony/pull/1"
+      })
+      |> json_response(409)
+
+    assert error_response["error"]["code"] == "runner_command_failed"
+    assert error_response["action"] == "record_canary"
+    assert error_response["exit_status"] == 9
+    assert_receive {:runner_api_cmd, [_script, "record-canary", "fail", "--issue", "CLZ-22", "--pr", "https://github.com/gaspardip/symphony/pull/1"]}
   end
 
   test "delivery report summarizes completed work in client-readable form" do
@@ -834,6 +993,8 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert state_payload.polling.dispatch_summary =~ "manual issues continue to dispatch"
     assert state_payload.pr_watcher.enabled == true
     assert state_payload.pr_watcher.mode == "draft_first"
+    assert state_payload.github_webhooks.health == "healthy"
+    assert state_payload.github_inbox.last_assignment.assignment_state == "processed"
     assert state_payload.triage.summary.attention_now >= 3
     assert state_payload.triage.summary.autonomous_now == 0
     assert state_payload.triage.summary.recently_finished == 0
@@ -849,6 +1010,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert running.policy.token_budget.per_turn_input.tone == "warn"
     assert running.policy.token_budget.per_issue_total.tone == "danger"
     assert running.policy.token_budget.per_issue_total_output.tone == "good"
+    assert running.lease.owner == "orchestrator-rich"
+    assert running.lease.status == "reclaimable"
+    assert running.lease.reclaimable == true
     assert running.last_decision.output == String.duplicate("x", 239) <> "…"
     assert Enum.any?(running.recent_activity, &(&1.message == "turn failed: compiler boom"))
     assert Enum.any?(state_payload.activity, &(&1.issue_identifier == "runner" and &1.message =~ "rollback suggested"))
@@ -865,11 +1029,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     [skipped] = state_payload.skipped
     assert skipped.reason == "missing labels"
+    assert skipped.lease.owner_channel == "canary"
     assert skipped.operator_summary.why_here == "Skipped"
 
     [queue] = state_payload.queue
     assert queue.label_gate_eligible == false
     assert queue.rank == 7
+    assert queue.lease.owner == "queue-owner"
     assert queue.operator_summary.why_here == "Queued"
     assert queue.operator_summary.automatic_next == "Wait for the required operator action before dispatch."
     assert Enum.any?(state_payload.triage.attention_now, &(&1.issue_identifier == "MT-PAUSED"))
@@ -948,6 +1114,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
            issue_identifier: "MT-ACTION"
          },
          {:retry_issue_now, "MT-ACTION"} => %{ok: true, action: "retry_now", issue_identifier: "MT-ACTION"},
+         {:refresh_merge_readiness, "MT-ACTION"} => %{
+           ok: true,
+           action: "refresh_merge_readiness",
+           issue_identifier: "MT-ACTION",
+           stage: "merge_readiness"
+         },
          {:approve_issue_for_merge, "MT-ACTION"} => {:error, :not_ready},
          {:reprioritize_issue, "MT-ACTION", 0} => %{
            ok: true,
@@ -986,6 +1158,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert {:ok, %{action: "retry_now"}} =
              Presenter.control_payload("retry_now", "MT-ACTION", %{}, orchestrator_name)
 
+    assert {:ok, %{action: "refresh_merge_readiness", stage: "merge_readiness"}} =
+             Presenter.control_payload("refresh_merge_readiness", "MT-ACTION", %{}, orchestrator_name)
+
     assert {:error, :not_ready} =
              Presenter.control_payload("approve_for_merge", "MT-ACTION", %{}, orchestrator_name)
 
@@ -1010,6 +1185,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert_receive {:orchestrator_call, {:stop_issue, "MT-ACTION"}}
     assert_receive {:orchestrator_call, {:hold_issue_for_human_review, "MT-ACTION"}}
     assert_receive {:orchestrator_call, {:retry_issue_now, "MT-ACTION"}}
+    assert_receive {:orchestrator_call, {:refresh_merge_readiness, "MT-ACTION"}}
     assert_receive {:orchestrator_call, {:approve_issue_for_merge, "MT-ACTION"}}
     assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-ACTION", 0}}
     assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-ACTION", nil}}
@@ -1444,6 +1620,22 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert attached.policy.merge_gate.label == "Awaiting review and checks"
     assert Enum.any?(attached.recent_activity, &(&1.message == "policy.pr_gate"))
 
+    merge_readiness = Map.fetch!(entries, "MT-MERGE-READINESS")
+    assert merge_readiness.runtime_mode.label == "Passive runtime"
+    assert merge_readiness.merge_readiness.active == true
+    assert merge_readiness.merge_readiness.pr_body_validation_status == "passed"
+    assert merge_readiness.runtime_health.passive_stage.merge_readiness == true
+    assert merge_readiness.status_summary.tone == "info"
+
+    assert merge_readiness.status_summary.automatic_next ==
+             "Refresh PR hygiene and posted review thread state before passive check polling continues."
+
+    assert merge_readiness.status_summary.summary ==
+             "Refreshing 1 posted review reply and 2 resolved threads before check polling resumes."
+
+    assert merge_readiness.policy.next_human_action ==
+             "No human action is required unless the passive runtime reports a failure."
+
     await_checks = Map.fetch!(entries, "MT-AWAIT-CHECKS")
     assert await_checks.policy.pr_gate.label == "PR attached"
     assert await_checks.policy.merge_gate.label == "Awaiting required checks"
@@ -1499,70 +1691,6 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert review_payload.status == "running"
     assert review_payload.running.review.pr_url == "https://example.com/pr/review"
     assert review_payload.recent_events == review_pr.recent_activity
-  end
-
-  test "running entry payload exposes adaptive review-fix budget state" do
-    payload =
-      Presenter.helper_for_test(:running_entry_payload, [
-        %{
-          issue_id: "issue-budget-runtime",
-          identifier: "MT-BUDGET-RUNTIME",
-          source: :memory,
-          state: "In Progress",
-          stage: "implement",
-          session_id: "sess-budget-runtime",
-          last_codex_event: "turn.started",
-          last_codex_message: "working",
-          last_codex_timestamp: DateTime.utc_now(),
-          started_at: DateTime.utc_now(),
-          runtime_seconds: 10,
-          workspace: "/tmp/mt-budget-runtime",
-          checkout?: true,
-          git?: true,
-          dirty?: true,
-          changed_files: 1,
-          harness_error: nil,
-          pr_url: "https://example.test/pr/1",
-          review_decision: "CHANGES_REQUESTED",
-          check_statuses: [],
-          required_checks: [],
-          publish_required_checks: [],
-          ci_required_checks: [],
-          labels: [],
-          required_labels: [],
-          label_gate_eligible: true,
-          ready_for_merge: false,
-          review_approved: false,
-          token_pressure: "high",
-          budget_runtime: %{
-            mode: "review_fix",
-            pressure_level: "high",
-            retry_count: 2,
-            scope_kind: "review_claim_batch",
-            scope_ids: ["comment:1"],
-            auto_narrowed: true,
-            total_extension_used: false,
-            per_turn_input_soft: 60_000,
-            per_turn_input_hard: 150_000,
-            max_turns_in_window: 5,
-            per_issue_total_limit: 650_000,
-            per_issue_total_extension: 150_000
-          },
-          current_turn_input_tokens: 80_000,
-          codex_input_tokens: 80_000,
-          codex_output_tokens: 4_000,
-          codex_total_tokens: 100_000,
-          recent_codex_updates: []
-        },
-        %{}
-      ])
-
-    assert payload.budget_runtime.mode == "review_fix"
-    assert payload.budget_runtime.retry_count == 2
-    assert payload.budget_runtime.scope_ids == ["comment:1"]
-    assert payload.policy.token_budget.per_turn_input.limit == 150_000
-    assert payload.policy.token_budget.per_issue_total.limit == 650_000
-    assert payload.policy.token_budget.review_fix.auto_narrowed == true
   end
 
   test "decision history and ledger helpers expose repair and finalization messages clearly" do
@@ -1868,6 +1996,18 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
         tracker_reads_paused: true,
         manual_dispatch_enabled: true
       },
+      github_webhooks: %{health: "healthy"},
+      github_inbox: %{
+        depth: 1,
+        oldest_pending_event_at: "2026-03-07T15:14:00Z",
+        last_drained_at: "2026-03-07T15:14:30Z",
+        last_assignment: %{
+          event_id: "delivery-rich",
+          assignment_state: "processed",
+          assignment_reason: "review_feedback_persisted",
+          assigned_runner_channel: "stable"
+        }
+      },
       runner: %{
         instance_name: "test-runner",
         runner_mode: "stable",
@@ -1998,6 +2138,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       running: [
         review_pr_entry(),
         attached_pr_entry(),
+        merge_readiness_entry(),
         await_checks_entry()
       ],
       retrying: [],
@@ -2079,6 +2220,19 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_decision_summary: "Need review",
       next_human_action: "Attach a PR.",
       last_ledger_event_id: "evt-run",
+      lease: %{
+        lease_owner: "orchestrator-rich",
+        lease_owner_instance_id: "stable:test-runner",
+        lease_owner_channel: "stable",
+        lease_acquired_at: "2026-03-07T15:00:00Z",
+        lease_updated_at: "2026-03-07T15:12:30Z",
+        lease_status: "reclaimable",
+        lease_epoch: 4,
+        lease_age_ms: 150_000,
+        lease_ttl_ms: 60_000,
+        lease_reclaimable: true,
+        lease_source: "live"
+      },
       last_decision: %{status: "failed", command: "mix test", output: String.duplicate("x", 260)},
       last_deploy_preview: %{status: "passed", command: "./scripts/deploy-preview.sh", output: "preview ok"},
       last_deploy_production: %{status: "passed", command: "./scripts/deploy-production.sh", output: "production ok"},
@@ -2136,7 +2290,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_rule_id: "routing.labels",
       last_failure_class: "routing",
       last_decision_summary: "Skipped",
-      last_ledger_event_id: "evt-skip"
+      last_ledger_event_id: "evt-skip",
+      lease: %{
+        lease_owner: "skip-owner",
+        lease_owner_instance_id: "canary:dogfood-runner",
+        lease_owner_channel: "canary",
+        lease_status: "held",
+        lease_epoch: 2,
+        lease_reclaimable: false
+      }
     }
   end
 
@@ -2159,7 +2321,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       last_rule_id: "priority.rank",
       last_failure_class: "priority",
       last_decision_summary: "Queued",
-      last_ledger_event_id: "evt-queue"
+      last_ledger_event_id: "evt-queue",
+      lease: %{
+        lease_owner: "queue-owner",
+        lease_owner_instance_id: "stable:test-runner",
+        lease_owner_channel: "stable",
+        lease_status: "held",
+        lease_epoch: 1,
+        lease_reclaimable: false
+      }
     }
   end
 
@@ -2429,6 +2599,90 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
         acceptance: %{"checks" => false},
         ledger_event_id: "evt-await",
         output: "test check missing"
+      }
+    }
+  end
+
+  defp merge_readiness_entry do
+    %{
+      issue_id: "issue-merge-readiness",
+      identifier: "MT-MERGE-READINESS",
+      state: "Merging",
+      stage: "merge_readiness",
+      passive?: true,
+      review_approved: false,
+      token_pressure: nil,
+      session_id: nil,
+      turn_count: 0,
+      codex_app_server_pid: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: ~U[2026-03-07 17:11:00Z],
+      last_codex_event: "stage_transition",
+      recent_codex_updates: [],
+      codex_input_tokens: 0,
+      codex_output_tokens: 0,
+      codex_total_tokens: 0,
+      current_turn_input_tokens: 0,
+      runtime_seconds: 6,
+      started_at: ~U[2026-03-07 17:10:30Z],
+      workspace: "/tmp/MT-MERGE-READINESS",
+      checkout?: true,
+      git?: true,
+      origin_url: "git@example.com/org/repo.git",
+      branch: "mt-merge-readiness",
+      head_sha: "aaaabbbbccccdddd",
+      dirty?: false,
+      changed_files: 0,
+      status_text: nil,
+      base_branch: "main",
+      harness_path: ".symphony/harness.yml",
+      harness_version: "1",
+      harness_error: nil,
+      preflight_command: "./scripts/preflight.sh",
+      validation_command: "./scripts/validate.sh",
+      smoke_command: "./scripts/smoke.sh",
+      post_merge_command: nil,
+      required_checks: ["test"],
+      publish_required_checks: [],
+      ci_required_checks: [],
+      pr_url: "https://example.com/pr/merge-readiness",
+      pr_state: "OPEN",
+      review_decision: "COMMENTED",
+      check_statuses: [%{name: "test", conclusion: nil, status: "queued"}],
+      ready_for_merge: false,
+      policy_class: "fully_autonomous",
+      policy_source: "workflow",
+      policy_override: nil,
+      labels: ["dogfood"],
+      required_labels: ["dogfood"],
+      label_gate_eligible: true,
+      last_rule_id: "policy.merge_readiness",
+      last_failure_class: "pr_hygiene",
+      last_decision_summary: "Refreshing PR hygiene",
+      next_human_action: nil,
+      last_ledger_event_id: "evt-merge-readiness",
+      last_decision: %{
+        status: "running",
+        command: nil,
+        verdict: "continue",
+        rule_id: "policy.merge_readiness",
+        failure_class: "pr_hygiene",
+        summary: "Refreshing PR hygiene",
+        details: "Posted review replies and PR body are being reconciled before passive check polling.",
+        human_action: nil,
+        acceptance_gaps: [],
+        risky_areas: ["publish"],
+        evidence: ["1 posted reply refresh", "2 resolved threads"],
+        acceptance: %{"pr_hygiene" => true},
+        ledger_event_id: "evt-merge-readiness",
+        output: ""
+      },
+      last_merge_readiness: %{
+        checked_at: "2026-03-07T17:10:45Z",
+        pr_body_validation_status: "passed",
+        posted_review_threads: 3,
+        pending_reply_refreshes: 1,
+        resolved_review_threads: 2
       }
     }
   end

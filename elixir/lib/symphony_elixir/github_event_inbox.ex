@@ -64,9 +64,11 @@ defmodule SymphonyElixir.GitHubEventInbox do
       {:error, {:github_event_inbox_failed, error}}
   end
 
+  @spec pending_events() :: [stored_event()]
   @spec pending_events(pos_integer()) :: [stored_event()]
   def pending_events(limit \\ 100)
 
+  @spec pending_events(pos_integer()) :: [stored_event()]
   def pending_events(limit) when is_integer(limit) and limit > 0 do
     state = load_state()
 
@@ -132,6 +134,17 @@ defmodule SymphonyElixir.GitHubEventInbox do
       "pr_url" => event.pr_url,
       "repo_full_name" => event.repo_full_name,
       "updated_at" => timestamp(event.updated_at),
+      "conclusion" => event.conclusion,
+      "check_name" => event.check_name,
+      "details_url" => event.details_url,
+      "head_sha" => event.head_sha,
+      "received_runner_channel" => event.received_runner_channel,
+      "received_runner_instance_id" => event.received_runner_instance_id,
+      "target_runner_channel" => event.target_runner_channel,
+      "assigned_runner_channel" => event.assigned_runner_channel,
+      "assigned_runner_instance_id" => event.assigned_runner_instance_id,
+      "assignment_state" => event.assignment_state,
+      "assignment_reason" => event.assignment_reason,
       "raw" => event.raw
     }
   end

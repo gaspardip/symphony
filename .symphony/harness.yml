@@ -1,5 +1,5 @@
 version: 1
-base_branch: gaspar/autonomous-pipeline
+base_branch: main
 
 project:
   type: elixir-app

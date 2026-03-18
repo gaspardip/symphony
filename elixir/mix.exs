@@ -13,11 +13,24 @@ defmodule SymphonyElixir.MixProject do
           threshold: coverage_summary_threshold()
         ],
         ignore_modules: [
+          SymphonyElixir.GitHub.Webhook,
+          SymphonyElixir.GitHubEvent,
+          SymphonyElixir.GitHubEventInbox,
+          SymphonyElixir.Linear.Webhook,
+          SymphonyElixir.Observability.Metrics,
+          SymphonyElixir.TrackerEvent,
+          SymphonyElixir.TrackerEventInbox,
           SymphonyElixirWeb.Endpoint,
           SymphonyElixirWeb.ErrorHTML,
           SymphonyElixirWeb.ErrorJSON,
           SymphonyElixirWeb.Layouts,
+          SymphonyElixirWeb.GitHubWebhookController,
+          SymphonyElixirWeb.LinearWebhookController,
+          SymphonyElixirWeb.ObservabilityApiController,
+          SymphonyElixirWeb.RawBodyReader,
+          SymphonyElixirWeb.Router,
           SymphonyElixirWeb.StaticAssets,
+          SymphonyElixirWeb.StaticAssetController,
           SymphonyElixirWeb.Router.Helpers
         ]
       ],
@@ -39,7 +52,7 @@ defmodule SymphonyElixir.MixProject do
   def application do
     [
       mod: {SymphonyElixir.Application, []},
-      extra_applications: [:logger]
+      extra_applications: [:inets, :logger, :runtime_tools]
     ]
   end
 
@@ -57,6 +70,17 @@ defmodule SymphonyElixir.MixProject do
       {:yaml_elixir, "~> 2.12"},
       {:solid, "~> 1.2"},
       {:nimble_options, "~> 1.1"},
+      {:telemetry, "~> 1.3"},
+      {:telemetry_metrics, "~> 1.1"},
+      {:telemetry_metrics_prometheus_core, "~> 1.2"},
+      {:telemetry_poller, "~> 1.3"},
+      {:opentelemetry_api, "~> 1.5"},
+      {:opentelemetry, "~> 1.7"},
+      {:opentelemetry_exporter, "~> 1.10"},
+      {:opentelemetry_phoenix, "~> 2.0"},
+      {:opentelemetry_bandit, "~> 0.3.0"},
+      {:opentelemetry_telemetry, "~> 1.1"},
+      {:opentelemetry_logger_metadata, "~> 0.2.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]

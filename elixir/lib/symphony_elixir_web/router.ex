@@ -6,6 +6,8 @@ defmodule SymphonyElixirWeb.Router do
   use Phoenix.Router
   import Phoenix.LiveView.Router
 
+  @metrics_path Application.compile_env(:symphony_elixir, [:observability, :metrics_path], "/metrics")
+
   pipeline :browser do
     plug(:fetch_session)
     plug(:fetch_live_flash)
@@ -32,8 +34,12 @@ defmodule SymphonyElixirWeb.Router do
     match(:*, "/api/webhooks/linear", ObservabilityApiController, :method_not_allowed)
     post("/api/webhooks/github", GitHubWebhookController, :create)
     match(:*, "/api/webhooks/github", ObservabilityApiController, :method_not_allowed)
+    get(@metrics_path, ObservabilityApiController, :metrics)
+    match(:*, @metrics_path, ObservabilityApiController, :method_not_allowed)
     get("/api/v1/state", ObservabilityApiController, :state)
     get("/api/v1/portfolio", ObservabilityApiController, :portfolio)
+    post("/api/v1/runner/actions/:action", ObservabilityApiController, :runner_control)
+    match(:*, "/api/v1/runner/actions/:action", ObservabilityApiController, :method_not_allowed)
     post("/api/v1/manual-runs", ObservabilityApiController, :manual_run)
     match(:*, "/api/v1/manual-runs", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/reports/delivery", ObservabilityApiController, :delivery_report)

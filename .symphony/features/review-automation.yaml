@@ -1,15 +1,66 @@
 id: review-automation
 title: Review Automation
 status: active
-summary: Draft-first PR review ingestion, scoped reply recovery, and thread-state management.
+summary: "Draft-first PR review ingestion, evidence-based reply generation, source-aware claim triage, heuristic consensus scoring, persisted review claims, webhook-triggered autonomous verification, webhook-triggered autonomous CI-failure reopening for PR-owned checks, historical precision and stagnation tracking, runner plus lease-aware webhook and issue routing for noisy PR feedback, stale-lease reclaim on autonomous review follow-up, a narrowed review-to-implement handoff that scopes accepted PR claims before reopening implementation, scoped review-fix implement prompts that keep autonomous PR-comment turns small enough to continue dogfood work, high-pressure prompt trimming that drops duplicated review context and reduces accepted-claim batches to one, a final focused prompt cut that removes the duplicate scoped-claim resume block, conditional review-fix budget fallback after repeated soft-pressure retries, a separate higher turn budget for high-pressure scoped review-fix implement retries, a bounded `110k/220k` third-stage budget tier once a scoped retry window is active, a bounded total-budget extension for accepted PR-comment follow-up after real claim progress exists, a stricter shell/output budget for those same high-pressure review-fix turns, live running-entry stage/workspace alignment for budget enforcement, a scoped review-fix turn window that resets on blocked PR-comment retries instead of inheriting the issue-wide implementation turn total, live retry-state persistence for budget-stopped review-fix turns, automatic retirement of addressed review claims from later focused batches including absolute-path touches, automatic continuation after budget-stopped review-fix turns that already retired a claim or still retain bounded retry-budget state, direct retry scheduling from the token-budget stop path, stale-snapshot blocked-run recovery before continuation redispatch, fail-soft blocking-contract normalization for malformed agent blocker types, fail-soft downgrade of runtime-owned git/publication blockers that should not halt a scoped PR-comment implement turn, seeded blocked-run replay recovery so `retry_now` can actually re-enter scoped PR-comment work, seeded manual redispatch fallback so locally recovered PR-comment runs continue after retry even without manual-store tracker state, exact local-pattern proof upgrades for stale semantic-regression comments, Elixir-aware contradiction handling for boolean-atom false positives, deterministic-proof low-cost/low-risk overrides for cheap real fixes, conservative autonomous inline-reply posting in public, live reconciliation of already-posted GitHub thread replies back into persisted `review_threads`, stage-entry runtime reconciliation that refreshes live GitHub thread state before active canary stages decide whether to refresh a posted reply, an explicit passive `merge_readiness` stage that can refresh posted review replies, resolve stale outdated threads, pair that cleanup with PR-body remediation after description-lint failures before passive check polling resumes, and surface the last PR-hygiene summary in both running and issue-level operator payloads, safe auto-resolution of contradicted false-positive inline threads after public replies are posted, and direct validate-resume once a scoped review-fix loop has already produced the retained local diff and exhausted its actionable claims."
 source_paths:
   - elixir/lib/symphony_elixir/pr_watcher.ex
+  - elixir/lib/symphony_elixir/review_adjudicator.ex
+  - elixir/lib/symphony_elixir/review_consensus.ex
+  - elixir/lib/symphony_elixir/review_evidence_collector.ex
   - elixir/lib/symphony_elixir/github_cli_client.ex
   - elixir/lib/symphony_elixir_web/presenter.ex
 acceptance_signals:
   - New review feedback is ingested and exposed as drafted replies
+  - Review comments are triaged into actionable and non-actionable dispositions before autonomous follow-up
+  - Independent local consensus passes enrich claim scoring before review verification
+  - Review claims persist verification state and evidence refs separately from drafted thread replies
+  - Draft replies reflect verification outcomes instead of generic reviewer acknowledgements
   - Thread state transitions are visible and policy-controlled
-  - Review-fix follow-up persists adaptive budget scope and pressure across retries
+  - Webhook-driven review feedback can route fully autonomous runs into a focused review verification stage before reopening implement
+  - Copilot-style nit noise does not reopen fully autonomous runs
+  - Review webhooks are designed to enter through a stable ingress and be routed internally to isolated runner channels instead of branch-bound endpoints
+  - Review webhook follow-up skips workspaces owned by another runner channel or instance
+  - Review webhook follow-up also skips same-channel workspaces when a different orchestrator owner holds the live lease
+  - Review webhook follow-up can reclaim a stale same-channel lease instead of skipping dead-runner ownership forever
+  - Autonomous review follow-up acquires and persists lease ownership before reopening implementation or review verification
+  - Failing PR-scoped GitHub `check_run` or `workflow_run` webhooks can reuse that same lease-backed autonomous follow-up path and reopen implementation with failed-check context instead of waiting for passive CI polling
+  - Operators can inspect GitHub webhook assignment state and lease reclaimability through the presenter and API payloads
+  - Repeated low-signal review comments are tracked as stagnant feedback instead of repeatedly reopening implementation without new proof
+  - High token-pressure review retries avoid duplicating review-feedback text and batch only one accepted claim so Copilot comment follow-up can keep progressing under the implement budget
+  - Review-fix token-cap relaxation only occurs after the runtime has already recorded a prior soft-budget retry for accepted PR claims, so broad implement turns do not inherit a larger cap by default
+  - Focused review-fix retries do not repeat the scoped claim summary inside resume context, reducing prompt load for repeated PR-comment follow-up turns
+  - High-pressure focused PR-comment retries use a stricter shell/output budget than normal focused implement turns, keeping live retries from spending most of the recovered budget on additional reads
+  - Live review-fix token-budget enforcement uses the running entry's dispatch stage and workspace path, so autonomous PR-comment retries do not silently fall back to the base implement budget
+  - High-pressure scoped PR-comment retries count turns from the latest blocked-review retry window, so accepted claim batches do not exhaust themselves on historical implement attempts from earlier dogfood loops
+  - High-pressure scoped PR-comment retries can take one final bounded budget step once a scoped retry window is active, so repeated accepted-claim follow-up is not blocked solely by baseline repository prompt overhead
+  - Accepted PR-comment follow-up that already retired at least one claim can exceed the base issue-total budget by a bounded amount, so review automation does not stop short after proving real progress
+  - Once a focused PR-comment turn addresses or explicitly retains a scoped claim, that claim is removed from later focused batches so autonomous follow-up can advance through the remaining accepted comments
+  - Focused PR-comment turns retire the touched claim even when Codex reports an absolute workspace path, so autonomous follow-up does not repeat the same accepted comment after editing the right file
+  - If a focused PR-comment turn makes claim progress but still stops on the input budget, the orchestrator automatically schedules the next continuation so review-comment work does not require a manual retry after each addressed claim
+  - Budget-stopped review-fix turns schedule the same continuation retry path as normal completions, so accepted PR-comment follow-up keeps moving without an operator-triggered `retry_now`
+  - Automatic continuation retries consult persisted blocked run state before redispatching, so stale retry issue snapshots do not cause webhook-driven PR-comment work to loop forever at `stage=blocked`
+  - Malformed blocking `blocker_type` values no longer collapse a successful review-fix turn into `implementation.invalid_turn_result`; the runtime degrades them to a generic implementation blocker instead
+  - Scoped PR-comment turns that only self-report failure because they could not create a commit, stage changes, or perform another runtime-owned git/publication action are treated as normal progress so autonomous review follow-up can keep moving through the remaining accepted claims
+  - Fully autonomous PR-comment runs can promote drafted inline replies to `approved_to_post` and post them automatically once the claim is addressed locally or contradicted by focused verification
+  - Fully autonomous PR-comment runs keep low-confidence deferred or insufficient-evidence inline replies as local drafts instead of auto-posting them publicly
+  - Fully autonomous PR-comment runs can refresh already-posted inline replies in place when a later adjudication or proof pass changes the recommended public response
+  - GitHub review reconciliation imports already-posted inline reply ids, urls, timestamps, and body text back into persisted thread state so stale local drafts do not drift from the live PR thread
+  - Live GitHub reply reconciliation preserves persisted addressed-state intent for already-posted inline replies, so merge-readiness can still refresh stale “next branch update” wording and resolve the thread after the branch update lands
+  - Await-checks can refresh already-posted inline replies, resolve outdated safe threads, and keep the persisted `review_threads` state aligned with GitHub before the run decides whether the PR is merge-ready
+  - Presenter issue payloads carry the persisted `last_merge_readiness` summary even outside running snapshots, so operators can inspect PR-hygiene counts from detail views after the passive pass completes
+  - Language false positives such as Elixir `true` versus `:true` can be contradicted locally instead of being promoted into fake correctness work
+  - Deterministic proof with a low-cost, low-risk fix path can upgrade a previously deferred or dismissed review claim back into accepted work without waiting for another human nudge
+  - Once a branch update is published, previously posted addressed inline replies can be refreshed in place with “included on the branch” wording instead of stale “next update” language
+  - Addressed inline review threads can be resolved automatically on GitHub after publish when the reply is already posted and the resolution recommendation is `resolve_after_change`
+  - Contradicted inline review threads can also be resolved automatically on GitHub after the false-positive reply is posted when the resolution recommendation is `resolve_after_contradiction`
+  - High-pressure accepted-claim follow-up can continue past the default implement turn cap without giving the same higher turn allowance to unrelated implementation work
+  - A scoped PR-comment run that already produced the retained local patch and exhausted its accepted actionable claims can advance directly into validation instead of failing the next cycle on the implement turn cap
+  - Seeded/manual PR-comment runs do not terminate as `{:done, :missing}` after a successful turn just because no manual-store issue record exists; the runtime keeps the manual issue shell alive and advances to the next stage
+  - Canary-targeted issues are skipped by stable runners and stay dispatchable on canary runners
+  - Seeded review workspaces can adjudicate scoped comments against the current checkout root instead of dismissing them as missing paths
+  - Replayed review feedback can promote previously dismissed claims back into pending verification and reopen seeded autonomous runs without a manual issue record
+  - Seeded manual review follow-up carries the live workspace branch identity so local canary replays can continue into implement without tripping branch/PR mismatch guards
+  - Seeded manual retries preserve a dispatchable local issue state when tracker/manual-store refresh fails, so replayed PR-comment work can continue after `retry_now`
 dependencies:
   - runtime-core
-last_updated_by_issue: CLZ-16
+last_updated_by_issue: CLZ-22

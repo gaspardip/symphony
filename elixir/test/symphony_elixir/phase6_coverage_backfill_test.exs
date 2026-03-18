@@ -268,7 +268,12 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
       malformed_list_snapshot = RunInspector.inspect(workspace, command_runner: malformed_list_runner)
 
       assert malformed_list_snapshot.check_statuses == [
-               %{name: "ci / publish", status: "COMPLETED", conclusion: "SUCCESS"},
+               %{
+                 name: "ci / publish",
+                 workflow_name: nil,
+                 status: "COMPLETED",
+                 conclusion: "SUCCESS"
+               },
                %{}
              ]
 

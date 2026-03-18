@@ -87,6 +87,66 @@ defmodule SymphonyElixir.PullRequestManagerTest do
     assert body =~ "Automated PR for MT-902."
   end
 
+  test "ensure_pull_request updates an existing PR through the GitHub adapter seam" do
+    workspace = Path.join(System.tmp_dir!(), "symphony-pr-edit-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue = %Issue{
+      id: "issue-pr-edit",
+      identifier: "MT-904",
+      title: "Update PR hygiene on an existing PR",
+      url: "https://linear.app/test/issue/MT-904"
+    }
+
+    run_state = %{
+      branch: "gaspar/test-pr-edit",
+      base_branch: "main",
+      stage: "merge_readiness",
+      last_turn_result: %{summary: "Refresh the PR body without opening a new PR."},
+      last_validation: %{status: "passed"},
+      last_verifier: %{status: "passed"}
+    }
+
+    assert {:ok, %{url: "https://github.com/gaspardip/symphony/pull/22", body_validation: %{status: "skipped"}}} =
+             PullRequestManager.ensure_pull_request(
+               workspace,
+               issue,
+               run_state,
+               github_client: __MODULE__.FakeExistingPullRequestGitHubClient,
+               github_client_opts: [test_pid: self()]
+             )
+
+    assert_received {:adapter_existing_pull_request, ^workspace, :existing}
+    assert_received {:adapter_edit_pull_request, ^workspace, _title}
+    assert_received {:adapter_existing_body_contents, body}
+    assert body =~ "Automated PR for MT-904."
+    assert_received {:adapter_persist_pr_url, ^workspace, "gaspar/test-pr-edit", "https://github.com/gaspardip/symphony/pull/22"}
+  end
+
+  test "ensure_pull_request fails cleanly when the branch is missing" do
+    workspace = Path.join(System.tmp_dir!(), "symphony-pr-missing-branch-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue = %Issue{
+      id: "issue-pr-missing-branch",
+      identifier: "MT-905",
+      title: "Require a branch before publishing"
+    }
+
+    assert {:error, :missing_branch} =
+             PullRequestManager.ensure_pull_request(
+               workspace,
+               issue,
+               %{base_branch: "main"},
+               github_client: __MODULE__.FakeGitHubClient,
+               github_client_opts: [test_pid: self()]
+             )
+  end
+
   test "merge_pull_request is idempotent when the PR is already merged" do
     workspace = "/tmp/symphony-pr-merged"
 
@@ -197,6 +257,48 @@ defmodule SymphonyElixir.PullRequestManagerTest do
       send(opts[:test_pid], {:adapter_persist_pr_url, workspace, branch, url})
       :ok
     end
+
+    @impl true
+    def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
+  end
+
+  defmodule FakeExistingPullRequestGitHubClient do
+    @behaviour SymphonyElixir.GitHubClient
+
+    @impl true
+    def existing_pull_request(workspace, opts) do
+      send(opts[:test_pid], {:adapter_existing_pull_request, workspace, :existing})
+      {:ok, %{url: "https://github.com/gaspardip/symphony/pull/22", state: "OPEN"}}
+    end
+
+    @impl true
+    def edit_pull_request(workspace, title, body_file, opts) do
+      send(opts[:test_pid], {:adapter_edit_pull_request, workspace, title})
+      send(opts[:test_pid], {:adapter_existing_body_contents, File.read!(body_file)})
+      {:ok, %{url: "https://github.com/gaspardip/symphony/pull/22", state: "OPEN"}}
+    end
+
+    @impl true
+    def create_pull_request(_workspace, _branch, _base_branch, _title, _body_file, _opts) do
+      raise "create should not be called when an existing PR is present"
+    end
+
+    @impl true
+    def merge_pull_request(_workspace, _opts) do
+      raise "merge should not be called in this test"
+    end
+
+    @impl true
+    def review_feedback(_workspace, _opts), do: {:ok, %{pr_url: nil, review_decision: nil, reviews: [], comments: []}}
+
+    @impl true
+    def persist_pr_url(workspace, branch, url, opts) do
+      send(opts[:test_pid], {:adapter_persist_pr_url, workspace, branch, url})
+      :ok
+    end
+
+    @impl true
+    def post_review_comment_reply(_pr_url, _comment_id, _body, _opts), do: {:error, :unsupported}
   end
 
   defp body_file_from_args(args) do

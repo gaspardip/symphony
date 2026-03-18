@@ -37,6 +37,7 @@ defmodule SymphonyElixir.RuleCatalogTest do
     :verifier_blocked,
     :unsafe_to_merge,
     :publish_failed,
+    :merge_readiness_failed,
     :pr_closed,
     :required_checks_missing,
     :required_checks_pending,

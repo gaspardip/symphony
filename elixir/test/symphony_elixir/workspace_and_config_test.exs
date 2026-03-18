@@ -107,6 +107,31 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.policy_review_fix_token_budget()[:narrow_scope_batch_size] == 1
   end
 
+  test "config exposes normalized runner channel and instance identity" do
+    previous_channel = System.get_env("SYMPHONY_RUNNER_CHANNEL")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_RUNNER_CHANNEL", previous_channel)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      runner_instance_name: "dogfood-runner",
+      runner_channel: "CANARY"
+    )
+
+    assert Config.runner_channel() == "canary"
+    assert Config.runner_instance_id() == "canary:dogfood-runner"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      runner_instance_name: "dogfood-runner",
+      runner_channel: "$SYMPHONY_RUNNER_CHANNEL"
+    )
+
+    System.put_env("SYMPHONY_RUNNER_CHANNEL", "EXPERIMENTAL")
+    assert Config.runner_channel() == "experimental"
+    assert Config.runner_instance_id() == "experimental:dogfood-runner"
+  end
+
   test "config exposes default abstract reasoning tiers and codex mappings by stage" do
     write_workflow_file!(Workflow.workflow_file_path())
 

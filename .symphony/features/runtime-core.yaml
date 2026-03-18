@@ -1,15 +1,67 @@
 id: runtime-core
 title: Runtime Core
 status: active
-summary: Runtime-owned delivery stages, adaptive recovery, proof gates, and publish lifecycle.
+summary: Runtime-owned delivery stages, recovery, proof gates, publish lifecycle, persisted review-claim state, autonomous webhook-driven review verification, webhook-driven CI failure reopening for failing PR checks, evidence-based review follow-up with non-actionable noise suppression, operator-visible lease and webhook assignment state, runner identity plus lease-backed channel-aware issue and webhook routing seams for stable ingress and isolated runner pools, a stable-ingress webhook relay bridge for healthy canary runners, repo-native runner promotion controls, token-aware resume context that narrows review-driven implement turns to the accepted PR claim scope, high-pressure prompt trimming that reduces accepted review batches to one claim and removes duplicated review context, conditional review-fix budget fallback that relaxes implement token caps only after repeated soft-pressure retries, a dedicated higher turn ceiling for high-pressure scoped review-fix implement runs, a bounded second-step review-fix budget bump to `85k/150k` after prior pressure is already recorded, a bounded third-stage review-fix budget bump to `110k/220k` once a scoped retry window is active, a bounded review-fix-only `per_issue_total` extension once accepted claim progress is already proven, an extra-tight shell/output budget for high-pressure scoped review-fix turns, live running-entry workspace/stage alignment for budget checks, a scoped review-fix turn window that counts retries from the latest blocked-review resume instead of the issue-wide implementation total, live review-fix budget-stop persistence that writes retry evidence back into `run_state.json` and can recover retry-count signals from prior budget stops, automatic retirement of successfully addressed scoped review claims from the next focused prompt including absolute workspace path matches, implement-stage preflight proof refresh for unresolved `needs_verification` review claims, stage-entry GitHub review reconciliation that refreshes live `review_threads` and `review_claims` before `implement`, `validate`, `review_verification`, `publish`, `merge_readiness`, or `await_checks` continue, an explicit passive `merge_readiness` stage between publish and check polling that can reapply a valid PR body after `validate-pr-description` failures and reconcile posted review-thread state before merge decisions, merge-readiness-specific failure classification and operator guidance, explicit `last_merge_readiness` exposure in running and issue-level operator payloads, dispatch-stage-aware merge-readiness restart controls for already-running passive merge-side work, direct validate-resume from retained scoped review-fix diffs once no accepted actionable claims remain, automatic orchestrator continuation for blocked review-fix budget stops that already made claim progress even when only retry-budget state remains, direct continuation scheduling from the token-budget stop path, stale-snapshot retry resume that trusts the persisted blocked workspace state over the in-memory issue shell, resumed-manual dispatch protection that keeps a locally resumed `Merging` issue active even when the manual-store refresh is still blocked, seeded-manual retry recovery that can resume a persisted active stage even after the top-level blocked marker is lost, fail-soft turn-result normalization for noisy blocker types instead of crashing the whole turn contract, fail-soft downgrade of runtime-owned git/publication blockers that agents should not own in implement turns, seeded manual retry-state repair so blocked local replays resume the stored stage instead of redispatching a blocked run unchanged, seeded manual redispatch fallback so resumed local replays stay dispatchable even when no manual-store issue record exists, exact local-pattern proof upgrades for stale review claims, required-check rollups that recognize both GitHub workflow names and emitted check-run names, and autonomous inline PR review reply promotion/posting and safe thread resolution for addressed or contradicted claims once a fully autonomous run has an attached PR URL.
 source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
+  - elixir/lib/symphony_elixir/github_webhook_relay.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
 acceptance_signals:
   - Deterministic stage execution from checkout through post_merge
   - Auto-heal and block reasons are visible in operator payloads
-  - Scoped review-fix runs narrow and auto-retry with explicit budget state instead of generic token-budget stops
+  - Fully autonomous runs can resume from GitHub review feedback without a manual poll loop
+  - Fully autonomous runs can pause in a passive review verification stage before reopening implementation
+  - Review claims, verification state, and return-stage context persist across webhook-triggered follow-up
+  - Review verification can enrich thread replies and resolution recommendations from collected evidence
+  - Fully autonomous runs stay in place when webhook review feedback is triaged as non-actionable
+  - Runtime topology supports stable webhook ingress with internal routing to isolated per-issue runners instead of live self-mutation
+  - Persisted run state records runner identity and channel so review webhook follow-up can avoid cross-instance interference
+  - Persisted run state records live lease ownership so same-channel runners do not both resume the same review follow-up
+  - Dispatch, lease refresh, and lease release keep persisted run-state ownership aligned with the live lease file
+  - Issue dispatch respects the target runner channel so stable and canary pools do not steal each other's work
+  - High token-pressure review retries shrink to a single accepted claim and avoid duplicating review feedback in the implement prompt so PR-comment work can continue under the per-turn input budget
+  - Repeated high-pressure review retries can relax the implement stage token budget modestly only after the first soft-budget retry has already been observed for accepted PR claims
+  - Repeated high-pressure review retries with an active scoped turn window can take one additional bounded step up to `220k` input tokens, so live accepted-claim follow-up is not blocked solely by the repo’s baseline prompt footprint
+  - Accepted-claim follow-up that already retired at least one review claim can exceed the base `per_issue_total` budget by a bounded amount, so dogfood does not stop one or two comments short of clearing the PR
+  - High-pressure scoped review-fix implement runs can exceed the default implement turn cap without loosening the turn budget for normal implementation work
+  - Focused review-fix prompts no longer repeat the same scoped claim block in resume context, keeping high-pressure retries narrower than normal implement turns
+  - High-pressure scoped review-fix turns use a stricter shell/output budget than normal focused implement turns so live retries spend recovered headroom on code edits instead of additional reads
+  - Live token-budget checks use the running entry's workspace path and dispatch stage so scoped review-fix retries do not accidentally fall back to the base implement budget
+  - Scoped review-fix retries count implementation turns from the latest retry window base instead of the lifetime issue total, so blocked PR-comment work can resume without inheriting stale turn exhaustion
+  - Budget-stop retries persist their blocked decision and retry-count evidence into the workspace state, so later canary retries do not restart from a blank high-pressure context
+  - Successful scoped review-fix turns mark their addressed claims as non-actionable, so the next retry advances to the remaining accepted GitHub review claims instead of repeating the same focused batch
+  - Successful scoped review-fix turns retire addressed claims even when Codex reports absolute workspace paths in `files_touched`, so the next retry advances past the just-edited review comment
+  - When a scoped review-fix turn stops on the input budget after already retiring a claim and requesting another turn, the orchestrator schedules the next continuation automatically instead of waiting for a manual retry
+  - Token-budget stops use the same continuation scheduling path as normal worker completion, so a budget-stopped review-fix run can redispatch itself without an operator pressing `retry_now`
+  - Automatic continuation retries resume from the persisted blocked workspace stage even when the retrying issue snapshot is stale, so dogfood review follow-up does not bounce forever at `{:stop, :blocked}`
+  - Resumed manual publish-stage runs remain dispatchable even when the stale manual-store refresh still reports the blocked snapshot, so `retry_now` can continue through `publish` instead of acknowledging the action and going inert
+  - Seeded manual workspaces can also resume directly from their persisted active stage during `retry_now` when a previous blocked stop left the issue snapshot stale but the top-level `run_state` no longer says `blocked`
+  - Malformed blocking `blocker_type` values are coerced into a generic implementation blocker instead of replacing an otherwise valid turn result with `implementation.invalid_turn_result`
+  - Turn results that only self-block because the agent could not create a commit, stage changes, or perform another runtime-owned git/publication action are downgraded back to normal implement progress instead of halting dogfood review follow-up
+  - Fully autonomous runs with an attached PR can auto-promote and post eligible inline review replies once a claim is addressed locally or contradicted by focused verification
+  - Fully autonomous runs with an attached PR can also post eligible deferred or dismissed inline review replies when focused verification concludes no further implementation is needed
+  - Persisted stale review claims can be upgraded back into accepted implementation work when focused verification matches an exact local regression pattern
+  - Runs that are already back in `implement` can refresh unresolved `needs_verification` claims from cheap local proof before the next turn, so newly shipped proof logic applies without forcing a separate review-verification cycle
+  - If a scoped review-fix run re-enters `implement` with no accepted actionable claims left and only retained local edits from the last clean turn, the runtime advances directly to `validate` instead of tripping the implement turn budget on the next cycle
+  - Publish and await-checks stages rehydrate live GitHub review state before continuing, so post-publish thread cleanup acts on current PR replies instead of stale local thread copies
+  - Publish can refresh posted addressed replies and resolve safe addressed inline threads on GitHub before handing the run to await-checks
+  - Publish enters an explicit passive `merge_readiness` stage that can self-heal PR hygiene by regenerating a valid PR body after `validate-pr-description` failures and reconciling outdated posted review threads before `await_checks` evaluates merge readiness
+  - Operator payloads expose `merge_readiness` as distinct passive work with PR-body validation and reply-refresh counts, so PR hygiene is visible separately from generic check polling
+  - Issue-level payloads surface persisted `last_merge_readiness` state even when the run is no longer actively running, so operators can inspect the last PR-hygiene pass from detail views and passive snapshots
+  - Operators can explicitly restart the passive PR-hygiene pass with `refresh_merge_readiness`, returning a PR-owned run to `merge_readiness` without reopening full implementation work
+  - Merge-readiness restartability checks and passive-run termination match the orchestrator's real `dispatch_stage` running-entry schema, so an already-running merge-side worker can be refreshed safely
+  - Merge-readiness maintenance failures use their own `pr_hygiene` failure class instead of borrowing publish-stage stop reasons, so operator reporting and guidance stay aligned with the actual failing stage
+  - Await-checks recognizes required GitHub workflows even when the emitted check-run name differs from the configured harness name, so publish is not blocked on alias-only check naming
+  - Failing PR-scoped GitHub `check_run` or `workflow_run` webhooks can return a fully autonomous run from `await_checks` or blocked check states back to `implement` with the failed-check context embedded in `resume_context`
+  - Publish-time safe review-thread resolution also covers contradicted false-positive replies, so exact local contradictions can close their GitHub threads instead of only posting a reply
+  - Operator snapshots surface lease age, TTL, reclaimability, and latest GitHub assignment state so webhook and routing skips are explainable
+  - Stable ingress can relay verified GitHub review webhooks to configured sibling runner instances without creating forwarding loops
+  - Operators can invoke inspect, promote, record-canary, and rollback runner actions through the observability API using the repo-owned promotion script
+  - Seeded manual run states with explicit policy metadata can synthesize a minimal issue shell and re-enter active review follow-up without a manual-store issue record
+  - Seeded manual retries keep the locally resumed issue state when tracker/manual-store refresh is unavailable so `retry_now` can actually redispatch the stored workspace
+  - Replay refresh drains GitHub inbox work even when runner metadata disables normal tracker dispatch
+  - Seeded manual continuation retries can reuse the persisted issue envelope and workspace branch identity so local stable-ingress replays survive the `review_verification` to `implement` handoff
 dependencies:
   - harness
-last_updated_by_issue: CLZ-16
+last_updated_by_issue: CLZ-22

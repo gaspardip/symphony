@@ -5,6 +5,8 @@ defmodule SymphonyElixir.LogFile do
 
   require Logger
 
+  alias SymphonyElixir.Config
+
   @handler_id :symphony_disk_log
   @default_log_relative_path "log/symphony.log"
   @default_max_bytes 10 * 1024 * 1024
@@ -68,7 +70,7 @@ defmodule SymphonyElixir.LogFile do
   defp disk_log_handler_config(path, max_bytes, max_files) do
     %{
       level: :all,
-      formatter: {:logger_formatter, %{single_line: true}},
+      formatter: formatter_config(),
       config: %{
         file: String.to_charlist(path),
         type: :wrap,
@@ -76,5 +78,16 @@ defmodule SymphonyElixir.LogFile do
         max_no_files: max_files
       }
     }
+  end
+
+  defp formatter_config do
+    if Config.observability_structured_logs?() do
+      {SymphonyElixir.JsonLogFormatter, %{}}
+    else
+      {:logger_formatter, %{single_line: true}}
+    end
+  rescue
+    _error ->
+      {:logger_formatter, %{single_line: true}}
   end
 end
