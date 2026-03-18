@@ -821,6 +821,72 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
              })
   end
 
+  test "review-fix exhaustion persists blocked run state when a workspace is present" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        review_fix: %{
+          enabled: true,
+          per_turn_input_soft: 60_000,
+          per_turn_input_hard: 120_000,
+          retry_2_per_turn_input_hard: 150_000,
+          retry_3_per_turn_input_hard: 220_000,
+          max_turns_in_window: 3,
+          retry_2_max_turns_in_window: 5,
+          retry_3_max_turns_in_window: 7,
+          auto_retry_limit: 3,
+          narrow_scope_batch_size: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-persisted-stop-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-review-fix-persisted-stop", identifier: "MT-914G2", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:stop, %RunPolicy.Violation{code: :review_fix_scope_exhausted}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 5,
+                 codex_input_tokens: 230_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 230_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   budget_mode: "review_fix",
+                   budget_retry_count: 3,
+                   budget_window_base_turn: 5,
+                   budget_scope_kind: "ci_failure_batch",
+                   budget_scope_ids: ["make-all"]
+                 }
+               })
+
+      assert %{
+               stage: "blocked",
+               stop_reason: %{rule_id: "budget.review_fix_scope_exhausted"},
+               last_rule_id: "budget.review_fix_scope_exhausted",
+               next_human_action: human_action
+             } = RunStateStore.load_or_default(workspace, issue)
+
+      assert is_binary(human_action) and human_action != ""
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "pull request manager updates an existing PR and attaches it to the issue" do
     workspace = temp_workspace!("pull-request-edit")
 

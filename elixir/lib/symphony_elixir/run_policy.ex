@@ -171,11 +171,13 @@ defmodule SymphonyElixir.RunPolicy do
     turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
     current_turn_input = max(0, input_total - turn_started_input)
     resume_context = normalize_resume_context(Map.get(running_entry, :resume_context, %{}))
+    workspace = workspace_for_issue(issue, running_entry)
 
     if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
       maybe_enforce_review_fix_token_budget(
         issue,
         running_entry,
+        workspace,
         resume_context,
         review_fix_budget,
         token_budget,
@@ -188,13 +190,13 @@ defmodule SymphonyElixir.RunPolicy do
 
       cond do
         budget_exceeded?(stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input], current_turn_input) ->
-          stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input))
+          stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
 
         budget_exceeded?(token_budget[:per_issue_total], total_tokens) ->
-          stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens))
+          stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
 
         budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-          stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total))
+          stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
 
         true ->
           :ok
@@ -593,6 +595,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp maybe_enforce_review_fix_token_budget(
          issue,
          running_entry,
+         workspace,
          resume_context,
          review_fix_budget,
          token_budget,
@@ -609,6 +612,7 @@ defmodule SymphonyElixir.RunPolicy do
         handle_review_fix_turn_budget_stop(
           issue,
           running_entry,
+          workspace,
           resume_context,
           review_fix_budget,
           current_turn_input,
@@ -619,6 +623,7 @@ defmodule SymphonyElixir.RunPolicy do
         handle_review_fix_total_budget_stop(
           issue,
           running_entry,
+          workspace,
           resume_context,
           review_fix_budget,
           token_budget,
@@ -626,12 +631,13 @@ defmodule SymphonyElixir.RunPolicy do
         )
 
       budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-        stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total))
+        stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
 
       true ->
         maybe_activate_review_fix_total_extension(
           issue,
           running_entry,
+          workspace,
           resume_context,
           review_fix_budget,
           token_budget,
@@ -673,6 +679,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp maybe_activate_review_fix_total_extension(
          issue,
          running_entry,
+         workspace,
          resume_context,
          review_fix_budget,
          token_budget,
@@ -695,7 +702,7 @@ defmodule SymphonyElixir.RunPolicy do
         :ok
 
       not review_fix_total_extension_eligible?(resume_context, extension_budget) ->
-        stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens))
+        stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
 
       true ->
         persisted_resume_context =
@@ -737,6 +744,7 @@ defmodule SymphonyElixir.RunPolicy do
   defp handle_review_fix_total_budget_stop(
          issue,
          running_entry,
+         workspace,
          resume_context,
          review_fix_budget,
          token_budget,
@@ -763,15 +771,16 @@ defmodule SymphonyElixir.RunPolicy do
         )
 
       persist_resume_context(issue, running_entry, persisted_resume_context)
-      stop_issue(issue, review_fix_exhaustion_violation(:total_extension_exhausted, total_tokens, metadata))
+      stop_issue(issue, review_fix_exhaustion_violation(:total_extension_exhausted, total_tokens, metadata), workspace)
     else
-      stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens))
+      stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
     end
   end
 
   defp handle_review_fix_turn_budget_stop(
          issue,
          running_entry,
+         workspace,
          resume_context,
          review_fix_budget,
          current_turn_input,
@@ -814,11 +823,11 @@ defmodule SymphonyElixir.RunPolicy do
 
       turns_in_window >= adaptive_budget.max_turns_in_window ->
         metadata = review_fix_budget_metadata(running_entry, persisted_resume_context, %{turns_in_window: turns_in_window})
-        stop_issue(issue, review_fix_exhaustion_violation(:turn_window_exhausted, current_turn_input, metadata))
+        stop_issue(issue, review_fix_exhaustion_violation(:turn_window_exhausted, current_turn_input, metadata), workspace)
 
       true ->
         metadata = review_fix_budget_metadata(running_entry, persisted_resume_context, %{})
-        stop_issue(issue, review_fix_exhaustion_violation(:scope_exhausted, current_turn_input, metadata))
+        stop_issue(issue, review_fix_exhaustion_violation(:scope_exhausted, current_turn_input, metadata), workspace)
     end
   end
 
