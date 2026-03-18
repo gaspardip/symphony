@@ -35,6 +35,7 @@ Make the self-development harness the required contract for Symphony self-host r
 - Fixed the live running-entry metadata seam by carrying `stage` and `workspace` into orchestrator running entries and falling back to persisted stage state in `RunPolicy`, so seeded review-fix retries are classified as `review_fix` in the real dogfood runtime instead of silently falling back to broad implement budgets.
 - Fixed the issue API operator surface so top-level `stop_reason` mirrors the persisted blocked run state for review-fix exhaustion, instead of forcing operators to dig into nested publish/runtime fields.
 - Added direct coverage for `WorkflowProfile`, `AuthorProfile`, and `Portfolio` normalization/aggregation paths so the adaptive-budget branch clears the repo coverage audit without changing runtime behavior again.
+- Added direct `Portfolio` default-fetch coverage with live `200`, `503`, and `missing_url` branches so operator portfolio telemetry is exercised without a stubbed fetcher.
 
 ## Evidence
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test`
