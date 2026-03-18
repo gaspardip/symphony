@@ -218,4 +218,65 @@ defmodule SymphonyElixir.WorkflowProfileTest do
     assert fallback.approval_gate_state == "Human Review"
     assert WorkflowProfile.default_profiles()[:fully_autonomous][:merge_mode] == :automerge
   end
+
+  test "resolves atom policy classes while preserving default deploy approval state" do
+    path = Workflow.workflow_file_path()
+
+    File.write!(
+      path,
+      """
+      ---
+      tracker:
+        kind: linear
+        endpoint: https://api.linear.app/graphql
+        api_key: token
+        project_slug: project
+      policy_packs:
+        client_safe:
+          deploy_approval_gate_state: Client Approval
+      ---
+
+      Ticket `{{ issue.identifier }}`.
+      """
+    )
+
+    SymphonyElixir.WorkflowStore.force_reload()
+
+    profile = WorkflowProfile.resolve(:review_required, policy_pack: :client_safe)
+
+    assert profile.name == :review_required
+    assert profile.deploy_approval_gate_state == "Deploy Approval"
+    assert profile.deploy_approval_gate_kind == "deploy_approval"
+  end
+
+  test "approval gate helpers normalize duplicate configured states" do
+    path = Workflow.workflow_file_path()
+
+    File.write!(
+      path,
+      """
+      ---
+      tracker:
+        kind: linear
+        endpoint: https://api.linear.app/graphql
+        api_key: token
+        project_slug: project
+      profiles:
+        fully_autonomous:
+          approval_gate_state: Client Approval
+          deploy_approval_gate_state: Client Approval
+      ---
+
+      Ticket `{{ issue.identifier }}`.
+      """
+    )
+
+    SymphonyElixir.WorkflowStore.force_reload()
+
+    assert WorkflowProfile.resolve(nil).name == :fully_autonomous
+    assert WorkflowProfile.approval_gate_state?(:client_approval) == false
+    assert WorkflowProfile.approval_gate_state?("client_approval")
+    assert WorkflowProfile.approval_gate_state?("client-approval")
+    assert Enum.count(WorkflowProfile.approval_gate_states(), &(&1 == "Client Approval")) == 1
+  end
 end
