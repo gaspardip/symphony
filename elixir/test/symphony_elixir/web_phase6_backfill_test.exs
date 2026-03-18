@@ -1098,6 +1098,50 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert Presenter.state_payload(orchestrator_name, 50).error.code == "snapshot_unavailable"
   end
 
+  test "issue payload falls back to the latest ledger decision when no run state exists" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-ledger-fallback",
+      identifier: "MT-LEDGER-FALLBACK",
+      title: "Ledger fallback",
+      description: "Use retry decision history when no run state exists yet",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :LedgerFallbackOrchestrator)
+
+    start_supervised!(
+      {BackfillOrchestrator,
+       name: orchestrator_name, test_pid: self(), snapshot: %{running: [], retrying: [], paused: [], skipped: [], queue: []}}
+    )
+
+    RunLedger.record("operator.action", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      actor_type: "operator",
+      actor_id: "dashboard",
+      failure_class: "coordination",
+      rule_id: "coordination.dispatch_slots_unavailable",
+      summary: "Immediate retry deferred because no orchestrator dispatch slots are available.",
+      metadata: %{
+        action: "retry_now",
+        dispatch_outcome: "deferred",
+        human_action: "Wait for a free dispatch slot or raise the configured concurrency limit before retrying."
+      }
+    })
+
+    assert {:ok, payload} = Presenter.issue_payload(issue.identifier, orchestrator_name, 50)
+    assert payload.status == "Todo"
+    assert payload.operator_summary.why_here =~ "no orchestrator dispatch slots"
+    assert payload.operator_summary.human_action_required =~ "Wait for a free dispatch slot"
+    assert payload.operator_summary.rule_id == "coordination.dispatch_slots_unavailable"
+    assert payload.operator_summary.failure_class == "coordination"
+  end
+
   test "presenter control payload covers remaining actions and tuple errors" do
     orchestrator_name = Module.concat(__MODULE__, :PresenterControlActionsOrchestrator)
 

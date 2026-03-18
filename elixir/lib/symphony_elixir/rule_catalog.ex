@@ -215,6 +215,16 @@ defmodule SymphonyElixir.RuleCatalog do
       failure_class: "coordination",
       human_action: "Wait for Symphony's Linear backoff window to expire before expecting new dispatches."
     },
+    dispatch_slots_unavailable: %{
+      rule_id: "coordination.dispatch_slots_unavailable",
+      failure_class: "coordination",
+      human_action: "Wait for a free dispatch slot or raise the configured concurrency limit before retrying."
+    },
+    retry_dispatch_deferred: %{
+      rule_id: "coordination.retry_dispatch_deferred",
+      failure_class: "coordination",
+      human_action: "Inspect the recorded no-dispatch reason and retry once the runtime gate is clear."
+    },
     tracker_event_replayed: %{
       rule_id: "tracker.event_replayed",
       failure_class: "coordination",

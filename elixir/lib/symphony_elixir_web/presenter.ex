@@ -1613,6 +1613,7 @@ defmodule SymphonyElixirWeb.Presenter do
       Map.get(running_payload, :operator_summary)
     else
       done_summary = done_operator_summary(run_state, decision_history)
+      history_signal = latest_operator_signal(decision_history)
       normalized_status = status |> to_string() |> String.downcase()
 
       %{
@@ -1620,6 +1621,7 @@ defmodule SymphonyElixirWeb.Presenter do
         why_here:
           done_summary ||
             Map.get(run_state || %{}, :last_decision_summary) ||
+            Map.get(history_signal || %{}, :summary) ||
             entry_value(tracked_issue || %{}, "state") ||
             "Issue is not currently running.",
         automatic_next:
@@ -1649,12 +1651,42 @@ defmodule SymphonyElixirWeb.Presenter do
             true ->
               "No automatic next step available."
           end,
-        human_action_required: Map.get(run_state || %{}, :next_human_action),
-        rule_id: Map.get(run_state || %{}, :last_rule_id),
-        failure_class: Map.get(run_state || %{}, :last_failure_class)
+        human_action_required:
+          Map.get(run_state || %{}, :next_human_action) ||
+            Map.get(history_signal || %{}, :human_action),
+        rule_id:
+          Map.get(run_state || %{}, :last_rule_id) || Map.get(history_signal || %{}, :rule_id),
+        failure_class:
+          Map.get(run_state || %{}, :last_failure_class) ||
+            Map.get(history_signal || %{}, :failure_class)
       }
     end
   end
+
+  defp latest_operator_signal(history) when is_list(history) do
+    history
+    |> Enum.reverse()
+    |> Enum.find_value(fn entry ->
+      summary = Map.get(entry, :summary)
+      metadata = Map.get(entry, :metadata) || %{}
+      human_action = Map.get(metadata, :human_action) || Map.get(metadata, "human_action")
+      rule_id = Map.get(entry, :rule_id)
+      failure_class = Map.get(entry, :failure_class)
+
+      if present_value?(summary) or present_value?(human_action) or present_value?(rule_id) do
+        %{
+          summary: summary,
+          human_action: human_action,
+          rule_id: rule_id,
+          failure_class: failure_class
+        }
+      else
+        nil
+      end
+    end)
+  end
+
+  defp latest_operator_signal(_history), do: nil
 
   defp issue_runtime_health_payload(running_payload, run_state, tracked_issue, decision_history) do
     if running_payload do

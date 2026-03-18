@@ -488,6 +488,41 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert resumed_issue.state == "Todo"
   end
 
+  test "retry_now returns a concrete no-dispatch reason when no slots are available" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_concurrent_agents: 0
+    )
+
+    issue = %Issue{
+      id: "issue-retry-no-slots",
+      identifier: "MT-RETRY-NO-SLOTS",
+      title: "Retry with no slots",
+      description: "Expose the no-dispatch reason instead of returning a silent success",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryNoSlotsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.action == "retry_now"
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.dispatch_slots_unavailable"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "no orchestrator dispatch slots"
+    assert retry_payload.human_action =~ "Wait for a free dispatch slot"
+  end
+
   test "review thread lifecycle controls update persisted manual thread state" do
     workspace_root =
       Path.join(

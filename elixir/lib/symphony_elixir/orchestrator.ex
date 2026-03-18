@@ -4920,19 +4920,7 @@ defmodule SymphonyElixir.Orchestrator do
         LeaseManager.release(issue.id)
       end
 
-      state =
-        cond do
-          Map.has_key?(state.running, issue.id) ->
-            state
-
-          retry_candidate_issue?(issue, terminal_state_set()) and
-              dispatch_slots_available?(issue, state) ->
-            dispatch_runtime_issue(state, issue, 1)
-
-          true ->
-            :ok = schedule_tick(0)
-            state
-        end
+      {reply, state} = retry_issue_now_outcome(state, issue)
 
       ledger_event =
         RunLedger.record("operator.action", %{
@@ -4940,16 +4928,21 @@ defmodule SymphonyElixir.Orchestrator do
           issue_identifier: issue.identifier,
           actor_type: "operator",
           actor_id: "dashboard",
-          summary: "Requested immediate retry.",
-          metadata: %{action: "retry_now"}
+          failure_class: Map.get(reply, :failure_class),
+          rule_id: Map.get(reply, :rule_id),
+          summary: Map.get(reply, :summary) || "Requested immediate retry.",
+          details: retry_issue_now_details(reply),
+          metadata: retry_issue_now_metadata(reply)
         })
 
-      {%{
-         ok: true,
-         action: "retry_now",
-         issue_identifier: issue.identifier,
-         ledger_event_id: Map.get(ledger_event, :event_id)
-       }, state}
+      {Map.merge(
+         %{
+           action: "retry_now",
+           issue_identifier: issue.identifier,
+           ledger_event_id: Map.get(ledger_event, :event_id)
+         },
+         Map.drop(reply, [:summary])
+       ), state}
     else
       true ->
         {%{
@@ -4968,6 +4961,185 @@ defmodule SymphonyElixir.Orchestrator do
          }, state}
     end
   end
+
+  defp retry_issue_now_outcome(%State{} = state, %Issue{} = issue) do
+    cond do
+      Map.has_key?(state.running, issue.id) ->
+        {%{
+           ok: true,
+           dispatch_outcome: "already_running",
+           summary: "Immediate retry skipped because the issue is already running."
+         }, state}
+
+      retry_candidate_issue?(issue, terminal_state_set()) and dispatch_slots_available?(issue, state) ->
+        next_state = dispatch_runtime_issue(state, issue, 1)
+
+        cond do
+          dispatch_started_for_issue?(state, next_state, issue.id) ->
+            {%{
+               ok: true,
+               dispatch_outcome: "dispatched",
+               summary: "Immediate retry dispatched the issue."
+             }, next_state}
+
+          retry_scheduled_for_issue?(state, next_state, issue.id) ->
+            {%{
+               ok: true,
+               dispatch_outcome: "retry_scheduled",
+               summary: "Immediate retry could not dispatch immediately and scheduled a retry."
+             }, next_state}
+
+          true ->
+            diagnostic = retry_issue_now_diagnostic(issue, state)
+
+            {Map.merge(
+               %{
+                 ok: true,
+                 dispatch_outcome: "deferred",
+                 error: diagnostic.summary
+               },
+               diagnostic
+             ), next_state}
+        end
+
+      true ->
+        :ok = schedule_tick(0)
+        diagnostic = retry_issue_now_diagnostic(issue, state)
+
+        {Map.merge(
+           %{
+             ok: true,
+             dispatch_outcome: "deferred",
+             error: diagnostic.summary
+           },
+           diagnostic
+         ), state}
+    end
+  end
+
+  defp retry_issue_now_diagnostic(%Issue{} = issue, %State{} = state) do
+    cond do
+      available_slots(state) <= 0 ->
+        retry_issue_now_rule(
+          :dispatch_slots_unavailable,
+          "Immediate retry deferred because no orchestrator dispatch slots are available.",
+          %{issue_state: issue.state, running_count: map_size(state.running)}
+        )
+
+      not state_slots_available?(issue, state.running) ->
+        retry_issue_now_rule(
+          :dispatch_slots_unavailable,
+          "Immediate retry deferred because #{issue.state} is already at its per-state concurrency limit.",
+          %{issue_state: issue.state, running_count: map_size(state.running)}
+        )
+
+      not retry_candidate_issue?(issue, terminal_state_set()) ->
+        retry_issue_now_ineligible_diagnostic(issue, state)
+
+      true ->
+        case revalidate_issue_for_dispatch(issue, &IssueSource.fetch_issue_states_by_ids/1, terminal_state_set()) do
+          {:skip, :missing} ->
+            retry_issue_now_rule(
+              :retry_dispatch_deferred,
+              "Immediate retry deferred because the issue is no longer active or visible during tracker refresh.",
+              %{issue_state: issue.state}
+            )
+
+          {:skip, %Issue{} = refreshed_issue} ->
+            reason = dispatch_skip_reason(refreshed_issue, state)
+
+            retry_issue_now_rule(
+              :retry_dispatch_deferred,
+              retry_issue_now_skip_summary(refreshed_issue, reason),
+              %{
+                issue_state: refreshed_issue.state,
+                blocked_by: Map.get(refreshed_issue, :blocked_by, []),
+                skip_reason: reason
+              },
+              next_human_action_for_skip(reason)
+            )
+
+          {:error, reason} ->
+            retry_issue_now_rule(
+              :retry_dispatch_deferred,
+              "Immediate retry deferred because tracker refresh failed before dispatch.",
+              %{issue_state: issue.state, refresh_error: inspect(reason)}
+            )
+
+          {:ok, _refreshed_issue} ->
+            retry_issue_now_rule(
+              :retry_dispatch_deferred,
+              "Immediate retry was accepted, but dispatch produced no visible runtime state change.",
+              %{issue_state: issue.state}
+            )
+        end
+    end
+  end
+
+  defp retry_issue_now_ineligible_diagnostic(%Issue{} = issue, %State{} = state) do
+    reason = dispatch_skip_reason(issue, state)
+
+    retry_issue_now_rule(
+      :retry_dispatch_deferred,
+      retry_issue_now_skip_summary(issue, reason),
+      %{issue_state: issue.state, blocked_by: Map.get(issue, :blocked_by, []), skip_reason: reason},
+      next_human_action_for_skip(reason)
+    )
+  end
+
+  defp retry_issue_now_skip_summary(%Issue{} = issue, reason) when is_binary(reason) do
+    "Immediate retry deferred because #{issue.identifier} is not dispatchable right now (#{reason})."
+  end
+
+  defp retry_issue_now_skip_summary(%Issue{} = issue, _reason) do
+    "Immediate retry deferred because #{issue.identifier} is not dispatchable in state #{issue.state}."
+  end
+
+  defp retry_issue_now_rule(rule_key, summary, details, human_action_override \\ nil)
+       when is_atom(rule_key) and is_binary(summary) and is_map(details) do
+    rule = RuleCatalog.rule(rule_key)
+
+    %{
+      rule_id: rule.rule_id,
+      failure_class: rule.failure_class,
+      summary: summary,
+      details: details,
+      human_action: human_action_override || rule.human_action
+    }
+  end
+
+  defp retry_issue_now_metadata(reply) when is_map(reply) do
+    %{
+      action: "retry_now",
+      dispatch_outcome: Map.get(reply, :dispatch_outcome),
+      human_action: Map.get(reply, :human_action),
+      details: Map.get(reply, :details)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp retry_issue_now_details(reply) when is_map(reply) do
+    case Map.get(reply, :details) do
+      nil -> nil
+      details -> inspect(details)
+    end
+  end
+
+  defp dispatch_started_for_issue?(%State{} = state, %State{} = next_state, issue_id)
+       when is_binary(issue_id) do
+    not Map.has_key?(state.running, issue_id) and Map.has_key?(next_state.running, issue_id)
+  end
+
+  defp dispatch_started_for_issue?(_state, _next_state, _issue_id), do: false
+
+  defp retry_scheduled_for_issue?(%State{} = state, %State{} = next_state, issue_id)
+       when is_binary(issue_id) do
+    not Map.has_key?(state.retry_attempts, issue_id) and
+      Map.has_key?(next_state.retry_attempts, issue_id)
+  end
+
+  defp retry_scheduled_for_issue?(_state, _next_state, _issue_id), do: false
 
   defp refresh_merge_readiness_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
