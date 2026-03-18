@@ -106,6 +106,60 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
+  @spec budget_runtime(map(), map()) :: map()
+  def budget_runtime(issue, running_entry) do
+    token_budget = Config.policy_token_budget()
+    review_fix_budget = Config.policy_review_fix_token_budget()
+    resume_context = normalize_resume_context(Map.get(running_entry, :resume_context, %{}))
+
+    if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
+      adaptive_budget = adaptive_review_fix_budget(review_fix_budget, resume_context)
+
+      %{
+        mode: "review_fix",
+        pressure_level: Map.get(resume_context, :budget_pressure_level, "normal"),
+        retry_count: review_fix_retry_count(resume_context),
+        window_base_turn: Map.get(resume_context, :budget_window_base_turn),
+        last_stop_code: Map.get(resume_context, :budget_last_stop_code),
+        last_observed_input_tokens: Map.get(resume_context, :budget_last_observed_input_tokens),
+        scope_kind: Map.get(resume_context, :budget_scope_kind),
+        scope_ids: normalize_scope_ids(Map.get(resume_context, :budget_scope_ids)),
+        auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
+        total_extension_used: truthy?(Map.get(resume_context, :budget_total_extension_used)),
+        per_turn_input_soft: adaptive_budget.per_turn_input_soft,
+        per_turn_input_hard: adaptive_budget.per_turn_input_hard,
+        max_turns_in_window: adaptive_budget.max_turns_in_window,
+        per_issue_total_limit:
+          effective_review_fix_total_budget(
+            token_budget,
+            review_fix_budget,
+            resume_context
+          ),
+        per_issue_total_extension: review_fix_budget[:per_issue_total_extension]
+      }
+    else
+      stage_budget = current_stage_token_budget(issue, running_entry)
+
+      %{
+        mode: "broad",
+        pressure_level: if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
+        retry_count: 0,
+        window_base_turn: nil,
+        last_stop_code: nil,
+        last_observed_input_tokens: nil,
+        scope_kind: nil,
+        scope_ids: [],
+        auto_narrowed: false,
+        total_extension_used: false,
+        per_turn_input_soft: stage_budget[:per_turn_input_soft],
+        per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+        max_turns_in_window: nil,
+        per_issue_total_limit: token_budget[:per_issue_total],
+        per_issue_total_extension: nil
+      }
+    end
+  end
+
   @spec maybe_stop_for_token_budget(map(), map()) :: :ok | {:retry, map()} | {:stop, violation()}
   def maybe_stop_for_token_budget(issue, running_entry) do
     token_budget = Config.policy_token_budget()
@@ -613,21 +667,7 @@ defmodule SymphonyElixir.RunPolicy do
   end
 
   defp review_fix_total_budget_exceeded?(token_budget, review_fix_budget, resume_context, total_tokens) do
-    base_budget = token_budget[:per_issue_total]
-    extension_budget = review_fix_budget[:per_issue_total_extension]
-    extension_eligible? = review_fix_total_extension_eligible?(resume_context, extension_budget)
-
-    extension_used_or_eligible? =
-      truthy?(Map.get(resume_context, :budget_total_extension_used)) or extension_eligible?
-
-    effective_budget =
-      cond do
-        not is_integer(base_budget) -> nil
-        extension_used_or_eligible? and is_integer(extension_budget) -> base_budget + extension_budget
-        true -> base_budget
-      end
-
-    budget_exceeded?(effective_budget, total_tokens)
+    budget_exceeded?(effective_review_fix_total_budget(token_budget, review_fix_budget, resume_context), total_tokens)
   end
 
   defp maybe_activate_review_fix_total_extension(
@@ -677,6 +717,21 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp review_fix_total_extension_eligible?(resume_context, extension_budget) do
     is_integer(extension_budget) and review_fix_progress_count(resume_context) >= 1
+  end
+
+  defp effective_review_fix_total_budget(token_budget, review_fix_budget, resume_context) do
+    base_budget = token_budget[:per_issue_total]
+    extension_budget = review_fix_budget[:per_issue_total_extension]
+    extension_eligible? = review_fix_total_extension_eligible?(resume_context, extension_budget)
+
+    extension_used_or_eligible? =
+      truthy?(Map.get(resume_context, :budget_total_extension_used)) or extension_eligible?
+
+    cond do
+      not is_integer(base_budget) -> nil
+      extension_used_or_eligible? and is_integer(extension_budget) -> base_budget + extension_budget
+      true -> base_budget
+    end
   end
 
   defp handle_review_fix_total_budget_stop(

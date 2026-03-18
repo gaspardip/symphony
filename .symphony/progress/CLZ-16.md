@@ -27,6 +27,10 @@ Make the self-development harness the required contract for Symphony self-host r
 - Added publish-gate enforcement so self-host publishes fail when progress or feature artifacts are missing or stale.
 - Added the thin root `AGENTS.md` index so the repo map stays discoverable without bloating the root instructions.
 - Verified the full Symphony Elixir suite passes on the baseline branch before merge.
+- Added a persisted review-fix token-budget state machine in `resume_context` so scoped PR-comment and CI-failure follow-up no longer rely only on `token_pressure: "high"`.
+- Added adaptive review-fix caps, bounded per-issue total extension, and review-fix-specific stop rules in `RunPolicy` and `RuleCatalog`.
+- Added automatic scoped retry scheduling in the orchestrator so review-fix budget stops can narrow and continue without an operator retry for the first recovery steps.
+- Narrowed `implement` prompts for review-fix lanes to one scope batch with reduced resume context and operator-visible budget state in presenter payloads.
 
 ## Evidence
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test`
@@ -34,6 +38,10 @@ Make the self-development harness the required contract for Symphony self-host r
 - `cd /Users/gaspar/src/symphony && ./scripts/symphony-smoke.sh`
 - Live self-host routing proof: the dogfood runner on `:4046` picked up `CLZ-16` from the Symphony Linear project with assignee-first routing.
 - Live self-host failure proof: `CLZ-16` blocked on `budget.per_turn_input_exceeded`, proving the issue entered the self-host execution path with the new harness contract loaded.
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/rule_catalog_test.exs test/symphony_elixir/workspace_and_config_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/core_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix harness.check`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix dialyzer --format short` still exits nonzero on the repo's existing warning baseline; this slice did not attempt to clear unrelated warnings.
 
 ## Next Step
-Merge the current baseline branch into `main`, rotate the dogfood runner to the merged default branch, and re-run the next Symphony self-host issues from a fresh base branch instead of the long-running baseline branch.
+Dogfood the new review-fix adaptive budget lane on a real self-host PR or CI recovery path and confirm scoped retries advance to `validate` or stop with review-fix-specific exhaustion reasons instead of the generic token-budget stop.

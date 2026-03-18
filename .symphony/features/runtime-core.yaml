@@ -1,7 +1,7 @@
 id: runtime-core
 title: Runtime Core
 status: active
-summary: Runtime-owned delivery stages, recovery, proof gates, and publish lifecycle.
+summary: Runtime-owned delivery stages, adaptive recovery, proof gates, and publish lifecycle.
 source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
@@ -9,7 +9,7 @@ source_paths:
 acceptance_signals:
   - Deterministic stage execution from checkout through post_merge
   - Auto-heal and block reasons are visible in operator payloads
+  - Scoped review-fix runs narrow and auto-retry with explicit budget state instead of generic token-budget stops
 dependencies:
   - harness
-last_updated_by_issue: seed
-
+last_updated_by_issue: CLZ-16

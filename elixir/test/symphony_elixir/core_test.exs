@@ -222,6 +222,72 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "UI proof: optional; mode=local"
   end
 
+  test "implement prompt narrows resume context for scoped review-fix retries" do
+    issue = %Issue{
+      id: "issue-review-fix-prompt",
+      identifier: "MT-REVIEW-FIX",
+      title: "Address scoped review feedback",
+      description: "Keep the prompt focused on the current review-fix batch."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          review_threads: %{
+            "comment:1" => %{"draft_state" => "drafted"},
+            "comment:2" => %{"draft_state" => "drafted"}
+          },
+          resume_context: %{
+            budget_mode: "review_fix",
+            budget_pressure_level: "high",
+            budget_retry_count: 1,
+            budget_scope_kind: "review_claim_batch",
+            budget_scope_ids: ["comment:1"],
+            budget_auto_narrowed: true,
+            token_pressure: "high",
+            last_turn_summary: "Adjusted the first claim locally.",
+            diff_summary: " lib/foo.ex | 10 +-"
+          }
+        },
+        [],
+        2,
+        5
+      )
+
+    assert prompt =~ "Scoped review-fix lane: active"
+    assert prompt =~ "Scope ids:\n- comment:1"
+    assert prompt =~ "Scoped review-fix token pressure is active."
+    assert prompt =~ "Address the scoped review_claim_batch items only: comment:1."
+    refute prompt =~ "Diff stat:"
+  end
+
+  test "implement prompt enters scoped ci-failure budget lane from failed checks" do
+    issue = %Issue{
+      id: "issue-ci-failure-prompt",
+      identifier: "MT-CI-FAILURE",
+      title: "Fix the failing required check",
+      description: "Keep the recovery turn scoped to CI failures."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          last_failing_required_checks: ["make-all"],
+          implementation_turns: 2
+        },
+        [],
+        3,
+        5
+      )
+
+    assert prompt =~ "Scoped review-fix lane: active"
+    assert prompt =~ "Scope kind: ci_failure_batch"
+    assert prompt =~ "Scope ids:\n- make-all"
+    assert prompt =~ "Address the scoped ci_failure_batch items only: make-all."
+  end
+
   test "existing workspace changes can advance to validation without a new diff" do
     turn_result = %SymphonyElixir.TurnResult{
       summary: "Existing diff is ready for validation",
@@ -267,6 +333,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute SymphonyElixir.DeliveryEngine.retryable_implementation_error_for_test(reason)
     assert SymphonyElixir.DeliveryEngine.non_retryable_implementation_error_for_test(reason)
+
     assert SymphonyElixir.DeliveryEngine.implementation_error_code_for_test(reason) ==
              :command_output_budget_exceeded
   end
@@ -279,6 +346,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute SymphonyElixir.DeliveryEngine.retryable_implementation_error_for_test(reason)
     assert SymphonyElixir.DeliveryEngine.non_retryable_implementation_error_for_test(reason)
+
     assert SymphonyElixir.DeliveryEngine.implementation_error_code_for_test(reason) ==
              :command_count_exceeded
   end
@@ -291,6 +359,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute SymphonyElixir.DeliveryEngine.retryable_implementation_error_for_test(reason)
     assert SymphonyElixir.DeliveryEngine.non_retryable_implementation_error_for_test(reason)
+
     assert SymphonyElixir.DeliveryEngine.implementation_error_code_for_test(reason) ==
              :broad_read_violation
   end
@@ -303,6 +372,7 @@ defmodule SymphonyElixir.CoreTest do
 
     refute SymphonyElixir.DeliveryEngine.retryable_implementation_error_for_test(reason)
     assert SymphonyElixir.DeliveryEngine.non_retryable_implementation_error_for_test(reason)
+
     assert SymphonyElixir.DeliveryEngine.implementation_error_code_for_test(reason) ==
              :stage_command_violation
   end
@@ -1462,6 +1532,7 @@ defmodule SymphonyElixir.CoreTest do
       """)
 
       File.chmod!(codex_binary, 0o755)
+
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_after_create: "git clone #{template_repo} .",
@@ -1615,6 +1686,7 @@ defmodule SymphonyElixir.CoreTest do
       """)
 
       File.chmod!(codex_binary, 0o755)
+
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_after_create: "git clone #{template_repo} .",

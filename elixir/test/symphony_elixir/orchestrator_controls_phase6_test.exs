@@ -82,6 +82,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert snapshot.runner.runner_health == "invalid"
     assert snapshot.runner.runner_health_rule_id == "runner.install_missing"
     assert snapshot.running == []
+
     assert snapshot.queue == [] or
              snapshot.queue == [%{error: "{:runner_health, \"runner.install_missing\"}"}]
   end
@@ -335,6 +336,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     manual_store_root = Path.join(workspace_root, "manual-store")
 
+    File.rm_rf!(workspace_root)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       workspace_root: workspace_root,
@@ -418,6 +421,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
   test "post review drafts posts approved inline replies when policy allows" do
     unique_suffix = System.unique_integer([:positive])
+
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -541,13 +545,14 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "verify", %{})
     {:ok, _} = SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{})
 
-    {:ok, _submitted_issue} = SymphonyElixir.ManualIssueStore.submit(%{
-      "id" => "retry-blocked",
-      "identifier" => issue.identifier,
-      "title" => issue.title,
-      "description" => issue.description,
-      "acceptance_criteria" => ["Resume blocked issue"]
-    })
+    {:ok, _submitted_issue} =
+      SymphonyElixir.ManualIssueStore.submit(%{
+        "id" => "retry-blocked",
+        "identifier" => issue.identifier,
+        "title" => issue.title,
+        "description" => issue.description,
+        "acceptance_criteria" => ["Resume blocked issue"]
+      })
 
     :ok = SymphonyElixir.ManualIssueStore.update_issue_state(issue.id, "Blocked")
     :ok = SymphonyElixir.LeaseManager.release(issue.id)
@@ -844,6 +849,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     System.cmd("git", ["init"], cd: workspace)
     File.mkdir_p!(Path.join(workspace, ".symphony"))
+
     File.write!(Path.join(workspace, ".symphony/harness.yml"), """
     version: 1
     base_branch: main
@@ -1062,9 +1068,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     missing_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:ok, []} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:ok, []} end)
       end)
 
     assert missing_log =~
@@ -1073,9 +1077,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     stale_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "Done"}]} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "Done"}]} end)
       end)
 
     assert stale_log =~
@@ -1087,9 +1089,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     error_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:error, :boom} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:error, :boom} end)
       end)
 
     assert error_log =~
@@ -1395,6 +1395,87 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     end)
   end
 
+  test "token budget retries auto-schedule scoped review-fix continuation" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-fix-budget-retry-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    issue = %Issue{
+      id: "issue-review-fix-retry",
+      identifier: "MT-REVIEW-FIX-RETRY",
+      title: "Retry scoped review fix",
+      description: "adaptive budget retry",
+      state: "In Progress",
+      labels: []
+    }
+
+    workspace = Workspace.path_for_issue(issue.identifier)
+    File.mkdir_p!(workspace)
+    assert {:ok, _state} = SymphonyElixir.RunStateStore.transition(workspace, "implement", %{})
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    ref = Process.monitor(worker)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    running_entry = %{
+      pid: worker,
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace: workspace,
+      stage: "implement",
+      started_at: DateTime.utc_now(),
+      turn_count: 1,
+      retry_attempt: 0,
+      codex_input_tokens: 130_000,
+      codex_output_tokens: 0,
+      codex_total_tokens: 130_000,
+      turn_started_input_tokens: 0,
+      resume_context: %{
+        budget_mode: "review_fix",
+        budget_scope_kind: "review_claim_batch",
+        budget_scope_ids: ["comment:1", "comment:2"]
+      }
+    }
+
+    next_state =
+      Orchestrator.maybe_stop_issue_for_token_budget_for_test(
+        %State{
+          lease_owner: "review-fix-owner",
+          codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+          claimed: MapSet.new([issue.id]),
+          running: %{issue.id => running_entry}
+        },
+        issue.id,
+        running_entry
+      )
+
+    refute Map.has_key?(next_state.running, issue.id)
+
+    retry_entry = Map.fetch!(next_state.retry_attempts, issue.id)
+    assert retry_entry.attempt == 1
+    assert retry_entry.identifier == issue.identifier
+    assert retry_entry.delay_type == :continuation
+    assert retry_entry.budget_retry == true
+    assert retry_entry.budget_mode == "review_fix"
+    assert retry_entry.budget_retry_count == 1
+    assert get_in(retry_entry, [:budget_resume_context, :budget_scope_ids]) == ["comment:1"]
+  end
+
   test "passive retry path uses issue lookup instead of candidate list fetch" do
     issue_id = "manual:issue-passive-retry"
     identifier = "MT-PASSIVE-RETRY"
@@ -1503,6 +1584,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     workspace = Path.join(workspace_root, issue.identifier)
     init_git_workspace!(workspace, branch: "symphony/mt-runtime-passive")
+
     SymphonyElixir.RunStateStore.transition(workspace, "await_checks", %{
       issue_id: issue.id,
       issue_identifier: issue.identifier

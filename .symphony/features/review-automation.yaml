@@ -1,7 +1,7 @@
 id: review-automation
 title: Review Automation
 status: active
-summary: Draft-first PR review ingestion, reply generation, and thread-state management.
+summary: Draft-first PR review ingestion, scoped reply recovery, and thread-state management.
 source_paths:
   - elixir/lib/symphony_elixir/pr_watcher.ex
   - elixir/lib/symphony_elixir/github_cli_client.ex
@@ -9,7 +9,7 @@ source_paths:
 acceptance_signals:
   - New review feedback is ingested and exposed as drafted replies
   - Thread state transitions are visible and policy-controlled
+  - Review-fix follow-up persists adaptive budget scope and pressure across retries
 dependencies:
   - runtime-core
-last_updated_by_issue: seed
-
+last_updated_by_issue: CLZ-16
