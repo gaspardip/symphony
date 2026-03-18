@@ -991,11 +991,11 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp broad_implement_workspace_candidate?(running_entry) when is_map(running_entry) do
-    is_binary(Map.get(running_entry, :workspace) || Map.get(running_entry, :workspace_path))
-  end
+  defp broad_implement_workspace_candidate?(running_entry) do
+    workspace = Map.get(running_entry, :workspace) || Map.get(running_entry, :workspace_path)
 
-  defp broad_implement_workspace_candidate?(_running_entry), do: false
+    is_binary(workspace)
+  end
 
   defp handle_broad_implement_turn_budget_stop(
          issue,
@@ -1603,10 +1603,8 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp broad_implement_target_paths(_running_entry, _resume_context), do: []
 
-  defp broad_implement_workspace_paths(running_entry) when is_map(running_entry) do
-    workspace =
-      Map.get(running_entry, :workspace) ||
-        Map.get(running_entry, :workspace_path)
+  defp broad_implement_workspace_paths(running_entry) do
+    workspace = Map.get(running_entry, :workspace) || Map.get(running_entry, :workspace_path)
 
     if is_binary(workspace) do
       workspace
@@ -1616,8 +1614,6 @@ defmodule SymphonyElixir.RunPolicy do
       []
     end
   end
-
-  defp broad_implement_workspace_paths(_running_entry), do: []
 
   defp broad_implement_already_learned(running_entry, resume_context, target_paths)
        when is_map(running_entry) and is_map(resume_context) do
@@ -1692,7 +1688,7 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp normalize_candidate_paths(_paths), do: []
 
-  defp normalize_diff_marker_paths(paths) when is_list(paths) do
+  defp normalize_diff_marker_paths(paths) do
     bare_paths = MapSet.new(paths)
 
     diff_prefixed_tails =
@@ -1725,8 +1721,6 @@ defmodule SymphonyElixir.RunPolicy do
       end
     end)
   end
-
-  defp normalize_diff_marker_paths(_paths), do: []
 
   defp diff_marker_tail(<<"a/", rest::binary>>) when rest != "",
     do: validate_diff_marker_tail(rest)
