@@ -479,6 +479,82 @@ defmodule SymphonyElixir.CoreTest do
     refute prompt =~ "adjacent helper"
   end
 
+  test "implement prompt keeps fallback broad retry context when no target path exists yet" do
+    issue = %Issue{
+      id: "issue-broad-budget-fallback-prompt",
+      identifier: "MT-BROAD-FALLBACK",
+      title: "Shape fallback broad retry context",
+      description: "Keep the issue brief only until a concrete focus path exists."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          resume_context: %{
+            budget_mode: "broad_implement",
+            budget_pressure_level: "high",
+            budget_retry_count: 1,
+            budget_auto_narrowed: true,
+            token_pressure: "high",
+            last_turn_summary: "Need to confirm the first concrete parity surface before editing.",
+            dirty_files: ["elixir/lib/symphony_elixir_web/presenter.ex"],
+            next_objective: "Pick the smallest concrete path and stop broad discovery."
+          }
+        },
+        [],
+        2,
+        3
+      )
+
+    assert prompt =~ "This is a narrow broad-implement retry."
+    assert prompt =~ "Execution hint: stay inside the first concrete path you confirm and avoid broad discovery."
+    assert prompt =~ "Issue brief:"
+    refute prompt =~ "Last implementation summary:"
+    refute prompt =~ "Dirty files:"
+    refute prompt =~ "Target paths:"
+  end
+
+  test "implement prompt normalizes broad retry resume context from persisted string keys" do
+    issue = %Issue{
+      id: "issue-broad-budget-string-keys",
+      identifier: "MT-BROAD-STRING",
+      title: "Normalize persisted broad retry state",
+      description: "Blocked retry payloads may round-trip through JSON before prompting again."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          resume_context: %{
+            "budget_mode" => "broad_implement",
+            "budget_pressure_level" => "high",
+            "budget_retry_count" => 2,
+            "budget_auto_narrowed" => true,
+            "token_pressure" => "high",
+            "target_paths" => ["elixir/lib/symphony_elixir/run_policy.ex"],
+            "next_required_path" => "elixir/lib/symphony_elixir/delivery_engine.ex",
+            "already_learned" =>
+              "Stay inside elixir/lib/symphony_elixir/run_policy.ex and avoid unrelated reads or repo-wide rediscovery.",
+            "budget_expansion_used" => true,
+            "budget_last_stop_code" => "budget.broad_implement_focus_insufficient"
+          }
+        },
+        [],
+        3,
+        4
+      )
+
+    assert prompt =~ "Broad implement retry lane: active"
+    assert prompt =~ "Budget retry count: 2"
+    assert prompt =~ "Next required path: elixir/lib/symphony_elixir/delivery_engine.ex"
+    assert prompt =~
+             "Focus path: `elixir/lib/symphony_elixir/run_policy.ex`. Stay inside this file."
+    assert prompt =~
+             "Advance the ticket by working only in `elixir/lib/symphony_elixir/run_policy.ex`."
+  end
+
   test "implement prompt enters scoped review-fix budget lane from accepted review claims" do
     issue = %Issue{
       id: "issue-review-fix-prompt",
