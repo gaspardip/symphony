@@ -1274,7 +1274,8 @@ defmodule SymphonyElixir.RunPolicy do
       [
         Map.get(resume_context, :last_turn_summary),
         Map.get(resume_context, :next_objective),
-        Map.get(running_entry, :last_codex_message)
+        Map.get(running_entry, :last_codex_message),
+        Map.get(running_entry, :recent_codex_updates, [])
       ]
       |> Enum.flat_map(&extract_candidate_paths/1)
 
@@ -1314,7 +1315,8 @@ defmodule SymphonyElixir.RunPolicy do
     summary =
       [
         Map.get(resume_context, :last_turn_summary),
-        Map.get(running_entry, :last_codex_message)
+        Map.get(running_entry, :last_codex_message),
+        Map.get(running_entry, :recent_codex_updates, [])
       ]
       |> Enum.map(&summarizable_text/1)
       |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))

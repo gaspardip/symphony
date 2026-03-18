@@ -27,6 +27,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Tightened the broad retry prompt to drop the issue brief entirely once target paths exist, replace the repo map with a short execution hint, and make the next objective path-specific.
 - Live replay showed the first cut still dropped `target_paths` and `already_learned` because broad budget stops often only have structured Codex commentary payloads, not a plain `last_turn_summary`.
 - Extended broad retry mining in `RunPolicy` to extract paths and compact continuity from structured `last_codex_message` payloads, including real `response.output_text.done` commentary.
+- Found the follow-up live seam: the useful commentary often sits in `recent_codex_updates` because the final update at stop time may just be a noisy tool event.
+- Extended broad retry mining again so it scans `recent_codex_updates` as well as `last_codex_message`, matching the real CLZ-32 worker transcript shape from the isolated Codex log store.
 - Generalized orchestrator retry metadata so broad-mode retries reuse the same automatic continuation path as review-fix retries without being mislabeled as review-fix work.
 - Added direct regression coverage for the new broad retry lane, the CI-recovery exclusion, the new stop rule, and the narrowed prompt text.
 - Found the live completion seam: worker shutdown was still falling through to the generic budget stop because the broad retry gate required persisted `run_state.stage == "implement"` even when the live `dispatch_stage` was already `implement`.
