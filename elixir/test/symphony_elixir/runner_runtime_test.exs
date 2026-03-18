@@ -439,9 +439,7 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
     assert promote_payload.output == "runner command ok"
     assert promote_payload.command =~ "promote"
 
-    assert_receive {:runner_runtime_cmd, "bash",
-                    [script_path, "promote", "main", "--canary-label", "canary:symphony"],
-                    options}
+    assert_receive {:runner_runtime_cmd, "bash", [script_path, "promote", "main", "--canary-label", "canary:symphony"], options}
 
     assert script_path == RunnerRuntime.promotion_script_path()
     assert options[:stderr_to_stdout] == true
@@ -518,7 +516,6 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
     assert failed_payload.exit_status == 7
     assert failed_payload.output == "runner failed"
 
-    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "record-canary", "fail"],
-                    _options}
+    assert_receive {:runner_runtime_cmd, "bash", [_script_path, "record-canary", "fail"], _options}
   end
 end

@@ -2373,9 +2373,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     missing_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:ok, []} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:ok, []} end)
       end)
 
     assert missing_log =~
@@ -2384,9 +2382,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     stale_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "Done"}]} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:ok, [%{issue | state: "Done"}]} end)
       end)
 
     assert stale_log =~
@@ -2398,9 +2394,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     error_log =
       capture_log(fn ->
         assert %State{} =
-                 Orchestrator.dispatch_issue_for_test(%State{}, issue,
-                   issue_fetcher: fn [_id] -> {:error, :boom} end
-                 )
+                 Orchestrator.dispatch_issue_for_test(%State{}, issue, issue_fetcher: fn [_id] -> {:error, :boom} end)
       end)
 
     assert error_log =~
