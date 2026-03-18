@@ -39,6 +39,7 @@ Make the self-development harness the required contract for Symphony self-host r
 - Added a concrete `mix harness.check` malformed-base-branch regression so the task's list-formatted validation errors stay covered while lifting the repo audit floor.
 - Added direct `CLI` manual-submit runtime coverage for real JSON loading, HTTP success, explicit API error messages, and unexpected status handling so the audit floor rises without touching adaptive-budget behavior.
 - Added extra `WorkflowProfile` coverage for valid deploy-mode normalization and unknown policy-class fallback so the adaptive-budget branch clears the remaining audit gap.
+- Added extra `AuthorProfile` coverage for direct-certainty summaries and commit-subject truncation so the remaining audit gap can be cleared without changing runtime behavior.
 
 ## Evidence
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test`
@@ -57,6 +58,7 @@ Make the self-development harness the required contract for Symphony self-host r
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/harness_check_task_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/cli_phase6_extra_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/workflow_profile_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/author_profile_test.exs`
 
 ## Next Step
 Publish the adaptive review-fix budget branch and let CI/review validate the live-proven retry and exhaustion behavior.
