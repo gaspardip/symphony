@@ -1854,16 +1854,14 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  codex_total_tokens: 150_000,
                  turn_started_input_tokens: 0,
                  resume_context: %{
-                   last_turn_summary:
-                     "The next focused edit belongs in elixir/lib/symphony_elixir/delivery_engine.ex before we touch anything else."
+                   last_turn_summary: "The next focused edit belongs in elixir/lib/symphony_elixir/delivery_engine.ex before we touch anything else."
                  }
                })
 
       assert %{
                resume_context: %{
                  target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
-                 already_learned:
-                   "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                }
              } = RunStateStore.load_or_default(workspace, issue)
     after

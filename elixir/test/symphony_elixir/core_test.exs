@@ -535,8 +535,7 @@ defmodule SymphonyElixir.CoreTest do
             "token_pressure" => "high",
             "target_paths" => ["elixir/lib/symphony_elixir/run_policy.ex"],
             "next_required_path" => "elixir/lib/symphony_elixir/delivery_engine.ex",
-            "already_learned" =>
-              "Stay inside elixir/lib/symphony_elixir/run_policy.ex and avoid unrelated reads or repo-wide rediscovery.",
+            "already_learned" => "Stay inside elixir/lib/symphony_elixir/run_policy.ex and avoid unrelated reads or repo-wide rediscovery.",
             "budget_expansion_used" => true,
             "budget_last_stop_code" => "budget.broad_implement_focus_insufficient"
           }
@@ -549,8 +548,10 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Broad implement retry lane: active"
     assert prompt =~ "Budget retry count: 2"
     assert prompt =~ "Next required path: elixir/lib/symphony_elixir/delivery_engine.ex"
+
     assert prompt =~
              "Focus path: `elixir/lib/symphony_elixir/run_policy.ex`. Stay inside this file."
+
     assert prompt =~
              "Advance the ticket by working only in `elixir/lib/symphony_elixir/run_policy.ex`."
   end
