@@ -1321,11 +1321,11 @@ defmodule SymphonyElixir.RunPolicy do
       |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))
 
     cond do
-      is_binary(existing) ->
-        existing
-
       target_paths != [] ->
         "Stay inside #{Enum.join(target_paths, ", ")} and avoid unrelated reads or repo-wide rediscovery."
+
+      is_binary(existing) ->
+        existing
 
       is_binary(summary) ->
         summarized_text(summary, 220)
