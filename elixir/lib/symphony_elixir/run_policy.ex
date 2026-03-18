@@ -141,6 +141,7 @@ defmodule SymphonyElixir.RunPolicy do
   def budget_runtime(issue, running_entry) do
     token_budget = Config.policy_token_budget()
     review_fix_budget = Config.policy_review_fix_token_budget()
+    broad_implement_budget = Config.policy_broad_implement_token_budget()
     resume_context = normalize_resume_context(Map.get(running_entry, :resume_context, %{}))
 
     if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
@@ -171,23 +172,43 @@ defmodule SymphonyElixir.RunPolicy do
     else
       stage_budget = current_stage_token_budget(issue, running_entry)
 
-      %{
-        mode: "broad",
-        pressure_level: if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
-        retry_count: 0,
-        window_base_turn: nil,
-        last_stop_code: nil,
-        last_observed_input_tokens: nil,
-        scope_kind: nil,
-        scope_ids: [],
-        auto_narrowed: false,
-        total_extension_used: false,
-        per_turn_input_soft: stage_budget[:per_turn_input_soft],
-        per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
-        max_turns_in_window: nil,
-        per_issue_total_limit: token_budget[:per_issue_total],
-        per_issue_total_extension: nil
-      }
+      if broad_implement_budget_mode?(resume_context, broad_implement_budget) do
+        %{
+          mode: "broad_implement",
+          pressure_level: Map.get(resume_context, :budget_pressure_level, "normal"),
+          retry_count: broad_implement_retry_count(resume_context),
+          window_base_turn: Map.get(resume_context, :budget_window_base_turn),
+          last_stop_code: Map.get(resume_context, :budget_last_stop_code),
+          last_observed_input_tokens: Map.get(resume_context, :budget_last_observed_input_tokens),
+          scope_kind: nil,
+          scope_ids: [],
+          auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
+          total_extension_used: false,
+          per_turn_input_soft: stage_budget[:per_turn_input_soft],
+          per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+          max_turns_in_window: nil,
+          per_issue_total_limit: token_budget[:per_issue_total],
+          per_issue_total_extension: nil
+        }
+      else
+        %{
+          mode: "broad",
+          pressure_level: if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
+          retry_count: 0,
+          window_base_turn: nil,
+          last_stop_code: nil,
+          last_observed_input_tokens: nil,
+          scope_kind: nil,
+          scope_ids: [],
+          auto_narrowed: false,
+          total_extension_used: false,
+          per_turn_input_soft: stage_budget[:per_turn_input_soft],
+          per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+          max_turns_in_window: nil,
+          per_issue_total_limit: token_budget[:per_issue_total],
+          per_issue_total_extension: nil
+        }
+      end
     end
   end
 
@@ -195,6 +216,7 @@ defmodule SymphonyElixir.RunPolicy do
   def maybe_stop_for_token_budget(issue, running_entry) do
     token_budget = Config.policy_token_budget()
     review_fix_budget = Config.policy_review_fix_token_budget()
+    broad_implement_budget = Config.policy_broad_implement_token_budget()
 
     workspace =
       Map.get(running_entry, :workspace_path) ||
@@ -223,6 +245,11 @@ defmodule SymphonyElixir.RunPolicy do
         output_total
       )
     else
+      stage =
+        Map.get(running_entry, :dispatch_stage) ||
+          Map.get(running_entry, :stage) ||
+          current_stage(issue, workspace, run_state)
+
       maybe_record_soft_budget_pressure(
         issue,
         running_entry,
@@ -232,21 +259,37 @@ defmodule SymphonyElixir.RunPolicy do
         run_state
       )
 
-      cond do
-        budget_exceeded?(
-          stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
-          current_turn_input
-        ) ->
-          stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
+      case maybe_enforce_broad_implement_token_budget(
+             issue,
+             running_entry,
+             workspace,
+             resume_context,
+             broad_implement_budget,
+             stage,
+             stage_budget,
+             current_turn_input,
+             run_state
+           ) do
+        :pass_through ->
+          cond do
+            budget_exceeded?(
+              stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+              current_turn_input
+            ) ->
+              stop_issue(issue, token_budget_violation(:per_turn_input, current_turn_input), workspace)
 
-        budget_exceeded?(total_budget, total_tokens) ->
-          stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+            budget_exceeded?(total_budget, total_tokens) ->
+              stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
 
-        budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-          stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
+            budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
+              stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
 
-        true ->
-          :ok
+            true ->
+              :ok
+          end
+
+        result ->
+          result
       end
     end
   end
@@ -619,6 +662,15 @@ defmodule SymphonyElixir.RunPolicy do
     )
   end
 
+  defp broad_implement_exhaustion_violation(observed, metadata) do
+    violation(:broad_implement_scope_exhausted,
+      summary: "Broad implement retries exhausted the narrow retry lane.",
+      details:
+        "Observed per-turn input #{observed} after Symphony retried with a narrower broad-implement context and no smaller safe retry remained.",
+      metadata: metadata
+    )
+  end
+
   defp workload_restricted_violation(summary, details, human_action) do
     violation(:policy_workload_restricted,
       summary: summary,
@@ -656,6 +708,27 @@ defmodule SymphonyElixir.RunPolicy do
       stage == "implement" and
       Map.get(resume_context, :budget_mode) == "review_fix"
   end
+
+  defp broad_implement_budget_candidate?(stage, broad_implement_budget, run_state)
+       when is_binary(stage) and is_map(broad_implement_budget) and is_map(run_state) do
+    resume_context = normalize_resume_context(Map.get(run_state, :resume_context, %{}))
+
+    Map.get(broad_implement_budget, :enabled, true) and
+      stage == "implement" and
+      Map.get(run_state, :stage) == "implement" and
+      not review_fix_budget_candidate?(run_state, stage) and
+      Map.get(resume_context, :budget_mode) != "review_fix" and
+      Map.get(resume_context, :budget_scope_kind) not in ["review_claim_batch", "ci_failure_batch"] and
+      is_nil(Map.get(run_state, :last_ci_failure))
+  end
+
+  defp broad_implement_budget_mode?(resume_context, broad_implement_budget)
+       when is_map(resume_context) and is_map(broad_implement_budget) do
+    Map.get(broad_implement_budget, :enabled, true) and
+      Map.get(resume_context, :budget_mode) == "broad_implement"
+  end
+
+  defp broad_implement_budget_mode?(_resume_context, _broad_implement_budget), do: false
 
   defp maybe_enforce_review_fix_token_budget(
          issue,
@@ -784,6 +857,89 @@ defmodule SymphonyElixir.RunPolicy do
 
         persist_resume_context(issue, running_entry, persisted_resume_context)
         :ok
+    end
+  end
+
+  defp maybe_enforce_broad_implement_token_budget(
+         issue,
+         running_entry,
+         workspace,
+         resume_context,
+         broad_implement_budget,
+         stage,
+         stage_budget,
+         current_turn_input,
+         run_state
+       ) do
+    hard_budget = stage_budget[:per_turn_input_hard] || Config.policy_per_turn_input_budget()
+
+    cond do
+      not broad_implement_workspace_candidate?(running_entry) ->
+        :pass_through
+
+      not broad_implement_budget_candidate?(stage, broad_implement_budget, run_state) ->
+        :pass_through
+
+      not budget_exceeded?(hard_budget, current_turn_input) ->
+        :pass_through
+
+      true ->
+        handle_broad_implement_turn_budget_stop(
+          issue,
+          running_entry,
+          workspace,
+          resume_context,
+          broad_implement_budget,
+          current_turn_input
+        )
+    end
+  end
+
+  defp broad_implement_workspace_candidate?(running_entry) when is_map(running_entry) do
+    is_binary(Map.get(running_entry, :workspace) || Map.get(running_entry, :workspace_path))
+  end
+
+  defp broad_implement_workspace_candidate?(_running_entry), do: false
+
+  defp handle_broad_implement_turn_budget_stop(
+         issue,
+         running_entry,
+         workspace,
+         resume_context,
+         broad_implement_budget,
+         current_turn_input
+       ) do
+    retry_count = broad_implement_retry_count(resume_context)
+    can_retry? = retry_count < (broad_implement_budget[:auto_retry_limit] || 0)
+
+    persisted_resume_context =
+      broad_implement_resume_context_for_budget_retry(
+        resume_context,
+        running_entry,
+        "budget.per_turn_input_exceeded",
+        current_turn_input,
+        %{
+          budget_retry_count: retry_count + 1,
+          budget_pressure_level: broad_implement_pressure_level_for_retry(retry_count + 1),
+          budget_auto_narrowed: true
+        }
+      )
+
+    persist_resume_context(issue, running_entry, persisted_resume_context)
+
+    if can_retry? do
+      {:retry,
+       %{
+         kind: :broad_implement_budget_retry,
+         summary: "Adaptive broad-implement retry scheduled after token budget pressure.",
+         budget_mode: "broad_implement",
+         resume_context: persisted_resume_context,
+         observed_input_tokens: current_turn_input,
+         retry_count: retry_count + 1
+       }}
+    else
+      metadata = broad_implement_budget_metadata(running_entry, persisted_resume_context)
+      stop_issue(issue, broad_implement_exhaustion_violation(current_turn_input, metadata), workspace)
     end
   end
 
@@ -1053,6 +1209,47 @@ defmodule SymphonyElixir.RunPolicy do
       total_extension_used: truthy?(Map.get(resume_context, :budget_total_extension_used))
     }
     |> Map.merge(extras)
+  end
+
+  defp broad_implement_resume_context_for_budget_retry(
+         resume_context,
+         running_entry,
+         stop_code,
+         observed_tokens,
+         overrides
+       ) do
+    turn_count = Map.get(running_entry, :turn_count, 0)
+
+    resume_context
+    |> Map.put(:budget_mode, "broad_implement")
+    |> Map.put_new(:budget_pressure_level, "normal")
+    |> Map.put_new(:budget_retry_count, 0)
+    |> Map.put_new(:budget_window_base_turn, turn_count)
+    |> Map.put(:budget_last_stop_code, stop_code)
+    |> Map.put(:budget_last_observed_input_tokens, observed_tokens)
+    |> Map.put(:token_pressure, "high")
+    |> Map.merge(Enum.into(overrides, %{}))
+  end
+
+  defp broad_implement_retry_count(resume_context) do
+    case Map.get(resume_context, :budget_retry_count, 0) do
+      value when is_integer(value) and value >= 0 -> value
+      _ -> 0
+    end
+  end
+
+  defp broad_implement_pressure_level_for_retry(retry_count) when retry_count >= 1,
+    do: "high"
+
+  defp broad_implement_pressure_level_for_retry(_retry_count), do: "normal"
+
+  defp broad_implement_budget_metadata(running_entry, resume_context) do
+    %{
+      stage: Map.get(running_entry, :stage),
+      retry_count: broad_implement_retry_count(resume_context),
+      pressure_level: Map.get(resume_context, :budget_pressure_level),
+      auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed))
+    }
   end
 
   defp narrow_review_fix_scope_ids(resume_context, batch_size) do

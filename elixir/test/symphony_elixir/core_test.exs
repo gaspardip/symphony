@@ -385,6 +385,46 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Address the scoped ci_failure_batch items only: make-all."
   end
 
+  test "implement prompt narrows broad implement retries under token pressure" do
+    issue = %Issue{
+      id: "issue-broad-budget-prompt",
+      identifier: "MT-BROAD-BUDGET",
+      title: "Shape broad implement context",
+      description: "Operators need the issue, state, and delivery telemetry surfaces to agree."
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          resume_context: %{
+            budget_mode: "broad_implement",
+            budget_pressure_level: "high",
+            budget_retry_count: 1,
+            budget_auto_narrowed: true,
+            token_pressure: "high",
+            last_turn_summary: "Mapped the parity bug to the issue payload presenter path.",
+            last_blocking_rule: "budget.per_turn_input_exceeded",
+            dirty_files: ["elixir/lib/symphony_elixir_web/presenter.ex"],
+            review_feedback_summary: "- correctness_risk lib/foo.ex: repeated context",
+            review_claim_summary: "- correctness_risk lib/foo.ex: verified",
+            diff_summary: " presenter.ex | 40 ++++++++++++++++++++++"
+          }
+        },
+        [],
+        2,
+        3
+      )
+
+    assert prompt =~ "This is a narrow broad-implement retry."
+    assert prompt =~ "Broad implement retry lane: active"
+    assert prompt =~ "Budget retry count: 1"
+    assert prompt =~ "Broad implement token pressure is active."
+    refute prompt =~ "Pending PR review feedback"
+    refute prompt =~ "Pending PR review claims"
+    refute prompt =~ "Diff stat:"
+  end
+
   test "implement prompt enters scoped review-fix budget lane from accepted review claims" do
     issue = %Issue{
       id: "issue-review-fix-prompt",

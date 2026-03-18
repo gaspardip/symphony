@@ -24,6 +24,7 @@ defmodule SymphonyElixir.RuleCatalogTest do
     :per_turn_input_budget_exceeded,
     :per_issue_total_budget_exceeded,
     :per_issue_output_budget_exceeded,
+    :broad_implement_scope_exhausted,
     :review_fix_scope_exhausted,
     :review_fix_turn_window_exhausted,
     :review_fix_total_extension_exhausted,

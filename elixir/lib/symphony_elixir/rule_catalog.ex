@@ -205,6 +205,11 @@ defmodule SymphonyElixir.RuleCatalog do
       failure_class: "budget",
       human_action: "The bounded review-fix extension is exhausted; split the remaining work or intervene manually."
     },
+    broad_implement_scope_exhausted: %{
+      rule_id: "budget.broad_implement_scope_exhausted",
+      failure_class: "budget",
+      human_action: "The narrowed broad-implement retry is exhausted; trim the issue context further or intervene manually."
+    },
     tracker_rate_limited: %{
       rule_id: "tracker.rate_limited",
       failure_class: "coordination",

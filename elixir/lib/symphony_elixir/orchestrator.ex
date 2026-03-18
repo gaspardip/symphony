@@ -310,15 +310,17 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           case {reason, RunPolicy.maybe_stop_for_token_budget(issue, running_entry)} do
             {:normal, {:retry, metadata}} ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive review-fix retry")
+              Logger.info(
+                "Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive #{Map.get(metadata, :budget_mode, "budget")} retry"
+              )
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
                 delay_type: :continuation,
                 issue: running_entry.issue,
-                error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+                error: Map.get(metadata, :summary, "adaptive token retry"),
                 budget_retry: true,
-                budget_mode: "review_fix",
+                budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
                 budget_retry_count: Map.get(metadata, :retry_count),
                 budget_resume_context: Map.get(metadata, :resume_context)
               })
@@ -6554,9 +6556,9 @@ defmodule SymphonyElixir.Orchestrator do
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: Map.get(running_entry, :identifier) || issue_id,
           delay_type: :continuation,
-          error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+          error: Map.get(metadata, :summary, "adaptive token retry"),
           budget_retry: true,
-          budget_mode: "review_fix",
+          budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
           budget_retry_count: Map.get(metadata, :retry_count),
           budget_resume_context: Map.get(metadata, :resume_context)
         })

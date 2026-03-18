@@ -975,6 +975,135 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     refute_receive {:memory_tracker_state_update, "issue-budget-malformed", _state}
   end
 
+  test "broad implement budget retries once with narrowed context before stopping" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-retry-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-broad-budget", identifier: "MT-914BROAD", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 185_018,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 185_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{}
+               })
+
+      assert %{
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_last_stop_code: "budget.per_turn_input_exceeded",
+                 budget_auto_narrowed: true,
+                 token_pressure: "high"
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+
+      assert {:stop, %RunPolicy.Violation{code: :broad_implement_scope_exhausted}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 2,
+                 codex_input_tokens: 170_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 355_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   budget_mode: "broad_implement",
+                   budget_retry_count: 1,
+                   budget_pressure_level: "high",
+                   budget_auto_narrowed: true
+                 }
+               })
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget does not intercept explicit ci-failure recovery" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 1_000_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-ci-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-broad-budget-ci", identifier: "MT-914BROADCI", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "implement", %{
+                 last_ci_failure: %{check_name: "make-all", conclusion: "failure"}
+               })
+
+      assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 185_018,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 185_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{}
+               })
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "review-fix budget retries narrow scope and persist retry state" do
     configure_memory_tracker!(
       policy_token_budget: %{
