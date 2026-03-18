@@ -58,6 +58,7 @@ cd symphony
 export LINEAR_API_KEY=your_linear_token
 ./scripts/symphony-preflight.sh
 cd elixir
+mise exec -- mix build
 mise exec -- ./bin/symphony \
   --i-understand-that-this-will-be-running-without-the-usual-guardrails \
   --port 4040 \
