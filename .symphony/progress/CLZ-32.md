@@ -29,6 +29,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Extended broad retry mining in `RunPolicy` to extract paths and compact continuity from structured `last_codex_message` payloads, including real `response.output_text.done` commentary.
 - Found the follow-up live seam: the useful commentary often sits in `recent_codex_updates` because the final update at stop time may just be a noisy tool event.
 - Extended broad retry mining again so it scans `recent_codex_updates` as well as `last_codex_message`, matching the real CLZ-32 worker transcript shape from the isolated Codex log store.
+- Found the remaining live handoff seam: the orchestrator was storing computed `budget_resume_context` in retry metadata but not reusing it on redispatch, so broad retry focus fields could disappear between the stop decision and the next worker startup.
+- Fixed that handoff by persisting retry-time `budget_resume_context` back into the workspace run state and merging it into the next dispatch's loaded `resume_context`, so `target_paths` and `already_learned` survive the live retry boundary.
 - Generalized orchestrator retry metadata so broad-mode retries reuse the same automatic continuation path as review-fix retries without being mislabeled as review-fix work.
 - Added direct regression coverage for the new broad retry lane, the CI-recovery exclusion, the new stop rule, and the narrowed prompt text.
 - Found the live completion seam: worker shutdown was still falling through to the generic budget stop because the broad retry gate required persisted `run_state.stage == "implement"` even when the live `dispatch_stage` was already `implement`.
@@ -39,6 +41,7 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
   `/Users/gaspar/code/symphony-workspaces-dogfood/CLZ-30/.symphony/run_state.json` stopped with `budget.per_turn_input_exceeded` after observed input `185018` on March 18, 2026.
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/rule_catalog_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/core_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:2269 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2323 test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix escript.build`
 - Live dogfood replay on `http://127.0.0.1:4046` for `CLZ-32` auto-retried the first broad implement overrun into `budget_mode = "broad_implement"` with `retry_count = 1`, `budget_auto_narrowed = true`, and `budget_last_observed_input_tokens = 146909`.
@@ -47,4 +50,4 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Runtime Codex logs in `/Users/gaspar/src/symphony-local/.codex-runtime-dogfood/logs_1.sqlite` confirmed the live worker emitted file-level commentary such as ``maybe_stop_for_token_budget/2`` and ``implement_prompt/...`` before the budget stop, which is the continuity source now mined into broad retry state.
 
 ## Next Step
-Replay `CLZ-32` live and measure whether the persisted path-specific retry shape drops the narrowed turn materially below the prior `135797` observed-input result.
+Restart the dogfood runner on the committed CLZ-32 head and replay `CLZ-32` so the patched retry handoff can be measured live.

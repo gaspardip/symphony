@@ -25,6 +25,7 @@ acceptance_signals:
   - Broad implement turns can take one bounded narrow retry with a leaner prompt instead of immediately failing or silently raising the cap when the first-turn context is too large
   - Broad implement retries persist concrete target paths and a compact already-learned summary so the next turn can continue from a file-level target instead of rediscovering the repo
   - Broad implement retries can also mine those target paths and continuity hints from structured Codex commentary updates when the broad turn overruns the budget before `report_agent_turn_result`
+  - Retry-time broad budget context is persisted and re-merged on redispatch, so live `target_paths` and `already_learned` continuity survive the boundary between a budget stop and the next worker startup
   - Once a broad retry has target paths, the retry prompt drops the broad issue brief and repo map in favor of a short execution hint plus a path-specific next objective
   - The broad implement retry lane does not steal explicit review-fix or CI-failure recovery work, so scoped follow-up keeps its own budget rules
   - Exhausted broad implement retries stop on a specific broad-mode rule instead of the generic `budget.per_turn_input_exceeded` stop
