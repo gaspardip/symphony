@@ -1744,6 +1744,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
     run_state = retry_run_state(issue.identifier, issue)
+    workspace = Workspace.path_for_issue(issue.identifier)
+    stage = Map.get(run_state, :stage)
 
     case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
@@ -1793,6 +1795,8 @@ defmodule SymphonyElixir.Orchestrator do
             policy_override: policy_override,
             policy_class: policy_class,
             policy_source: policy_source,
+            workspace: workspace,
+            stage: stage,
             resume_context: Map.get(run_state, :resume_context, %{}),
             last_ledger_event_id: Map.get(ledger_event, :event_id),
             started_at: DateTime.utc_now()
@@ -1840,6 +1844,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
     run_state = retry_run_state(issue.identifier, issue)
+    workspace = Workspace.path_for_issue(issue.identifier)
+    stage = Map.get(run_state, :stage)
 
     case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
            workspace =
@@ -1908,6 +1914,8 @@ defmodule SymphonyElixir.Orchestrator do
             policy_override: policy_override,
             policy_class: policy_class,
             policy_source: policy_source,
+            workspace: workspace,
+            stage: stage,
             resume_context: Map.get(run_state, :resume_context, %{}),
             last_ledger_event_id: Map.get(ledger_event, :event_id),
             passive?: true,

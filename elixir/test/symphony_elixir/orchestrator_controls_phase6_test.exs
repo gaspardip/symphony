@@ -1584,8 +1584,6 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
               ref: ref,
               identifier: issue.identifier,
               issue: issue,
-              workspace: workspace,
-              stage: "implement",
               started_at: DateTime.utc_now(),
               turn_count: 1,
               retry_attempt: 0,

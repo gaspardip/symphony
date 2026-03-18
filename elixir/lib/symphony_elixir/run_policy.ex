@@ -587,8 +587,12 @@ defmodule SymphonyElixir.RunPolicy do
   defp budget_exceeded?(budget, observed) when is_integer(budget), do: observed > budget
 
   defp review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
+    stage =
+      Map.get(running_entry, :stage) ||
+        current_stage(Map.get(running_entry, :issue, %{}))
+
     Map.get(review_fix_budget, :enabled, true) and
-      Map.get(running_entry, :stage) == "implement" and
+      stage == "implement" and
       Map.get(resume_context, :budget_mode) == "review_fix"
   end
 
