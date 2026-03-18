@@ -2147,11 +2147,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             "",
             "This is a narrow broad-implement retry. Do not rediscover the whole repo or restate the full issue.",
             "Resolved workflow profile: #{WorkflowProfile.name_string(workflow_profile)} (merge mode #{workflow_profile.merge_mode}).",
-            "",
-            "Issue brief:",
-            summarized_text(issue.description || "No description provided.", 1_200),
-            "",
-            RepoMap.prompt_block(repo_map),
+            maybe_broad_retry_issue_brief(issue, resume_context),
             "",
             "Broad-budget retry rules:",
             "- First identify the smallest code path that can advance the ticket and limit the turn to that path.",
@@ -2160,6 +2156,9 @@ defmodule SymphonyElixir.DeliveryEngine do
             "- Do not run full validation, smoke, build, or test commands during `implement`.",
             "- Keep command output small. Do not stream long logs or dump large files into the turn.",
             "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
+            "",
+            "Execution hint:",
+            broad_retry_execution_hint(repo_map, resume_context),
             "",
             "Resume context:",
             broad_resume_context_block(resume_context),
@@ -2460,6 +2459,8 @@ defmodule SymphonyElixir.DeliveryEngine do
       "Broad implement retry lane: active",
       maybe_named_line("Budget pressure", resume_context[:budget_pressure_level], 40),
       maybe_named_line("Budget retry count", resume_context[:budget_retry_count], 20),
+      maybe_named_list("Target paths", Map.get(resume_context, :target_paths, []), 6),
+      maybe_named_multiline("Already learned", resume_context[:already_learned]),
       maybe_named_line("Last blocking rule", resume_context[:last_blocking_rule], 200),
       maybe_named_line("Last implementation summary", resume_context[:last_turn_summary], 280),
       maybe_named_list("Dirty files", Enum.take(Map.get(resume_context, :dirty_files, []), 8), 8)
@@ -2502,8 +2503,18 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp broad_retry_next_objective(resume_context) when is_map(resume_context) do
-    Map.get(resume_context, :next_objective) ||
-      "Identify the smallest concrete code path that advances the ticket, touch only that path, and leave broader follow-up for a later turn if needed."
+    case Map.get(resume_context, :target_paths, []) do
+      [path] ->
+        "Advance the ticket by working only in `#{path}` and any directly adjacent helper needed to complete that path."
+
+      paths when is_list(paths) and paths != [] ->
+        joined = Enum.map_join(Enum.take(paths, 3), ", ", &"`#{&1}`")
+        "Advance the ticket by working only in the smallest path cluster: #{joined}."
+
+      _ ->
+        Map.get(resume_context, :next_objective) ||
+          "Identify the smallest concrete code path that advances the ticket, touch only that path, and leave broader follow-up for a later turn if needed."
+    end
   end
 
   defp review_fix_resume_context(state, stored_resume_context, "implement") do
@@ -2534,6 +2545,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         :budget_last_stop_code,
         :budget_last_observed_input_tokens,
         :budget_auto_narrowed,
+        :target_paths,
+        :already_learned,
         :token_pressure
       ])
     else
@@ -2643,8 +2656,77 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_resume_context_key("budget_progress_count"), do: :budget_progress_count
   defp normalize_resume_context_key("budget_total_extension_used"), do: :budget_total_extension_used
   defp normalize_resume_context_key("budget_auto_narrowed"), do: :budget_auto_narrowed
+  defp normalize_resume_context_key("target_paths"), do: :target_paths
+  defp normalize_resume_context_key("already_learned"), do: :already_learned
   defp normalize_resume_context_key("token_pressure"), do: :token_pressure
   defp normalize_resume_context_key(_key), do: nil
+
+  defp maybe_broad_retry_issue_brief(issue, resume_context) when is_map(resume_context) do
+    case Map.get(resume_context, :target_paths, []) do
+      paths when is_list(paths) and paths != [] ->
+        nil
+
+      _ ->
+        ["", "Issue brief:", summarized_text(issue.description || "No description provided.", 1_200)]
+        |> Enum.join("\n")
+    end
+  end
+
+  defp broad_retry_execution_hint(repo_map, resume_context) when is_map(resume_context) do
+    target_paths = Map.get(resume_context, :target_paths, []) |> Enum.take(3)
+    already_learned = summarized_text(Map.get(resume_context, :already_learned), 220)
+
+    [
+      broad_retry_focus_line(target_paths),
+      broad_retry_learned_line(already_learned),
+      broad_retry_repo_hint_line(repo_map, target_paths)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> "Keep the retry narrow and choose one concrete subsystem before reading more files."
+      lines -> Enum.join(lines, "\n")
+    end
+  end
+
+  defp broad_retry_focus_line([]), do: "Focus path: choose one concrete file or subsystem before continuing."
+  defp broad_retry_focus_line(paths), do: "Focus path: #{Enum.map_join(paths, ", ", &"`#{&1}`")}."
+
+  defp broad_retry_learned_line(nil), do: nil
+  defp broad_retry_learned_line(text), do: "Already learned: #{text}"
+
+  defp broad_retry_repo_hint_line(nil, paths) when paths != [], do: "Execution hint: stay inside the focus path unless a directly adjacent helper is required."
+  defp broad_retry_repo_hint_line(nil, _paths), do: "Execution hint: stay inside the first concrete path you confirm and avoid broad discovery."
+
+  defp broad_retry_repo_hint_line(repo_map, paths) do
+    platform =
+      case Map.get(repo_map, :platform) do
+        value when is_binary(value) and value != "" -> value
+        _ -> nil
+      end
+
+    proof =
+      case Map.get(repo_map, :behavioral_proof) do
+        %{test_paths: tests} when is_list(tests) and tests != [] ->
+          "behavioral proof lives under #{Enum.join(Enum.take(tests, 2), ", ")}"
+
+        _ ->
+          nil
+      end
+
+    cond do
+      platform && proof ->
+        "Execution hint: platform=#{platform}; #{proof}."
+
+      platform && paths != [] ->
+        "Execution hint: platform=#{platform}; stay inside the focus path unless a directly adjacent helper is required."
+
+      proof ->
+        "Execution hint: #{proof}."
+
+      true ->
+        "Execution hint: stay inside the focus path unless a directly adjacent helper is required."
+    end
+  end
 
   defp maybe_named_line(_label, nil, _limit), do: nil
 

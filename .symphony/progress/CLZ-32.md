@@ -23,6 +23,8 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Added a bounded broad implement retry lane in `RunPolicy` that persists `budget_mode = "broad_implement"` and auto-narrow metadata, but only for real persisted implement workspaces.
 - Kept the broad retry lane out of review-fix and explicit CI-failure recovery paths by gating it against persisted `review_claims`, `budget_scope_kind`, `budget_mode`, and `last_ci_failure`.
 - Added a lean broad retry prompt path in `DeliveryEngine` that trims issue context and avoids duplicated review-oriented sections.
+- Persisted concrete `target_paths` and a compact `already_learned` summary into broad retry `resume_context` so the next turn can continue from a file-level target instead of rediscovering the whole repo.
+- Tightened the broad retry prompt to drop the issue brief entirely once target paths exist, replace the repo map with a short execution hint, and make the next objective path-specific.
 - Generalized orchestrator retry metadata so broad-mode retries reuse the same automatic continuation path as review-fix retries without being mislabeled as review-fix work.
 - Added direct regression coverage for the new broad retry lane, the CI-recovery exclusion, the new stop rule, and the narrowed prompt text.
 - Found the live completion seam: worker shutdown was still falling through to the generic budget stop because the broad retry gate required persisted `run_state.stage == "implement"` even when the live `dispatch_stage` was already `implement`.
@@ -32,6 +34,7 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
 - Live dogfood failure proof:
   `/Users/gaspar/code/symphony-workspaces-dogfood/CLZ-30/.symphony/run_state.json` stopped with `budget.per_turn_input_exceeded` after observed input `185018` on March 18, 2026.
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/rule_catalog_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
+- `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix test test/symphony_elixir/core_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix harness.check`
 - `cd /Users/gaspar/src/symphony-clz-32/elixir && mise exec -- mix escript.build`
 - Live dogfood replay on `http://127.0.0.1:4046` for `CLZ-32` auto-retried the first broad implement overrun into `budget_mode = "broad_implement"` with `retry_count = 1`, `budget_auto_narrowed = true`, and `budget_last_observed_input_tokens = 146909`.
@@ -39,4 +42,4 @@ Keep broad implement runs bounded under token pressure by narrowing context on r
   `/Users/gaspar/code/symphony-workspaces-dogfood/CLZ-32/.symphony/run_state.json` ended with `budget.broad_implement_scope_exhausted`, `budget_retry_count = 2`, and observed narrowed-turn input `135797`.
 
 ## Next Step
-Push this branch and open the PR once you want the broad-implement retry lane reviewed upstream.
+Replay `CLZ-32` live and measure whether the persisted path-specific retry shape drops the narrowed turn materially below the prior `135797` observed-input result.

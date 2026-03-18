@@ -404,6 +404,8 @@ defmodule SymphonyElixir.CoreTest do
             budget_auto_narrowed: true,
             token_pressure: "high",
             last_turn_summary: "Mapped the parity bug to the issue payload presenter path.",
+            already_learned: "The parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
+            target_paths: ["elixir/lib/symphony_elixir_web/presenter.ex"],
             last_blocking_rule: "budget.per_turn_input_exceeded",
             dirty_files: ["elixir/lib/symphony_elixir_web/presenter.ex"],
             review_feedback_summary: "- correctness_risk lib/foo.ex: repeated context",
@@ -420,9 +422,17 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Broad implement retry lane: active"
     assert prompt =~ "Budget retry count: 1"
     assert prompt =~ "Broad implement token pressure is active."
+    assert prompt =~ "Execution hint:"
+    assert prompt =~ "Focus path: `elixir/lib/symphony_elixir_web/presenter.ex`."
+    assert prompt =~ "Already learned: The parity bug is concentrated"
+    assert prompt =~ "Exact next objective:"
+    assert prompt =~ "Advance the ticket by working only in `elixir/lib/symphony_elixir_web/presenter.ex`"
+    assert prompt =~ "Target paths:\n- elixir/lib/symphony_elixir_web/presenter.ex"
     refute prompt =~ "Pending PR review feedback"
     refute prompt =~ "Pending PR review claims"
     refute prompt =~ "Diff stat:"
+    refute prompt =~ "Issue brief:"
+    refute prompt =~ "Repo map:"
   end
 
   test "implement prompt enters scoped review-fix budget lane from accepted review claims" do

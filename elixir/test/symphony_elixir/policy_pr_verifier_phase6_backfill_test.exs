@@ -1017,7 +1017,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  codex_output_tokens: 0,
                  codex_total_tokens: 185_018,
                  turn_started_input_tokens: 0,
-                 resume_context: %{}
+                 resume_context: %{
+                   last_turn_summary:
+                     "The operator payload parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
+                   next_objective:
+                     "Continue in elixir/lib/symphony_elixir_web/presenter.ex and elixir/lib/symphony_elixir_web/router.ex without rediscovering the whole repo."
+                 }
                })
 
       assert %{
@@ -1026,9 +1031,16 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  budget_retry_count: 1,
                  budget_last_stop_code: "budget.per_turn_input_exceeded",
                  budget_auto_narrowed: true,
-                 token_pressure: "high"
+                 token_pressure: "high",
+                 target_paths: [
+                   "elixir/lib/symphony_elixir_web/presenter.ex",
+                   "elixir/lib/symphony_elixir_web/router.ex"
+                 ],
+                 already_learned: already_learned
                }
              } = RunStateStore.load_or_default(workspace, issue)
+
+      assert already_learned =~ "presenter.ex"
 
       assert {:stop, %RunPolicy.Violation{code: :broad_implement_scope_exhausted}} =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
@@ -1043,7 +1055,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                    budget_mode: "broad_implement",
                    budget_retry_count: 1,
                    budget_pressure_level: "high",
-                   budget_auto_narrowed: true
+                   budget_auto_narrowed: true,
+                   target_paths: [
+                     "elixir/lib/symphony_elixir_web/presenter.ex",
+                     "elixir/lib/symphony_elixir_web/router.ex"
+                   ],
+                   already_learned: already_learned
                  }
                })
     after

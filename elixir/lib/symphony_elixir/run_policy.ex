@@ -1154,6 +1154,8 @@ defmodule SymphonyElixir.RunPolicy do
   defp review_fix_resume_context_key("budget_progress_count"), do: :budget_progress_count
   defp review_fix_resume_context_key("budget_total_extension_used"), do: :budget_total_extension_used
   defp review_fix_resume_context_key("budget_auto_narrowed"), do: :budget_auto_narrowed
+  defp review_fix_resume_context_key("target_paths"), do: :target_paths
+  defp review_fix_resume_context_key("already_learned"), do: :already_learned
   defp review_fix_resume_context_key("token_pressure"), do: :token_pressure
   defp review_fix_resume_context_key(_key), do: nil
 
@@ -1218,6 +1220,8 @@ defmodule SymphonyElixir.RunPolicy do
          overrides
        ) do
     turn_count = Map.get(running_entry, :turn_count, 0)
+    target_paths = broad_implement_target_paths(running_entry, resume_context)
+    already_learned = broad_implement_already_learned(running_entry, resume_context, target_paths)
 
     resume_context
     |> Map.put(:budget_mode, "broad_implement")
@@ -1226,6 +1230,8 @@ defmodule SymphonyElixir.RunPolicy do
     |> Map.put_new(:budget_window_base_turn, turn_count)
     |> Map.put(:budget_last_stop_code, stop_code)
     |> Map.put(:budget_last_observed_input_tokens, observed_tokens)
+    |> maybe_put_broad_retry_target_paths(target_paths)
+    |> maybe_put_broad_retry_learned(already_learned)
     |> Map.put(:token_pressure, "high")
     |> Map.merge(Enum.into(overrides, %{}))
   end
@@ -1247,9 +1253,116 @@ defmodule SymphonyElixir.RunPolicy do
       stage: Map.get(running_entry, :stage),
       retry_count: broad_implement_retry_count(resume_context),
       pressure_level: Map.get(resume_context, :budget_pressure_level),
-      auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed))
+      auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
+      target_paths: Map.get(resume_context, :target_paths, [])
     }
   end
+
+  defp broad_implement_target_paths(running_entry, resume_context)
+       when is_map(running_entry) and is_map(resume_context) do
+    existing_paths =
+      resume_context
+      |> Map.get(:target_paths, [])
+      |> normalize_candidate_paths()
+
+    dirty_paths =
+      running_entry
+      |> broad_implement_workspace_paths()
+      |> Enum.take(6)
+
+    summary_paths =
+      [
+        Map.get(resume_context, :last_turn_summary),
+        Map.get(resume_context, :next_objective),
+        Map.get(running_entry, :last_codex_message)
+      ]
+      |> Enum.flat_map(&extract_candidate_paths/1)
+
+    existing_paths
+    |> Kernel.++(dirty_paths)
+    |> Kernel.++(summary_paths)
+    |> normalize_candidate_paths()
+    |> Enum.take(3)
+  end
+
+  defp broad_implement_target_paths(_running_entry, _resume_context), do: []
+
+  defp broad_implement_workspace_paths(running_entry) when is_map(running_entry) do
+    workspace =
+      Map.get(running_entry, :workspace) ||
+        Map.get(running_entry, :workspace_path)
+
+    if is_binary(workspace) do
+      workspace
+      |> RunInspector.changed_paths()
+      |> normalize_candidate_paths()
+    else
+      []
+    end
+  end
+
+  defp broad_implement_workspace_paths(_running_entry), do: []
+
+  defp broad_implement_already_learned(running_entry, resume_context, target_paths)
+       when is_map(running_entry) and is_map(resume_context) do
+    existing =
+      case Map.get(resume_context, :already_learned) do
+        value when is_binary(value) and value != "" -> value
+        _ -> nil
+      end
+
+    summary =
+      [
+        Map.get(resume_context, :last_turn_summary),
+        Map.get(running_entry, :last_codex_message)
+      ]
+      |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))
+
+    cond do
+      is_binary(existing) ->
+        existing
+
+      is_binary(summary) and target_paths != [] ->
+        "The retry should stay inside #{Enum.join(target_paths, ", ")}. #{summarized_text(summary, 220)}"
+
+      is_binary(summary) ->
+        summarized_text(summary, 260)
+
+      target_paths != [] ->
+        "The retry should stay inside #{Enum.join(target_paths, ", ")} and avoid rediscovering unrelated parts of the repo."
+
+      true ->
+        nil
+    end
+  end
+
+  defp broad_implement_already_learned(_running_entry, _resume_context, _target_paths), do: nil
+
+  defp maybe_put_broad_retry_target_paths(resume_context, []), do: resume_context
+  defp maybe_put_broad_retry_target_paths(resume_context, target_paths), do: Map.put(resume_context, :target_paths, target_paths)
+
+  defp maybe_put_broad_retry_learned(resume_context, nil), do: resume_context
+  defp maybe_put_broad_retry_learned(resume_context, text), do: Map.put(resume_context, :already_learned, text)
+
+  defp normalize_candidate_paths(paths) when is_list(paths) do
+    paths
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp normalize_candidate_paths(_paths), do: []
+
+  defp extract_candidate_paths(nil), do: []
+
+  defp extract_candidate_paths(text) when is_binary(text) do
+    Regex.scan(~r{(?:^|[\s`'"])((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:ex|exs|md|yaml|yml|json|sh))(?=$|[\s`'".,;:])}, text, capture: :all_but_first)
+    |> List.flatten()
+    |> normalize_candidate_paths()
+  end
+
+  defp extract_candidate_paths(_text), do: []
 
   defp narrow_review_fix_scope_ids(resume_context, batch_size) do
     resume_context
@@ -1602,6 +1715,25 @@ defmodule SymphonyElixir.RunPolicy do
     |> case do
       "" -> "No additional output was captured."
       trimmed -> String.slice(trimmed, 0, 1_000)
+    end
+  end
+
+  defp summarized_text(nil, _limit), do: nil
+
+  defp summarized_text(value, limit) when is_integer(limit) and limit > 0 do
+    value
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" ->
+        nil
+
+      text ->
+        if String.length(text) <= limit do
+          text
+        else
+          String.slice(text, 0, max(limit - 3, 0)) <> "..."
+        end
     end
   end
 
