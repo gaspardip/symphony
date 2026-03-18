@@ -242,6 +242,32 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace reruns after_create for metadata-only bootstrap directories and preserves .symphony state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-bootstrap-only-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "mkdir -p .git && echo bootstrapped > README.md"
+      )
+
+      workspace = Path.join(workspace_root, "MT-BOOTSTRAP")
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.write!(Path.join(workspace, ".symphony/run_state.json"), ~s({"stage":"checkout"}))
+
+      assert {:ok, ^workspace} = Workspace.create_for_issue("MT-BOOTSTRAP")
+      assert File.dir?(Path.join(workspace, ".git"))
+      assert File.read!(Path.join(workspace, "README.md")) == "bootstrapped\n"
+      assert File.read!(Path.join(workspace, ".symphony/run_state.json")) == ~s({"stage":"checkout"})
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace replaces stale non-directory paths" do
     workspace_root =
       Path.join(
