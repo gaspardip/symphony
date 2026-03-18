@@ -556,6 +556,88 @@ defmodule SymphonyElixir.CoreTest do
              "Advance the ticket by working only in `elixir/lib/symphony_elixir/run_policy.ex`."
   end
 
+  test "implement prompt uses repo-backed execution hints for broad retries before a focus path exists" do
+    issue = %Issue{
+      id: "issue-broad-budget-repo-hint",
+      identifier: "MT-BROAD-REPO-HINT",
+      title: "Use repo-backed retry hints",
+      description: "A broad retry with harness context should prefer a compact repo-backed execution hint."
+    }
+
+    inspection = %SymphonyElixir.RunInspector.Snapshot{
+      fingerprint: "broad-repo-hint",
+      dirty?: false,
+      changed_files: 0,
+      pr_url: nil,
+      harness: %{
+        project: %{type: "ios-app"},
+        behavioral_proof: %{test_paths: ["LocalEventsExplorerTests/", "LocalEventsExplorerUITests/"]}
+      }
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          resume_context: %{
+            budget_mode: "broad_implement",
+            budget_pressure_level: "high",
+            budget_retry_count: 1,
+            budget_auto_narrowed: true,
+            token_pressure: "high"
+          }
+        },
+        [inspection: inspection],
+        2,
+        3
+      )
+
+    assert prompt =~ "Execution hint: platform="
+    assert prompt =~ "behavioral proof lives under LocalEventsExplorerTests/, LocalEventsExplorerUITests/"
+    assert prompt =~ "Focus path: choose one concrete file or subsystem before continuing."
+  end
+
+  test "implement prompt uses repo-backed execution hints for focused broad retries" do
+    issue = %Issue{
+      id: "issue-broad-budget-focused-repo-hint",
+      identifier: "MT-BROAD-FOCUSED-HINT",
+      title: "Use focused repo-backed retry hints",
+      description: "A focused broad retry should keep the repo-backed execution hint compact."
+    }
+
+    inspection = %SymphonyElixir.RunInspector.Snapshot{
+      fingerprint: "broad-focused-repo-hint",
+      dirty?: false,
+      changed_files: 0,
+      pr_url: nil,
+      harness: %{
+        project: %{type: "ios-app"}
+      }
+    }
+
+    prompt =
+      SymphonyElixir.DeliveryEngine.implement_prompt_for_test(
+        issue,
+        %{
+          resume_context: %{
+            budget_mode: "broad_implement",
+            budget_pressure_level: "high",
+            budget_retry_count: 1,
+            budget_auto_narrowed: true,
+            token_pressure: "high",
+            target_paths: ["elixir/lib/symphony_elixir/run_policy.ex"]
+          }
+        },
+        [inspection: inspection],
+        2,
+        3
+      )
+
+    assert prompt =~ "Execution hint: platform="
+    assert prompt =~ "stay inside the explicit focus path list for this retry."
+    assert prompt =~ "Target paths:\n- elixir/lib/symphony_elixir/run_policy.ex"
+  end
+
   test "implement prompt enters scoped review-fix budget lane from accepted review claims" do
     issue = %Issue{
       id: "issue-review-fix-prompt",
