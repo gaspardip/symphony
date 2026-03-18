@@ -2434,8 +2434,6 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp token_pressure_note(_resume_context), do: nil
-
   defp review_fix_next_objective(resume_context) when is_map(resume_context) do
     if review_fix_budget_mode?(resume_context) do
       scope_kind = Map.get(resume_context, :budget_scope_kind, "review_claim_batch")
@@ -2449,12 +2447,13 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp review_fix_next_objective(_resume_context), do: nil
-
   defp review_fix_resume_context(state, stored_resume_context, "implement") do
     cond do
       review_fix_budget_mode?(stored_resume_context) ->
         carry_forward_review_fix_budget_context(stored_resume_context)
+
+      review_fix_scope_ids(state, "review_claim_batch") != [] ->
+        initial_review_fix_resume_context(state, "review_claim_batch", review_fix_scope_ids(state, "review_claim_batch"))
 
       review_fix_scope_ids(state, "ci_failure_batch") != [] ->
         initial_review_fix_resume_context(state, "ci_failure_batch", review_fix_scope_ids(state, "ci_failure_batch"))
