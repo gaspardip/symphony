@@ -722,6 +722,52 @@ defmodule SymphonyElixir.RuntimeShellPhase6BackfillTest do
     assert {:error, :missing_linear_viewer_identity} = Client.fetch_candidate_issues()
   end
 
+  test "linear client fetch_issue_by_identifier resolves me assignee routing before decoding issues" do
+    parent = self()
+
+    endpoint =
+      start_linear_server!(fn body ->
+        payload = Jason.decode!(body)
+        send(parent, {:linear_payload, payload})
+
+        cond do
+          String.contains?(payload["query"], "query SymphonyLinearViewer") ->
+            %{"data" => %{"viewer" => %{"id" => "viewer-7"}}}
+
+          String.contains?(payload["query"], "query SymphonyLinearIssueByIdentifier") ->
+            %{
+              "data" => %{
+                "issues" => %{
+                  "nodes" => [linear_issue_payload("issue-7", "MT-7", "viewer-7")]
+                }
+              }
+            }
+        end
+      end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      tracker_endpoint: endpoint,
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      tracker_assignee: "me"
+    )
+
+    assert {:ok, %Issue{identifier: "MT-7", assigned_to_worker: true}} =
+             Client.fetch_issue_by_identifier("MT-7")
+
+    assert_receive {:linear_payload, %{"query" => viewer_query}}
+    assert viewer_query =~ "SymphonyLinearViewer"
+
+    assert_receive {:linear_payload,
+                    %{
+                      "query" => issue_query,
+                      "variables" => %{"teamKey" => "MT", "number" => 7.0, "projectSlug" => "project"}
+                    }}
+
+    assert issue_query =~ "SymphonyLinearIssueByIdentifier"
+  end
+
   test "linear client fetch_candidate_issues propagates viewer request status errors" do
     endpoint =
       start_linear_server!(fn body ->

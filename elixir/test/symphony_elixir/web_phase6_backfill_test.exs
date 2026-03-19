@@ -304,6 +304,53 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.last_decision.compatibility_report == compatibility_report
   end
 
+  test "presenter blocked issue payload falls back to latest ledger signal when persisted operator fields are sparse" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-web-ledger-fallback",
+      identifier: "MT-WEB-LEDGER",
+      title: "Ledger fallback",
+      description: "Tracked via ledger signal",
+      state: "Blocked"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(Config.workspace_root(), issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "blocked", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: "tracker",
+               last_decision_summary: nil,
+               next_human_action: nil,
+               last_rule_id: nil,
+               last_failure_class: nil
+             })
+
+    RunLedger.record("policy.decided", %{
+      issue_identifier: issue.identifier,
+      summary: "Need one operator retry before merge readiness can be refreshed.",
+      rule_id: "policy.retry_refresh",
+      failure_class: "policy",
+      metadata: %{human_action: "Retry the operator refresh."}
+    })
+
+    orchestrator_name = Module.concat(__MODULE__, :PresenterLedgerFallbackOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
+
+    assert {:ok, payload} = Presenter.issue_payload(issue.identifier, orchestrator_name, 50)
+    assert payload.status == "Blocked"
+    assert payload.operator_summary.why_here == "Need one operator retry before merge readiness can be refreshed."
+    assert payload.operator_summary.human_action_required == "Retry the operator refresh."
+    assert payload.operator_summary.rule_id == "policy.retry_refresh"
+    assert payload.operator_summary.failure_class == "policy"
+  end
+
   test "presenter refresh and control payloads normalize timestamps and unexpected results" do
     requested_at = DateTime.utc_now()
     orchestrator_name = Module.concat(__MODULE__, :PresenterControlOrchestrator)
