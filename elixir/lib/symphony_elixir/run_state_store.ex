@@ -20,12 +20,42 @@ defmodule SymphonyElixir.RunStateStore do
   @spec load(Path.t()) :: {:ok, map()} | {:error, :missing | term()}
   def load(workspace) when is_binary(workspace) do
     with {:ok, path} <- load_path(workspace),
-         {:ok, payload} <- File.read(path),
+         {:ok, payload} <- read_payload(workspace, path),
          {:ok, decoded} <- Jason.decode(payload),
          true <- is_map(decoded) or {:error, :invalid_state} do
       {:ok, atomize(decoded)}
     else
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp read_payload(workspace, path) when is_binary(workspace) and is_binary(path) do
+    case File.read(path) do
+      {:ok, payload} ->
+        {:ok, payload}
+
+      {:error, :enoent} ->
+        reread_payload(workspace, path)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp reread_payload(workspace, previous_path) when is_binary(workspace) and is_binary(previous_path) do
+    case load_path(workspace) do
+      {:ok, ^previous_path} ->
+        {:error, :missing}
+
+      {:ok, next_path} ->
+        case File.read(next_path) do
+          {:ok, payload} -> {:ok, payload}
+          {:error, :enoent} -> {:error, :missing}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
