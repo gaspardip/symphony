@@ -2860,6 +2860,63 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     end)
   end
 
+  test "retry lookup removes claimed workspace when the issue reaches a terminal state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-terminal-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    issue = %Issue{
+      id: "manual:issue-terminal-retry",
+      identifier: "MT-TERMINAL-RETRY",
+      title: "Terminal retry cleanup",
+      state: "Done",
+      source: :manual
+    }
+
+    workspace = Workspace.path_for_issue(issue.identifier)
+    File.mkdir_p!(workspace)
+    File.write!(Path.join(workspace, "marker.txt"), "cleanup me")
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        %State{claimed: MapSet.new([issue.id])},
+        issue.id,
+        1,
+        %{}
+      )
+
+    refute MapSet.member?(next_state.claimed, issue.id)
+    refute File.exists?(workspace)
+  end
+
+  test "retry lookup releases claims when the issue disappears without a seeded manual fallback" do
+    issue_id = "issue-retry-disappeared"
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        nil,
+        %State{claimed: MapSet.new([issue_id])},
+        issue_id,
+        1,
+        %{identifier: "MT-DISAPPEARED"}
+      )
+
+    refute MapSet.member?(next_state.claimed, issue_id)
+    refute Map.has_key?(next_state.retry_attempts, issue_id)
+  end
+
   test "manual continuation retry reuses seeded issue metadata when tracker lookup is empty" do
     issue_id = "manual:issue-continuation-retry"
     identifier = "MT-CONTINUATION-RETRY"
