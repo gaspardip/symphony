@@ -2281,8 +2281,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp normalize_budget_runtime(runtime) when is_map(runtime) do
     %{
       mode: Map.get(runtime, :mode) || Map.get(runtime, "mode") || "broad",
-      admission_reason:
-        Map.get(runtime, :admission_reason) || Map.get(runtime, "admission_reason"),
+      admission_reason: Map.get(runtime, :admission_reason) || Map.get(runtime, "admission_reason"),
       pressure_level: Map.get(runtime, :pressure_level) || Map.get(runtime, "pressure_level") || "normal",
       retry_count: Map.get(runtime, :retry_count) || Map.get(runtime, "retry_count") || 0,
       window_base_turn: Map.get(runtime, :window_base_turn) || Map.get(runtime, "window_base_turn"),

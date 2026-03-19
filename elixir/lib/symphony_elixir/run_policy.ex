@@ -142,6 +142,7 @@ defmodule SymphonyElixir.RunPolicy do
     token_budget = Config.policy_token_budget()
     review_fix_budget = Config.policy_review_fix_token_budget()
     broad_implement_budget = Config.policy_broad_implement_token_budget()
+
     workspace =
       Map.get(running_entry, :workspace_path) ||
         Map.get(running_entry, :workspace) ||
@@ -351,8 +352,7 @@ defmodule SymphonyElixir.RunPolicy do
                     resume_context: persisted_resume_context,
                     target_paths: Map.get(persisted_resume_context, :target_paths, []),
                     next_required_path: Map.get(persisted_resume_context, :next_required_path),
-                    budget_expansion_used:
-                      truthy?(Map.get(persisted_resume_context, :budget_expansion_used))
+                    budget_expansion_used: truthy?(Map.get(persisted_resume_context, :budget_expansion_used))
                   }
                 ),
                 workspace
@@ -1542,7 +1542,7 @@ defmodule SymphonyElixir.RunPolicy do
           "stage_not_implement"
 
         review_fix_budget_candidate?(run_state, stage) or
-            Map.get(resume_context, :budget_mode) == "review_fix" or
+          Map.get(resume_context, :budget_mode) == "review_fix" or
             Map.get(resume_context, :budget_scope_kind) in ["review_claim_batch", "ci_failure_batch"] ->
           "review_fix_candidate"
 

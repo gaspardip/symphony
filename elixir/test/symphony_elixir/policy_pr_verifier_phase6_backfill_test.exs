@@ -1844,8 +1844,7 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       identifier: "MT-914BROADISSUE",
       state: "In Progress",
       title: "Document runner control endpoints",
-      description:
-        "Update docs/DOGFOOD_OPERATIONS.md and docs/OBSERVABILITY_RUNBOOK.md with the runner control endpoints."
+      description: "Update docs/DOGFOOD_OPERATIONS.md and docs/OBSERVABILITY_RUNBOOK.md with the runner control endpoints."
     }
 
     try do
