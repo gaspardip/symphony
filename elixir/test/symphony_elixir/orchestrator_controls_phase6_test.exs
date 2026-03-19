@@ -697,6 +697,58 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert retry_payload.human_action =~ "Add the required routing labels"
   end
 
+  test "issue_target_runner_channel follows canary labels" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-retry-missing-canary-labels",
+      identifier: "MT-RETRY-MISSING-CANARY-LABELS",
+      title: "Retry canary routing",
+      description: "Derive runner channel from canary labels",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    canary_issue = %{issue | labels: ["dogfood:symphony", "canary:symphony"]}
+
+    assert Orchestrator.issue_target_runner_channel_for_test(issue) == "stable"
+    assert Orchestrator.issue_target_runner_channel_for_test(canary_issue) == "canary"
+  end
+
+  test "retry_now returns a concrete no-dispatch reason when policy labels conflict with the company pack" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_policy_pack: "client_safe"
+    )
+
+    issue = %Issue{
+      id: "issue-retry-policy-conflict",
+      identifier: "MT-RETRY-POLICY-CONFLICT",
+      title: "Retry policy conflict",
+      description: "Expose company-pack policy conflicts in the retry payload",
+      state: "Todo",
+      labels: ["policy:fully-autonomous"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryPolicyConflictOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.retry_dispatch_deferred"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "policy.pack_disallows_class"
+    assert retry_payload.human_action =~ "Inspect the recorded no-dispatch reason"
+  end
+
   test "review thread lifecycle controls update persisted manual thread state" do
     workspace_root =
       Path.join(

@@ -39,6 +39,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Added focused `Orchestrator.retry_issue_now/2` coverage for two still-missed control branches: the already-running fast path now proves Symphony returns a stable structured payload instead of attempting redispatch, and the per-state concurrency limiter now proves a distinct deferred reason when global slots exist but the issue state is saturated.
 - Added one more focused `retry_now` diagnostic proof for tracker issues routed to the wrong runner channel, so the public control payload now proves that canary-labelled work on a stable runner reports a concrete deferred reason and human action instead of a silent success.
 - Added one final `retry_now` diagnostic proof for missing required routing labels, so the public control payload now also proves the label-gate rejection path returns a concrete deferred reason and actionable guidance instead of a generic success shell.
+- Added two more focused orchestration control proofs at the end of the same branch family: `issue_target_runner_channel/1` now proves canary routing derives from the canary label, and `retry_now` now proves company-pack policy conflicts surface the pack-specific rule id in the deferred payload instead of silently succeeding.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -57,6 +58,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:491 test/symphony_elixir/orchestrator_controls_phase6_test.exs:526 test/symphony_elixir/orchestrator_controls_phase6_test.exs:570`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:618`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:666`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:700 test/symphony_elixir/orchestrator_controls_phase6_test.exs:718`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix harness.check`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix escript.build`
 
@@ -81,6 +83,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Focused `retry_now` coverage now proves two structured operator outcomes that were still missing in CI: active issues report `already_running` instead of pretending to redispatch, and per-state concurrency pressure reports a concrete deferred reason even when the global slot count is not exhausted.
 - Focused `retry_now` coverage now also proves the wrong-runner-channel diagnostic path, so tracker issues that target canary on a stable runner return an explicit deferred reason and routing action instead of a generic success shell.
 - Focused `retry_now` coverage now also proves the missing-required-labels diagnostic path, so tracker issues missing route labels return an explicit deferred reason and label guidance instead of a generic success shell.
+- Focused control coverage now also proves canary label routing and company-pack conflict reporting in the same retry family, which should raise the changed `Orchestrator` surface without inventing unrelated unit-only scaffolding.
 
 ## Next Step
 - Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.
