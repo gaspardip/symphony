@@ -43,6 +43,13 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - Taught orchestrator initialization, snapshots, and reconciliation to recover live running entries from persisted worker PIDs, including the original `resume_context` budget metadata for broad retries.
 - Added same-runner lease reclaim only for the safe orphaned-worker case: if the persisted lease belongs to this runner instance but the stored worker PID is dead, dispatch now clears the stale worker marker, reclaims the lease, and restarts work instead of spinning forever on `lease already held`.
 - Trimmed live-worker recovery back to orchestrator startup only after a full-suite promotion run proved that scanning all workspaces during hot `snapshot`/reconciliation paths added enough latency to trip status timing assertions; the restart-proof contract stays intact because the real seam is process restart, not steady-state polling.
+- Replayed the promoted runner and confirmed the next restart-only gap: older active workspaces created before `worker_pid` persistence still preserved `implement` + broad retry state, but a fresh runner had no way to seed a redispatch path from that persisted active state.
+- Added startup-only orphaned-active retry seeding for same-runner persisted work with no live worker PID, so a restarted runner queues a continuation retry from the saved issue envelope and then lets the normal same-runner lease reclaim path redispatch it unattended.
+- Scoped the retry fallback to explicit persisted-resume metadata only, so normal tracker retries still depend on live tracker visibility while restart recovery can bypass a stale blocked tracker echo long enough to call `maybe_resume_blocked_issue/2`.
+- Fixed retry lookup so restart-recovery retries prefer the persisted active issue envelope when the tracker still echoes a stale `Blocked` state, instead of immediately releasing the claim before `maybe_resume_blocked_issue/2` can resume active work.
+- Widened orphaned-active startup recovery to also seed same-runner active work whose earlier bad recovery path already cleared the persisted lease snapshot, as long as the run is still routed to the current runner and no live worker PID exists.
+- Moved repo-owned worker command homes for Hex and Mix into `.symphony/runtime`, so preflight/validation/smoke no longer depend on writable `~/.hex` or `~/.mix` state inside sandboxed autonomous workspaces.
+- Replayed `CLZ-33` on a fresh local runner after those fixes and confirmed the run now seeds, survives the stale blocked tracker echo, reacquires dispatch, and reaches a new blocker in repo preflight instead of budget or restart continuity.
 
 ## Validation
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
@@ -51,8 +58,13 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/recovery_and_lease_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_status_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_status_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix harness.check`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix escript.build`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs`
+- `cd /tmp/symphony-budget-stabilize && ./scripts/symphony-preflight.sh`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix harness.check`
 
 ## Evidence
 - The pre-fix isolated proof runner stopped generically on `CLZ-33` with an empty `resume_context`, matching the remaining gap described in the implementation plan:
@@ -81,6 +93,15 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - The new recovery regressions prove the current live blocker and its repair directly:
   - a persisted live worker PID can rebuild the orchestrator's `running` and `claimed` state after a supervisor restart without dropping the active broad-retry lane
   - a same-runner lease with a dead persisted worker PID can be safely reclaimed and redispatched instead of looping forever on `lease already held`
+- The restart-seeded continuation regression now proves the backwards-compatibility path directly:
+  - a same-runner active workspace with no persisted `worker_pid` still seeds a continuation retry on orchestrator startup
+  - that retry carries the persisted issue envelope explicitly, so restart recovery can resume the active workspace even when the tracker still echoes `Blocked`
+- The latest restart proof on `:4052` shows the exact intended recovery path in live logs:
+  - `runtime.recovery_scheduled` is recorded for `CLZ-33`
+  - retry lookup explicitly logs that it is resuming from persisted active run state instead of the stale blocked tracker echo
+  - dispatch reacquires the issue and reaches a new blocker in `preflight.failed`, proving budget-lane admission/restart continuity are no longer the first failure
+- The repo-owned preflight command now succeeds under a repo-local Hex/Mix home instead of failing on `~/.hex/cache.ets` permission errors:
+  - `cd /tmp/symphony-budget-stabilize && ./scripts/symphony-preflight.sh`
 
 ## Next Step
-- Commit the worker-pid recovery fix, rebuild the isolated proof runner from the updated branch, and rerun `CLZ-33` to verify the live broad-retry handoff survives orchestrator restarts without losing the running entry or spinning on a stale same-runner lease.
+- Replay a fresh proof workspace using the updated repo-owned scripts so the autonomous run can get past preflight without writing to global Hex/Mix homes, then continue chasing the next unattended blocker on the path from ticket to merge-ready PR.
