@@ -252,8 +252,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create:
-          "mkdir -p .git .symphony && echo bootstrapped > README.md && echo version: 1 > .symphony/harness.yml"
+        hook_after_create: "mkdir -p .git .symphony && echo bootstrapped > README.md && echo version: 1 > .symphony/harness.yml"
       )
 
       workspace = Path.join(workspace_root, "MT-BOOTSTRAP")

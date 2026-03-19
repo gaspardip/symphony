@@ -268,9 +268,11 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.review.pr_url == "https://example.test/pr/fallback"
     assert payload.review.pr_state == "OPEN"
     assert payload.review.review_decision == "APPROVED"
+
     assert payload.review.check_statuses == [
              %{name: "ci / publish", status: "COMPLETED", conclusion: "SUCCESS"}
            ]
+
     assert payload.review.required_checks_passed == true
     assert payload.running == nil
     assert payload.retry == nil
@@ -1128,10 +1130,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     orchestrator_name = Module.concat(__MODULE__, :LedgerFallbackOrchestrator)
 
-    start_supervised!(
-      {BackfillOrchestrator,
-       name: orchestrator_name, test_pid: self(), snapshot: %{running: [], retrying: [], paused: [], skipped: [], queue: []}}
-    )
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: %{running: [], retrying: [], paused: [], skipped: [], queue: []}})
 
     RunLedger.record("operator.action", %{
       issue_id: issue.id,

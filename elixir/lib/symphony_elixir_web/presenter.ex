@@ -1686,8 +1686,7 @@ defmodule SymphonyElixirWeb.Presenter do
         human_action_required:
           Map.get(run_state || %{}, :next_human_action) ||
             Map.get(history_signal || %{}, :human_action),
-        rule_id:
-          Map.get(run_state || %{}, :last_rule_id) || Map.get(history_signal || %{}, :rule_id),
+        rule_id: Map.get(run_state || %{}, :last_rule_id) || Map.get(history_signal || %{}, :rule_id),
         failure_class:
           Map.get(run_state || %{}, :last_failure_class) ||
             Map.get(history_signal || %{}, :failure_class)
