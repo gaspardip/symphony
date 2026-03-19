@@ -2876,8 +2876,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
                  budget_retry_count: 1,
                  budget_auto_narrowed: true,
                  target_paths: ["docs/DOGFOOD_OPERATIONS.md"],
-                 already_learned:
-                   "Stay inside docs/DOGFOOD_OPERATIONS.md and avoid unrelated reads or repo-wide rediscovery."
+                 already_learned: "Stay inside docs/DOGFOOD_OPERATIONS.md and avoid unrelated reads or repo-wide rediscovery."
                }
              })
 
@@ -2916,6 +2915,158 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert %{^issue_id => running_entry} = next_state.running
     assert running_entry.issue.state == "In Progress"
     assert MapSet.member?(next_state.claimed, issue.id)
+  end
+
+  test "recovery rebuilds a live running entry from persisted worker pid" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-live-worker-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-live-worker-recovery",
+      identifier: "MT-LIVE-WORKER-RECOVERY",
+      title: "Recover live worker",
+      description: "rebuild running state from persisted worker metadata after orchestrator loss",
+      state: "In Progress",
+      source: :tracker,
+      labels: ["ops"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    worker_pid = worker |> :erlang.pid_to_list() |> List.to_string()
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _run_state} =
+             RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: issue.source,
+               issue_state: issue.state,
+               worker_pid: worker_pid,
+               lease_owner: "stale-owner",
+               lease_owner_instance_id: "stable:stable-runner",
+               lease_owner_channel: "stable",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 target_paths: ["docs/DOGFOOD_OPERATIONS.md"]
+               }
+             })
+
+    state =
+      Orchestrator.recover_live_running_workers_for_test(%State{
+        lease_owner: "replacement-owner",
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      })
+
+    issue_id = issue.id
+    assert %{^issue_id => running_entry} = state.running
+    assert running_entry.pid == worker
+    assert running_entry.dispatch_stage == "implement"
+    assert get_in(running_entry, [:resume_context, :budget_mode]) == "broad_implement"
+    assert MapSet.member?(state.claimed, issue.id)
+  end
+
+  test "dispatch reclaims a same-runner lease when the persisted worker pid is dead" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-same-runner-lease-reclaim-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-same-runner-lease-reclaim",
+      identifier: "MT-SAME-RUNNER-LEASE-RECLAIM",
+      title: "Reclaim same-runner lease",
+      description: "resume dispatch when the previous local owner died without releasing its lease",
+      state: "Todo",
+      source: :tracker,
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    dead_worker = spawn(fn -> :ok end)
+    dead_worker_pid = dead_worker |> :erlang.pid_to_list() |> List.to_string()
+    dead_ref = Process.monitor(dead_worker)
+
+    assert_receive {:DOWN, ^dead_ref, :process, ^dead_worker, _reason}
+
+    on_exit(fn ->
+      LeaseManager.release(issue.id)
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _run_state} =
+             RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: issue.source,
+               issue_state: "In Progress",
+               worker_pid: dead_worker_pid,
+               lease_owner: "previous-owner",
+               lease_owner_instance_id: "stable:stable-runner",
+               lease_owner_channel: "stable"
+             })
+
+    claim_issue_lease!(issue.id, issue.identifier, "previous-owner")
+
+    parent = self()
+
+    returned_state =
+      Orchestrator.do_dispatch_issue_for_test(
+        %State{lease_owner: "replacement-owner"},
+        issue,
+        nil,
+        reclaim_same_runner_lease?: true,
+        spawn_fun: fn state, dispatched_issue, attempt, recipient ->
+          send(parent, {:spawned, dispatched_issue.id, attempt, recipient})
+          state
+        end
+      )
+
+    issue_id = issue.id
+    assert_receive {:spawned, ^issue_id, nil, _recipient}
+    assert returned_state.lease_owner == "replacement-owner"
+
+    assert {:ok, lease} = LeaseManager.read(issue.id)
+    assert lease["owner"] == "replacement-owner"
+
+    assert {:ok, persisted_run_state} = RunStateStore.load(workspace)
+    assert persisted_run_state.worker_pid == nil
   end
 
   test "worker dispatch seeds missing run state with retry budget focus" do

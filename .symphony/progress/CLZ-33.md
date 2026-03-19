@@ -38,11 +38,17 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - Fixed `maybe_resume_blocked_issue/2` so a stale immediate tracker refresh that still says `Blocked` no longer overwrites the intended resume state; the runtime now falls back to the persisted active resume stage instead of trusting the stale tracker echo.
 - Moved resumable blocked-workspace handling ahead of stale routing/label/policy reevaluation in running-issue reconciliation, so active broad-retry work wins over a lagging blocked tracker snapshot during the retry handoff.
 - Added focused orchestration coverage that proves a running broad-retry workspace stays active when the tracker snapshot still says `Blocked`, and that `maybe_resume_blocked_issue/2` returns the intended active stage even if the tracker refresh is stale.
+- Traced the next live `CLZ-33` proof failure to an orchestrator restart seam rather than budget admission: after the first bounded broad retry admitted correctly, the live worker could keep running while the supervisor rebuilt with an empty `state.running`, leaving the persisted lease held and later dispatch attempts stuck on repeated `lease already held` skips.
+- Added persisted `worker_pid` continuity to `run_state.json`, so active budget-lane work can be reconstructed from the surviving worker process instead of depending only on the in-memory `running` map.
+- Taught orchestrator initialization, snapshots, and reconciliation to recover live running entries from persisted worker PIDs, including the original `resume_context` budget metadata for broad retries.
+- Added same-runner lease reclaim only for the safe orphaned-worker case: if the persisted lease belongs to this runner instance but the stored worker PID is dead, dispatch now clears the stale worker marker, reclaims the lease, and restarts work instead of spinning forever on `lease already held`.
 
 ## Validation
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/repo_compatibility_test.exs test/symphony_elixir/git_manager_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/recovery_and_lease_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix harness.check`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix escript.build`
 
@@ -70,6 +76,9 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - The new reconciliation regression proves the latest live blocker directly:
   - a running broad-retry workspace no longer self-terminates just because the tracker still reports `Blocked` immediately after the runtime asked to resume active work
   - a stale blocked tracker refresh no longer erases the intended active resume state during `maybe_resume_blocked_issue/2`
+- The new recovery regressions prove the current live blocker and its repair directly:
+  - a persisted live worker PID can rebuild the orchestrator's `running` and `claimed` state after a supervisor restart without dropping the active broad-retry lane
+  - a same-runner lease with a dead persisted worker PID can be safely reclaimed and redispatched instead of looping forever on `lease already held`
 
 ## Next Step
-- Commit the blocked-state continuity fix, rebuild the isolated proof runner from the updated branch, and rerun `CLZ-33` to verify the active broad-retry handoff survives tracker-state lag and reaches the next unattended proof blocker from the real budget lane.
+- Commit the worker-pid recovery fix, rebuild the isolated proof runner from the updated branch, and rerun `CLZ-33` to verify the live broad-retry handoff survives orchestrator restarts without losing the running entry or spinning on a stale same-runner lease.
