@@ -293,7 +293,9 @@ defmodule SymphonyElixir.RunInspector do
 
   defp run_harness_command(workspace, command, opts) when is_binary(command) do
     shell_runner = Keyword.get(opts, :shell_runner, &default_shell_runner/3)
-    {output, status} = shell_runner.(workspace, command, stderr_to_stdout: true)
+    ensure_workspace_runtime_dirs(workspace)
+    cmd_opts = [stderr_to_stdout: true, env: workspace_runtime_env(workspace)]
+    {output, status} = shell_runner.(workspace, command, cmd_opts)
 
     %CommandResult{
       status: if(status == 0, do: :passed, else: :failed),
@@ -523,6 +525,24 @@ defmodule SymphonyElixir.RunInspector do
 
   defp default_shell_runner(workspace, command, opts) do
     System.cmd("sh", ["-lc", command], Keyword.merge([cd: workspace], opts))
+  end
+
+  defp workspace_runtime_env(workspace) do
+    runtime_home = Path.join(workspace, ".symphony/runtime")
+
+    [
+      {"MIX_HOME", Path.join(runtime_home, "mix_home")},
+      {"HEX_HOME", Path.join(runtime_home, "hex_home")},
+      {"MIX_ARCHIVES", Path.join(runtime_home, "mix_archives")}
+    ]
+  end
+
+  defp ensure_workspace_runtime_dirs(workspace) do
+    runtime_home = Path.join(workspace, ".symphony/runtime")
+
+    Enum.each(["mix_home", "hex_home", "mix_archives"], fn dir ->
+      File.mkdir_p!(Path.join(runtime_home, dir))
+    end)
   end
 
   defp runtime_artifact_path?(nil), do: false

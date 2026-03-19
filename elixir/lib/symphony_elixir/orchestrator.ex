@@ -147,6 +147,7 @@ defmodule SymphonyElixir.Orchestrator do
         codex_rate_limits: nil
       }
       |> recover_live_running_workers()
+      |> seed_orphaned_active_retries()
 
     run_terminal_workspace_cleanup()
     :ok = schedule_tick(0)
@@ -2511,6 +2512,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec seed_orphaned_active_retries_for_test(State.t()) :: State.t()
+  def seed_orphaned_active_retries_for_test(%State{} = state) do
+    seed_orphaned_active_retries(state)
+  end
+
+  @doc false
   @spec continuation_metadata_for_running_entry_for_test(map()) :: map()
   def continuation_metadata_for_running_entry_for_test(running_entry),
     do: continuation_metadata_for_running_entry(running_entry)
@@ -3723,6 +3730,23 @@ defmodule SymphonyElixir.Orchestrator do
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
 
+      metadata[:resume_persisted_issue?] == true ->
+        case manual_retry_issue_fallback(metadata) do
+          %Issue{} = persisted_issue ->
+            Logger.info(
+              "Retry lookup saw stale tracker state for issue_id=#{issue_id} issue_identifier=#{issue.identifier}; resuming from persisted active run state"
+            )
+
+            handle_active_retry(state, persisted_issue, attempt, metadata)
+
+          nil ->
+            Logger.debug(
+              "Issue left active states without persisted recovery data, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}"
+            )
+
+            {:noreply, release_issue_claim(state, issue_id)}
+        end
+
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
@@ -3740,6 +3764,9 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, release_issue_claim(state, issue_id)}
     end
   end
+
+  defp manual_retry_issue_fallback(%{resume_persisted_issue?: true, issue: %Issue{} = issue}),
+    do: issue
 
   defp manual_retry_issue_fallback(%{issue: %Issue{source: :manual} = issue}), do: issue
   defp manual_retry_issue_fallback(_metadata), do: nil
@@ -7662,6 +7689,49 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
+  defp seed_orphaned_active_retries(%State{} = state) do
+    Config.workspace_root()
+    |> list_workspace_paths()
+    |> Enum.reduce(state, fn workspace, state_acc ->
+      seed_orphaned_active_retry(state_acc, workspace)
+    end)
+  end
+
+  defp seed_orphaned_active_retry(%State{} = state, workspace) when is_binary(workspace) do
+    with {:ok, run_state} <- RunStateStore.load(workspace),
+         issue_id when is_binary(issue_id) and issue_id != "" <- Map.get(run_state, :issue_id),
+         false <- Map.has_key?(state.running, issue_id),
+         false <- Map.has_key?(state.retry_attempts, issue_id),
+         true <- orphaned_active_retry_run_state?(run_state),
+         %Issue{} = issue <- issue_for_run_state(run_state) || recovered_issue_from_run_state(run_state) do
+      Logger.info(
+        "Seeding orphaned active retry for issue_id=#{issue_id} issue_identifier=#{issue.identifier} stage=#{Map.get(run_state, :stage)}"
+      )
+
+      RunLedger.record("runtime.recovery_scheduled", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        actor_type: "runtime",
+        actor_id: state.lease_owner,
+        summary: "Queued persisted active work for recovery after runner restart.",
+        metadata: %{stage: Map.get(run_state, :stage)}
+      })
+
+      schedule_issue_retry(state, issue.id, 1, %{
+        identifier: issue.identifier,
+        issue: issue,
+        error: "runner restarted; resuming persisted active run",
+        delay_type: :continuation,
+        resume_persisted_issue?: true
+      })
+    else
+      _ ->
+        state
+    end
+  end
+
+  defp seed_orphaned_active_retry(%State{} = state, _workspace), do: state
+
   defp recover_live_running_worker(%State{} = state, workspace) when is_binary(workspace) do
     with {:ok, run_state} <- RunStateStore.load(workspace),
          issue_id when is_binary(issue_id) and issue_id != "" <- Map.get(run_state, :issue_id),
@@ -7886,6 +7956,34 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp recoverable_live_worker_run_state?(_run_state), do: false
+
+  defp orphaned_active_retry_run_state?(run_state) when is_map(run_state) do
+    recoverable_live_worker_run_state?(run_state) and
+      orphaned_active_retry_recoverable?(run_state) and
+      not live_worker_pid_in_run_state?(run_state)
+  end
+
+  defp orphaned_active_retry_run_state?(_run_state), do: false
+
+  defp orphaned_active_retry_recoverable?(run_state) when is_map(run_state) do
+    same_runner_instance_lease_reclaimable?(run_state) or
+      missing_persisted_same_runner_lease_snapshot?(run_state)
+  end
+
+  defp orphaned_active_retry_recoverable?(_run_state), do: false
+
+  defp missing_persisted_same_runner_lease_snapshot?(run_state) when is_map(run_state) do
+    run_state_routed_to_current_runner?(run_state) and
+      not present?(Map.get(run_state, :lease_owner)) and
+      not present?(Map.get(run_state, :lease_owner_instance_id)) and
+      not present?(Map.get(run_state, :lease_owner_channel)) and
+      not present?(Map.get(run_state, :lease_status)) and
+      not present?(Map.get(run_state, :lease_acquired_at)) and
+      not present?(Map.get(run_state, :lease_updated_at)) and
+      is_nil(Map.get(run_state, :lease_epoch))
+  end
+
+  defp missing_persisted_same_runner_lease_snapshot?(_run_state), do: false
 
   defp active_runtime_stage?(stage)
        when stage in ["implement", "validate", "verify", "publish", "merge_readiness", "await_checks", "merge", "post_merge"],
