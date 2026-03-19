@@ -632,6 +632,37 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert retry_payload.human_action =~ "Wait for a free dispatch slot"
   end
 
+  test "retry_now returns a concrete no-dispatch reason when the issue targets a different runner channel" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-retry-wrong-runner-channel",
+      identifier: "MT-RETRY-WRONG-RUNNER-CHANNEL",
+      title: "Retry wrong runner channel",
+      description: "Expose runner-channel mismatch in the retry payload",
+      state: "Todo",
+      labels: ["canary:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryWrongRunnerChannelOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.retry_dispatch_deferred"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "wrong runner channel"
+    assert retry_payload.human_action =~ "Route this issue to a runner on the matching channel"
+  end
+
   test "review thread lifecycle controls update persisted manual thread state" do
     workspace_root =
       Path.join(
