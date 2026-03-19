@@ -24,11 +24,17 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Normalized Linear identifier lookups so `fetch_issue_by_identifier/1` now honors the same routing assignee filter as `fetch_issue_by_id/1` and `fetch_issue_states_by_ids/1`, eliminating the live mismatch where `/api/v1/CLZ-31` looked assigned while `retry_now` correctly deferred it as unroutable.
 - Fixed the dogfood checkout bootstrap seam: if the orchestrator has already created a metadata-only workspace with `.symphony/run_state.json`, `Workspace.create_for_issue/1` now preserves `.symphony`, reruns the `after_create` hook against an empty directory, and restores the runtime state afterward so checkout hooks can still materialize the Git repo.
 - Refined that bootstrap repair so restoring preserved `.symphony` state now merges runtime files back into the checked-out repo tree instead of replacing it, which keeps tracked repo files like `.symphony/harness.yml` available for pre-run policy enforcement.
+- Removed the last live observability stall: issue detail and snapshot payloads now use a lightweight `RunInspector` mode that skips live `gh pr view` calls and falls back to persisted PR/check state from `run_state.json`, so active runs no longer wedge the operator API while rendering review metadata.
+- Made `RunStateStore.load/1` resilient during metadata-only workspace bootstrap by reading staged `.bootstrap-*` runtime state when `.symphony/run_state.json` is temporarily parked outside the workspace, which keeps dispatch helpers and live issue reads from seeing a false `:missing` state mid-checkout.
+- Relaxed direct spawn-path run-state seeding so orchestrator worker helpers can synthesize a minimal persisted run state when no lease-backed state exists yet, preserving test-only spawn coverage and claimed passive dispatch without forcing a lease round-trip.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/workspace_and_config_test.exs test/symphony_elixir/policy_runtime_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/phase6_coverage_backfill_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/workspace_and_config_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix harness.check`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix escript.build`
 
 ## Evidence
 - Local focused control/presenter coverage is green after the telemetry and revalidation fixes.
@@ -37,6 +43,9 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Focused Linear client coverage now proves identifier-based issue fetches carry `assigned_to_worker: false` when the configured routing assignee does not match, keeping issue detail payloads aligned with `retry_now` dispatch gating.
 - Focused workspace coverage now proves a metadata-only workspace reruns `after_create` and preserves `.symphony/run_state.json`, matching the live self-host retry path after a `retry_now` dispatch.
 - The workspace bootstrap regression now also proves checked-out `.symphony/harness.yml` survives the metadata restore, matching the live canary path that previously advanced from `checkout.missing_git` to `harness.missing`.
+- Focused observability coverage now proves lightweight `RunInspector` reads skip `gh pr view`, and presenter issue payloads can rebuild review/check details from persisted run-state fields instead of shelling out live during API rendering.
+- Focused recovery coverage now proves `RunStateStore.load/1` can read staged bootstrap metadata while a workspace rebuild is in progress, matching the dispatch-time bootstrap race from live dogfood.
+- Live replay on `http://127.0.0.1:4046/api/v1/state` and `http://127.0.0.1:4046/api/v1/CLZ-31` now responds again while `CLZ-31` is blocked, and the issue detail payload renders a full operator summary instead of timing out in the controller.
 
 ## Next Step
-- Rebuild the canary runner on the latest local commit and replay `CLZ-31` again to verify the live run gets past checkout and into a real agent turn.
+- Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.

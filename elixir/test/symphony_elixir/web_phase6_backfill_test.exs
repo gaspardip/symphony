@@ -226,6 +226,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              RunStateStore.transition(workspace, "blocked", %{
                issue_id: issue.id,
                issue_identifier: issue.identifier,
+               pr_url: "https://example.test/pr/fallback",
+               last_pr_state: "OPEN",
+               last_review_decision: "APPROVED",
+               last_check_statuses: [
+                 %{name: "ci / publish", status: "COMPLETED", conclusion: "SUCCESS"}
+               ],
+               last_required_checks_state: "passed",
                last_rule_id: "policy.review_required",
                last_failure_class: "policy",
                last_merge_readiness: %{
@@ -258,6 +265,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.company.name == "Client Boundary"
     assert payload.company.mode == "client_safe"
     assert payload.company.policy_pack == "client_safe"
+    assert payload.review.pr_url == "https://example.test/pr/fallback"
+    assert payload.review.pr_state == "OPEN"
+    assert payload.review.review_decision == "APPROVED"
+    assert payload.review.check_statuses == [
+             %{name: "ci / publish", status: "COMPLETED", conclusion: "SUCCESS"}
+           ]
+    assert payload.review.required_checks_passed == true
     assert payload.running == nil
     assert payload.retry == nil
     assert payload.paused == nil

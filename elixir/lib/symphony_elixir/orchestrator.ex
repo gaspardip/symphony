@@ -3155,75 +3155,75 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
-    run_state = retry_run_state(issue.identifier, issue)
     workspace = Workspace.path_for_issue(issue.identifier)
-    stage = Map.get(run_state, :stage)
     dispatch_stage = normalize_dispatch_stage(issue)
 
-    case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
-         end) do
-      {:ok, pid} ->
-        ref = Process.monitor(pid)
-        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
+    with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
+         stage <- Map.get(run_state, :stage),
+         {:ok, pid} <-
+           start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
+             AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
+           end) do
+      ref = Process.monitor(pid)
+      {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
-        Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
+      Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
-        ledger_event =
-          RunLedger.record("dispatch.started", %{
-            issue_id: issue.id,
-            issue_identifier: issue.identifier,
-            actor_type: "runtime",
-            actor_id: state.lease_owner,
-            policy_class: policy_class,
-            summary: "Dispatching issue to an agent worker.",
-            details: "Attempt #{inspect(attempt || 1)}.",
-            metadata: %{
-              policy_source: policy_source,
-              retry_attempt: normalize_retry_attempt(attempt)
-            }
-          })
-
-        running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
-            session_id: nil,
-            last_codex_message: nil,
-            last_codex_timestamp: nil,
-            last_codex_event: nil,
-            codex_app_server_pid: nil,
-            codex_input_tokens: 0,
-            codex_output_tokens: 0,
-            codex_total_tokens: 0,
-            codex_last_reported_input_tokens: 0,
-            codex_last_reported_output_tokens: 0,
-            codex_last_reported_total_tokens: 0,
-            turn_started_input_tokens: 0,
-            turn_count: 0,
-            recent_codex_updates: [],
-            retry_attempt: normalize_retry_attempt(attempt),
-            workspace_path: workspace,
-            dispatch_stage: dispatch_stage,
-            policy_override: policy_override,
-            policy_class: policy_class,
+      ledger_event =
+        RunLedger.record("dispatch.started", %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          actor_type: "runtime",
+          actor_id: state.lease_owner,
+          policy_class: policy_class,
+          summary: "Dispatching issue to an agent worker.",
+          details: "Attempt #{inspect(attempt || 1)}.",
+          metadata: %{
             policy_source: policy_source,
-            workspace: workspace,
-            stage: stage,
-            resume_context: Map.get(run_state, :resume_context, %{}),
-            last_ledger_event_id: Map.get(ledger_event, :event_id),
-            started_at: DateTime.utc_now()
-          })
+            retry_attempt: normalize_retry_attempt(attempt)
+          }
+        })
 
-        %{
-          state
-          | running: running,
-            claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
-        }
+      running =
+        Map.put(state.running, issue.id, %{
+          pid: pid,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          session_id: nil,
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_app_server_pid: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0,
+          turn_started_input_tokens: 0,
+          turn_count: 0,
+          recent_codex_updates: [],
+          retry_attempt: normalize_retry_attempt(attempt),
+          workspace_path: workspace,
+          dispatch_stage: dispatch_stage,
+          policy_override: policy_override,
+          policy_class: policy_class,
+          policy_source: policy_source,
+          workspace: workspace,
+          stage: stage,
+          resume_context: Map.get(run_state, :resume_context, %{}),
+          last_ledger_event_id: Map.get(ledger_event, :event_id),
+          started_at: DateTime.utc_now()
+        })
 
+      %{
+        state
+        | running: running,
+          claimed: MapSet.put(state.claimed, issue.id),
+          retry_attempts: Map.delete(state.retry_attempts, issue.id)
+      }
+    else
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         LeaseManager.release(issue.id, state.lease_owner)
@@ -3265,98 +3265,98 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_passive_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
-    run_state = retry_run_state(issue.identifier, issue)
     workspace = Workspace.path_for_issue(issue.identifier)
-    stage = Map.get(run_state, :stage)
 
-    case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
-           workspace =
-             case Workspace.create_for_issue(issue) do
-               {:ok, path} ->
-                 path
+    with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
+         stage <- Map.get(run_state, :stage),
+         {:ok, pid} <-
+           start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
+             workspace =
+               case Workspace.create_for_issue(issue) do
+                 {:ok, path} ->
+                   path
 
-               {:error, reason} ->
-                 raise RuntimeError, "Passive worker setup failed: #{inspect(reason)}"
+                 {:error, reason} ->
+                   raise RuntimeError, "Passive worker setup failed: #{inspect(reason)}"
+               end
+
+             case DeliveryEngine.run(
+                    workspace,
+                    issue,
+                    recipient,
+                    attempt: attempt,
+                    policy_override: policy_override,
+                    issue_state_fetcher: &IssueSource.fetch_issue_states_by_ids/1
+                  ) do
+               :ok -> :ok
+               {:done, _issue} -> :ok
+               {:stop, _reason} -> :ok
+               {:error, reason} -> raise RuntimeError, "Passive worker failed: #{inspect(reason)}"
              end
+           end) do
+      ref = Process.monitor(pid)
+      {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
+      dispatch_stage = normalize_dispatch_stage(issue)
 
-           case DeliveryEngine.run(
-                  workspace,
-                  issue,
-                  recipient,
-                  attempt: attempt,
-                  policy_override: policy_override,
-                  issue_state_fetcher: &IssueSource.fetch_issue_states_by_ids/1
-                ) do
-             :ok -> :ok
-             {:done, _issue} -> :ok
-             {:stop, _reason} -> :ok
-             {:error, reason} -> raise RuntimeError, "Passive worker failed: #{inspect(reason)}"
-           end
-         end) do
-      {:ok, pid} ->
-        ref = Process.monitor(pid)
-        {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
-        dispatch_stage = normalize_dispatch_stage(issue)
+      Logger.info("Dispatching issue to passive runtime worker: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
-        Logger.info("Dispatching issue to passive runtime worker: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
-
-        ledger_event =
-          RunLedger.record("dispatch.started", %{
-            issue_id: issue.id,
-            issue_identifier: issue.identifier,
-            actor_type: "runtime",
-            actor_id: state.lease_owner,
-            policy_class: policy_class,
-            summary: "Dispatching issue to a passive runtime worker.",
-            details: "Attempt #{inspect(attempt || 1)}.",
-            metadata: %{
-              passive: true,
-              policy_source: policy_source,
-              retry_attempt: normalize_retry_attempt(attempt)
-            }
-          })
-
-        running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
-            session_id: nil,
-            last_codex_message: nil,
-            last_codex_timestamp: nil,
-            last_codex_event: nil,
-            codex_app_server_pid: nil,
-            codex_input_tokens: 0,
-            codex_output_tokens: 0,
-            codex_total_tokens: 0,
-            codex_last_reported_input_tokens: 0,
-            codex_last_reported_output_tokens: 0,
-            codex_last_reported_total_tokens: 0,
-            turn_started_input_tokens: 0,
-            turn_count: 0,
-            recent_codex_updates: [],
-            retry_attempt: normalize_retry_attempt(attempt),
-            workspace_path: workspace,
-            dispatch_stage: dispatch_stage,
-            policy_override: policy_override,
-            policy_class: policy_class,
+      ledger_event =
+        RunLedger.record("dispatch.started", %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          actor_type: "runtime",
+          actor_id: state.lease_owner,
+          policy_class: policy_class,
+          summary: "Dispatching issue to a passive runtime worker.",
+          details: "Attempt #{inspect(attempt || 1)}.",
+          metadata: %{
+            passive: true,
             policy_source: policy_source,
-            workspace: workspace,
-            stage: stage,
-            resume_context: Map.get(run_state, :resume_context, %{}),
-            last_ledger_event_id: Map.get(ledger_event, :event_id),
-            passive?: true,
-            started_at: DateTime.utc_now()
-          })
+            retry_attempt: normalize_retry_attempt(attempt)
+          }
+        })
 
-        %{
-          state
-          | running: running,
-            claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
-        }
+      running =
+        Map.put(state.running, issue.id, %{
+          pid: pid,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          session_id: nil,
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_app_server_pid: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0,
+          turn_started_input_tokens: 0,
+          turn_count: 0,
+          recent_codex_updates: [],
+          retry_attempt: normalize_retry_attempt(attempt),
+          workspace_path: workspace,
+          dispatch_stage: dispatch_stage,
+          policy_override: policy_override,
+          policy_class: policy_class,
+          policy_source: policy_source,
+          workspace: workspace,
+          stage: stage,
+          resume_context: Map.get(run_state, :resume_context, %{}),
+          last_ledger_event_id: Map.get(ledger_event, :event_id),
+          passive?: true,
+          started_at: DateTime.utc_now()
+        })
 
+      %{
+        state
+        | running: running,
+          claimed: MapSet.put(state.claimed, issue.id),
+          retry_attempts: Map.delete(state.retry_attempts, issue.id)
+      }
+    else
       {:error, reason} ->
         Logger.error("Unable to spawn passive runtime worker for #{issue_context(issue)}: #{inspect(reason)}")
 
@@ -3373,6 +3373,38 @@ defmodule SymphonyElixir.Orchestrator do
           delay_type: :passive_continuation,
           issue: issue
         })
+    end
+  end
+
+  defp ensure_dispatch_run_state(%State{} = state, workspace, issue)
+       when is_binary(workspace) and is_map(issue) do
+    case RunStateStore.load(workspace) do
+      {:ok, run_state} ->
+        {:ok, run_state}
+
+      {:error, :missing} ->
+        case persist_live_issue_lease(state, workspace, issue) do
+          {:ok, run_state} ->
+            {:ok, run_state}
+
+          {:error, :missing} ->
+            persist_issue_run_state(workspace, issue)
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp persist_issue_run_state(workspace, issue) when is_binary(workspace) and is_map(issue) do
+    run_state = RunStateStore.load_or_default(workspace, issue)
+
+    case RunStateStore.save(workspace, run_state) do
+      :ok -> {:ok, run_state}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -4425,9 +4457,10 @@ defmodule SymphonyElixir.Orchestrator do
   # credo:disable-for-next-line
   defp running_snapshot_entry(issue_id, metadata, now, state) do
     workspace_path = Path.join(Config.workspace_root(), metadata.identifier || issue_id)
-    inspection = RunInspector.inspect(workspace_path)
+    inspection = RunInspector.inspect(workspace_path, include_pr_details: false)
     run_state = load_run_state(workspace_path, metadata.issue)
     lease = stateful_lease_details(issue_id, run_state, now)
+    inspection = apply_persisted_review_state(inspection, run_state)
 
     {policy_class, policy_source, policy_override} =
       policy_snapshot_values(metadata.issue, state, run_state)
@@ -4535,6 +4568,35 @@ defmodule SymphonyElixir.Orchestrator do
         ),
       recent_codex_updates: Map.get(metadata, :recent_codex_updates, [])
     }
+  end
+
+  defp apply_persisted_review_state(%RunInspector.Snapshot{} = inspection, run_state)
+       when is_map(run_state) do
+    check_statuses =
+      case Map.get(run_state, :last_check_statuses) do
+        statuses when is_list(statuses) and statuses != [] -> statuses
+        _ -> inspection.check_statuses
+      end
+
+    inspection
+    |> Map.put(:pr_url, Map.get(run_state, :pr_url) || inspection.pr_url)
+    |> Map.put(:pr_state, Map.get(run_state, :last_pr_state) || inspection.pr_state)
+    |> Map.put(:review_decision, Map.get(run_state, :last_review_decision) || inspection.review_decision)
+    |> Map.put(:check_statuses, check_statuses)
+    |> Map.put(:required_checks_state, Map.get(run_state, :last_required_checks_state) || inspection.required_checks_state)
+    |> Map.put(:missing_required_checks, persisted_check_list(run_state, :last_missing_required_checks, inspection.missing_required_checks))
+    |> Map.put(:pending_required_checks, persisted_check_list(run_state, :last_pending_required_checks, inspection.pending_required_checks))
+    |> Map.put(:failing_required_checks, persisted_check_list(run_state, :last_failing_required_checks, inspection.failing_required_checks))
+    |> Map.put(:cancelled_required_checks, persisted_check_list(run_state, :last_cancelled_required_checks, inspection.cancelled_required_checks))
+  end
+
+  defp apply_persisted_review_state(%RunInspector.Snapshot{} = inspection, _run_state), do: inspection
+
+  defp persisted_check_list(run_state, key, fallback) when is_map(run_state) do
+    case Map.get(run_state, key) do
+      values when is_list(values) and values != [] -> values
+      _ -> fallback
+    end
   end
 
   defp paused_snapshot_entries(paused_issue_states) when is_map(paused_issue_states) do

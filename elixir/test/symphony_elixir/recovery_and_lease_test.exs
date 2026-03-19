@@ -77,6 +77,37 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
     end
   end
 
+  test "run state store loads staged bootstrap metadata while workspace rebuild is in progress" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-state-bootstrap-load-#{System.unique_integer([:positive])}"
+      )
+
+    workspace = Path.join(workspace_root, "MT-BOOTSTRAP-LOAD")
+    staged_dir = Path.join(workspace_root, ".MT-BOOTSTRAP-LOAD.bootstrap-1")
+
+    try do
+      File.mkdir_p!(staged_dir)
+
+      File.write!(
+        Path.join(staged_dir, "run_state.json"),
+        Jason.encode!(%{
+          "issue_id" => "issue-bootstrap",
+          "issue_identifier" => "MT-BOOTSTRAP-LOAD",
+          "stage" => "implement"
+        })
+      )
+
+      assert {:ok, state} = RunStateStore.load(workspace)
+      assert state.issue_id == "issue-bootstrap"
+      assert state.issue_identifier == "MT-BOOTSTRAP-LOAD"
+      assert state.stage == "implement"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "run state store transition preserves existing issue-scoped state when no issue context is passed" do
     workspace =
       Path.join(

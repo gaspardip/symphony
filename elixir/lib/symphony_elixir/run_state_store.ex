@@ -19,15 +19,62 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec load(Path.t()) :: {:ok, map()} | {:error, :missing | term()}
   def load(workspace) when is_binary(workspace) do
-    path = state_path(workspace)
-
-    with true <- File.exists?(path) or {:error, :missing},
+    with {:ok, path} <- load_path(workspace),
          {:ok, payload} <- File.read(path),
          {:ok, decoded} <- Jason.decode(payload),
          true <- is_map(decoded) or {:error, :invalid_state} do
       {:ok, atomize(decoded)}
     else
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp load_path(workspace) when is_binary(workspace) do
+    path = state_path(workspace)
+
+    cond do
+      File.exists?(path) ->
+        {:ok, path}
+
+      true ->
+        case staged_bootstrap_state_path(workspace) do
+          nil -> {:error, :missing}
+          staged_path -> {:ok, staged_path}
+        end
+    end
+  end
+
+  defp staged_bootstrap_state_path(workspace) when is_binary(workspace) do
+    basename = Path.basename(workspace)
+    parent = Path.dirname(workspace)
+    prefix = ".#{basename}.bootstrap-"
+
+    parent
+    |> File.ls()
+    |> case do
+      {:ok, entries} ->
+        entries
+        |> Enum.filter(&String.starts_with?(&1, prefix))
+        |> Enum.map(&Path.join(parent, &1))
+        |> Enum.filter(&File.dir?/1)
+        |> Enum.map(fn dir -> {dir, Path.join([dir, @filename])} end)
+        |> Enum.filter(fn {_dir, path} -> File.exists?(path) end)
+        |> Enum.max_by(
+          fn {dir, _path} ->
+            case File.stat(dir, time: :posix) do
+              {:ok, stat} -> stat.mtime
+              _ -> 0
+            end
+          end,
+          fn -> nil end
+        )
+        |> case do
+          {_dir, path} -> path
+          nil -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
