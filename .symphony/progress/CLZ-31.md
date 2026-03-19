@@ -29,6 +29,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Relaxed direct spawn-path run-state seeding so orchestrator worker helpers can synthesize a minimal persisted run state when no lease-backed state exists yet, preserving test-only spawn coverage and claimed passive dispatch without forcing a lease round-trip.
 - Finalized the CLZ-31 branch after merge fallout: dispatch bootstrap now re-merges persisted retry `resume_context` into worker startup state, so retry-time `target_paths` and `already_learned` continuity survive the operator-read fixes instead of getting dropped during spawn.
 - Hardened lease persistence against empty-read races by treating blank lease payloads as missing and writing lease JSON through a temp-file rename, which removes the intermittent CI decode error when a worker refresh reads the lease during a concurrent write.
+- Closed the last retry continuity seam for lease-backed dispatch startup: when a worker seeds its state from a live lease instead of an existing `run_state.json`, the orchestrator now persists the merged retry `resume_context` back to disk instead of only returning it in-memory to the running entry.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -52,6 +53,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Focused recovery coverage now proves `RunStateStore.load/1` can read staged bootstrap metadata while a workspace rebuild is in progress, matching the dispatch-time bootstrap race from live dogfood.
 - Live replay on `http://127.0.0.1:4046/api/v1/state` and `http://127.0.0.1:4046/api/v1/CLZ-31` now responds again while `CLZ-31` is blocked, and the issue detail payload renders a full operator summary instead of timing out in the controller.
 - Post-merge CI regressions are closed locally: the retry-focus spawn path again exposes persisted `resume_context.target_paths`, and lease reads no longer fail with `Jason.DecodeError` on transient empty payloads during refresh.
+- Lease-backed startup coverage now proves both active and passive workers persist retry-time `target_paths` even when startup has to synthesize state from the live lease file rather than an existing workspace run-state file.
 
 ## Next Step
 - Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.

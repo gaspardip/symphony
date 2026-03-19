@@ -3382,12 +3382,12 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(workspace) and is_map(issue) and is_map(retry_metadata) do
     case RunStateStore.load(workspace) do
       {:ok, run_state} ->
-        {:ok, merge_retry_budget_resume_context(run_state, retry_metadata)}
+        persist_dispatch_run_state_retry_context(workspace, run_state, retry_metadata)
 
       {:error, :missing} ->
         case persist_live_issue_lease(state, workspace, issue) do
           {:ok, run_state} ->
-            {:ok, merge_retry_budget_resume_context(run_state, retry_metadata)}
+            persist_dispatch_run_state_retry_context(workspace, run_state, retry_metadata)
 
           {:error, :missing} ->
             persist_issue_run_state(workspace, issue, retry_metadata)
@@ -3398,6 +3398,16 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp persist_dispatch_run_state_retry_context(workspace, run_state, retry_metadata)
+       when is_binary(workspace) and is_map(run_state) and is_map(retry_metadata) do
+    merged_run_state = merge_retry_budget_resume_context(run_state, retry_metadata)
+
+    case RunStateStore.save(workspace, merged_run_state) do
+      :ok -> {:ok, merged_run_state}
+      {:error, reason} -> {:error, reason}
     end
   end
 

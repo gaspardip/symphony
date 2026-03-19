@@ -2618,6 +2618,161 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
            ]
   end
 
+  test "worker dispatch merges lease-backed state with retry budget focus when run state is missing" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-budget-retry-lease-seed-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-broad-retry-lease-seed",
+      identifier: "MT-BROAD-RETRY-LEASE-SEED",
+      title: "Seed budget retry focus from lease",
+      description: "persist retry focus when dispatch reloads lease-backed state",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(workspace)
+    claim_issue_lease!(issue.id, issue.identifier, "retry-focus-owner")
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    state =
+      Orchestrator.do_spawn_issue_worker_for_test(
+        %State{
+          lease_owner: "retry-focus-owner",
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 1,
+              identifier: issue.identifier,
+              budget_resume_context: %{
+                budget_mode: "broad_implement",
+                budget_retry_count: 1,
+                target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                already_learned: "Resume from the lease-backed DeliveryEngine focus."
+              }
+            }
+          }
+        },
+        issue,
+        1,
+        self(),
+        start_child_fun: fn _supervisor, _fun -> {:ok, worker} end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+
+    assert get_in(running_entry, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert persisted_run_state.lease_owner == "retry-focus-owner"
+    assert persisted_run_state.lease_owner_channel == "stable"
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+  end
+
+  test "passive worker dispatch merges lease-backed state with retry budget focus when run state is missing" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-passive-budget-retry-lease-seed-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-passive-broad-retry-lease-seed",
+      identifier: "MT-PASSIVE-BROAD-RETRY-LEASE-SEED",
+      title: "Seed passive budget retry focus from lease",
+      description: "persist retry focus when passive dispatch reloads lease-backed state",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(workspace)
+    claim_issue_lease!(issue.id, issue.identifier, "retry-focus-owner")
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    state =
+      Orchestrator.do_spawn_passive_worker_for_test(
+        %State{
+          lease_owner: "retry-focus-owner",
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 1,
+              identifier: issue.identifier,
+              budget_resume_context: %{
+                budget_mode: "broad_implement",
+                budget_retry_count: 1,
+                target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                already_learned: "Resume passive work from the lease-backed DeliveryEngine focus."
+              }
+            }
+          }
+        },
+        issue,
+        1,
+        self(),
+        start_child_fun: fn _supervisor, _fun -> {:ok, worker} end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+    assert running_entry.passive? == true
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert persisted_run_state.lease_owner == "retry-focus-owner"
+    assert persisted_run_state.lease_owner_channel == "stable"
+
+    assert get_in(running_entry, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+  end
+
   test "passive retry path uses issue lookup instead of candidate list fetch" do
     issue_id = "manual:issue-passive-retry"
     identifier = "MT-PASSIVE-RETRY"
