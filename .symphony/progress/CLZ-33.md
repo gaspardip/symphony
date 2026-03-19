@@ -34,6 +34,10 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - Replayed the isolated `CLZ-33` proof on the updated runner and confirmed the next blocker was stale blocked state continuity: after compatibility passed, the workspace still held the earlier `repo_not_compatible` blocked state and `DeliveryEngine` stopped immediately on `stage = "blocked"`.
 - Fixed active redispatch rewind so a reactivated compatibility-stopped workspace resumes from `checkout`, which matches the persisted default stage when no earlier active `stage_history` exists.
 - Added focused orchestrator coverage that proves a blocked `compatibility.not_certified` run state is cleared back to `checkout` before startup during normal active dispatch.
+- Traced the next live proof failure on `CLZ-33` to blocked-state continuity rather than budget admission: the first broad retry now admitted correctly, but tracker refreshes could still report the issue as `Blocked` and the running worker would be torn down during reconciliation.
+- Fixed `maybe_resume_blocked_issue/2` so a stale immediate tracker refresh that still says `Blocked` no longer overwrites the intended resume state; the runtime now falls back to the persisted active resume stage instead of trusting the stale tracker echo.
+- Moved resumable blocked-workspace handling ahead of stale routing/label/policy reevaluation in running-issue reconciliation, so active broad-retry work wins over a lagging blocked tracker snapshot during the retry handoff.
+- Added focused orchestration coverage that proves a running broad-retry workspace stays active when the tracker snapshot still says `Blocked`, and that `maybe_resume_blocked_issue/2` returns the intended active stage even if the tracker refresh is stale.
 
 ## Validation
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
@@ -63,6 +67,9 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
   - generic per-turn stops persist `budget_admission_reason`
   - blocked budget-stopped workspaces rewind back into active dispatch with preserved retry metadata
   - presenter issue payloads expose persisted `budget_runtime` fields instead of collapsing to a generic empty shell
+- The new reconciliation regression proves the latest live blocker directly:
+  - a running broad-retry workspace no longer self-terminates just because the tracker still reports `Blocked` immediately after the runtime asked to resume active work
+  - a stale blocked tracker refresh no longer erases the intended active resume state during `maybe_resume_blocked_issue/2`
 
 ## Next Step
-- Commit the active-redispatch rewind follow-up, rebuild the isolated proof runner from the updated branch, and rerun `CLZ-33` to verify the run now gets past both compatibility and stale blocked-state replay into the real budget-lane proof path.
+- Commit the blocked-state continuity fix, rebuild the isolated proof runner from the updated branch, and rerun `CLZ-33` to verify the active broad-retry handoff survives tracker-state lag and reaches the next unattended proof blocker from the real budget lane.

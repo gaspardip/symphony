@@ -2665,6 +2665,9 @@ defmodule SymphonyElixir.Orchestrator do
 
         terminate_running_issue(state, issue.id, true)
 
+      resumable_running_blocked_issue?(state, issue) ->
+        resume_running_blocked_issue(state, issue, active_states)
+
       match?({:error, _}, resolve_policy(issue, state)) ->
         Logger.info("Issue has invalid policy routing: #{issue_context(issue)} labels=#{inspect(Issue.label_names(issue))}; moving issue to #{@blocked_state}")
 
@@ -2712,6 +2715,27 @@ defmodule SymphonyElixir.Orchestrator do
 
       _ ->
         %{state | issue_routing_cache: issue_routing_cache}
+    end
+  end
+
+  defp resumable_running_blocked_issue?(%State{} = state, %Issue{state: @blocked_state} = issue) do
+    Map.has_key?(state.running, issue.id) and
+      resumable_retry_issue?(Workspace.path_for_issue(issue.identifier), issue)
+  end
+
+  defp resumable_running_blocked_issue?(_state, _issue), do: false
+
+  defp resume_running_blocked_issue(%State{} = state, %Issue{} = issue, active_states) do
+    {state, resumed_issue} = maybe_resume_blocked_issue(state, issue)
+
+    if active_issue_state?(resumed_issue.state, active_states) do
+      refresh_running_issue_state(state, resumed_issue)
+    else
+      Logger.info(
+        "Issue remained non-active after blocked resume attempt: #{issue_context(resumed_issue)} state=#{resumed_issue.state}; stopping active agent"
+      )
+
+      terminate_running_issue(state, issue.id, false)
     end
   end
 
@@ -5396,7 +5420,7 @@ defmodule SymphonyElixir.Orchestrator do
     local_resume =
       fn resume_state ->
         cond do
-          issue.source == :manual and is_binary(resume_state) ->
+          is_binary(resume_state) ->
             {state, %{issue | state: resume_state}}
 
           true ->
@@ -5424,7 +5448,16 @@ defmodule SymphonyElixir.Orchestrator do
            }),
          :ok <- IssueSource.update_issue_state(issue, resume_state),
          {:ok, refreshed_issue} <- IssueSource.refresh_issue(issue) do
-      {state, refreshed_issue || %{issue | state: resume_state}}
+      case refreshed_issue do
+        %Issue{state: @blocked_state} ->
+          local_resume.(resume_state)
+
+        %Issue{} = latest_issue ->
+          {state, latest_issue}
+
+        _ ->
+          local_resume.(resume_state)
+      end
     else
       _ ->
         resume_state =

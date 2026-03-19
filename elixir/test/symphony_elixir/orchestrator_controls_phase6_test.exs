@@ -2824,6 +2824,100 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert persisted_run_state.stop_reason == nil
   end
 
+  test "reconcile keeps a running broad retry alive when tracker state lags as blocked" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-broad-retry-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-broad-retry-reconcile",
+      identifier: "MT-BROAD-RETRY-RECONCILE",
+      title: "Keep resumable blocked retry running",
+      description: "do not tear down a running broad retry when tracker state still says blocked",
+      state: "Blocked",
+      labels: ["dogfood:symphony"]
+    }
+
+    issue_id = issue.id
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    ref = Process.monitor(worker)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: issue.source,
+               stop_reason: nil,
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_auto_narrowed: true,
+                 target_paths: ["docs/DOGFOOD_OPERATIONS.md"],
+                 already_learned:
+                   "Stay inside docs/DOGFOOD_OPERATIONS.md and avoid unrelated reads or repo-wide rediscovery."
+               }
+             })
+
+    assert Orchestrator.issue_routable_to_worker_for_test(issue)
+    assert Orchestrator.issue_matches_required_labels_for_test(issue)
+
+    {_resume_state, resumed_issue} = Orchestrator.maybe_resume_blocked_issue_for_test(%State{}, issue)
+    assert resumed_issue.state == "In Progress"
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %State{
+      lease_owner: "test-owner",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      running: %{
+        issue.id => %{
+          pid: worker,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          workspace: workspace,
+          workspace_path: workspace,
+          stage: "implement",
+          resume_context: %{
+            budget_mode: "broad_implement",
+            budget_retry_count: 1,
+            target_paths: ["docs/DOGFOOD_OPERATIONS.md"]
+          },
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue.id])
+    }
+
+    next_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    assert %{^issue_id => running_entry} = next_state.running
+    assert running_entry.issue.state == "In Progress"
+    assert MapSet.member?(next_state.claimed, issue.id)
+  end
+
   test "worker dispatch seeds missing run state with retry budget focus" do
     workspace_root =
       Path.join(
