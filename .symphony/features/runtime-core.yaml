@@ -6,6 +6,7 @@ source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - elixir/lib/symphony_elixir/github_webhook_relay.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
+  - elixir/lib/symphony_elixir/run_policy.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
 acceptance_signals:
   - Deterministic stage execution from checkout through post_merge
@@ -21,6 +22,20 @@ acceptance_signals:
   - Dispatch, lease refresh, and lease release keep persisted run-state ownership aligned with the live lease file
   - Issue dispatch respects the target runner channel so stable and canary pools do not steal each other's work
   - High token-pressure review retries shrink to a single accepted claim and avoid duplicating review feedback in the implement prompt so PR-comment work can continue under the per-turn input budget
+  - Broad implement turns can take one bounded file-only retry with a leaner prompt instead of immediately failing or silently raising the cap when the first-turn context is too large
+  - Broad implement retries persist concrete target paths and a compact already-learned summary so the next turn can continue from a file-level target instead of rediscovering the repo
+  - Broad implement retries can also mine those target paths and continuity hints from structured Codex commentary updates when the broad turn overruns the budget before `report_agent_turn_result`
+  - Retry-time broad budget context is persisted and re-merged on redispatch, so live `target_paths` and `already_learned` continuity survive the boundary between a budget stop and the next worker startup
+  - Once a broad retry has target paths, the retry prompt drops the broad issue brief and repo map in favor of a short execution hint plus a path-specific next objective
+  - Once a broad retry has target paths, the retry prompt also drops redundant dirty-file and last-summary context and instead tells the model to stay inside the chosen file or explicitly request one next file
+  - Broad retry target-path state prefers full repo paths over matching basenames, so the retry lane carries one unambiguous focus path instead of repeating both `foo/bar.ex` and `bar.ex`
+  - Broad retry target-path state also normalizes diff-style `a/...` and `b/...` file markers back to the real repo path, so live patch snippets do not re-inflate the bounded retry lane with duplicate focus entries
+  - Broad retry continuity shifts from long rediscovery summaries to a compact "stay inside these target paths" execution rule once a concrete focus already exists
+  - If a file-only broad retry proves one more file is required, the runtime can take exactly one bounded expansion retry with the original target plus the single explicit `next_required_path`
+  - The broad implement retry lane does not steal explicit review-fix or CI-failure recovery work, so scoped follow-up keeps its own budget rules
+  - Broad implement retries stop on specific broad-mode rules instead of the generic `budget.per_turn_input_exceeded` stop, distinguishing focus-insufficient from expansion-exhausted outcomes
+  - When a bounded broad retry stops, the blocked workspace keeps its top-level `resume_context` target-path and next-required-path fields instead of forcing operators or the next retry to recover them only from nested decision metadata
+  - If an operator replays a blocked broad retry after the exact `next_required_path` is already known, the runtime can still take the bounded second-file expansion instead of refusing it because the historical broad retry counter is already high
   - Repeated high-pressure review retries can relax the implement stage token budget modestly only after the first soft-budget retry has already been observed for accepted PR claims
   - Repeated high-pressure review retries with an active scoped turn window can take one additional bounded step up to `220k` input tokens, so live accepted-claim follow-up is not blocked solely by the repo’s baseline prompt footprint
   - Accepted-claim follow-up that already retired at least one review claim can exceed the base `per_issue_total` budget by a bounded amount, so dogfood does not stop one or two comments short of clearing the PR

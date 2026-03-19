@@ -2323,6 +2323,149 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     end)
   end
 
+  test "budget retry scheduling persists computed resume context for the next turn" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-budget-retry-persist-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    identifier = "MT-BROAD-RETRY-PERSIST"
+    workspace = Path.join(workspace_root, identifier)
+
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+               issue_id: "issue-broad-retry-persist",
+               issue_identifier: identifier,
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1
+               }
+             })
+
+    state =
+      Orchestrator.schedule_issue_retry_for_test(
+        %State{},
+        "issue-broad-retry-persist",
+        1,
+        %{
+          identifier: identifier,
+          budget_mode: "broad_implement",
+          budget_resume_context: %{
+            budget_mode: "broad_implement",
+            budget_retry_count: 2,
+            budget_auto_narrowed: true,
+            target_paths: ["elixir/lib/symphony_elixir/run_policy.ex"],
+            already_learned: "Focus on the broad retry budget path in run_policy."
+          }
+        }
+      )
+
+    retry_entry = Map.fetch!(state.retry_attempts, "issue-broad-retry-persist")
+    assert retry_entry.budget_mode == "broad_implement"
+
+    assert {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
+
+    assert get_in(run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/run_policy.ex"
+           ]
+
+    assert get_in(run_state, [:resume_context, :already_learned]) ==
+             "Focus on the broad retry budget path in run_policy."
+  end
+
+  test "worker dispatch reuses persisted budget retry focus from retry metadata" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-budget-retry-dispatch-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-broad-retry-dispatch",
+      identifier: "MT-BROAD-RETRY-DISPATCH",
+      title: "Dispatch budget retry focus",
+      description: "preserve broad retry focus through worker startup",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1
+               }
+             })
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    state =
+      Orchestrator.do_spawn_issue_worker_for_test(
+        %State{
+          lease_owner: "retry-focus-owner",
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 2,
+              identifier: issue.identifier,
+              budget_resume_context: %{
+                budget_mode: "broad_implement",
+                budget_retry_count: 2,
+                budget_auto_narrowed: true,
+                target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                already_learned: "DeliveryEngine already owns the broad retry prompt shape."
+              }
+            }
+          }
+        },
+        issue,
+        2,
+        self(),
+        start_child_fun: fn _supervisor, _fun -> {:ok, worker} end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+
+    assert get_in(running_entry, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(running_entry, [:resume_context, :already_learned]) ==
+             "DeliveryEngine already owns the broad retry prompt shape."
+  end
+
   test "passive retry path uses issue lookup instead of candidate list fetch" do
     issue_id = "manual:issue-passive-retry"
     identifier = "MT-PASSIVE-RETRY"
