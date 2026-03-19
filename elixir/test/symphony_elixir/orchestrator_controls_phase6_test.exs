@@ -2464,6 +2464,15 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     assert get_in(running_entry, [:resume_context, :already_learned]) ==
              "DeliveryEngine already owns the broad retry prompt shape."
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(persisted_run_state, [:resume_context, :already_learned]) ==
+             "DeliveryEngine already owns the broad retry prompt shape."
   end
 
   test "worker dispatch seeds missing run state with retry budget focus" do
