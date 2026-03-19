@@ -31,6 +31,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Hardened lease persistence against empty-read races by treating blank lease payloads as missing and writing lease JSON through a temp-file rename, which removes the intermittent CI decode error when a worker refresh reads the lease during a concurrent write.
 - Closed the last retry continuity seam for lease-backed dispatch startup: when a worker seeds its state from a live lease instead of an existing `run_state.json`, the orchestrator now persists the merged retry `resume_context` back to disk instead of only returning it in-memory to the running entry.
 - Added focused PR-landing coverage for the last branch deltas: Linear identifier lookup now has an explicit `"me"`-routed fetch-by-identifier proof, and blocked issue payloads now prove the presenter can rebuild `why_here`, `human_action_required`, `rule_id`, and `failure_class` from the latest ledger signal when persisted operator fields are sparse.
+- Added one more coverage lift in the highest-yield changed module, `SymphonyElixir.Orchestrator`, by backfilling the manual-empty-refresh skip path and the explicit retry reschedule error branches for active vs passive continuation lookups.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -41,6 +42,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix escript.build`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:1796 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2815 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2838`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix harness.check`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix escript.build`
 
@@ -57,6 +59,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Post-merge CI regressions are closed locally: the retry-focus spawn path again exposes persisted `resume_context.target_paths`, and lease reads no longer fail with `Jason.DecodeError` on transient empty payloads during refresh.
 - Lease-backed startup coverage now proves both active and passive workers persist retry-time `target_paths` even when startup has to synthesize state from the live lease file rather than an existing workspace run-state file.
 - Focused PR landing coverage now proves the final CI-only seams: `"me"`-routed Linear identifier fetches preserve `assigned_to_worker`, and blocked presenter payloads can rebuild operator guidance entirely from the latest ledger signal when `run_state.json` is sparse.
+- Focused orchestrator coverage now also proves two retry-control branches that were still missing in CI: manual revalidation skips blocked non-retry issues when the tracker returns nothing, and retry lookup failures reschedule with distinct active vs passive error context.
 
 ## Next Step
 - Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.

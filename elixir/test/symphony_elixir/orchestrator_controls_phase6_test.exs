@@ -1853,6 +1853,12 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
                {:ok, []}
              end)
 
+    assert {:skip, %Issue{identifier: "MT-MANUAL-BLOCKED", state: "Blocked"}} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(
+               %{manual_issue | identifier: "MT-MANUAL-BLOCKED", state: "Blocked"},
+               fn [_id] -> {:ok, []} end
+             )
+
     assert {:ok, %Issue{} = refreshed_issue} =
              Orchestrator.revalidate_issue_for_dispatch_for_test(eligible_issue, fn [_id] ->
                {:ok,
@@ -2804,6 +2810,54 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     refute MapSet.member?(next_state.claimed, issue_id)
     refute Map.has_key?(next_state.retry_attempts, issue_id)
+  end
+
+  test "retry poll failures reschedule active retries with explicit error context" do
+    issue_id = "manual:issue-retry-error"
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_for_test(
+        %State{},
+        issue_id,
+        1,
+        %{identifier: "MT-RETRY-ERROR"},
+        {:error, :boom}
+      )
+
+    retry_entry = Map.fetch!(next_state.retry_attempts, issue_id)
+    assert retry_entry.attempt == 2
+    assert retry_entry.identifier == "MT-RETRY-ERROR"
+    assert retry_entry.error == "retry poll failed: :boom"
+    assert is_reference(retry_entry.timer_ref)
+
+    on_exit(fn ->
+      Process.cancel_timer(retry_entry.timer_ref)
+    end)
+  end
+
+  test "passive retry lookup failures reschedule with passive-specific error context" do
+    issue_id = "manual:issue-passive-retry-error"
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_for_test(
+        %State{},
+        issue_id,
+        1,
+        %{identifier: "MT-PASSIVE-RETRY-ERROR", delay_type: :passive_continuation},
+        {:error, :candidate_fetch_should_not_run},
+        {:error, :lookup_failed}
+      )
+
+    retry_entry = Map.fetch!(next_state.retry_attempts, issue_id)
+    assert retry_entry.attempt == 2
+    assert retry_entry.identifier == "MT-PASSIVE-RETRY-ERROR"
+    assert retry_entry.delay_type == :passive_continuation
+    assert retry_entry.error == "passive retry lookup failed: :lookup_failed"
+    assert is_reference(retry_entry.timer_ref)
+
+    on_exit(fn ->
+      Process.cancel_timer(retry_entry.timer_ref)
+    end)
   end
 
   test "manual continuation retry reuses seeded issue metadata when tracker lookup is empty" do
