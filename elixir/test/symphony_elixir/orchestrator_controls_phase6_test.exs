@@ -523,6 +523,115 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert retry_payload.human_action =~ "Wait for a free dispatch slot"
   end
 
+  test "retry_now reports already_running when the issue is already active" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-retry-already-running",
+      identifier: "MT-RETRY-ALREADY-RUNNING",
+      title: "Retry already running",
+      description: "Do not redispatch an active issue",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryAlreadyRunningOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid) do
+        Process.exit(worker_pid, :kill)
+      end
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{
+        pid: worker_pid,
+        ref: make_ref(),
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.utc_now()
+      }
+
+      state
+      |> Map.put(:running, Map.put(state.running, issue.id, running_entry))
+      |> Map.put(:claimed, MapSet.put(state.claimed, issue.id))
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "already_running"
+  end
+
+  test "retry_now returns a concrete no-dispatch reason when the issue state is already at its concurrency limit" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_concurrent_agents: 2,
+      max_concurrent_agents_by_state: %{"Todo" => 1}
+    )
+
+    issue = %Issue{
+      id: "issue-retry-state-slots",
+      identifier: "MT-RETRY-STATE-SLOTS",
+      title: "Retry at state concurrency limit",
+      description: "Expose per-state concurrency backpressure",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    blocker_issue = %Issue{
+      id: "issue-retry-state-slots-blocker",
+      identifier: "MT-RETRY-STATE-SLOTS-BLOCKER",
+      title: "Blocker",
+      description: "Occupies the Todo state slot",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue, blocker_issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryStateSlotsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid) do
+        Process.exit(worker_pid, :kill)
+      end
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{
+        pid: worker_pid,
+        ref: make_ref(),
+        identifier: blocker_issue.identifier,
+        issue: blocker_issue,
+        started_at: DateTime.utc_now()
+      }
+
+      state
+      |> Map.put(:running, Map.put(state.running, blocker_issue.id, running_entry))
+      |> Map.put(:claimed, MapSet.put(state.claimed, blocker_issue.id))
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.dispatch_slots_unavailable"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "per-state concurrency limit"
+    assert retry_payload.human_action =~ "Wait for a free dispatch slot"
+  end
+
   test "review thread lifecycle controls update persisted manual thread state" do
     workspace_root =
       Path.join(

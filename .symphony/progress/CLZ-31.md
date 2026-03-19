@@ -36,6 +36,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Hardened `LeaseManager` against whitespace-only payload races as well as fully blank payloads, so stale review-follow-up lease reclaim paths no longer surface intermittent `Jason.DecodeError` during webhook-driven autonomous resume.
 - Closed the remaining staged bootstrap read race in `RunStateStore.load/1`: if a staged `.bootstrap-*` file disappears between path discovery and file read, the loader now re-resolves once before reporting `:missing`, which keeps direct-dispatch startup from seeing a false missing run state during checkout bootstrap moves.
 - Added focused workspace bootstrap coverage for the two remaining changed branches in `Workspace`: tmp-only bootstrap directories now prove `after_create` reruns even without preserved `.symphony` state, and metadata-only bootstrap reruns that fail now prove preserved `.symphony` files are merged back after the hook error.
+- Added focused `Orchestrator.retry_issue_now/2` coverage for two still-missed control branches: the already-running fast path now proves Symphony returns a stable structured payload instead of attempting redispatch, and the per-state concurrency limiter now proves a distinct deferred reason when global slots exist but the issue state is saturated.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -51,6 +52,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/recovery_and_lease_test.exs:239 test/symphony_elixir/recovery_and_lease_test.exs:253 test/symphony_elixir/webhook_first_intake_test.exs:1241`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/recovery_and_lease_test.exs:80 test/symphony_elixir/orchestrator_controls_phase6_test.exs:1960 test/symphony_elixir/webhook_first_intake_test.exs:1241`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/workspace_and_config_test.exs`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:491 test/symphony_elixir/orchestrator_controls_phase6_test.exs:526 test/symphony_elixir/orchestrator_controls_phase6_test.exs:570`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix harness.check`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix escript.build`
 
@@ -72,6 +74,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Focused lease coverage now proves whitespace-only payloads are treated like missing leases, and the exact stale-review-follow-up webhook reclaim case that flaked in CI now passes against the hardened reader.
 - Focused bootstrap-read coverage now proves the staged metadata fallback still works, and the exact direct-dispatch spawn-path test that flaked in CI now passes alongside the stale-review-follow-up webhook reclaim case.
 - Focused workspace coverage now proves both changed bootstrap lifecycle branches: tmp-only directories rerun `after_create`, and failed metadata-only bootstrap reruns still restore preserved `.symphony` state.
+- Focused `retry_now` coverage now proves two structured operator outcomes that were still missing in CI: active issues report `already_running` instead of pretending to redispatch, and per-state concurrency pressure reports a concrete deferred reason even when the global slot count is not exhausted.
 
 ## Next Step
 - Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.
