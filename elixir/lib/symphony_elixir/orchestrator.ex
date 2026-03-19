@@ -3697,22 +3697,34 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       _ ->
-        case tracker_read(state, candidate_issue_fetcher) do
-          {%State{} = next_state, {:ok, issues}} ->
-            issues
-            |> find_issue_by_id(issue_id)
-            |> handle_retry_issue_lookup(next_state, issue_id, attempt, metadata)
+        if metadata[:resume_persisted_issue?] == true do
+          # Bypass tracker fetch for orphaned active recovery; the persisted issue
+          # already carries enough state to redispatch without a Linear round-trip.
+          persisted_issue = manual_retry_issue_fallback(metadata)
 
-          {%State{} = next_state, {:error, reason}} ->
-            Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+          Logger.info(
+            "Resuming persisted active run without tracker fetch for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}"
+          )
 
-            {:noreply,
-             schedule_issue_retry(
-               next_state,
-               issue_id,
-               attempt + 1,
-               Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
-             )}
+          handle_retry_issue_lookup(persisted_issue, state, issue_id, attempt, metadata)
+        else
+          case tracker_read(state, candidate_issue_fetcher) do
+            {%State{} = next_state, {:ok, issues}} ->
+              issues
+              |> find_issue_by_id(issue_id)
+              |> handle_retry_issue_lookup(next_state, issue_id, attempt, metadata)
+
+            {%State{} = next_state, {:error, reason}} ->
+              Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+
+              {:noreply,
+               schedule_issue_retry(
+                 next_state,
+                 issue_id,
+                 attempt + 1,
+                 Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+               )}
+          end
         end
     end
   end
@@ -3804,9 +3816,17 @@ defmodule SymphonyElixir.Orchestrator do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) do
       dispatch_fun =
-        case metadata[:delay_type] do
-          :passive_continuation -> &dispatch_passive_issue/3
-          _ -> &dispatch_issue/3
+        cond do
+          metadata[:delay_type] == :passive_continuation ->
+            &dispatch_passive_issue/3
+
+          metadata[:resume_persisted_issue?] == true ->
+            # Skip revalidation for orphaned active recovery — the persisted
+            # run_state is authoritative and the tracker may be unreachable.
+            &do_dispatch_issue/3
+
+          true ->
+            &dispatch_issue/3
         end
 
       {:noreply, dispatch_runtime_issue(state, issue, attempt, dispatch_fun, &dispatch_passive_issue/3)}
@@ -8064,13 +8084,30 @@ defmodule SymphonyElixir.Orchestrator do
         state: Map.get(run_state, :issue_state) || "In Progress",
         source: source,
         branch_name: seeded_manual_issue_branch_name(run_state, issue_identifier),
-        labels: Map.get(run_state, :issue_labels, []),
+        labels: recovered_issue_labels(run_state),
         assigned_to_worker: true
       }
     end
   end
 
   defp recovered_issue_from_run_state(_run_state), do: nil
+
+  # When reconstructing an issue from a canary-channel run_state, inject the
+  # canary routing labels so the issue passes channel routing checks.  The
+  # run_state stores runner_channel but not issue_labels, so without this the
+  # recovered issue appears to belong to "stable" and gets rejected.
+  defp recovered_issue_labels(run_state) when is_map(run_state) do
+    base_labels = Map.get(run_state, :issue_labels, []) |> List.wrap()
+
+    case Map.get(run_state, :runner_channel) do
+      "canary" ->
+        canary_labels = RunnerRuntime.canary_required_labels()
+        Enum.uniq(base_labels ++ canary_labels)
+
+      _ ->
+        base_labels
+    end
+  end
 
   defp iso8601_to_datetime(value) when is_binary(value) do
     case DateTime.from_iso8601(value) do
