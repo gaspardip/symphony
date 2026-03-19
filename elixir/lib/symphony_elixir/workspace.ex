@@ -156,8 +156,6 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp maybe_run_after_create_hook(_workspace, _issue_context, _lifecycle), do: :ok
-
   defp restore_preserved_workspace_state(_workspace, %{preserved_metadata_dir: nil}), do: :ok
 
   defp restore_preserved_workspace_state(workspace, %{preserved_metadata_dir: preserved_dir})
@@ -173,8 +171,6 @@ defmodule SymphonyElixir.Workspace do
         :ok
     end
   end
-
-  defp restore_preserved_workspace_state(_workspace, _lifecycle), do: :ok
 
   defp merge_preserved_workspace_metadata!(source_dir, target_dir)
        when is_binary(source_dir) and is_binary(target_dir) do

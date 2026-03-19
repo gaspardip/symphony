@@ -3463,8 +3463,6 @@ defmodule SymphonyElixir.Orchestrator do
     |> then(&struct(Issue, &1))
   end
 
-  defp merge_dispatch_refresh_issue(issue, _refreshed_issue), do: issue
-
   defp manual_dispatch_resume_override?(
          %Issue{source: :manual, state: issue_state} = issue,
          %Issue{source: :manual, state: refreshed_state} = refreshed_issue,
@@ -4607,8 +4605,6 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.put(:failing_required_checks, persisted_check_list(run_state, :last_failing_required_checks, inspection.failing_required_checks))
     |> Map.put(:cancelled_required_checks, persisted_check_list(run_state, :last_cancelled_required_checks, inspection.cancelled_required_checks))
   end
-
-  defp apply_persisted_review_state(%RunInspector.Snapshot{} = inspection, _run_state), do: inspection
 
   defp persisted_check_list(run_state, key, fallback) when is_map(run_state) do
     case Map.get(run_state, key) do

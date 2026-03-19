@@ -584,7 +584,66 @@ defmodule SymphonyElixirWeb.Presenter do
       inspection =
         workspace_path
         |> RunInspector.inspect(include_pr_details: false)
-        |> apply_persisted_review_state(run_state)
+        |> then(fn inspection ->
+          if is_map(run_state) do
+            check_statuses =
+              case Map.get(run_state, :last_check_statuses) do
+                statuses when is_list(statuses) and statuses != [] -> statuses
+                _ -> inspection.check_statuses
+              end
+
+            persisted_check_list = fn key, fallback ->
+              case Map.get(run_state, key) do
+                values when is_list(values) and values != [] -> values
+                _ -> fallback
+              end
+            end
+
+            inspection
+            |> Map.put(:pr_url, Map.get(run_state, :pr_url) || inspection.pr_url)
+            |> Map.put(:pr_state, Map.get(run_state, :last_pr_state) || inspection.pr_state)
+            |> Map.put(
+              :review_decision,
+              Map.get(run_state, :last_review_decision) || inspection.review_decision
+            )
+            |> Map.put(:check_statuses, check_statuses)
+            |> Map.put(
+              :required_checks_state,
+              Map.get(run_state, :last_required_checks_state) ||
+                inspection.required_checks_state
+            )
+            |> Map.put(
+              :missing_required_checks,
+              persisted_check_list.(
+                :last_missing_required_checks,
+                inspection.missing_required_checks
+              )
+            )
+            |> Map.put(
+              :pending_required_checks,
+              persisted_check_list.(
+                :last_pending_required_checks,
+                inspection.pending_required_checks
+              )
+            )
+            |> Map.put(
+              :failing_required_checks,
+              persisted_check_list.(
+                :last_failing_required_checks,
+                inspection.failing_required_checks
+              )
+            )
+            |> Map.put(
+              :cancelled_required_checks,
+              persisted_check_list.(
+                :last_cancelled_required_checks,
+                inspection.cancelled_required_checks
+              )
+            )
+          else
+            inspection
+          end
+        end)
 
       %{
         issue_id: Map.get(run_state || %{}, :issue_id) || entry_value(tracked_issue || %{}, "id"),
@@ -640,35 +699,6 @@ defmodule SymphonyElixirWeb.Presenter do
         deploy_approved: Map.get(run_state || %{}, :deploy_approved, false),
         stop_reason: Map.get(run_state || %{}, :stop_reason)
       }
-    end
-  end
-
-  defp apply_persisted_review_state(%RunInspector.Snapshot{} = inspection, run_state)
-       when is_map(run_state) do
-    check_statuses =
-      case Map.get(run_state, :last_check_statuses) do
-        statuses when is_list(statuses) and statuses != [] -> statuses
-        _ -> inspection.check_statuses
-      end
-
-    inspection
-    |> Map.put(:pr_url, Map.get(run_state, :pr_url) || inspection.pr_url)
-    |> Map.put(:pr_state, Map.get(run_state, :last_pr_state) || inspection.pr_state)
-    |> Map.put(:review_decision, Map.get(run_state, :last_review_decision) || inspection.review_decision)
-    |> Map.put(:check_statuses, check_statuses)
-    |> Map.put(:required_checks_state, Map.get(run_state, :last_required_checks_state) || inspection.required_checks_state)
-    |> Map.put(:missing_required_checks, persisted_check_list(run_state, :last_missing_required_checks, inspection.missing_required_checks))
-    |> Map.put(:pending_required_checks, persisted_check_list(run_state, :last_pending_required_checks, inspection.pending_required_checks))
-    |> Map.put(:failing_required_checks, persisted_check_list(run_state, :last_failing_required_checks, inspection.failing_required_checks))
-    |> Map.put(:cancelled_required_checks, persisted_check_list(run_state, :last_cancelled_required_checks, inspection.cancelled_required_checks))
-  end
-
-  defp apply_persisted_review_state(%RunInspector.Snapshot{} = inspection, _run_state), do: inspection
-
-  defp persisted_check_list(run_state, key, fallback) when is_map(run_state) do
-    case Map.get(run_state, key) do
-      values when is_list(values) and values != [] -> values
-      _ -> fallback
     end
   end
 
@@ -1645,7 +1675,31 @@ defmodule SymphonyElixirWeb.Presenter do
       Map.get(running_payload, :operator_summary)
     else
       done_summary = done_operator_summary(run_state, decision_history)
-      history_signal = latest_operator_signal(decision_history)
+
+      history_signal =
+        if is_list(decision_history) do
+          decision_history
+          |> Enum.reverse()
+          |> Enum.find_value(fn entry ->
+            summary = Map.get(entry, :summary)
+            metadata = Map.get(entry, :metadata) || %{}
+            human_action = Map.get(metadata, :human_action) || Map.get(metadata, "human_action")
+            rule_id = Map.get(entry, :rule_id)
+            failure_class = Map.get(entry, :failure_class)
+
+            if present_value?(summary) or present_value?(human_action) or present_value?(rule_id) do
+              %{
+                summary: summary,
+                human_action: human_action,
+                rule_id: rule_id,
+                failure_class: failure_class
+              }
+            else
+              nil
+            end
+          end)
+        end
+
       normalized_status = status |> to_string() |> String.downcase()
 
       %{
@@ -1693,31 +1747,6 @@ defmodule SymphonyElixirWeb.Presenter do
       }
     end
   end
-
-  defp latest_operator_signal(history) when is_list(history) do
-    history
-    |> Enum.reverse()
-    |> Enum.find_value(fn entry ->
-      summary = Map.get(entry, :summary)
-      metadata = Map.get(entry, :metadata) || %{}
-      human_action = Map.get(metadata, :human_action) || Map.get(metadata, "human_action")
-      rule_id = Map.get(entry, :rule_id)
-      failure_class = Map.get(entry, :failure_class)
-
-      if present_value?(summary) or present_value?(human_action) or present_value?(rule_id) do
-        %{
-          summary: summary,
-          human_action: human_action,
-          rule_id: rule_id,
-          failure_class: failure_class
-        }
-      else
-        nil
-      end
-    end)
-  end
-
-  defp latest_operator_signal(_history), do: nil
 
   defp issue_runtime_health_payload(running_payload, run_state, tracked_issue, decision_history) do
     if running_payload do
