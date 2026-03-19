@@ -27,9 +27,14 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - Exposed `budget_runtime` directly in presenter issue payloads using persisted run-state fields, including `budget_mode`, `budget_admission_reason`, `target_paths`, `next_required_path`, and `budget_expansion_used`.
 - Added the zero-arg promoted-label helper in `RunnerRuntime` so issue routing uses the installed runner metadata during clean-main proof replays.
 - Fixed the last operator surface gap so generic broad-mode payloads also expose persisted `budget_last_stop_code` and `budget_last_observed_input_tokens` instead of dropping them to `nil`.
+- Rebuilt the isolated `mainproof` runner on the clean-main branch and reran `CLZ-33`, which surfaced a new earlier blocker: branch-only workspaces cloned from the proof branch failed compatibility before implement because the checkout had no local `main` or `origin/main`.
+- Fixed `RepoCompatibility.branch_base_setup_check/3` so branch-base compatibility accepts a base branch that is fetchable from `origin`, which matches the real shallow branch-clone contract used by the self-dogfood runner.
+- Fixed `GitManager` branch preparation and base resets to fetch `#{base_branch}:refs/remotes/origin/#{base_branch}` explicitly, so branch-only workspaces can later materialize and use `origin/main` instead of failing after compatibility.
+- Added realistic branch-only clone coverage for both seams using a local source repo with a feature branch clone that intentionally lacks `origin/main` before the fix path runs.
 
 ## Validation
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/repo_compatibility_test.exs test/symphony_elixir/git_manager_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix harness.check`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix escript.build`
 
@@ -37,8 +42,14 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - The pre-fix isolated proof runner stopped generically on `CLZ-33` with an empty `resume_context`, matching the remaining gap described in the implementation plan:
   - `/tmp/symphony-workspaces-mainproof/CLZ-33/.symphony/run_state.json`
   - `/tmp/symphony-dogfood-mainproof-logs/log/symphony.log.1`
+- The next proof replay surfaced a different, earlier contract bug before the budget lane: the isolated workspace only tracked `remotes/origin/codex/budget-lane-stabilization`, while `git ls-remote --heads origin main` still proved the base branch was fetchable from origin.
+- The new coverage now proves the real fix path instead of assuming a fully tracked clone:
+  - branch-only clones pass repo compatibility when the base branch is fetchable from origin
+  - branch preparation explicitly materializes `origin/main` before checkout/reset in those same clones
 - Focused budget-policy, orchestrator, routing, and presenter coverage is green on the clean-main worktree after the admission/continuity fixes:
   - `189 tests, 0 failures`
+- The expanded matrix covering compatibility, branch prep, budget admission, dispatch continuity, and operator payloads is now green:
+  - `222 tests, 0 failures`
 - The focused matrix now proves the planned behavior changes directly:
   - first-turn broad implement overruns with no focusable path stop as `budget.broad_implement_scope_exhausted`
   - generic per-turn stops persist `budget_admission_reason`
@@ -46,4 +57,4 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
   - presenter issue payloads expose persisted `budget_runtime` fields instead of collapsing to a generic empty shell
 
 ## Next Step
-- Commit the stabilization slice, rebuild the isolated proof runner from merged `main` only, and rerun unattended proof ticket 1 (docs/operator) followed by proof ticket 2 (small code change) without manual rescue.
+- Commit the compatibility follow-up, rebuild the isolated proof runner from the updated branch, and rerun `CLZ-33` to verify the run reaches implement/budget admission instead of failing repo compatibility before execution.

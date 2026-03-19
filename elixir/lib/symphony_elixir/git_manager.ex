@@ -14,7 +14,7 @@ defmodule SymphonyElixir.GitManager do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
 
     with :ok <- ensure_git_checkout(workspace),
-         :ok <- git_ok(command_runner, workspace, ["fetch", "origin", "--prune", base_branch]),
+         :ok <- fetch_base_branch(command_runner, workspace, base_branch),
          :ok <- checkout_branch(command_runner, workspace, branch, base_branch),
          :ok <- git_ok(command_runner, workspace, ["config", "branch.#{branch}.symphony-base-branch", base_branch]) do
       {:ok, %{branch: branch, base_branch: base_branch}}
@@ -56,7 +56,7 @@ defmodule SymphonyElixir.GitManager do
 
     result =
       with :ok <- ensure_git_checkout(workspace),
-           :ok <- git_ok(command_runner, workspace, ["fetch", "origin", "--prune", base_branch]),
+           :ok <- fetch_base_branch(command_runner, workspace, base_branch),
            :ok <- git_ok(command_runner, workspace, ["checkout", "-f", base_branch]),
            :ok <- git_ok(command_runner, workspace, ["reset", "--hard", "origin/#{base_branch}"]) do
         :ok
@@ -93,6 +93,14 @@ defmodule SymphonyElixir.GitManager do
       {_output, _status} ->
         git_ok(command_runner, workspace, ["checkout", "-B", branch, "origin/#{base_branch}"])
     end
+  end
+
+  defp fetch_base_branch(command_runner, workspace, base_branch) do
+    git_ok(
+      command_runner,
+      workspace,
+      ["fetch", "origin", "--prune", "#{base_branch}:refs/remotes/origin/#{base_branch}"]
+    )
   end
 
   defp ensure_git_checkout(workspace) do

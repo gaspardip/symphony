@@ -134,42 +134,48 @@ defmodule SymphonyElixir.RepoCompatibility do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
     base_branch = harness.base_branch
 
-    exists? =
-      case command_runner.(
-             "git",
-             ["rev-parse", "--verify", "--quiet", base_branch],
-             cd: workspace,
-             stderr_to_stdout: true
-           ) do
-        {_output, 0} -> true
-        _ -> false
-      end
-
-    remote_exists? =
-      case command_runner.(
-             "git",
-             ["rev-parse", "--verify", "--quiet", "origin/#{base_branch}"],
-             cd: workspace,
-             stderr_to_stdout: true
-           ) do
-        {_output, 0} -> true
-        _ -> false
-      end
+    exists? = git_ref_exists?(command_runner, workspace, base_branch)
+    remote_exists? = git_ref_exists?(command_runner, workspace, "origin/#{base_branch}")
+    remote_fetchable? = remote_branch_fetchable?(command_runner, workspace, base_branch)
 
     cond do
-      exists? or remote_exists? ->
+      exists? or remote_exists? or remote_fetchable? ->
         pass(
           "branch_base_setup",
           "Base branch is available.",
-          "Base branch `#{base_branch}` exists locally or on origin for branch preparation and reset."
+          "Base branch `#{base_branch}` exists locally, as `origin/#{base_branch}`, or can be fetched from origin for branch preparation and reset."
         )
 
       true ->
         fail(
           "branch_base_setup",
           "Base branch is not available.",
-          "Base branch `#{base_branch}` does not exist locally or as `origin/#{base_branch}`."
+          "Base branch `#{base_branch}` does not exist locally, as `origin/#{base_branch}`, or as a fetchable branch on origin."
         )
+    end
+  end
+
+  defp git_ref_exists?(command_runner, workspace, ref) do
+    case command_runner.(
+           "git",
+           ["rev-parse", "--verify", "--quiet", ref],
+           cd: workspace,
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp remote_branch_fetchable?(command_runner, workspace, base_branch) do
+    case command_runner.(
+           "git",
+           ["ls-remote", "--exit-code", "--heads", "origin", base_branch],
+           cd: workspace,
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> true
+      _ -> false
     end
   end
 
