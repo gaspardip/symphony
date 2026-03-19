@@ -3378,11 +3378,27 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  @doc false
+  @spec ensure_dispatch_run_state_for_test(State.t(), binary(), map(), map()) ::
+          {:ok, map()} | {:error, term()}
+  def ensure_dispatch_run_state_for_test(
+        %State{} = state,
+        workspace,
+        issue,
+        retry_metadata \\ %{}
+      )
+      when is_binary(workspace) and is_map(issue) and is_map(retry_metadata) do
+    ensure_dispatch_run_state(state, workspace, issue, retry_metadata)
+  end
+
   defp ensure_dispatch_run_state(%State{} = state, workspace, issue, retry_metadata)
        when is_binary(workspace) and is_map(issue) and is_map(retry_metadata) do
     case RunStateStore.load(workspace) do
       {:ok, run_state} ->
-        persist_dispatch_run_state_retry_context(workspace, run_state, retry_metadata)
+        with {:ok, normalized_run_state} <-
+               normalize_dispatch_run_state_for_active_dispatch(workspace, issue, run_state) do
+          persist_dispatch_run_state_retry_context(workspace, normalized_run_state, retry_metadata)
+        end
 
       {:error, :missing} ->
         case persist_live_issue_lease(state, workspace, issue) do
@@ -3398,6 +3414,33 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp normalize_dispatch_run_state_for_active_dispatch(workspace, issue, run_state)
+       when is_binary(workspace) and is_map(issue) and is_map(run_state) do
+    case {Map.get(run_state, :stage), resume_stage_override(run_state, issue)} do
+      {"blocked", resume_stage} when is_binary(resume_stage) ->
+        RunStateStore.transition(workspace, resume_stage, %{
+          issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+          issue_identifier:
+            Map.get(issue, :identifier) || Map.get(issue, "identifier") ||
+              Map.get(run_state, :issue_identifier),
+          issue_source:
+            Map.get(issue, :source) || Map.get(issue, "source") ||
+              Map.get(run_state, :issue_source),
+          reason: "Dispatch resuming persisted blocked run state",
+          stop_reason: nil,
+          last_decision: nil,
+          last_rule_id: nil,
+          last_failure_class: nil,
+          last_decision_summary: nil,
+          next_human_action: nil,
+          resume_context: retry_resume_context(run_state, resume_stage)
+        })
+
+      _ ->
+        {:ok, run_state}
     end
   end
 
@@ -5486,6 +5529,15 @@ defmodule SymphonyElixir.Orchestrator do
       {"validation_failed", _} ->
         "implement"
 
+      {"per_turn_input_budget_exceeded", _} ->
+        "implement"
+
+      {"broad_implement_focus_insufficient", _} ->
+        "implement"
+
+      {"broad_implement_expansion_exhausted", _} ->
+        "implement"
+
       {"verifier_blocked", _} ->
         "verify"
 
@@ -7056,7 +7108,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_target_runner_channel(%Issue{} = issue) do
     canary_labels =
-      RunnerRuntime.canary_required_labels(%{})
+      RunnerRuntime.canary_required_labels()
       |> normalize_labels()
 
     issue_labels =

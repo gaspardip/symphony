@@ -142,13 +142,40 @@ defmodule SymphonyElixir.RunPolicy do
     token_budget = Config.policy_token_budget()
     review_fix_budget = Config.policy_review_fix_token_budget()
     broad_implement_budget = Config.policy_broad_implement_token_budget()
-    resume_context = normalize_resume_context(Map.get(running_entry, :resume_context, %{}))
+    workspace =
+      Map.get(running_entry, :workspace_path) ||
+        Map.get(running_entry, :workspace) ||
+        Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+
+    run_state = RunStateStore.load_or_default(workspace, issue)
+    resume_context = effective_resume_context(run_state, running_entry)
+    stage_budget = current_stage_token_budget(issue, running_entry, workspace, run_state)
+    current_turn_input = current_turn_input_tokens(running_entry)
+
+    stage =
+      Map.get(running_entry, :dispatch_stage) ||
+        Map.get(running_entry, :stage) ||
+        current_stage(issue, workspace, run_state)
+
+    broad_admission =
+      broad_implement_admission_state(
+        issue,
+        running_entry,
+        resume_context,
+        broad_implement_budget,
+        stage,
+        stage_budget,
+        current_turn_input,
+        workspace,
+        run_state
+      )
 
     if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
       adaptive_budget = adaptive_review_fix_budget(review_fix_budget, resume_context)
 
       %{
         mode: "review_fix",
+        admission_reason: Map.get(resume_context, :budget_admission_reason),
         pressure_level: Map.get(resume_context, :budget_pressure_level, "normal"),
         retry_count: review_fix_retry_count(resume_context),
         window_base_turn: Map.get(resume_context, :budget_window_base_turn),
@@ -158,6 +185,9 @@ defmodule SymphonyElixir.RunPolicy do
         scope_ids: normalize_scope_ids(Map.get(resume_context, :budget_scope_ids)),
         auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
         total_extension_used: truthy?(Map.get(resume_context, :budget_total_extension_used)),
+        target_paths: normalize_candidate_paths(Map.get(resume_context, :target_paths, [])),
+        next_required_path: Map.get(resume_context, :next_required_path),
+        expansion_used: truthy?(Map.get(resume_context, :budget_expansion_used)),
         per_turn_input_soft: adaptive_budget.per_turn_input_soft,
         per_turn_input_hard: adaptive_budget.per_turn_input_hard,
         max_turns_in_window: adaptive_budget.max_turns_in_window,
@@ -175,6 +205,9 @@ defmodule SymphonyElixir.RunPolicy do
       if broad_implement_budget_mode?(resume_context, broad_implement_budget) do
         %{
           mode: "broad_implement",
+          admission_reason:
+            Map.get(resume_context, :budget_admission_reason) ||
+              Map.get(broad_admission, :admission_reason),
           pressure_level: Map.get(resume_context, :budget_pressure_level, "normal"),
           retry_count: broad_implement_retry_count(resume_context),
           window_base_turn: Map.get(resume_context, :budget_window_base_turn),
@@ -184,6 +217,9 @@ defmodule SymphonyElixir.RunPolicy do
           scope_ids: [],
           auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
           total_extension_used: false,
+          target_paths: normalize_candidate_paths(Map.get(resume_context, :target_paths, [])),
+          next_required_path: Map.get(resume_context, :next_required_path),
+          expansion_used: truthy?(Map.get(resume_context, :budget_expansion_used)),
           per_turn_input_soft: stage_budget[:per_turn_input_soft],
           per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
           max_turns_in_window: nil,
@@ -193,15 +229,21 @@ defmodule SymphonyElixir.RunPolicy do
       else
         %{
           mode: "broad",
+          admission_reason:
+            Map.get(resume_context, :budget_admission_reason) ||
+              Map.get(broad_admission, :admission_reason),
           pressure_level: if(Map.get(resume_context, :token_pressure) == "high", do: "high", else: "normal"),
           retry_count: 0,
-          window_base_turn: nil,
-          last_stop_code: nil,
-          last_observed_input_tokens: nil,
+          window_base_turn: Map.get(resume_context, :budget_window_base_turn),
+          last_stop_code: Map.get(resume_context, :budget_last_stop_code),
+          last_observed_input_tokens: Map.get(resume_context, :budget_last_observed_input_tokens),
           scope_kind: nil,
           scope_ids: [],
-          auto_narrowed: false,
+          auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
           total_extension_used: false,
+          target_paths: normalize_candidate_paths(Map.get(resume_context, :target_paths, [])),
+          next_required_path: Map.get(resume_context, :next_required_path),
+          expansion_used: truthy?(Map.get(resume_context, :budget_expansion_used)),
           per_turn_input_soft: stage_budget[:per_turn_input_soft],
           per_turn_input_hard: stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
           max_turns_in_window: nil,
@@ -230,7 +272,7 @@ defmodule SymphonyElixir.RunPolicy do
     total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
     turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
     current_turn_input = max(0, input_total - turn_started_input)
-    resume_context = normalize_resume_context(Map.get(running_entry, :resume_context, %{}))
+    resume_context = effective_resume_context(run_state, running_entry)
 
     if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
       maybe_enforce_review_fix_token_budget(
@@ -259,16 +301,32 @@ defmodule SymphonyElixir.RunPolicy do
         run_state
       )
 
+      refreshed_run_state =
+        if is_binary(workspace), do: RunStateStore.load_or_default(workspace, issue), else: run_state
+
+      refreshed_resume_context = effective_resume_context(refreshed_run_state, running_entry)
+
+      broad_admission =
+        broad_implement_admission_state(
+          issue,
+          running_entry,
+          refreshed_resume_context,
+          broad_implement_budget,
+          stage,
+          stage_budget,
+          current_turn_input,
+          workspace,
+          refreshed_run_state
+        )
+
       case maybe_enforce_broad_implement_token_budget(
              issue,
              running_entry,
              workspace,
-             resume_context,
+             refreshed_resume_context,
              broad_implement_budget,
-             stage,
-             stage_budget,
              current_turn_input,
-             run_state
+             broad_admission
            ) do
         :pass_through ->
           cond do
@@ -276,9 +334,27 @@ defmodule SymphonyElixir.RunPolicy do
               stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
               current_turn_input
             ) ->
+              persisted_resume_context =
+                generic_budget_resume_context_for_stop(
+                  refreshed_resume_context,
+                  broad_admission,
+                  current_turn_input
+                )
+
               stop_issue(
                 issue,
-                token_budget_violation(:per_turn_input, current_turn_input),
+                token_budget_violation(
+                  :per_turn_input,
+                  current_turn_input,
+                  %{
+                    budget_admission_reason: Map.get(broad_admission, :admission_reason),
+                    resume_context: persisted_resume_context,
+                    target_paths: Map.get(persisted_resume_context, :target_paths, []),
+                    next_required_path: Map.get(persisted_resume_context, :next_required_path),
+                    budget_expansion_used:
+                      truthy?(Map.get(persisted_resume_context, :budget_expansion_used))
+                  }
+                ),
                 workspace
               )
 
@@ -653,7 +729,7 @@ defmodule SymphonyElixir.RunPolicy do
     )
   end
 
-  defp token_budget_violation(kind, observed) do
+  defp token_budget_violation(kind, observed, metadata \\ %{}) do
     code =
       case kind do
         :per_turn_input -> :per_turn_input_budget_exceeded
@@ -661,10 +737,31 @@ defmodule SymphonyElixir.RunPolicy do
         :per_issue_total_output -> :per_issue_output_budget_exceeded
       end
 
+    admission_reason =
+      Map.get(metadata, :budget_admission_reason) || Map.get(metadata, "budget_admission_reason")
+
+    {summary, details} = token_budget_violation_message(kind, observed, admission_reason)
+
     violation(code,
-      summary: "The run exceeded a configured token budget and was stopped.",
-      details: "Budget #{kind} exceeded with observed value #{observed}."
+      summary: summary,
+      details: details,
+      metadata: metadata
     )
+  end
+
+  defp token_budget_violation_message(:per_turn_input, observed, reason)
+       when is_binary(reason) and reason != "" do
+    {
+      "The run exceeded the per-turn input budget and could not enter the adaptive retry lane.",
+      "Budget per_turn_input exceeded with observed value #{observed}. Broad-implement admission reason: #{reason}."
+    }
+  end
+
+  defp token_budget_violation_message(kind, observed, _reason) do
+    {
+      "The run exceeded a configured token budget and was stopped.",
+      "Budget #{kind} exceeded with observed value #{observed}."
+    }
   end
 
   defp review_fix_exhaustion_violation(:scope_exhausted, observed, metadata) do
@@ -764,21 +861,6 @@ defmodule SymphonyElixir.RunPolicy do
     Map.get(review_fix_budget, :enabled, true) and
       stage == "implement" and
       Map.get(resume_context, :budget_mode) == "review_fix"
-  end
-
-  defp broad_implement_budget_candidate?(stage, broad_implement_budget, run_state)
-       when is_binary(stage) and is_map(broad_implement_budget) and is_map(run_state) do
-    resume_context = normalize_resume_context(Map.get(run_state, :resume_context, %{}))
-
-    Map.get(broad_implement_budget, :enabled, true) and
-      stage == "implement" and
-      not review_fix_budget_candidate?(run_state, stage) and
-      Map.get(resume_context, :budget_mode) != "review_fix" and
-      Map.get(resume_context, :budget_scope_kind) not in [
-        "review_claim_batch",
-        "ci_failure_batch"
-      ] and
-      is_nil(Map.get(run_state, :last_ci_failure))
   end
 
   defp broad_implement_budget_mode?(resume_context, broad_implement_budget)
@@ -962,21 +1044,14 @@ defmodule SymphonyElixir.RunPolicy do
          workspace,
          resume_context,
          broad_implement_budget,
-         stage,
-         stage_budget,
          current_turn_input,
-         run_state
+         broad_admission
        ) do
-    hard_budget = stage_budget[:per_turn_input_hard] || Config.policy_per_turn_input_budget()
-
     cond do
-      not broad_implement_workspace_candidate?(running_entry) ->
+      not Map.get(broad_admission, :enter_retry_lane?, false) ->
         :pass_through
 
-      not broad_implement_budget_candidate?(stage, broad_implement_budget, run_state) ->
-        :pass_through
-
-      not budget_exceeded?(hard_budget, current_turn_input) ->
+      not Map.get(broad_admission, :budget_exceeded?, false) ->
         :pass_through
 
       true ->
@@ -986,16 +1061,16 @@ defmodule SymphonyElixir.RunPolicy do
           workspace,
           resume_context,
           broad_implement_budget,
-          current_turn_input
+          current_turn_input,
+          broad_admission
         )
     end
   end
 
-  defp broad_implement_workspace_candidate?(running_entry) do
-    workspace = Map.get(running_entry, :workspace) || Map.get(running_entry, :workspace_path)
+  defp broad_implement_workspace_candidate?(workspace) when is_binary(workspace),
+    do: File.dir?(workspace)
 
-    is_binary(workspace)
-  end
+  defp broad_implement_workspace_candidate?(_workspace), do: false
 
   defp handle_broad_implement_turn_budget_stop(
          issue,
@@ -1003,12 +1078,17 @@ defmodule SymphonyElixir.RunPolicy do
          workspace,
          resume_context,
          broad_implement_budget,
-         current_turn_input
+         current_turn_input,
+         broad_admission
        ) do
     retry_count = broad_implement_retry_count(resume_context)
     can_retry? = retry_count < (broad_implement_budget[:auto_retry_limit] || 0)
 
-    primary_target_path = broad_implement_primary_target_path(running_entry, resume_context)
+    primary_target_path =
+      Map.get(broad_admission, :primary_target_path) ||
+        broad_implement_primary_target_path(running_entry, resume_context)
+
+    admission_reason = Map.get(broad_admission, :admission_reason)
     expansion_used? = truthy?(Map.get(resume_context, :budget_expansion_used))
 
     next_required_path =
@@ -1028,7 +1108,8 @@ defmodule SymphonyElixir.RunPolicy do
               budget_auto_narrowed: true,
               target_paths: [primary_target_path],
               next_required_path: nil,
-              budget_expansion_used: false
+              budget_expansion_used: false,
+              budget_admission_reason: admission_reason
             }
           )
 
@@ -1058,7 +1139,8 @@ defmodule SymphonyElixir.RunPolicy do
               budget_auto_narrowed: true,
               target_paths: [primary_target_path, next_required_path],
               next_required_path: next_required_path,
-              budget_expansion_used: true
+              budget_expansion_used: true,
+              budget_admission_reason: admission_reason
             }
           )
 
@@ -1085,7 +1167,8 @@ defmodule SymphonyElixir.RunPolicy do
               budget_pressure_level: "critical",
               target_paths: [primary_target_path],
               next_required_path: next_required_path,
-              budget_expansion_used: false
+              budget_expansion_used: false,
+              budget_admission_reason: admission_reason
             }
           )
 
@@ -1114,7 +1197,8 @@ defmodule SymphonyElixir.RunPolicy do
             current_turn_input,
             %{
               budget_pressure_level: "critical",
-              next_required_path: next_required_path
+              next_required_path: next_required_path,
+              budget_admission_reason: admission_reason
             }
           )
 
@@ -1137,7 +1221,10 @@ defmodule SymphonyElixir.RunPolicy do
             running_entry,
             "budget.broad_implement_scope_exhausted",
             current_turn_input,
-            %{budget_pressure_level: "critical"}
+            %{
+              budget_pressure_level: "critical",
+              budget_admission_reason: admission_reason
+            }
           )
 
         persist_resume_context(issue, running_entry, persisted_resume_context)
@@ -1358,8 +1445,16 @@ defmodule SymphonyElixir.RunPolicy do
   end
 
   defp workspace_for_issue(issue, running_entry) do
-    Map.get(running_entry, :workspace) ||
+    Map.get(running_entry, :workspace_path) ||
+      Map.get(running_entry, :workspace) ||
       Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
+  end
+
+  defp effective_resume_context(run_state, running_entry) do
+    run_state
+    |> Map.get(:resume_context, %{})
+    |> normalize_resume_context()
+    |> Map.merge(normalize_resume_context(Map.get(running_entry, :resume_context, %{})))
   end
 
   defp current_stage_token_budget(issue, running_entry) do
@@ -1408,8 +1503,69 @@ defmodule SymphonyElixir.RunPolicy do
   defp review_fix_resume_context_key("already_learned"), do: :already_learned
   defp review_fix_resume_context_key("next_required_path"), do: :next_required_path
   defp review_fix_resume_context_key("budget_expansion_used"), do: :budget_expansion_used
+  defp review_fix_resume_context_key("budget_admission_reason"), do: :budget_admission_reason
   defp review_fix_resume_context_key("token_pressure"), do: :token_pressure
   defp review_fix_resume_context_key(_key), do: nil
+
+  defp current_turn_input_tokens(running_entry) when is_map(running_entry) do
+    input_total = Map.get(running_entry, :codex_input_tokens, 0)
+    turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
+    max(0, input_total - turn_started_input)
+  end
+
+  defp broad_implement_admission_state(
+         issue,
+         running_entry,
+         resume_context,
+         broad_implement_budget,
+         stage,
+         stage_budget,
+         current_turn_input,
+         workspace,
+         run_state
+       )
+       when is_map(running_entry) and is_map(resume_context) and is_map(stage_budget) and
+              is_map(run_state) do
+    hard_budget = stage_budget[:per_turn_input_hard] || Config.policy_per_turn_input_budget()
+    primary_target_path = broad_implement_primary_target_path(Map.put(running_entry, :issue, issue), resume_context)
+    budget_exceeded = budget_exceeded?(hard_budget, current_turn_input)
+
+    admission_reason =
+      cond do
+        not broad_implement_workspace_candidate?(workspace) ->
+          "missing_workspace"
+
+        not Map.get(broad_implement_budget, :enabled, true) ->
+          "broad_implement_disabled"
+
+        stage != "implement" ->
+          "stage_not_implement"
+
+        review_fix_budget_candidate?(run_state, stage) or
+            Map.get(resume_context, :budget_mode) == "review_fix" or
+            Map.get(resume_context, :budget_scope_kind) in ["review_claim_batch", "ci_failure_batch"] ->
+          "review_fix_candidate"
+
+        not is_nil(Map.get(run_state, :last_ci_failure)) ->
+          "ci_failure_present"
+
+        not budget_exceeded ->
+          "budget_not_exceeded"
+
+        is_nil(primary_target_path) ->
+          "no_target_path"
+
+        true ->
+          nil
+      end
+
+    %{
+      budget_exceeded?: budget_exceeded,
+      admission_reason: admission_reason,
+      enter_retry_lane?: budget_exceeded and admission_reason in [nil, "no_target_path"],
+      primary_target_path: primary_target_path
+    }
+  end
 
   defp review_fix_resume_context_for_budget_retry(
          resume_context,
@@ -1502,8 +1658,19 @@ defmodule SymphonyElixir.RunPolicy do
     |> maybe_put_broad_retry_target_paths(target_paths)
     |> maybe_put_broad_retry_learned(already_learned)
     |> maybe_put_broad_retry_next_required_path(Map.get(override_map, :next_required_path))
+    |> maybe_put_budget_admission_reason(Map.get(override_map, :budget_admission_reason))
     |> Map.put(:token_pressure, "high")
     |> Map.merge(override_map)
+  end
+
+  defp generic_budget_resume_context_for_stop(resume_context, broad_admission, observed_tokens)
+       when is_map(resume_context) and is_map(broad_admission) and is_integer(observed_tokens) do
+    resume_context
+    |> Map.put(:budget_mode, "broad")
+    |> maybe_put_budget_admission_reason(Map.get(broad_admission, :admission_reason))
+    |> Map.put(:budget_last_stop_code, "budget.per_turn_input_exceeded")
+    |> Map.put(:budget_last_observed_input_tokens, observed_tokens)
+    |> Map.put(:token_pressure, "high")
   end
 
   defp broad_implement_retry_count(resume_context) do
@@ -1573,6 +1740,11 @@ defmodule SymphonyElixir.RunPolicy do
       |> Map.get(:target_paths, [])
       |> normalize_candidate_paths()
 
+    issue_paths =
+      running_entry
+      |> Map.get(:issue, %{})
+      |> extract_candidate_paths()
+
     dirty_paths =
       running_entry
       |> broad_implement_workspace_paths()
@@ -1588,6 +1760,7 @@ defmodule SymphonyElixir.RunPolicy do
       |> Enum.flat_map(&extract_candidate_paths/1)
 
     existing_paths
+    |> Kernel.++(issue_paths)
     |> Kernel.++(dirty_paths)
     |> Kernel.++(summary_paths)
     |> normalize_candidate_paths()
@@ -1664,6 +1837,12 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp maybe_put_broad_retry_next_required_path(resume_context, path),
     do: Map.put(resume_context, :next_required_path, path)
+
+  defp maybe_put_budget_admission_reason(resume_context, nil),
+    do: Map.delete(resume_context, :budget_admission_reason)
+
+  defp maybe_put_budget_admission_reason(resume_context, reason),
+    do: Map.put(resume_context, :budget_admission_reason, reason)
 
   defp normalize_candidate_paths(paths) when is_list(paths) do
     normalized =

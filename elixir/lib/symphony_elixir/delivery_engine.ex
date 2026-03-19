@@ -2500,6 +2500,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     [
       "Broad implement retry lane: active",
+      maybe_named_line("Admission reason", resume_context[:budget_admission_reason], 80),
       maybe_named_line("Budget pressure", resume_context[:budget_pressure_level], 40),
       maybe_named_line("Budget retry count", resume_context[:budget_retry_count], 20),
       maybe_named_list("Target paths", target_paths, 6),
@@ -2724,6 +2725,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_resume_context_key("already_learned"), do: :already_learned
   defp normalize_resume_context_key("next_required_path"), do: :next_required_path
   defp normalize_resume_context_key("budget_expansion_used"), do: :budget_expansion_used
+  defp normalize_resume_context_key("budget_admission_reason"), do: :budget_admission_reason
   defp normalize_resume_context_key("token_pressure"), do: :token_pressure
   defp normalize_resume_context_key(_key), do: nil
 

@@ -2707,6 +2707,71 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
              "DeliveryEngine already owns the broad retry prompt shape."
   end
 
+  test "worker dispatch rewinds blocked budget run state before startup" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-budget-retry-rewind-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-broad-retry-rewind",
+      identifier: "MT-BROAD-RETRY-REWIND",
+      title: "Rewind blocked retry state",
+      description: "resume blocked broad retry state during active dispatch",
+      state: "Blocked",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               stop_reason: %{
+                 code: "per_turn_input_budget_exceeded",
+                 rule_id: "budget.per_turn_input_exceeded",
+                 failure_class: "budget",
+                 summary: "Token budget exceeded"
+               },
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_auto_narrowed: true,
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                 already_learned: "Stay inside DeliveryEngine and avoid repo-wide rediscovery."
+               }
+             })
+
+    assert {:ok, rewound_run_state} =
+             Orchestrator.ensure_dispatch_run_state_for_test(%State{}, workspace, issue, %{})
+
+    assert rewound_run_state.stage == "implement"
+
+    assert get_in(rewound_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(rewound_run_state, [:resume_context, :already_learned]) ==
+             "Stay inside DeliveryEngine and avoid repo-wide rediscovery."
+
+    assert rewound_run_state.reason == "Dispatch resuming persisted blocked run state"
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert persisted_run_state.stage == "implement"
+  end
+
   test "worker dispatch seeds missing run state with retry budget focus" do
     workspace_root =
       Path.join(

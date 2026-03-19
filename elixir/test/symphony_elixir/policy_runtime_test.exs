@@ -850,6 +850,56 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
     assert Orchestrator.issue_target_runner_channel_for_test(issue) == "canary"
   end
 
+  test "canary runner channel honors custom promoted canary labels" do
+    runner_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-runner-canary-custom-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(runner_root)
+
+      File.write!(
+        Path.join(runner_root, "metadata.json"),
+        Jason.encode!(%{
+          "runner_mode" => "canary_active",
+          "canary_required_labels" => ["canary:mainproof"]
+        })
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        tracker_required_labels: ["dogfood:symphony"],
+        runner_install_root: runner_root,
+        runner_channel: "canary"
+      )
+
+      stable_issue = %Issue{
+        id: "issue-stable-custom-routed",
+        identifier: "MT-302F4A",
+        title: "Stable targeted",
+        state: "Todo",
+        labels: ["dogfood:symphony"]
+      }
+
+      canary_issue = %Issue{
+        id: "issue-canary-custom-routed",
+        identifier: "MT-302F4B",
+        title: "Canary targeted",
+        state: "Todo",
+        labels: ["dogfood:symphony", "canary:mainproof"]
+      }
+
+      refute Orchestrator.should_dispatch_issue_for_test(stable_issue, %Orchestrator.State{})
+      assert Orchestrator.should_dispatch_issue_for_test(canary_issue, %Orchestrator.State{})
+      assert Orchestrator.issue_target_runner_channel_for_test(stable_issue) == "stable"
+      assert Orchestrator.issue_target_runner_channel_for_test(canary_issue) == "canary"
+    after
+      File.rm_rf(runner_root)
+    end
+  end
+
   test "seeded manual replay reflects blocked run state so retry can resume it" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
