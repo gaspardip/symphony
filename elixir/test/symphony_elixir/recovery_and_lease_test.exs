@@ -108,6 +108,55 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
     end
   end
 
+  test "run state store treats blank persisted payloads as missing" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-state-blank-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.write!(RunStateStore.state_path(workspace), "   \n")
+
+      assert {:error, :missing} = RunStateStore.load(workspace)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "run state store saves atomically without leaving temp state files behind" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-state-atomic-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+      assert :ok =
+               RunStateStore.save(workspace, %{
+                 issue_id: "issue-atomic",
+                 issue_identifier: "MT-ATOMIC",
+                 stage: "implement"
+               })
+
+      assert :ok =
+               RunStateStore.save(workspace, %{
+                 issue_id: "issue-atomic",
+                 issue_identifier: "MT-ATOMIC",
+                 stage: "review_verification"
+               })
+
+      assert {:ok, state} = RunStateStore.load(workspace)
+      assert state.stage == "review_verification"
+      assert Path.wildcard(RunStateStore.state_path(workspace) <> ".tmp-*") == []
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "run state store transition preserves existing issue-scoped state when no issue context is passed" do
     workspace =
       Path.join(

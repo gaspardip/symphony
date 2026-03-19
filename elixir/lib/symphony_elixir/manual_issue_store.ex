@@ -197,6 +197,7 @@ defmodule SymphonyElixir.ManualIssueStore do
 
     with true <- File.exists?(path) or {:error, :missing},
          {:ok, payload} <- File.read(path),
+         true <- String.trim(payload) != "" or {:error, :missing},
          {:ok, decoded} <- Jason.decode(payload),
          {:ok, record} <- decode_record(decoded) do
       {:ok, record}
@@ -209,7 +210,7 @@ defmodule SymphonyElixir.ManualIssueStore do
   defp write_record(issue_id, record) when is_binary(issue_id) and is_map(record) do
     path = record_path(issue_id)
     :ok = File.mkdir_p(Path.dirname(path))
-    File.write(path, Jason.encode!(encode_record(record)), [:write])
+    atomic_write(path, Jason.encode!(encode_record(record)))
   end
 
   defp record_path(issue_id) when is_binary(issue_id) do
@@ -226,6 +227,7 @@ defmodule SymphonyElixir.ManualIssueStore do
 
   defp read_record(path) when is_binary(path) do
     with {:ok, payload} <- File.read(path),
+         true <- String.trim(payload) != "" or {:error, :missing},
          {:ok, decoded} <- Jason.decode(payload),
          {:ok, record} <- decode_record(decoded) do
       record
@@ -398,5 +400,18 @@ defmodule SymphonyElixir.ManualIssueStore do
     |> to_string()
     |> String.trim()
     |> String.downcase()
+  end
+
+  defp atomic_write(path, payload) when is_binary(path) and is_binary(payload) do
+    tmp_path = "#{path}.tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.write(tmp_path, payload, [:write]),
+         :ok <- File.rename(tmp_path, path) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(tmp_path)
+        {:error, reason}
+    end
   end
 end

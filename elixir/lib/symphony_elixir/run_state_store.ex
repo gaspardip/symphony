@@ -32,7 +32,11 @@ defmodule SymphonyElixir.RunStateStore do
   defp read_payload(workspace, path) when is_binary(workspace) and is_binary(path) do
     case File.read(path) do
       {:ok, payload} ->
-        {:ok, payload}
+        if String.trim(payload) == "" do
+          reread_payload(workspace, path)
+        else
+          {:ok, payload}
+        end
 
       {:error, :enoent} ->
         reread_payload(workspace, path)
@@ -143,7 +147,7 @@ defmodule SymphonyElixir.RunStateStore do
     path = state_path(workspace)
     state = ensure_runner_metadata(state)
     :ok = File.mkdir_p(Path.dirname(path))
-    File.write(path, Jason.encode!(state), [:write])
+    atomic_write(path, Jason.encode!(state))
   end
 
   @spec transition(Path.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
@@ -491,5 +495,18 @@ defmodule SymphonyElixir.RunStateStore do
       key when is_binary(key) -> not atomizable_key?(key)
       _ -> false
     end)
+  end
+
+  defp atomic_write(path, payload) when is_binary(path) and is_binary(payload) do
+    tmp_path = "#{path}.tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.write(tmp_path, payload, [:write]),
+         :ok <- File.rename(tmp_path, path) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(tmp_path)
+        {:error, reason}
+    end
   end
 end

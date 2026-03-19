@@ -87,6 +87,8 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Focused `retry_now` coverage now also proves the missing-required-labels diagnostic path, so tracker issues missing route labels return an explicit deferred reason and label guidance instead of a generic success shell.
 - Focused control coverage now also proves canary label routing and company-pack conflict reporting in the same retry family, which should raise the changed `Orchestrator` surface without inventing unrelated unit-only scaffolding.
 - The repo coverage policy is now explicitly `85.00%`, and the coverage CLI/audit tests prove both the new threshold value and the rendered summary text.
+- `RunStateStore.save/2` and `ManualIssueStore.write_record/2` now swap temp files into place atomically, and focused regression coverage proves blank `run_state.json` payloads downgrade to `:missing` instead of surfacing transient empty-JSON races in the webhook follow-up path.
+- The exact autonomous webhook review-follow-up probe at `test/symphony_elixir/webhook_first_intake_test.exs:430` now passes in a 12-run local loop after the atomic persistence fix, closing the last CI-only flake that remained after the operator-read changes.
 
 ## Next Step
-- Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.
+- Land `PR #13`, then rerun a fresh unattended ticket-to-merge dogfood slice from merged `main` instead of babysitting the operator/read path again.
