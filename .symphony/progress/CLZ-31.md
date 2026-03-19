@@ -38,6 +38,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Added focused workspace bootstrap coverage for the two remaining changed branches in `Workspace`: tmp-only bootstrap directories now prove `after_create` reruns even without preserved `.symphony` state, and metadata-only bootstrap reruns that fail now prove preserved `.symphony` files are merged back after the hook error.
 - Added focused `Orchestrator.retry_issue_now/2` coverage for two still-missed control branches: the already-running fast path now proves Symphony returns a stable structured payload instead of attempting redispatch, and the per-state concurrency limiter now proves a distinct deferred reason when global slots exist but the issue state is saturated.
 - Added one more focused `retry_now` diagnostic proof for tracker issues routed to the wrong runner channel, so the public control payload now proves that canary-labelled work on a stable runner reports a concrete deferred reason and human action instead of a silent success.
+- Added one final `retry_now` diagnostic proof for missing required routing labels, so the public control payload now also proves the label-gate rejection path returns a concrete deferred reason and actionable guidance instead of a generic success shell.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -55,6 +56,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/workspace_and_config_test.exs`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:491 test/symphony_elixir/orchestrator_controls_phase6_test.exs:526 test/symphony_elixir/orchestrator_controls_phase6_test.exs:570`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:618`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:666`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix harness.check`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix escript.build`
 
@@ -78,6 +80,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Focused workspace coverage now proves both changed bootstrap lifecycle branches: tmp-only directories rerun `after_create`, and failed metadata-only bootstrap reruns still restore preserved `.symphony` state.
 - Focused `retry_now` coverage now proves two structured operator outcomes that were still missing in CI: active issues report `already_running` instead of pretending to redispatch, and per-state concurrency pressure reports a concrete deferred reason even when the global slot count is not exhausted.
 - Focused `retry_now` coverage now also proves the wrong-runner-channel diagnostic path, so tracker issues that target canary on a stable runner return an explicit deferred reason and routing action instead of a generic success shell.
+- Focused `retry_now` coverage now also proves the missing-required-labels diagnostic path, so tracker issues missing route labels return an explicit deferred reason and label guidance instead of a generic success shell.
 
 ## Next Step
 - Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.

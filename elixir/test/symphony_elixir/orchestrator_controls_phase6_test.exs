@@ -663,6 +663,40 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert retry_payload.human_action =~ "Route this issue to a runner on the matching channel"
   end
 
+  test "retry_now returns a concrete no-dispatch reason when required routing labels are missing" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["dogfood:symphony"]
+    )
+
+    issue = %Issue{
+      id: "issue-retry-missing-required-labels",
+      identifier: "MT-RETRY-MISSING-REQUIRED-LABELS",
+      title: "Retry missing required labels",
+      description: "Expose missing routing labels in the retry payload",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryMissingRequiredLabelsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.retry_dispatch_deferred"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "missing required labels"
+    assert retry_payload.human_action =~ "Add the required routing labels"
+  end
+
   test "review thread lifecycle controls update persisted manual thread state" do
     workspace_root =
       Path.join(
