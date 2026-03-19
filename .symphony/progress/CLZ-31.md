@@ -27,6 +27,8 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Removed the last live observability stall: issue detail and snapshot payloads now use a lightweight `RunInspector` mode that skips live `gh pr view` calls and falls back to persisted PR/check state from `run_state.json`, so active runs no longer wedge the operator API while rendering review metadata.
 - Made `RunStateStore.load/1` resilient during metadata-only workspace bootstrap by reading staged `.bootstrap-*` runtime state when `.symphony/run_state.json` is temporarily parked outside the workspace, which keeps dispatch helpers and live issue reads from seeing a false `:missing` state mid-checkout.
 - Relaxed direct spawn-path run-state seeding so orchestrator worker helpers can synthesize a minimal persisted run state when no lease-backed state exists yet, preserving test-only spawn coverage and claimed passive dispatch without forcing a lease round-trip.
+- Finalized the CLZ-31 branch after merge fallout: dispatch bootstrap now re-merges persisted retry `resume_context` into worker startup state, so retry-time `target_paths` and `already_learned` continuity survive the operator-read fixes instead of getting dropped during spawn.
+- Hardened lease persistence against empty-read races by treating blank lease payloads as missing and writing lease JSON through a temp-file rename, which removes the intermittent CI decode error when a worker refresh reads the lease during a concurrent write.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -35,6 +37,9 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/workspace_and_config_test.exs`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix harness.check`
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix escript.build`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix harness.check`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix escript.build`
 
 ## Evidence
 - Local focused control/presenter coverage is green after the telemetry and revalidation fixes.
@@ -46,6 +51,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Focused observability coverage now proves lightweight `RunInspector` reads skip `gh pr view`, and presenter issue payloads can rebuild review/check details from persisted run-state fields instead of shelling out live during API rendering.
 - Focused recovery coverage now proves `RunStateStore.load/1` can read staged bootstrap metadata while a workspace rebuild is in progress, matching the dispatch-time bootstrap race from live dogfood.
 - Live replay on `http://127.0.0.1:4046/api/v1/state` and `http://127.0.0.1:4046/api/v1/CLZ-31` now responds again while `CLZ-31` is blocked, and the issue detail payload renders a full operator summary instead of timing out in the controller.
+- Post-merge CI regressions are closed locally: the retry-focus spawn path again exposes persisted `resume_context.target_paths`, and lease reads no longer fail with `Jason.DecodeError` on transient empty payloads during refresh.
 
 ## Next Step
 - Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.

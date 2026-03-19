@@ -3155,10 +3155,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
+    retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
     workspace = Workspace.path_for_issue(issue.identifier)
     dispatch_stage = normalize_dispatch_stage(issue)
 
-    with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
+    with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue, retry_metadata),
          stage <- Map.get(run_state, :stage),
          {:ok, pid} <-
            start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
@@ -3265,9 +3266,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_spawn_passive_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
+    retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
     workspace = Workspace.path_for_issue(issue.identifier)
 
-    with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
+    with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue, retry_metadata),
          stage <- Map.get(run_state, :stage),
          {:ok, pid} <-
            start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
@@ -3376,19 +3378,19 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp ensure_dispatch_run_state(%State{} = state, workspace, issue)
-       when is_binary(workspace) and is_map(issue) do
+  defp ensure_dispatch_run_state(%State{} = state, workspace, issue, retry_metadata)
+       when is_binary(workspace) and is_map(issue) and is_map(retry_metadata) do
     case RunStateStore.load(workspace) do
       {:ok, run_state} ->
-        {:ok, run_state}
+        {:ok, merge_retry_budget_resume_context(run_state, retry_metadata)}
 
       {:error, :missing} ->
         case persist_live_issue_lease(state, workspace, issue) do
           {:ok, run_state} ->
-            {:ok, run_state}
+            {:ok, merge_retry_budget_resume_context(run_state, retry_metadata)}
 
           {:error, :missing} ->
-            persist_issue_run_state(workspace, issue)
+            persist_issue_run_state(workspace, issue, retry_metadata)
 
           {:error, reason} ->
             {:error, reason}
@@ -3399,8 +3401,12 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp persist_issue_run_state(workspace, issue) when is_binary(workspace) and is_map(issue) do
-    run_state = RunStateStore.load_or_default(workspace, issue)
+  defp persist_issue_run_state(workspace, issue, retry_metadata)
+       when is_binary(workspace) and is_map(issue) and is_map(retry_metadata) do
+    run_state =
+      workspace
+      |> RunStateStore.load_or_default(issue)
+      |> merge_retry_budget_resume_context(retry_metadata)
 
     case RunStateStore.save(workspace, run_state) do
       :ok -> {:ok, run_state}

@@ -59,6 +59,9 @@ defmodule SymphonyElixir.LeaseManager do
     path = lease_path(issue_id)
 
     case File.read(path) do
+      {:ok, ""} ->
+        {:error, :missing}
+
       {:ok, payload} ->
         Jason.decode(payload)
 
@@ -165,7 +168,17 @@ defmodule SymphonyElixir.LeaseManager do
       updated_at: DateTime.to_iso8601(now)
     }
 
-    File.write(path, Jason.encode!(payload), [:write])
+    encoded = Jason.encode!(payload)
+    tmp_path = "#{path}.tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.write(tmp_path, encoded, [:write]),
+         :ok <- File.rename(tmp_path, path) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(tmp_path)
+        {:error, reason}
+    end
   end
 
   defp acquire_decision(existing, owner, now, ttl_ms) do
