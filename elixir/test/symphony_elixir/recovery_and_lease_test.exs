@@ -250,6 +250,23 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
     end
   end
 
+  test "acquire recreates a blank lease payload" do
+    issue_id = "issue-lease-recreate-#{System.unique_integer([:positive])}"
+    path = LeaseManager.lease_path(issue_id)
+
+    try do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "")
+
+      assert :ok = LeaseManager.acquire(issue_id, "MT-LEASE-RECREATE", "owner-a")
+      assert {:ok, lease} = LeaseManager.read(issue_id)
+      assert lease["owner"] == "owner-a"
+      assert lease["epoch"] == 1
+    after
+      File.rm(path)
+    end
+  end
+
   test "review follow-up lease helpers acquire, classify, and release owner state" do
     workspace_root =
       Path.join(

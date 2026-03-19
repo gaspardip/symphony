@@ -2541,6 +2541,83 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
            ]
   end
 
+  test "passive worker dispatch seeds missing run state with retry budget focus" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-passive-budget-retry-seed-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-passive-broad-retry-seed",
+      identifier: "MT-PASSIVE-BROAD-RETRY-SEED",
+      title: "Seed passive budget retry focus",
+      description: "persist retry focus when passive dispatch has to seed run_state",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    state =
+      Orchestrator.do_spawn_passive_worker_for_test(
+        %State{
+          lease_owner: "retry-focus-owner",
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 1,
+              identifier: issue.identifier,
+              budget_resume_context: %{
+                budget_mode: "broad_implement",
+                budget_retry_count: 1,
+                target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                already_learned: "Resume passive work directly inside DeliveryEngine."
+              }
+            }
+          }
+        },
+        issue,
+        1,
+        self(),
+        start_child_fun: fn _supervisor, _fun -> {:ok, worker} end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+
+    assert running_entry.passive? == true
+
+    assert get_in(running_entry, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(running_entry, [:resume_context, :already_learned]) ==
+             "Resume passive work directly inside DeliveryEngine."
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+  end
+
   test "passive retry path uses issue lookup instead of candidate list fetch" do
     issue_id = "manual:issue-passive-retry"
     identifier = "MT-PASSIVE-RETRY"
