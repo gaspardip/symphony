@@ -31,10 +31,14 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - Fixed `RepoCompatibility.branch_base_setup_check/3` so branch-base compatibility accepts a base branch that is fetchable from `origin`, which matches the real shallow branch-clone contract used by the self-dogfood runner.
 - Fixed `GitManager` branch preparation and base resets to fetch `#{base_branch}:refs/remotes/origin/#{base_branch}` explicitly, so branch-only workspaces can later materialize and use `origin/main` instead of failing after compatibility.
 - Added realistic branch-only clone coverage for both seams using a local source repo with a feature branch clone that intentionally lacks `origin/main` before the fix path runs.
+- Replayed the isolated `CLZ-33` proof on the updated runner and confirmed the next blocker was stale blocked state continuity: after compatibility passed, the workspace still held the earlier `repo_not_compatible` blocked state and `DeliveryEngine` stopped immediately on `stage = "blocked"`.
+- Fixed active redispatch rewind so a reactivated compatibility-stopped workspace resumes from `checkout`, which matches the persisted default stage when no earlier active `stage_history` exists.
+- Added focused orchestrator coverage that proves a blocked `compatibility.not_certified` run state is cleared back to `checkout` before startup during normal active dispatch.
 
 ## Validation
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/repo_compatibility_test.exs test/symphony_elixir/git_manager_test.exs test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix harness.check`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix escript.build`
 
@@ -46,6 +50,10 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - The new coverage now proves the real fix path instead of assuming a fully tracked clone:
   - branch-only clones pass repo compatibility when the base branch is fetchable from origin
   - branch preparation explicitly materializes `origin/main` before checkout/reset in those same clones
+- The subsequent isolated proof replay on `:4050` got past compatibility and into `delivery_engine`, which exposed the next continuity seam clearly instead of failing earlier:
+  - `/tmp/symphony-mainproof-logs-20260319/log/symphony.log.1`
+  - `/tmp/symphony-workspaces-mainproof-20260319/CLZ-33/.symphony/run_state.json`
+- The new orchestrator regression proves that a reactivated compatibility stop with no prior active `stage_history` now rewinds to `checkout` instead of re-entering `delivery_engine` as a permanently blocked workspace.
 - Focused budget-policy, orchestrator, routing, and presenter coverage is green on the clean-main worktree after the admission/continuity fixes:
   - `189 tests, 0 failures`
 - The expanded matrix covering compatibility, branch prep, budget admission, dispatch continuity, and operator payloads is now green:
@@ -57,4 +65,4 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
   - presenter issue payloads expose persisted `budget_runtime` fields instead of collapsing to a generic empty shell
 
 ## Next Step
-- Commit the compatibility follow-up, rebuild the isolated proof runner from the updated branch, and rerun `CLZ-33` to verify the run reaches implement/budget admission instead of failing repo compatibility before execution.
+- Commit the active-redispatch rewind follow-up, rebuild the isolated proof runner from the updated branch, and rerun `CLZ-33` to verify the run now gets past both compatibility and stale blocked-state replay into the real budget-lane proof path.

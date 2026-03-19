@@ -2772,6 +2772,58 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert persisted_run_state.stage == "implement"
   end
 
+  test "worker dispatch rewinds blocked compatibility stop back to checkout" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-compatibility-retry-rewind-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-compat-retry-rewind",
+      identifier: "MT-COMPAT-RETRY-REWIND",
+      title: "Rewind blocked compatibility state",
+      description: "resume blocked compatibility stop during active dispatch",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               stop_reason: %{
+                 code: "repo_not_compatible",
+                 rule_id: "compatibility.not_certified",
+                 failure_class: "environment",
+                 summary: "The repo failed compatibility checks before execution."
+               }
+             })
+
+    assert {:ok, rewound_run_state} =
+             Orchestrator.ensure_dispatch_run_state_for_test(%State{}, workspace, issue, %{})
+
+    assert rewound_run_state.stage == "checkout"
+    assert rewound_run_state.stop_reason == nil
+    assert rewound_run_state.reason == "Dispatch resuming persisted blocked run state"
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert persisted_run_state.stage == "checkout"
+    assert persisted_run_state.stop_reason == nil
+  end
+
   test "worker dispatch seeds missing run state with retry budget focus" do
     workspace_root =
       Path.join(

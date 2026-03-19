@@ -5529,6 +5529,9 @@ defmodule SymphonyElixir.Orchestrator do
       {"validation_failed", _} ->
         "implement"
 
+      {"repo_not_compatible", _} ->
+        "checkout"
+
       {"per_turn_input_budget_exceeded", _} ->
         "implement"
 
