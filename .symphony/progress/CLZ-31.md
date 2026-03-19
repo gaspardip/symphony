@@ -33,6 +33,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Added focused PR-landing coverage for the last branch deltas: Linear identifier lookup now has an explicit `"me"`-routed fetch-by-identifier proof, and blocked issue payloads now prove the presenter can rebuild `why_here`, `human_action_required`, `rule_id`, and `failure_class` from the latest ledger signal when persisted operator fields are sparse.
 - Added one more coverage lift in the highest-yield changed module, `SymphonyElixir.Orchestrator`, by backfilling the manual-empty-refresh skip path and the explicit retry reschedule error branches for active vs passive continuation lookups.
 - Extended that `Orchestrator` coverage lift with the remaining retry-lookup cleanup branches: terminal issues now prove workspace cleanup + claim release, and missing issues without seeded manual fallback now prove the claim is dropped cleanly.
+- Hardened `LeaseManager` against whitespace-only payload races as well as fully blank payloads, so stale review-follow-up lease reclaim paths no longer surface intermittent `Jason.DecodeError` during webhook-driven autonomous resume.
 
 ## Validation
 - `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
@@ -45,6 +46,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:1796 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2815 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2838`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:1796 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2815 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2838 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2863 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2904`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/recovery_and_lease_test.exs:239 test/symphony_elixir/recovery_and_lease_test.exs:253 test/symphony_elixir/webhook_first_intake_test.exs:1241`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix harness.check`
 - `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix escript.build`
 
@@ -63,6 +65,7 @@ Prove that a live Symphony run can explain its own dispatch and retry control de
 - Focused PR landing coverage now proves the final CI-only seams: `"me"`-routed Linear identifier fetches preserve `assigned_to_worker`, and blocked presenter payloads can rebuild operator guidance entirely from the latest ledger signal when `run_state.json` is sparse.
 - Focused orchestrator coverage now also proves two retry-control branches that were still missing in CI: manual revalidation skips blocked non-retry issues when the tracker returns nothing, and retry lookup failures reschedule with distinct active vs passive error context.
 - The retry-control proof now also covers both cleanup exits: terminal retry lookups remove the workspace and claim, and missing lookups with no seeded manual issue simply release the claim instead of hanging onto stale state.
+- Focused lease coverage now proves whitespace-only payloads are treated like missing leases, and the exact stale-review-follow-up webhook reclaim case that flaked in CI now passes against the hardened reader.
 
 ## Next Step
 - Use the restored live operator API on `CLZ-31` to continue the next end-to-end dogfood slice instead of debugging the HTTP controller path again.

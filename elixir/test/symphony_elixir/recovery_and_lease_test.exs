@@ -250,6 +250,22 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
     end
   end
 
+  test "whitespace lease payloads are treated as missing and releasable" do
+    issue_id = "issue-lease-whitespace-#{System.unique_integer([:positive])}"
+    path = LeaseManager.lease_path(issue_id)
+
+    try do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "\n  \n")
+
+      assert {:error, :missing} = LeaseManager.read(issue_id)
+      assert :ok = LeaseManager.release(issue_id, "owner-a")
+      refute File.exists?(path)
+    after
+      File.rm(path)
+    end
+  end
+
   test "acquire recreates a blank lease payload" do
     issue_id = "issue-lease-recreate-#{System.unique_integer([:positive])}"
     path = LeaseManager.lease_path(issue_id)

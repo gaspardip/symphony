@@ -59,11 +59,8 @@ defmodule SymphonyElixir.LeaseManager do
     path = lease_path(issue_id)
 
     case File.read(path) do
-      {:ok, ""} ->
-        {:error, :missing}
-
-      {:ok, payload} ->
-        Jason.decode(payload)
+      {:ok, payload} when is_binary(payload) ->
+        decode_payload(payload)
 
       {:error, :enoent} ->
         {:error, :missing}
@@ -136,12 +133,21 @@ defmodule SymphonyElixir.LeaseManager do
 
     case File.read(path) do
       {:ok, payload} when is_binary(owner) ->
-        with {:ok, existing} <- Jason.decode(payload),
-             true <- (existing["owner"] || existing[:owner]) == owner do
-          File.rm(path)
-          :ok
-        else
-          _ -> :ok
+        case decode_payload(payload) do
+          {:error, :missing} ->
+            File.rm(path)
+            :ok
+
+          {:ok, existing} ->
+            if (existing["owner"] || existing[:owner]) == owner do
+              File.rm(path)
+              :ok
+            else
+              :ok
+            end
+
+          _ ->
+            :ok
         end
 
       _ ->
@@ -178,6 +184,14 @@ defmodule SymphonyElixir.LeaseManager do
       {:error, reason} ->
         File.rm(tmp_path)
         {:error, reason}
+    end
+  end
+
+  defp decode_payload(payload) when is_binary(payload) do
+    if String.trim(payload) == "" do
+      {:error, :missing}
+    else
+      Jason.decode(payload)
     end
   end
 
