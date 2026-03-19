@@ -236,6 +236,20 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
     end
   end
 
+  test "blank lease payloads are treated as missing" do
+    issue_id = "issue-lease-blank-#{System.unique_integer([:positive])}"
+    path = LeaseManager.lease_path(issue_id)
+
+    try do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "")
+
+      assert {:error, :missing} = LeaseManager.read(issue_id)
+    after
+      File.rm(path)
+    end
+  end
+
   test "review follow-up lease helpers acquire, classify, and release owner state" do
     workspace_root =
       Path.join(
