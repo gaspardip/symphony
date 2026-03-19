@@ -42,6 +42,7 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - Added persisted `worker_pid` continuity to `run_state.json`, so active budget-lane work can be reconstructed from the surviving worker process instead of depending only on the in-memory `running` map.
 - Taught orchestrator initialization, snapshots, and reconciliation to recover live running entries from persisted worker PIDs, including the original `resume_context` budget metadata for broad retries.
 - Added same-runner lease reclaim only for the safe orphaned-worker case: if the persisted lease belongs to this runner instance but the stored worker PID is dead, dispatch now clears the stale worker marker, reclaims the lease, and restarts work instead of spinning forever on `lease already held`.
+- Trimmed live-worker recovery back to orchestrator startup only after a full-suite promotion run proved that scanning all workspaces during hot `snapshot`/reconciliation paths added enough latency to trip status timing assertions; the restart-proof contract stays intact because the real seam is process restart, not steady-state polling.
 
 ## Validation
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_pr_verifier_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
@@ -49,6 +50,7 @@ Make every over-budget implement turn on remote `main` end in one explainable bu
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/policy_runtime_test.exs test/symphony_elixir/recovery_and_lease_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
+- `cd /tmp/symphony-budget-stabilize/elixir && mix test test/symphony_elixir/orchestrator_status_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix harness.check`
 - `cd /tmp/symphony-budget-stabilize/elixir && mix escript.build`
 

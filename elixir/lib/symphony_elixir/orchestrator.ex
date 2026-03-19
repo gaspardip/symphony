@@ -2210,10 +2210,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_running_issues(%State{} = state, source_mode \\ :all) do
-    state =
-      state
-      |> recover_live_running_workers()
-      |> reconcile_stalled_running_issues()
+    state = reconcile_stalled_running_issues(state)
 
     running_ids = Map.keys(state.running)
 
@@ -4340,10 +4337,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def handle_call(:snapshot, _from, state) do
-    state =
-      state
-      |> refresh_runtime_config()
-      |> recover_live_running_workers()
+    state = refresh_runtime_config(state)
 
     now = DateTime.utc_now()
     now_ms = System.monotonic_time(:millisecond)
