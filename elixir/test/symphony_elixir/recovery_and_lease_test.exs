@@ -77,6 +77,86 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
     end
   end
 
+  test "run state store loads staged bootstrap metadata while workspace rebuild is in progress" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-state-bootstrap-load-#{System.unique_integer([:positive])}"
+      )
+
+    workspace = Path.join(workspace_root, "MT-BOOTSTRAP-LOAD")
+    staged_dir = Path.join(workspace_root, ".MT-BOOTSTRAP-LOAD.bootstrap-1")
+
+    try do
+      File.mkdir_p!(staged_dir)
+
+      File.write!(
+        Path.join(staged_dir, "run_state.json"),
+        Jason.encode!(%{
+          "issue_id" => "issue-bootstrap",
+          "issue_identifier" => "MT-BOOTSTRAP-LOAD",
+          "stage" => "implement"
+        })
+      )
+
+      assert {:ok, state} = RunStateStore.load(workspace)
+      assert state.issue_id == "issue-bootstrap"
+      assert state.issue_identifier == "MT-BOOTSTRAP-LOAD"
+      assert state.stage == "implement"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "run state store treats blank persisted payloads as missing" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-state-blank-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.write!(RunStateStore.state_path(workspace), "   \n")
+
+      assert {:error, :missing} = RunStateStore.load(workspace)
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
+  test "run state store saves atomically without leaving temp state files behind" do
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-state-atomic-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+      assert :ok =
+               RunStateStore.save(workspace, %{
+                 issue_id: "issue-atomic",
+                 issue_identifier: "MT-ATOMIC",
+                 stage: "implement"
+               })
+
+      assert :ok =
+               RunStateStore.save(workspace, %{
+                 issue_id: "issue-atomic",
+                 issue_identifier: "MT-ATOMIC",
+                 stage: "review_verification"
+               })
+
+      assert {:ok, state} = RunStateStore.load(workspace)
+      assert state.stage == "review_verification"
+      assert Path.wildcard(RunStateStore.state_path(workspace) <> ".tmp-*") == []
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "run state store transition preserves existing issue-scoped state when no issue context is passed" do
     workspace =
       Path.join(
@@ -200,6 +280,53 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
       assert lease["epoch"] == 3
       assert LeaseManager.refresh(issue_id, "owner-a") == {:error, :claimed}
       assert :ok = LeaseManager.refresh(issue_id, "owner-b")
+    after
+      File.rm(path)
+    end
+  end
+
+  test "blank lease payloads are treated as missing" do
+    issue_id = "issue-lease-blank-#{System.unique_integer([:positive])}"
+    path = LeaseManager.lease_path(issue_id)
+
+    try do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "")
+
+      assert {:error, :missing} = LeaseManager.read(issue_id)
+    after
+      File.rm(path)
+    end
+  end
+
+  test "whitespace lease payloads are treated as missing and releasable" do
+    issue_id = "issue-lease-whitespace-#{System.unique_integer([:positive])}"
+    path = LeaseManager.lease_path(issue_id)
+
+    try do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "\n  \n")
+
+      assert {:error, :missing} = LeaseManager.read(issue_id)
+      assert :ok = LeaseManager.release(issue_id, "owner-a")
+      refute File.exists?(path)
+    after
+      File.rm(path)
+    end
+  end
+
+  test "acquire recreates a blank lease payload" do
+    issue_id = "issue-lease-recreate-#{System.unique_integer([:positive])}"
+    path = LeaseManager.lease_path(issue_id)
+
+    try do
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, "")
+
+      assert :ok = LeaseManager.acquire(issue_id, "MT-LEASE-RECREATE", "owner-a")
+      assert {:ok, lease} = LeaseManager.read(issue_id)
+      assert lease["owner"] == "owner-a"
+      assert lease["epoch"] == 1
     after
       File.rm(path)
     end

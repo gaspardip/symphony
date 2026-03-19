@@ -47,6 +47,7 @@ defmodule SymphonyElixir.RunInspector do
   def inspect(workspace, opts \\ []) when is_binary(workspace) do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
     shell_runner = Keyword.get(opts, :shell_runner, &default_shell_runner/3)
+    include_pr_details? = Keyword.get(opts, :include_pr_details, true)
 
     checkout? = File.dir?(workspace)
     git? = checkout? and File.exists?(Path.join(workspace, ".git"))
@@ -65,7 +66,7 @@ defmodule SymphonyElixir.RunInspector do
       end
 
     pr_data =
-      if git? do
+      if git? and include_pr_details? do
         pr_details(command_runner, shell_runner, workspace)
       else
         %{pr_url: nil, pr_state: nil, review_decision: nil, check_statuses: []}

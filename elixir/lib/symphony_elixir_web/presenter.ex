@@ -581,7 +581,69 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp issue_detail_entry(workspace_path, run_state, tracked_issue, effective_policy_class) do
     if File.dir?(workspace_path) do
-      inspection = RunInspector.inspect(workspace_path)
+      inspection =
+        workspace_path
+        |> RunInspector.inspect(include_pr_details: false)
+        |> then(fn inspection ->
+          if is_map(run_state) do
+            check_statuses =
+              case Map.get(run_state, :last_check_statuses) do
+                statuses when is_list(statuses) and statuses != [] -> statuses
+                _ -> inspection.check_statuses
+              end
+
+            persisted_check_list = fn key, fallback ->
+              case Map.get(run_state, key) do
+                values when is_list(values) and values != [] -> values
+                _ -> fallback
+              end
+            end
+
+            inspection
+            |> Map.put(:pr_url, Map.get(run_state, :pr_url) || inspection.pr_url)
+            |> Map.put(:pr_state, Map.get(run_state, :last_pr_state) || inspection.pr_state)
+            |> Map.put(
+              :review_decision,
+              Map.get(run_state, :last_review_decision) || inspection.review_decision
+            )
+            |> Map.put(:check_statuses, check_statuses)
+            |> Map.put(
+              :required_checks_state,
+              Map.get(run_state, :last_required_checks_state) ||
+                inspection.required_checks_state
+            )
+            |> Map.put(
+              :missing_required_checks,
+              persisted_check_list.(
+                :last_missing_required_checks,
+                inspection.missing_required_checks
+              )
+            )
+            |> Map.put(
+              :pending_required_checks,
+              persisted_check_list.(
+                :last_pending_required_checks,
+                inspection.pending_required_checks
+              )
+            )
+            |> Map.put(
+              :failing_required_checks,
+              persisted_check_list.(
+                :last_failing_required_checks,
+                inspection.failing_required_checks
+              )
+            )
+            |> Map.put(
+              :cancelled_required_checks,
+              persisted_check_list.(
+                :last_cancelled_required_checks,
+                inspection.cancelled_required_checks
+              )
+            )
+          else
+            inspection
+          end
+        end)
 
       %{
         issue_id: Map.get(run_state || %{}, :issue_id) || entry_value(tracked_issue || %{}, "id"),
@@ -1613,6 +1675,31 @@ defmodule SymphonyElixirWeb.Presenter do
       Map.get(running_payload, :operator_summary)
     else
       done_summary = done_operator_summary(run_state, decision_history)
+
+      history_signal =
+        if is_list(decision_history) do
+          decision_history
+          |> Enum.reverse()
+          |> Enum.find_value(fn entry ->
+            summary = Map.get(entry, :summary)
+            metadata = Map.get(entry, :metadata) || %{}
+            human_action = Map.get(metadata, :human_action) || Map.get(metadata, "human_action")
+            rule_id = Map.get(entry, :rule_id)
+            failure_class = Map.get(entry, :failure_class)
+
+            if present_value?(summary) or present_value?(human_action) or present_value?(rule_id) do
+              %{
+                summary: summary,
+                human_action: human_action,
+                rule_id: rule_id,
+                failure_class: failure_class
+              }
+            else
+              nil
+            end
+          end)
+        end
+
       normalized_status = status |> to_string() |> String.downcase()
 
       %{
@@ -1620,6 +1707,7 @@ defmodule SymphonyElixirWeb.Presenter do
         why_here:
           done_summary ||
             Map.get(run_state || %{}, :last_decision_summary) ||
+            Map.get(history_signal || %{}, :summary) ||
             entry_value(tracked_issue || %{}, "state") ||
             "Issue is not currently running.",
         automatic_next:
@@ -1649,9 +1737,13 @@ defmodule SymphonyElixirWeb.Presenter do
             true ->
               "No automatic next step available."
           end,
-        human_action_required: Map.get(run_state || %{}, :next_human_action),
-        rule_id: Map.get(run_state || %{}, :last_rule_id),
-        failure_class: Map.get(run_state || %{}, :last_failure_class)
+        human_action_required:
+          Map.get(run_state || %{}, :next_human_action) ||
+            Map.get(history_signal || %{}, :human_action),
+        rule_id: Map.get(run_state || %{}, :last_rule_id) || Map.get(history_signal || %{}, :rule_id),
+        failure_class:
+          Map.get(run_state || %{}, :last_failure_class) ||
+            Map.get(history_signal || %{}, :failure_class)
       }
     end
   end

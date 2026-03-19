@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.Config
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
+  @bootstrap_metadata_entries MapSet.new([".symphony"])
 
   @spec create_for_issue(map() | String.t() | nil) :: {:ok, Path.t()} | {:error, term()}
   def create_for_issue(issue_or_identifier) do
@@ -18,9 +19,16 @@ defmodule SymphonyElixir.Workspace do
       workspace = workspace_path_for_issue(safe_id)
 
       with :ok <- validate_workspace_path(workspace),
-           {:ok, created?} <- ensure_workspace(workspace),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?) do
-        {:ok, workspace}
+           {:ok, lifecycle} <- ensure_workspace(workspace) do
+        case maybe_run_after_create_hook(workspace, issue_context, lifecycle) do
+          :ok ->
+            :ok = restore_preserved_workspace_state(workspace, lifecycle)
+            {:ok, workspace}
+
+          {:error, _reason} = error ->
+            :ok = restore_preserved_workspace_state(workspace, lifecycle)
+            error
+        end
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
@@ -38,9 +46,12 @@ defmodule SymphonyElixir.Workspace do
 
   defp ensure_workspace(workspace) do
     cond do
+      bootstrap_only_workspace?(workspace) ->
+        prepare_bootstrap_workspace(workspace)
+
       File.dir?(workspace) ->
         clean_tmp_artifacts(workspace)
-        {:ok, false}
+        {:ok, %{after_create?: false, preserved_metadata_dir: nil}}
 
       File.exists?(workspace) ->
         File.rm_rf!(workspace)
@@ -54,7 +65,7 @@ defmodule SymphonyElixir.Workspace do
   defp create_workspace(workspace) do
     File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
-    {:ok, true}
+    {:ok, %{after_create?: true, preserved_metadata_dir: nil}}
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
@@ -129,8 +140,8 @@ defmodule SymphonyElixir.Workspace do
     end)
   end
 
-  defp maybe_run_after_create_hook(workspace, issue_context, created?) do
-    case created? do
+  defp maybe_run_after_create_hook(workspace, issue_context, %{after_create?: after_create?}) do
+    case after_create? do
       true ->
         case Config.workspace_hooks()[:after_create] do
           nil ->
@@ -143,6 +154,76 @@ defmodule SymphonyElixir.Workspace do
       false ->
         :ok
     end
+  end
+
+  defp restore_preserved_workspace_state(_workspace, %{preserved_metadata_dir: nil}), do: :ok
+
+  defp restore_preserved_workspace_state(workspace, %{preserved_metadata_dir: preserved_dir})
+       when is_binary(preserved_dir) do
+    target = Path.join(workspace, ".symphony")
+
+    cond do
+      File.dir?(preserved_dir) ->
+        merge_preserved_workspace_metadata!(preserved_dir, target)
+        :ok
+
+      true ->
+        :ok
+    end
+  end
+
+  defp merge_preserved_workspace_metadata!(source_dir, target_dir)
+       when is_binary(source_dir) and is_binary(target_dir) do
+    File.mkdir_p!(target_dir)
+
+    Enum.each(File.ls!(source_dir), fn entry ->
+      source = Path.join(source_dir, entry)
+      target = Path.join(target_dir, entry)
+
+      cond do
+        File.dir?(source) ->
+          merge_preserved_workspace_metadata!(source, target)
+
+        true ->
+          File.cp!(source, target)
+      end
+    end)
+
+    File.rm_rf!(source_dir)
+  end
+
+  defp bootstrap_only_workspace?(workspace) when is_binary(workspace) do
+    case File.ls(workspace) do
+      {:ok, entries} ->
+        entries != [] and
+          Enum.all?(entries, fn entry ->
+            MapSet.member?(@bootstrap_metadata_entries, entry) or
+              MapSet.member?(@excluded_entries, entry)
+          end)
+
+      _ ->
+        false
+    end
+  end
+
+  defp prepare_bootstrap_workspace(workspace) when is_binary(workspace) do
+    preserved_dir = Path.join(workspace, ".symphony")
+
+    temp_metadata_dir =
+      Path.join(
+        Path.dirname(workspace),
+        ".#{Path.basename(workspace)}.bootstrap-#{System.unique_integer([:positive])}"
+      )
+
+    if File.dir?(preserved_dir) do
+      File.rm_rf(temp_metadata_dir)
+      File.rename!(preserved_dir, temp_metadata_dir)
+    end
+
+    File.rm_rf!(workspace)
+    File.mkdir_p!(workspace)
+
+    {:ok, %{after_create?: true, preserved_metadata_dir: if(File.dir?(temp_metadata_dir), do: temp_metadata_dir, else: nil)}}
   end
 
   defp maybe_run_before_remove_hook(workspace) do

@@ -222,6 +222,39 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
     end
   end
 
+  test "RunInspector can skip live PR inspection for lightweight observability reads" do
+    workspace = temp_workspace("run-inspector-lightweight")
+    write_harness_yaml!(workspace, ["ci / publish"])
+    File.mkdir_p!(Path.join(workspace, ".git"))
+
+    command_runner = fn
+      "git", ["config", "--get", "remote.origin.url"], _opts -> {"git@github.com:example/repo.git\n", 0}
+      "git", ["rev-parse", "--abbrev-ref", "HEAD"], _opts -> {"main\n", 0}
+      "git", ["rev-parse", "HEAD"], _opts -> {"abc123\n", 0}
+      "git", ["status", "--porcelain"], _opts -> {" M lib/a.ex\n", 0}
+      "gh", ["pr", "view", "--json", "url,state,reviewDecision,statusCheckRollup"], _opts -> flunk("gh pr view should be skipped for lightweight inspection")
+    end
+
+    try do
+      snapshot = RunInspector.inspect(workspace, command_runner: command_runner, include_pr_details: false)
+
+      assert snapshot.checkout?
+      assert snapshot.git?
+      assert snapshot.origin_url == "git@github.com:example/repo.git"
+      assert snapshot.branch == "main"
+      assert snapshot.head_sha == "abc123"
+      assert snapshot.pr_url == nil
+      assert snapshot.pr_state == nil
+      assert snapshot.review_decision == nil
+      assert snapshot.check_statuses == []
+      assert snapshot.required_checks_state == :missing
+      assert snapshot.changed_files == 1
+      assert snapshot.dirty?
+    after
+      File.rm_rf(workspace)
+    end
+  end
+
   test "RunInspector normalizes malformed GitHub check rollups" do
     workspace = temp_workspace("run-inspector-malformed-rollup")
     write_harness_yaml!(workspace, ["ci / publish"])

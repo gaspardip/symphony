@@ -94,4 +94,27 @@ defmodule SymphonyElixir.ManualIssueStoreTest do
                "acceptance_criteria" => ["Still unique"]
              })
   end
+
+  test "manual issue store ignores blank persisted records and leaves no temp files after updates",
+       %{store_root: store_root} do
+    payload = %{
+      "id" => "clz-15",
+      "identifier" => "CLZ-15",
+      "title" => "Atomic manual issue record",
+      "acceptance_criteria" => ["Persist cleanly"]
+    }
+
+    assert {:ok, issue} = ManualIssueStore.submit(payload)
+    assert :ok = ManualIssueStore.update_issue_state(issue.id, "Human Review")
+
+    File.write!(
+      Path.join(store_root, Base.url_encode64("manual:blank-record", padding: false) <> ".json"),
+      " \n"
+    )
+
+    assert {:ok, fetched_issue} = ManualIssueStore.fetch_issue_by_identifier("CLZ-15")
+    assert fetched_issue.id == issue.id
+    assert fetched_issue.state == "Human Review"
+    assert Path.wildcard(Path.join(store_root, "*.tmp-*")) == []
+  end
 end

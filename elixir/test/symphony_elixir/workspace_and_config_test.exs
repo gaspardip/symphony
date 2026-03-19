@@ -242,6 +242,59 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace reruns after_create for metadata-only bootstrap directories and preserves .symphony state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-bootstrap-only-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "mkdir -p .git .symphony && echo bootstrapped > README.md && echo version: 1 > .symphony/harness.yml"
+      )
+
+      workspace = Path.join(workspace_root, "MT-BOOTSTRAP")
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.write!(Path.join(workspace, ".symphony/run_state.json"), ~s({"stage":"checkout"}))
+
+      assert {:ok, ^workspace} = Workspace.create_for_issue("MT-BOOTSTRAP")
+      assert File.dir?(Path.join(workspace, ".git"))
+      assert File.read!(Path.join(workspace, "README.md")) == "bootstrapped\n"
+      assert File.read!(Path.join(workspace, ".symphony/harness.yml")) == "version: 1\n"
+      assert File.read!(Path.join(workspace, ".symphony/run_state.json")) == ~s({"stage":"checkout"})
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace reruns after_create for tmp-only bootstrap directories" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-tmp-bootstrap-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "mkdir -p .git && echo bootstrapped > README.md"
+      )
+
+      workspace = Path.join(workspace_root, "MT-TMP-BOOTSTRAP")
+      File.mkdir_p!(Path.join(workspace, "tmp"))
+      File.write!(Path.join(workspace, "tmp/scratch.txt"), "stale\n")
+
+      assert {:ok, ^workspace} = Workspace.create_for_issue("MT-TMP-BOOTSTRAP")
+      assert File.dir?(Path.join(workspace, ".git"))
+      assert File.read!(Path.join(workspace, "README.md")) == "bootstrapped\n"
+      refute File.exists?(Path.join(workspace, "tmp/scratch.txt"))
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace replaces stale non-directory paths" do
     workspace_root =
       Path.join(
@@ -322,6 +375,34 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
                Workspace.create_for_issue("MT-FAIL")
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace restores preserved .symphony state when metadata-only bootstrap rerun fails" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-bootstrap-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "mkdir -p .git .symphony && echo nope && exit 17"
+      )
+
+      workspace = Path.join(workspace_root, "MT-BOOTSTRAP-FAIL")
+      File.mkdir_p!(Path.join(workspace, ".symphony/nested"))
+      File.write!(Path.join(workspace, ".symphony/run_state.json"), ~s({"stage":"checkout"}))
+      File.write!(Path.join(workspace, ".symphony/nested/evidence.txt"), "preserve me\n")
+
+      assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
+               Workspace.create_for_issue("MT-BOOTSTRAP-FAIL")
+
+      assert File.read!(Path.join(workspace, ".symphony/run_state.json")) == ~s({"stage":"checkout"})
+      assert File.read!(Path.join(workspace, ".symphony/nested/evidence.txt")) == "preserve me\n"
     after
       File.rm_rf(workspace_root)
     end

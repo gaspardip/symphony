@@ -488,6 +488,267 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert resumed_issue.state == "Todo"
   end
 
+  test "retry_now returns a concrete no-dispatch reason when no slots are available" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_concurrent_agents: 0
+    )
+
+    issue = %Issue{
+      id: "issue-retry-no-slots",
+      identifier: "MT-RETRY-NO-SLOTS",
+      title: "Retry with no slots",
+      description: "Expose the no-dispatch reason instead of returning a silent success",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryNoSlotsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.action == "retry_now"
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.dispatch_slots_unavailable"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "no orchestrator dispatch slots"
+    assert retry_payload.human_action =~ "Wait for a free dispatch slot"
+  end
+
+  test "retry_now reports already_running when the issue is already active" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-retry-already-running",
+      identifier: "MT-RETRY-ALREADY-RUNNING",
+      title: "Retry already running",
+      description: "Do not redispatch an active issue",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryAlreadyRunningOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid) do
+        Process.exit(worker_pid, :kill)
+      end
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{
+        pid: worker_pid,
+        ref: make_ref(),
+        identifier: issue.identifier,
+        issue: issue,
+        started_at: DateTime.utc_now()
+      }
+
+      state
+      |> Map.put(:running, Map.put(state.running, issue.id, running_entry))
+      |> Map.put(:claimed, MapSet.put(state.claimed, issue.id))
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "already_running"
+  end
+
+  test "retry_now returns a concrete no-dispatch reason when the issue state is already at its concurrency limit" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_concurrent_agents: 2,
+      max_concurrent_agents_by_state: %{"Todo" => 1}
+    )
+
+    issue = %Issue{
+      id: "issue-retry-state-slots",
+      identifier: "MT-RETRY-STATE-SLOTS",
+      title: "Retry at state concurrency limit",
+      description: "Expose per-state concurrency backpressure",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    blocker_issue = %Issue{
+      id: "issue-retry-state-slots-blocker",
+      identifier: "MT-RETRY-STATE-SLOTS-BLOCKER",
+      title: "Blocker",
+      description: "Occupies the Todo state slot",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue, blocker_issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryStateSlotsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    worker_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid) do
+        Process.exit(worker_pid, :kill)
+      end
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    :sys.replace_state(pid, fn state ->
+      running_entry = %{
+        pid: worker_pid,
+        ref: make_ref(),
+        identifier: blocker_issue.identifier,
+        issue: blocker_issue,
+        started_at: DateTime.utc_now()
+      }
+
+      state
+      |> Map.put(:running, Map.put(state.running, blocker_issue.id, running_entry))
+      |> Map.put(:claimed, MapSet.put(state.claimed, blocker_issue.id))
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.dispatch_slots_unavailable"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "per-state concurrency limit"
+    assert retry_payload.human_action =~ "Wait for a free dispatch slot"
+  end
+
+  test "retry_now returns a concrete no-dispatch reason when the issue targets a different runner channel" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-retry-wrong-runner-channel",
+      identifier: "MT-RETRY-WRONG-RUNNER-CHANNEL",
+      title: "Retry wrong runner channel",
+      description: "Expose runner-channel mismatch in the retry payload",
+      state: "Todo",
+      labels: ["canary:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryWrongRunnerChannelOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.retry_dispatch_deferred"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "wrong runner channel"
+    assert retry_payload.human_action =~ "Route this issue to a runner on the matching channel"
+  end
+
+  test "retry_now returns a concrete no-dispatch reason when required routing labels are missing" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["dogfood:symphony"]
+    )
+
+    issue = %Issue{
+      id: "issue-retry-missing-required-labels",
+      identifier: "MT-RETRY-MISSING-REQUIRED-LABELS",
+      title: "Retry missing required labels",
+      description: "Expose missing routing labels in the retry payload",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryMissingRequiredLabelsOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.retry_dispatch_deferred"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "missing required labels"
+    assert retry_payload.human_action =~ "Add the required routing labels"
+  end
+
+  test "issue_target_runner_channel follows canary labels" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-retry-missing-canary-labels",
+      identifier: "MT-RETRY-MISSING-CANARY-LABELS",
+      title: "Retry canary routing",
+      description: "Derive runner channel from canary labels",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    canary_issue = %{issue | labels: ["dogfood:symphony", "canary:symphony"]}
+
+    assert Orchestrator.issue_target_runner_channel_for_test(issue) == "stable"
+    assert Orchestrator.issue_target_runner_channel_for_test(canary_issue) == "canary"
+  end
+
+  test "retry_now returns a concrete no-dispatch reason when policy labels conflict with the company pack" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      company_policy_pack: "client_safe"
+    )
+
+    issue = %Issue{
+      id: "issue-retry-policy-conflict",
+      identifier: "MT-RETRY-POLICY-CONFLICT",
+      title: "Retry policy conflict",
+      description: "Expose company-pack policy conflicts in the retry payload",
+      state: "Todo",
+      labels: ["policy:fully-autonomous"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :RetryPolicyConflictOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    retry_payload = Orchestrator.retry_issue_now(orchestrator_name, issue.identifier)
+    assert retry_payload.ok == true
+    assert retry_payload.dispatch_outcome == "deferred"
+    assert retry_payload.rule_id == "coordination.retry_dispatch_deferred"
+    assert retry_payload.failure_class == "coordination"
+    assert retry_payload.error =~ "policy.pack_disallows_class"
+    assert retry_payload.human_action =~ "Inspect the recorded no-dispatch reason"
+  end
+
   test "review thread lifecycle controls update persisted manual thread state" do
     workspace_root =
       Path.join(
@@ -1818,6 +2079,30 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
                {:ok, []}
              end)
 
+    assert {:skip, %Issue{identifier: "MT-MANUAL-BLOCKED", state: "Blocked"}} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(
+               %{manual_issue | identifier: "MT-MANUAL-BLOCKED", state: "Blocked"},
+               fn [_id] -> {:ok, []} end
+             )
+
+    assert {:ok, %Issue{} = refreshed_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(eligible_issue, fn [_id] ->
+               {:ok,
+                [
+                  %Issue{
+                    id: eligible_issue.id,
+                    identifier: eligible_issue.identifier,
+                    state: "Todo",
+                    labels: eligible_issue.labels,
+                    assigned_to_worker: true
+                  }
+                ]}
+             end)
+
+    assert refreshed_issue.title == eligible_issue.title
+    assert refreshed_issue.description == eligible_issue.description
+    assert refreshed_issue.state == "Todo"
+
     assert {:ok, %Issue{state: "Merging"} = resumed_issue} =
              Orchestrator.revalidate_issue_for_dispatch_for_test(
                %{manual_issue | state: "Merging"},
@@ -2411,6 +2696,322 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     assert get_in(running_entry, [:resume_context, :already_learned]) ==
              "DeliveryEngine already owns the broad retry prompt shape."
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(persisted_run_state, [:resume_context, :already_learned]) ==
+             "DeliveryEngine already owns the broad retry prompt shape."
+  end
+
+  test "worker dispatch seeds missing run state with retry budget focus" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-budget-retry-seed-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-broad-retry-seed",
+      identifier: "MT-BROAD-RETRY-SEED",
+      title: "Seed budget retry focus",
+      description: "persist retry focus when dispatch has to seed run_state",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    state =
+      Orchestrator.do_spawn_issue_worker_for_test(
+        %State{
+          lease_owner: "retry-focus-owner",
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 1,
+              identifier: issue.identifier,
+              budget_resume_context: %{
+                budget_mode: "broad_implement",
+                budget_retry_count: 1,
+                target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                already_learned: "Resume directly inside DeliveryEngine."
+              }
+            }
+          }
+        },
+        issue,
+        1,
+        self(),
+        start_child_fun: fn _supervisor, _fun -> {:ok, worker} end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+
+    assert get_in(running_entry, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(running_entry, [:resume_context, :already_learned]) ==
+             "Resume directly inside DeliveryEngine."
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+  end
+
+  test "passive worker dispatch seeds missing run state with retry budget focus" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-passive-budget-retry-seed-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-passive-broad-retry-seed",
+      identifier: "MT-PASSIVE-BROAD-RETRY-SEED",
+      title: "Seed passive budget retry focus",
+      description: "persist retry focus when passive dispatch has to seed run_state",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    state =
+      Orchestrator.do_spawn_passive_worker_for_test(
+        %State{
+          lease_owner: "retry-focus-owner",
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 1,
+              identifier: issue.identifier,
+              budget_resume_context: %{
+                budget_mode: "broad_implement",
+                budget_retry_count: 1,
+                target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                already_learned: "Resume passive work directly inside DeliveryEngine."
+              }
+            }
+          }
+        },
+        issue,
+        1,
+        self(),
+        start_child_fun: fn _supervisor, _fun -> {:ok, worker} end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+
+    assert running_entry.passive? == true
+
+    assert get_in(running_entry, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(running_entry, [:resume_context, :already_learned]) ==
+             "Resume passive work directly inside DeliveryEngine."
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+  end
+
+  test "worker dispatch merges lease-backed state with retry budget focus when run state is missing" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-budget-retry-lease-seed-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-broad-retry-lease-seed",
+      identifier: "MT-BROAD-RETRY-LEASE-SEED",
+      title: "Seed budget retry focus from lease",
+      description: "persist retry focus when dispatch reloads lease-backed state",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(workspace)
+    claim_issue_lease!(issue.id, issue.identifier, "retry-focus-owner")
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    state =
+      Orchestrator.do_spawn_issue_worker_for_test(
+        %State{
+          lease_owner: "retry-focus-owner",
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 1,
+              identifier: issue.identifier,
+              budget_resume_context: %{
+                budget_mode: "broad_implement",
+                budget_retry_count: 1,
+                target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                already_learned: "Resume from the lease-backed DeliveryEngine focus."
+              }
+            }
+          }
+        },
+        issue,
+        1,
+        self(),
+        start_child_fun: fn _supervisor, _fun -> {:ok, worker} end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+
+    assert get_in(running_entry, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert persisted_run_state.lease_owner == "retry-focus-owner"
+    assert persisted_run_state.lease_owner_channel == "stable"
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+  end
+
+  test "passive worker dispatch merges lease-backed state with retry budget focus when run state is missing" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-passive-budget-retry-lease-seed-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-passive-broad-retry-lease-seed",
+      identifier: "MT-PASSIVE-BROAD-RETRY-LEASE-SEED",
+      title: "Seed passive budget retry focus from lease",
+      description: "persist retry focus when passive dispatch reloads lease-backed state",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(workspace)
+    claim_issue_lease!(issue.id, issue.identifier, "retry-focus-owner")
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    state =
+      Orchestrator.do_spawn_passive_worker_for_test(
+        %State{
+          lease_owner: "retry-focus-owner",
+          retry_attempts: %{
+            issue.id => %{
+              attempt: 1,
+              identifier: issue.identifier,
+              budget_resume_context: %{
+                budget_mode: "broad_implement",
+                budget_retry_count: 1,
+                target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                already_learned: "Resume passive work from the lease-backed DeliveryEngine focus."
+              }
+            }
+          }
+        },
+        issue,
+        1,
+        self(),
+        start_child_fun: fn _supervisor, _fun -> {:ok, worker} end
+      )
+
+    running_entry = Map.fetch!(state.running, issue.id)
+    assert running_entry.passive? == true
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert persisted_run_state.lease_owner == "retry-focus-owner"
+    assert persisted_run_state.lease_owner_channel == "stable"
+
+    assert get_in(running_entry, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(persisted_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
   end
 
   test "passive retry path uses issue lookup instead of candidate list fetch" do
@@ -2431,6 +3032,111 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         %{identifier: identifier, delay_type: :passive_continuation},
         {:error, :candidate_fetch_should_not_run},
         {:ok, nil}
+      )
+
+    refute MapSet.member?(next_state.claimed, issue_id)
+    refute Map.has_key?(next_state.retry_attempts, issue_id)
+  end
+
+  test "retry poll failures reschedule active retries with explicit error context" do
+    issue_id = "manual:issue-retry-error"
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_for_test(
+        %State{},
+        issue_id,
+        1,
+        %{identifier: "MT-RETRY-ERROR"},
+        {:error, :boom}
+      )
+
+    retry_entry = Map.fetch!(next_state.retry_attempts, issue_id)
+    assert retry_entry.attempt == 2
+    assert retry_entry.identifier == "MT-RETRY-ERROR"
+    assert retry_entry.error == "retry poll failed: :boom"
+    assert is_reference(retry_entry.timer_ref)
+
+    on_exit(fn ->
+      Process.cancel_timer(retry_entry.timer_ref)
+    end)
+  end
+
+  test "passive retry lookup failures reschedule with passive-specific error context" do
+    issue_id = "manual:issue-passive-retry-error"
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_for_test(
+        %State{},
+        issue_id,
+        1,
+        %{identifier: "MT-PASSIVE-RETRY-ERROR", delay_type: :passive_continuation},
+        {:error, :candidate_fetch_should_not_run},
+        {:error, :lookup_failed}
+      )
+
+    retry_entry = Map.fetch!(next_state.retry_attempts, issue_id)
+    assert retry_entry.attempt == 2
+    assert retry_entry.identifier == "MT-PASSIVE-RETRY-ERROR"
+    assert retry_entry.delay_type == :passive_continuation
+    assert retry_entry.error == "passive retry lookup failed: :lookup_failed"
+    assert is_reference(retry_entry.timer_ref)
+
+    on_exit(fn ->
+      Process.cancel_timer(retry_entry.timer_ref)
+    end)
+  end
+
+  test "retry lookup removes claimed workspace when the issue reaches a terminal state" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-retry-terminal-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root
+    )
+
+    issue = %Issue{
+      id: "manual:issue-terminal-retry",
+      identifier: "MT-TERMINAL-RETRY",
+      title: "Terminal retry cleanup",
+      state: "Done",
+      source: :manual
+    }
+
+    workspace = Workspace.path_for_issue(issue.identifier)
+    File.mkdir_p!(workspace)
+    File.write!(Path.join(workspace, "marker.txt"), "cleanup me")
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        %State{claimed: MapSet.new([issue.id])},
+        issue.id,
+        1,
+        %{}
+      )
+
+    refute MapSet.member?(next_state.claimed, issue.id)
+    refute File.exists?(workspace)
+  end
+
+  test "retry lookup releases claims when the issue disappears without a seeded manual fallback" do
+    issue_id = "issue-retry-disappeared"
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        nil,
+        %State{claimed: MapSet.new([issue_id])},
+        issue_id,
+        1,
+        %{identifier: "MT-DISAPPEARED"}
       )
 
     refute MapSet.member?(next_state.claimed, issue_id)

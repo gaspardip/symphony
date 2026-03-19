@@ -226,6 +226,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              RunStateStore.transition(workspace, "blocked", %{
                issue_id: issue.id,
                issue_identifier: issue.identifier,
+               pr_url: "https://example.test/pr/fallback",
+               last_pr_state: "OPEN",
+               last_review_decision: "APPROVED",
+               last_check_statuses: [
+                 %{name: "ci / publish", status: "COMPLETED", conclusion: "SUCCESS"}
+               ],
+               last_required_checks_state: "passed",
                last_rule_id: "policy.review_required",
                last_failure_class: "policy",
                last_merge_readiness: %{
@@ -258,6 +265,15 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.company.name == "Client Boundary"
     assert payload.company.mode == "client_safe"
     assert payload.company.policy_pack == "client_safe"
+    assert payload.review.pr_url == "https://example.test/pr/fallback"
+    assert payload.review.pr_state == "OPEN"
+    assert payload.review.review_decision == "APPROVED"
+
+    assert payload.review.check_statuses == [
+             %{name: "ci / publish", status: "COMPLETED", conclusion: "SUCCESS"}
+           ]
+
+    assert payload.review.required_checks_passed == true
     assert payload.running == nil
     assert payload.retry == nil
     assert payload.paused == nil
@@ -286,6 +302,53 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert String.ends_with?(payload.last_decision.output, "…")
     assert payload.compatibility_report == compatibility_report
     assert payload.last_decision.compatibility_report == compatibility_report
+  end
+
+  test "presenter blocked issue payload falls back to latest ledger signal when persisted operator fields are sparse" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-web-ledger-fallback",
+      identifier: "MT-WEB-LEDGER",
+      title: "Ledger fallback",
+      description: "Tracked via ledger signal",
+      state: "Blocked"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(Config.workspace_root(), issue.identifier)
+    File.mkdir_p!(workspace)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "blocked", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: "tracker",
+               last_decision_summary: nil,
+               next_human_action: nil,
+               last_rule_id: nil,
+               last_failure_class: nil
+             })
+
+    RunLedger.record("policy.decided", %{
+      issue_identifier: issue.identifier,
+      summary: "Need one operator retry before merge readiness can be refreshed.",
+      rule_id: "policy.retry_refresh",
+      failure_class: "policy",
+      metadata: %{human_action: "Retry the operator refresh."}
+    })
+
+    orchestrator_name = Module.concat(__MODULE__, :PresenterLedgerFallbackOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: empty_snapshot()})
+
+    assert {:ok, payload} = Presenter.issue_payload(issue.identifier, orchestrator_name, 50)
+    assert payload.status == "Blocked"
+    assert payload.operator_summary.why_here == "Need one operator retry before merge readiness can be refreshed."
+    assert payload.operator_summary.human_action_required == "Retry the operator refresh."
+    assert payload.operator_summary.rule_id == "policy.retry_refresh"
+    assert payload.operator_summary.failure_class == "policy"
   end
 
   test "presenter refresh and control payloads normalize timestamps and unexpected results" do
@@ -1096,6 +1159,47 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     assert :ok = BackfillOrchestrator.put_snapshot(orchestrator_name, :unavailable)
     assert Presenter.state_payload(orchestrator_name, 50).error.code == "snapshot_unavailable"
+  end
+
+  test "issue payload falls back to the latest ledger decision when no run state exists" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-ledger-fallback",
+      identifier: "MT-LEDGER-FALLBACK",
+      title: "Ledger fallback",
+      description: "Use retry decision history when no run state exists yet",
+      state: "Todo",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :LedgerFallbackOrchestrator)
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: %{running: [], retrying: [], paused: [], skipped: [], queue: []}})
+
+    RunLedger.record("operator.action", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      actor_type: "operator",
+      actor_id: "dashboard",
+      failure_class: "coordination",
+      rule_id: "coordination.dispatch_slots_unavailable",
+      summary: "Immediate retry deferred because no orchestrator dispatch slots are available.",
+      metadata: %{
+        action: "retry_now",
+        dispatch_outcome: "deferred",
+        human_action: "Wait for a free dispatch slot or raise the configured concurrency limit before retrying."
+      }
+    })
+
+    assert {:ok, payload} = Presenter.issue_payload(issue.identifier, orchestrator_name, 50)
+    assert payload.status == "Todo"
+    assert payload.operator_summary.why_here =~ "no orchestrator dispatch slots"
+    assert payload.operator_summary.human_action_required =~ "Wait for a free dispatch slot"
+    assert payload.operator_summary.rule_id == "coordination.dispatch_slots_unavailable"
+    assert payload.operator_summary.failure_class == "coordination"
   end
 
   test "presenter control payload covers remaining actions and tuple errors" do

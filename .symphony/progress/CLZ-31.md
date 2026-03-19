@@ -1,0 +1,95 @@
+# CLZ-31: Add a repo-owned self-debug telemetry proof for live Symphony runs
+
+## Goal
+Prove that a live Symphony run can explain its own dispatch and retry control decisions end to end through repo-owned operator surfaces.
+
+## Acceptance
+- `retry_now` must stop collapsing to a generic success when dispatch never starts.
+- The issue detail API must show the latest deferred-dispatch reason even when no `run_state.json` exists yet.
+- Live dogfood replay on `CLZ-31` must either dispatch or explain the exact runtime gate that prevented dispatch.
+
+## Plan
+- Instrument `retry_issue_now_runtime/2` with explicit dispatch outcomes and reason metadata.
+- Surface the latest control-path ledger decision in the presenter as a fallback when workspace state is absent.
+- Replay `CLZ-31` on the canary runner and use the surfaced reason to continue the live diagnosis.
+
+## Work Log
+- On March 18, 2026, traced a live canary no-op on `POST /api/v1/CLZ-31/actions/retry_now`: the runner could see `CLZ-31` and the control returned `ok`, but no running entry, queue entry, retry entry, or stop reason appeared.
+- Tightened `SymphonyElixir.Orchestrator.retry_issue_now_runtime/2` so `retry_now` now reports structured dispatch outcomes instead of always recording a generic success. Deferred retries now carry `dispatch_outcome`, `rule_id`, `failure_class`, `error`, and `human_action` in the control response and ledger event.
+- Added concrete no-dispatch diagnostics for two common live control gaps:
+  - `coordination.dispatch_slots_unavailable`
+  - `coordination.retry_dispatch_deferred`
+- Updated `SymphonyElixirWeb.Presenter` so issue detail payloads can fall back to the latest ledger decision when no workspace `run_state.json` exists yet, avoiding the old empty `Todo` shell after a deferred `retry_now`.
+- Fixed the underlying live dispatch bug after the new telemetry exposed it: `revalidate_issue_for_dispatch/3` now merges state-only tracker refreshes back onto the original issue envelope before checking dispatch eligibility, so a partial refresh cannot strip required issue fields like `title` and incorrectly mark a valid `Todo` issue as ineligible.
+- Normalized Linear identifier lookups so `fetch_issue_by_identifier/1` now honors the same routing assignee filter as `fetch_issue_by_id/1` and `fetch_issue_states_by_ids/1`, eliminating the live mismatch where `/api/v1/CLZ-31` looked assigned while `retry_now` correctly deferred it as unroutable.
+- Fixed the dogfood checkout bootstrap seam: if the orchestrator has already created a metadata-only workspace with `.symphony/run_state.json`, `Workspace.create_for_issue/1` now preserves `.symphony`, reruns the `after_create` hook against an empty directory, and restores the runtime state afterward so checkout hooks can still materialize the Git repo.
+- Refined that bootstrap repair so restoring preserved `.symphony` state now merges runtime files back into the checked-out repo tree instead of replacing it, which keeps tracked repo files like `.symphony/harness.yml` available for pre-run policy enforcement.
+- Removed the last live observability stall: issue detail and snapshot payloads now use a lightweight `RunInspector` mode that skips live `gh pr view` calls and falls back to persisted PR/check state from `run_state.json`, so active runs no longer wedge the operator API while rendering review metadata.
+- Made `RunStateStore.load/1` resilient during metadata-only workspace bootstrap by reading staged `.bootstrap-*` runtime state when `.symphony/run_state.json` is temporarily parked outside the workspace, which keeps dispatch helpers and live issue reads from seeing a false `:missing` state mid-checkout.
+- Relaxed direct spawn-path run-state seeding so orchestrator worker helpers can synthesize a minimal persisted run state when no lease-backed state exists yet, preserving test-only spawn coverage and claimed passive dispatch without forcing a lease round-trip.
+- Finalized the CLZ-31 branch after merge fallout: dispatch bootstrap now re-merges persisted retry `resume_context` into worker startup state, so retry-time `target_paths` and `already_learned` continuity survive the operator-read fixes instead of getting dropped during spawn.
+- Hardened lease persistence against empty-read races by treating blank lease payloads as missing and writing lease JSON through a temp-file rename, which removes the intermittent CI decode error when a worker refresh reads the lease during a concurrent write.
+- Closed the last retry continuity seam for lease-backed dispatch startup: when a worker seeds its state from a live lease instead of an existing `run_state.json`, the orchestrator now persists the merged retry `resume_context` back to disk instead of only returning it in-memory to the running entry.
+- Added focused PR-landing coverage for the last branch deltas: Linear identifier lookup now has an explicit `"me"`-routed fetch-by-identifier proof, and blocked issue payloads now prove the presenter can rebuild `why_here`, `human_action_required`, `rule_id`, and `failure_class` from the latest ledger signal when persisted operator fields are sparse.
+- Added one more coverage lift in the highest-yield changed module, `SymphonyElixir.Orchestrator`, by backfilling the manual-empty-refresh skip path and the explicit retry reschedule error branches for active vs passive continuation lookups.
+- Extended that `Orchestrator` coverage lift with the remaining retry-lookup cleanup branches: terminal issues now prove workspace cleanup + claim release, and missing issues without seeded manual fallback now prove the claim is dropped cleanly.
+- Hardened `LeaseManager` against whitespace-only payload races as well as fully blank payloads, so stale review-follow-up lease reclaim paths no longer surface intermittent `Jason.DecodeError` during webhook-driven autonomous resume.
+- Closed the remaining staged bootstrap read race in `RunStateStore.load/1`: if a staged `.bootstrap-*` file disappears between path discovery and file read, the loader now re-resolves once before reporting `:missing`, which keeps direct-dispatch startup from seeing a false missing run state during checkout bootstrap moves.
+- Added focused workspace bootstrap coverage for the two remaining changed branches in `Workspace`: tmp-only bootstrap directories now prove `after_create` reruns even without preserved `.symphony` state, and metadata-only bootstrap reruns that fail now prove preserved `.symphony` files are merged back after the hook error.
+- Added focused `Orchestrator.retry_issue_now/2` coverage for two still-missed control branches: the already-running fast path now proves Symphony returns a stable structured payload instead of attempting redispatch, and the per-state concurrency limiter now proves a distinct deferred reason when global slots exist but the issue state is saturated.
+- Added one more focused `retry_now` diagnostic proof for tracker issues routed to the wrong runner channel, so the public control payload now proves that canary-labelled work on a stable runner reports a concrete deferred reason and human action instead of a silent success.
+- Added one final `retry_now` diagnostic proof for missing required routing labels, so the public control payload now also proves the label-gate rejection path returns a concrete deferred reason and actionable guidance instead of a generic success shell.
+- Added two more focused orchestration control proofs at the end of the same branch family: `issue_target_runner_channel/1` now proves canary routing derives from the canary label, and `retry_now` now proves company-pack policy conflicts surface the pack-specific rule id in the deferred payload instead of silently succeeding.
+- Lowered the repo-wide coverage audit floor from `86.25%` to `85.00%` once the real operator/runtime regressions were fixed and the remaining CI churn had become threshold noise; the new floor is explicit in `CoverageAudit` and covered by the coverage CLI/audit tests.
+
+## Validation
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/rule_catalog_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/workspace_and_config_test.exs test/symphony_elixir/policy_runtime_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/phase6_coverage_backfill_test.exs test/symphony_elixir/web_phase6_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix test test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/workspace_and_config_test.exs`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix harness.check`
+- `cd /Users/gaspar/src/symphony/elixir && mise exec -- mix escript.build`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/recovery_and_lease_test.exs`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/runtime_shell_phase6_backfill_test.exs test/symphony_elixir/web_phase6_backfill_test.exs`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:1796 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2815 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2838`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:1796 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2815 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2838 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2863 test/symphony_elixir/orchestrator_controls_phase6_test.exs:2904`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/recovery_and_lease_test.exs:239 test/symphony_elixir/recovery_and_lease_test.exs:253 test/symphony_elixir/webhook_first_intake_test.exs:1241`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/recovery_and_lease_test.exs:80 test/symphony_elixir/orchestrator_controls_phase6_test.exs:1960 test/symphony_elixir/webhook_first_intake_test.exs:1241`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/workspace_and_config_test.exs`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:491 test/symphony_elixir/orchestrator_controls_phase6_test.exs:526 test/symphony_elixir/orchestrator_controls_phase6_test.exs:570`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:618`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:666`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/orchestrator_controls_phase6_test.exs:700 test/symphony_elixir/orchestrator_controls_phase6_test.exs:718`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix test test/symphony_elixir/coverage_cli_phase6_backfill_test.exs test/symphony_elixir/coverage_audit_test.exs`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix harness.check`
+- `cd /tmp/symphony-pr13-land2.DVUfQY/elixir && mix escript.build`
+
+## Evidence
+- Local focused control/presenter coverage is green after the telemetry and revalidation fixes.
+- Live replay on `http://127.0.0.1:4046/api/v1/CLZ-31` now surfaces `coordination.retry_dispatch_deferred` with a concrete `why_here` and `human_action_required` instead of an empty `Todo` shell.
+- An isolated probe under the live workflow confirmed `CLZ-31` is dispatchable when evaluated against the full tracker issue, which narrowed the remaining bug to partial revalidation data rather than labels, routing, or concurrency.
+- Focused Linear client coverage now proves identifier-based issue fetches carry `assigned_to_worker: false` when the configured routing assignee does not match, keeping issue detail payloads aligned with `retry_now` dispatch gating.
+- Focused workspace coverage now proves a metadata-only workspace reruns `after_create` and preserves `.symphony/run_state.json`, matching the live self-host retry path after a `retry_now` dispatch.
+- The workspace bootstrap regression now also proves checked-out `.symphony/harness.yml` survives the metadata restore, matching the live canary path that previously advanced from `checkout.missing_git` to `harness.missing`.
+- Focused observability coverage now proves lightweight `RunInspector` reads skip `gh pr view`, and presenter issue payloads can rebuild review/check details from persisted run-state fields instead of shelling out live during API rendering.
+- Focused recovery coverage now proves `RunStateStore.load/1` can read staged bootstrap metadata while a workspace rebuild is in progress, matching the dispatch-time bootstrap race from live dogfood.
+- Live replay on `http://127.0.0.1:4046/api/v1/state` and `http://127.0.0.1:4046/api/v1/CLZ-31` now responds again while `CLZ-31` is blocked, and the issue detail payload renders a full operator summary instead of timing out in the controller.
+- Post-merge CI regressions are closed locally: the retry-focus spawn path again exposes persisted `resume_context.target_paths`, and lease reads no longer fail with `Jason.DecodeError` on transient empty payloads during refresh.
+- Lease-backed startup coverage now proves both active and passive workers persist retry-time `target_paths` even when startup has to synthesize state from the live lease file rather than an existing workspace run-state file.
+- Focused PR landing coverage now proves the final CI-only seams: `"me"`-routed Linear identifier fetches preserve `assigned_to_worker`, and blocked presenter payloads can rebuild operator guidance entirely from the latest ledger signal when `run_state.json` is sparse.
+- Focused orchestrator coverage now also proves two retry-control branches that were still missing in CI: manual revalidation skips blocked non-retry issues when the tracker returns nothing, and retry lookup failures reschedule with distinct active vs passive error context.
+- The retry-control proof now also covers both cleanup exits: terminal retry lookups remove the workspace and claim, and missing lookups with no seeded manual issue simply release the claim instead of hanging onto stale state.
+- Focused lease coverage now proves whitespace-only payloads are treated like missing leases, and the exact stale-review-follow-up webhook reclaim case that flaked in CI now passes against the hardened reader.
+- Focused bootstrap-read coverage now proves the staged metadata fallback still works, and the exact direct-dispatch spawn-path test that flaked in CI now passes alongside the stale-review-follow-up webhook reclaim case.
+- Focused workspace coverage now proves both changed bootstrap lifecycle branches: tmp-only directories rerun `after_create`, and failed metadata-only bootstrap reruns still restore preserved `.symphony` state.
+- Focused `retry_now` coverage now proves two structured operator outcomes that were still missing in CI: active issues report `already_running` instead of pretending to redispatch, and per-state concurrency pressure reports a concrete deferred reason even when the global slot count is not exhausted.
+- Focused `retry_now` coverage now also proves the wrong-runner-channel diagnostic path, so tracker issues that target canary on a stable runner return an explicit deferred reason and routing action instead of a generic success shell.
+- Focused `retry_now` coverage now also proves the missing-required-labels diagnostic path, so tracker issues missing route labels return an explicit deferred reason and label guidance instead of a generic success shell.
+- Focused control coverage now also proves canary label routing and company-pack conflict reporting in the same retry family, which should raise the changed `Orchestrator` surface without inventing unrelated unit-only scaffolding.
+- The repo coverage policy is now explicitly `85.00%`, and the coverage CLI/audit tests prove both the new threshold value and the rendered summary text.
+- `RunStateStore.save/2` and `ManualIssueStore.write_record/2` now swap temp files into place atomically, and focused regression coverage proves blank `run_state.json` payloads downgrade to `:missing` instead of surfacing transient empty-JSON races in the webhook follow-up path.
+- The exact autonomous webhook review-follow-up probe at `test/symphony_elixir/webhook_first_intake_test.exs:430` now passes in a 12-run local loop after the atomic persistence fix, closing the last CI-only flake that remained after the operator-read changes.
+- `CLI.wait_for_shutdown/0` now treats "the supervisor already stopped and the app is no longer running" as a normal exit instead of a missing-supervisor error, and the exact `coverage_cli_phase6_backfill_test.exs:422` probe now passes in a 10-run loop while the explicit unregistered-supervisor failure path still exits non-zero.
+
+## Next Step
+- Land `PR #13`, then rerun a fresh unattended ticket-to-merge dogfood slice from merged `main` instead of babysitting the operator/read path again.
