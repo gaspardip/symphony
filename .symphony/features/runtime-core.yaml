@@ -6,6 +6,7 @@ source_paths:
   - elixir/lib/symphony_elixir/delivery_engine.ex
   - elixir/lib/symphony_elixir/github_webhook_relay.ex
   - elixir/lib/symphony_elixir/lease_manager.ex
+  - elixir/lib/symphony_elixir/cli.ex
   - elixir/lib/symphony_elixir/manual_issue_store.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
   - elixir/lib/symphony_elixir/run_policy.ex
@@ -84,6 +85,7 @@ acceptance_signals:
   - Post-merge dispatch startup keeps persisted retry `resume_context` focus when operator-read fixes seed or reload workspace state, so retry-time `target_paths` and `already_learned` survive into the next running entry instead of disappearing at spawn
   - Lease-backed dispatch startup also persists that merged retry `resume_context` back into workspace state, so retries seeded from the live lease file keep their `target_paths` and `already_learned` continuity after the worker starts instead of only exposing it in-memory
   - `RunStateStore.save/2` and `ManualIssueStore.write_record/2` now replace files atomically, so webhook-driven review follow-up does not intermittently observe empty JSON while persisted run state and manual issue records are being rewritten
+  - CLI shutdown waits now treat "the supervisor already stopped and the app is no longer running" as a normal completion, so repo-owned CLI smoke paths do not randomly exit `1` when a clean shutdown wins the monitor race
   - Lease refresh and retry-dispatch reads tolerate transient blank lease payloads because lease writes now swap temp files into place atomically instead of exposing partially written JSON
   - Replay refresh drains GitHub inbox work even when runner metadata disables normal tracker dispatch
   - Seeded manual continuation retries can reuse the persisted issue envelope and workspace branch identity so local stable-ingress replays survive the `review_verification` to `implement` handoff

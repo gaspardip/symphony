@@ -276,8 +276,12 @@ defmodule SymphonyElixir.CLI do
   defp wait_for_shutdown do
     case wait_for_shutdown_result(SymphonyElixir.Supervisor, nil) do
       {:error, :not_running} ->
-        IO.puts(:stderr, "Symphony supervisor is not running")
-        System.halt(1)
+        if symphony_application_running?() do
+          IO.puts(:stderr, "Symphony supervisor is not running")
+          System.halt(1)
+        else
+          System.halt(0)
+        end
 
       {:ok, :normal} ->
         System.halt(0)
@@ -308,4 +312,11 @@ defmodule SymphonyElixir.CLI do
 
   defp supervisor_pid(supervisor) when is_pid(supervisor), do: supervisor
   defp supervisor_pid(supervisor), do: Process.whereis(supervisor)
+
+  defp symphony_application_running? do
+    Enum.any?(Application.started_applications(), fn
+      {:symphony_elixir, _, _} -> true
+      _ -> false
+    end)
+  end
 end
