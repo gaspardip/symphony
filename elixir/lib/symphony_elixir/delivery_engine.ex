@@ -76,6 +76,8 @@ defmodule SymphonyElixir.DeliveryEngine do
     else
       Logger.info("Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}")
 
+      trim_auto_loaded_context(workspace)
+
       with {:ok, app_session} <- AppServer.start_session(workspace) do
         Logger.info("Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}")
 
@@ -90,6 +92,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             opts
           )
         after
+          restore_auto_loaded_context(workspace)
           AppServer.stop_session(app_session)
         end
       else
@@ -119,6 +122,14 @@ defmodule SymphonyElixir.DeliveryEngine do
   @doc false
   @spec retryable_implementation_error_for_test(term()) :: boolean()
   def retryable_implementation_error_for_test(reason), do: retryable_implementation_error?(reason)
+
+  @doc false
+  @spec trim_auto_loaded_context_for_test(Path.t()) :: :ok
+  def trim_auto_loaded_context_for_test(workspace), do: trim_auto_loaded_context(workspace)
+
+  @doc false
+  @spec restore_auto_loaded_context_for_test(Path.t()) :: :ok
+  def restore_auto_loaded_context_for_test(workspace), do: restore_auto_loaded_context(workspace)
 
   @doc false
   @spec non_retryable_implementation_error_for_test(term()) :: boolean()
@@ -4960,5 +4971,67 @@ defmodule SymphonyElixir.DeliveryEngine do
       _ ->
         false
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Auto-loaded context trimming
+  #
+  # Codex auto-loads SPEC.md (the repo spec) into every turn's context window.
+  # A 77 KB spec consumes ~19K tokens of the per-turn budget before the agent
+  # reads a single file.  To keep the budget viable we swap the full spec for a
+  # lightweight summary before the session starts and restore the original after.
+  # ---------------------------------------------------------------------------
+
+  @spec_trimmed_marker ".symphony/runtime/.spec_trimmed"
+  @spec_backup_name "SPEC_FULL.md"
+  @spec_max_auto_load_bytes 8_192
+  @spec_summary_lines 60
+
+  defp trim_auto_loaded_context(workspace) when is_binary(workspace) do
+    spec_path = Path.join(workspace, "SPEC.md")
+    backup_path = Path.join(workspace, @spec_backup_name)
+    marker_path = Path.join(workspace, @spec_trimmed_marker)
+
+    with {:ok, content} <- File.read(spec_path),
+         true <- byte_size(content) > @spec_max_auto_load_bytes,
+         false <- File.exists?(backup_path) do
+      summary = build_spec_summary(content)
+      File.rename!(spec_path, backup_path)
+      File.write!(spec_path, summary)
+      File.mkdir_p!(Path.dirname(marker_path))
+      File.write!(marker_path, "trimmed")
+
+      Logger.info(
+        "Trimmed SPEC.md from #{byte_size(content)} to #{byte_size(summary)} bytes for Codex session"
+      )
+    else
+      _ -> :ok
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to trim auto-loaded context: #{Exception.message(error)}")
+  end
+
+  defp restore_auto_loaded_context(workspace) when is_binary(workspace) do
+    spec_path = Path.join(workspace, "SPEC.md")
+    backup_path = Path.join(workspace, @spec_backup_name)
+    marker_path = Path.join(workspace, @spec_trimmed_marker)
+
+    if File.exists?(marker_path) and File.exists?(backup_path) do
+      File.rename!(backup_path, spec_path)
+      File.rm(marker_path)
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to restore auto-loaded context: #{Exception.message(error)}")
+  end
+
+  defp build_spec_summary(content) when is_binary(content) do
+    lines = String.split(content, ~r/\r?\n/)
+    header = Enum.take(lines, @spec_summary_lines) |> Enum.join("\n")
+
+    header <>
+      "\n\n---\n_This summary was auto-trimmed by the Symphony runner. " <>
+      "The full specification is available at `#{@spec_backup_name}`._\n"
   end
 end

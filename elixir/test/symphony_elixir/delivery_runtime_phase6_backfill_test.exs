@@ -1545,4 +1545,54 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
   defp unique_issue_id(prefix) do
     "#{prefix}-#{System.unique_integer([:positive])}"
   end
+
+  describe "auto-loaded context trimming" do
+    test "trim_auto_loaded_context swaps large SPEC.md with a summary" do
+      workspace = Path.join(System.tmp_dir!(), "context-trim-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf!(workspace) end)
+
+      # Create a SPEC.md larger than the threshold (8 KB)
+      large_content =
+        Enum.map_join(1..300, "\n", fn i -> "## Section #{i}\n\nDetailed content for section #{i} with enough text." end)
+
+      spec_path = Path.join(workspace, "SPEC.md")
+      File.write!(spec_path, large_content)
+
+      assert byte_size(large_content) > 8_192
+
+      DeliveryEngine.trim_auto_loaded_context_for_test(workspace)
+
+      # SPEC.md should now be trimmed
+      trimmed = File.read!(spec_path)
+      assert byte_size(trimmed) < byte_size(large_content)
+      assert trimmed =~ "auto-trimmed by the Symphony runner"
+      assert trimmed =~ "SPEC_FULL.md"
+
+      # Backup should exist
+      assert File.exists?(Path.join(workspace, "SPEC_FULL.md"))
+      assert File.read!(Path.join(workspace, "SPEC_FULL.md")) == large_content
+
+      # Restore should bring back the original
+      DeliveryEngine.restore_auto_loaded_context_for_test(workspace)
+      assert File.read!(spec_path) == large_content
+      refute File.exists?(Path.join(workspace, "SPEC_FULL.md"))
+    end
+
+    test "trim_auto_loaded_context skips small SPEC.md files" do
+      workspace = Path.join(System.tmp_dir!(), "context-trim-small-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf!(workspace) end)
+
+      small_content = "# SPEC\n\nSmall spec."
+      spec_path = Path.join(workspace, "SPEC.md")
+      File.write!(spec_path, small_content)
+
+      DeliveryEngine.trim_auto_loaded_context_for_test(workspace)
+
+      # Should be unchanged
+      assert File.read!(spec_path) == small_content
+      refute File.exists?(Path.join(workspace, "SPEC_FULL.md"))
+    end
+  end
 end
