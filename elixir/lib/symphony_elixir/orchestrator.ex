@@ -8042,17 +8042,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp live_worker_pid_in_run_state?(_run_state), do: false
 
   defp decode_worker_pid(pid_string) when is_binary(pid_string) do
-    try do
-      pid = pid_string |> String.to_charlist() |> :erlang.list_to_pid()
+    pid = pid_string |> String.to_charlist() |> :erlang.list_to_pid()
 
-      if Process.alive?(pid) do
-        {:ok, pid}
-      else
-        {:error, :dead}
-      end
-    rescue
-      ArgumentError -> {:error, :invalid}
+    if Process.alive?(pid) do
+      {:ok, pid}
+    else
+      {:error, :dead}
     end
+  rescue
+    ArgumentError -> {:error, :invalid}
   end
 
   defp encode_worker_pid(pid) when is_pid(pid) do

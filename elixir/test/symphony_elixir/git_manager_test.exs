@@ -15,7 +15,7 @@ defmodule SymphonyElixir.GitManagerTest do
     harness = %{base_branch: "gaspar/harness-engineering"}
 
     command_runner = fn
-      "git", ["fetch", "origin", "--prune", "gaspar/harness-engineering:refs/remotes/origin/gaspar/harness-engineering"], _opts ->
+      "git", ["fetch", "origin", "gaspar/harness-engineering:refs/remotes/origin/gaspar/harness-engineering"], _opts ->
         {"", 0}
 
       "git", ["checkout", "-f", "gaspar/harness-engineering"], _opts ->
@@ -45,7 +45,7 @@ defmodule SymphonyElixir.GitManagerTest do
     parent = self()
 
     command_runner = fn
-      "git", ["fetch", "origin", "--prune", "main:refs/remotes/origin/main"], _opts ->
+      "git", ["fetch", "origin", "main:refs/remotes/origin/main"], _opts ->
         {"", 0}
 
       "git", ["checkout", "symphony/evt-lock-01"], _opts ->

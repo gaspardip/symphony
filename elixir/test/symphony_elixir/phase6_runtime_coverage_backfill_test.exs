@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Phase6RuntimeCoverageBackfillTest do
     File.mkdir_p!(Path.join(workspace, ".git"))
 
     existing_branch_runner = fn
-      "git", ["fetch", "origin", "--prune", "develop"], _opts -> {"", 0}
+      "git", ["fetch", "origin", "develop"], _opts -> {"", 0}
       "git", ["checkout", "feature/phase-6"], _opts -> {"", 0}
       "git", ["reset", "--hard", "origin/develop"], _opts -> {"", 0}
       "git", ["config", "branch.feature/phase-6.symphony-base-branch", "develop"], _opts -> {"", 0}
@@ -25,7 +25,7 @@ defmodule SymphonyElixir.Phase6RuntimeCoverageBackfillTest do
              )
 
     new_branch_runner = fn
-      "git", ["fetch", "origin", "--prune", "main"], _opts -> {"", 0}
+      "git", ["fetch", "origin", "main"], _opts -> {"", 0}
       "git", ["checkout", "symphony/mt-611"], _opts -> {"missing", 1}
       "git", ["checkout", "-B", "symphony/mt-611", "origin/main"], _opts -> {"", 0}
       "git", ["config", "branch.symphony/mt-611.symphony-base-branch", "main"], _opts -> {"", 0}
@@ -169,7 +169,7 @@ defmodule SymphonyElixir.Phase6RuntimeCoverageBackfillTest do
              GitManager.push_branch(workspace, "symphony/mt-616")
 
     reset_runner = fn
-      "git", ["fetch", "origin", "--prune", "main"], _opts -> {"", 0}
+      "git", ["fetch", "origin", "main"], _opts -> {"", 0}
       "git", ["checkout", "-f", "main"], _opts -> {"", 0}
       "git", ["reset", "--hard", "origin/main"], _opts -> {"", 0}
       command, args, _opts -> raise "unexpected git call: #{command} #{inspect(args)}"
