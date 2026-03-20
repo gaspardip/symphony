@@ -4976,36 +4976,32 @@ defmodule SymphonyElixir.DeliveryEngine do
   # ---------------------------------------------------------------------------
   # Auto-loaded context trimming
   #
-  # Codex auto-loads SPEC.md (the repo spec) into every turn's context window.
-  # A 77 KB spec consumes ~19K tokens of the per-turn budget before the agent
-  # reads a single file.  To keep the budget viable we swap the full spec for a
-  # lightweight summary before the session starts and restore the original after.
+  # Agent CLIs auto-load certain root files into every turn's context window:
+  #   - Codex: SPEC.md
+  #   - Claude Code: CLAUDE.md
+  #
+  # A 77 KB spec eats ~19K tokens of the per-turn budget before the agent reads
+  # a single file.  We swap oversized auto-loaded files for lightweight summaries
+  # before the session starts and restore the originals after.  This works for
+  # any repo — no per-project config needed.
   # ---------------------------------------------------------------------------
 
-  @spec_trimmed_marker ".symphony/runtime/.spec_trimmed"
-  @spec_backup_name "SPEC_FULL.md"
-  @spec_max_auto_load_bytes 8_192
-  @spec_summary_lines 60
+  @auto_loaded_files ["SPEC.md", "CLAUDE.md"]
+  @auto_load_max_bytes 8_192
+  @auto_load_summary_lines 60
+  @auto_load_marker ".symphony/runtime/.context_trimmed"
 
   defp trim_auto_loaded_context(workspace) when is_binary(workspace) do
-    spec_path = Path.join(workspace, "SPEC.md")
-    backup_path = Path.join(workspace, @spec_backup_name)
-    marker_path = Path.join(workspace, @spec_trimmed_marker)
+    trimmed =
+      @auto_loaded_files
+      |> Enum.filter(&auto_load_file_oversized?(workspace, &1))
+      |> Enum.map(&trim_auto_loaded_file(workspace, &1))
+      |> Enum.reject(&is_nil/1)
 
-    with {:ok, content} <- File.read(spec_path),
-         true <- byte_size(content) > @spec_max_auto_load_bytes,
-         false <- File.exists?(backup_path) do
-      summary = build_spec_summary(content)
-      File.rename!(spec_path, backup_path)
-      File.write!(spec_path, summary)
+    if trimmed != [] do
+      marker_path = Path.join(workspace, @auto_load_marker)
       File.mkdir_p!(Path.dirname(marker_path))
-      File.write!(marker_path, "trimmed")
-
-      Logger.info(
-        "Trimmed SPEC.md from #{byte_size(content)} to #{byte_size(summary)} bytes for Codex session"
-      )
-    else
-      _ -> :ok
+      File.write!(marker_path, Enum.join(trimmed, "\n"))
     end
   rescue
     error ->
@@ -5013,12 +5009,14 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp restore_auto_loaded_context(workspace) when is_binary(workspace) do
-    spec_path = Path.join(workspace, "SPEC.md")
-    backup_path = Path.join(workspace, @spec_backup_name)
-    marker_path = Path.join(workspace, @spec_trimmed_marker)
+    marker_path = Path.join(workspace, @auto_load_marker)
 
-    if File.exists?(marker_path) and File.exists?(backup_path) do
-      File.rename!(backup_path, spec_path)
+    if File.exists?(marker_path) do
+      marker_path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.each(&restore_auto_loaded_file(workspace, &1))
+
       File.rm(marker_path)
     end
   rescue
@@ -5026,12 +5024,55 @@ defmodule SymphonyElixir.DeliveryEngine do
       Logger.warning("Failed to restore auto-loaded context: #{Exception.message(error)}")
   end
 
-  defp build_spec_summary(content) when is_binary(content) do
+  defp auto_load_file_oversized?(workspace, filename) do
+    path = Path.join(workspace, filename)
+    backup = Path.join(workspace, auto_load_backup_name(filename))
+
+    File.exists?(path) and not File.exists?(backup) and
+      match?({:ok, %{size: size}} when size > @auto_load_max_bytes, File.stat(path))
+  end
+
+  defp trim_auto_loaded_file(workspace, filename) do
+    path = Path.join(workspace, filename)
+    backup = Path.join(workspace, auto_load_backup_name(filename))
+
+    with {:ok, content} <- File.read(path) do
+      summary = build_context_summary(content, filename)
+      File.rename!(path, backup)
+      File.write!(path, summary)
+
+      Logger.info(
+        "Trimmed #{filename} from #{byte_size(content)} to #{byte_size(summary)} bytes for agent session"
+      )
+
+      filename
+    else
+      _ -> nil
+    end
+  end
+
+  defp restore_auto_loaded_file(workspace, filename) do
+    path = Path.join(workspace, filename)
+    backup = Path.join(workspace, auto_load_backup_name(filename))
+
+    if File.exists?(backup) do
+      File.rename!(backup, path)
+    end
+  end
+
+  defp auto_load_backup_name(filename) do
+    ext = Path.extname(filename)
+    base = Path.basename(filename, ext)
+    "#{base}_FULL#{ext}"
+  end
+
+  defp build_context_summary(content, filename) when is_binary(content) do
     lines = String.split(content, ~r/\r?\n/)
-    header = Enum.take(lines, @spec_summary_lines) |> Enum.join("\n")
+    header = lines |> Enum.take(@auto_load_summary_lines) |> Enum.join("\n")
+    backup = auto_load_backup_name(filename)
 
     header <>
-      "\n\n---\n_This summary was auto-trimmed by the Symphony runner. " <>
-      "The full specification is available at `#{@spec_backup_name}`._\n"
+      "\n\n---\n_This file was auto-trimmed by the Symphony runner to reduce context cost. " <>
+      "The full version is at `#{backup}`._\n"
   end
 end
