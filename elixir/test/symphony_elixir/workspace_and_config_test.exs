@@ -133,7 +133,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.runner_instance_id() == "experimental:dogfood-runner"
   end
 
-  test "config exposes normalized runner channel and instance identity" do
+  test "config exposes normalized runner channel and instance identity with env indirection" do
     previous_channel = System.get_env("SYMPHONY_RUNNER_CHANNEL")
 
     on_exit(fn ->
