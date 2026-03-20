@@ -53,6 +53,7 @@ runner:
   channel: canary
   self_host_project: true
 codex:
+  stall_timeout_ms: 900000
   command: codex --model gpt-5.4 app-server
   reasoning:
     stages:

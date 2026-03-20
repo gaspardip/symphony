@@ -5041,9 +5041,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       File.write!(backup, content)
       File.write!(path, summary)
 
-      Logger.info(
-        "Trimmed #{filename} from #{byte_size(content)} to #{byte_size(summary)} bytes for agent session"
-      )
+      Logger.info("Trimmed #{filename} from #{byte_size(content)} to #{byte_size(summary)} bytes for agent session")
 
       filename
     else

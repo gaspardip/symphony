@@ -286,7 +286,6 @@ defmodule SymphonyElixir.RunPolicy do
   defp workspace_has_code_changes?(_workspace), do: false
 
   defp do_maybe_stop_for_token_budget(issue, running_entry, token_budget, review_fix_budget, broad_implement_budget, workspace) do
-
     run_state = RunStateStore.load_or_default(workspace, issue)
     stage_budget = current_stage_token_budget(issue, running_entry, workspace, run_state)
     total_budget = current_total_token_budget(token_budget, issue, running_entry, run_state)

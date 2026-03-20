@@ -3710,9 +3710,7 @@ defmodule SymphonyElixir.Orchestrator do
               do: manual_retry_issue_fallback(metadata),
               else: metadata[:issue]
 
-          Logger.info(
-            "Resuming without tracker fetch for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}"
-          )
+          Logger.info("Resuming without tracker fetch for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}")
 
           handle_retry_issue_lookup(bypass_issue, state, issue_id, attempt, metadata)
         else
@@ -3753,16 +3751,12 @@ defmodule SymphonyElixir.Orchestrator do
       metadata[:resume_persisted_issue?] == true ->
         case manual_retry_issue_fallback(metadata) do
           %Issue{} = persisted_issue ->
-            Logger.info(
-              "Retry lookup saw stale tracker state for issue_id=#{issue_id} issue_identifier=#{issue.identifier}; resuming from persisted active run state"
-            )
+            Logger.info("Retry lookup saw stale tracker state for issue_id=#{issue_id} issue_identifier=#{issue.identifier}; resuming from persisted active run state")
 
             handle_active_retry(state, persisted_issue, attempt, metadata)
 
           nil ->
-            Logger.debug(
-              "Issue left active states without persisted recovery data, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}"
-            )
+            Logger.debug("Issue left active states without persisted recovery data, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
             {:noreply, release_issue_claim(state, issue_id)}
         end
@@ -7733,9 +7727,7 @@ defmodule SymphonyElixir.Orchestrator do
          false <- Map.has_key?(state.retry_attempts, issue_id),
          true <- orphaned_active_retry_run_state?(run_state),
          %Issue{} = issue <- issue_for_run_state(run_state) || recovered_issue_from_run_state(run_state) do
-      Logger.info(
-        "Seeding orphaned active retry for issue_id=#{issue_id} issue_identifier=#{issue.identifier} stage=#{Map.get(run_state, :stage)}"
-      )
+      Logger.info("Seeding orphaned active retry for issue_id=#{issue_id} issue_identifier=#{issue.identifier} stage=#{Map.get(run_state, :stage)}")
 
       RunLedger.record("runtime.recovery_scheduled", %{
         issue_id: issue.id,
@@ -8076,7 +8068,6 @@ defmodule SymphonyElixir.Orchestrator do
   defp workspace_for_running_entry(running_entry, identifier) when is_map(running_entry) do
     workspace_for_running_entry(running_entry) || Workspace.path_for_issue(identifier)
   end
-
 
   defp recovered_issue_from_run_state(run_state) when is_map(run_state) do
     source = normalize_issue_source(Map.get(run_state, :issue_source))
