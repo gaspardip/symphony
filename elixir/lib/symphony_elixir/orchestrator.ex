@@ -327,9 +327,16 @@ defmodule SymphonyElixir.Orchestrator do
                 budget_resume_context: Map.get(metadata, :resume_context)
               })
 
-            {:normal, {:stop, _violation}} ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; recorded token-budget stop")
-              release_issue_claim(state, issue_id)
+            {:normal, {:stop, _violation}} when reason == :normal ->
+              workspace = workspace_for_running_entry(running_entry, running_entry.identifier)
+
+              if workspace_has_pending_changes?(workspace) do
+                Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; budget stop overridden — workspace has pending changes, continuing to validation")
+                complete_issue(state, issue_id)
+              else
+                Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; recorded token-budget stop")
+                release_issue_claim(state, issue_id)
+              end
 
             {:normal, :ok} ->
               continuation = continuation_metadata_for_running_entry(running_entry)
@@ -8076,6 +8083,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp workspace_for_running_entry(running_entry, identifier) when is_map(running_entry) do
     workspace_for_running_entry(running_entry) || Workspace.path_for_issue(identifier)
   end
+
+  defp workspace_has_pending_changes?(workspace) when is_binary(workspace) do
+    case RunInspector.changed_paths(workspace) do
+      paths when is_list(paths) and paths != [] -> true
+      _ -> false
+    end
+  end
+
+  defp workspace_has_pending_changes?(_workspace), do: false
 
   defp recovered_issue_from_run_state(run_state) when is_map(run_state) do
     source = normalize_issue_source(Map.get(run_state, :issue_source))
