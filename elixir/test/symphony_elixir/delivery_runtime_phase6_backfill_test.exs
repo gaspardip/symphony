@@ -1564,13 +1564,13 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
       trimmed = File.read!(spec_path)
       assert byte_size(trimmed) < byte_size(large_content)
       assert trimmed =~ "auto-trimmed by the Symphony runner"
-      assert trimmed =~ "SPEC_FULL.md"
-      assert File.exists?(Path.join(workspace, "SPEC_FULL.md"))
-      assert File.read!(Path.join(workspace, "SPEC_FULL.md")) == large_content
+      assert trimmed =~ ".symphony/runtime/context_backups/SPEC.md"
+      assert File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
+      assert File.read!(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md")) == large_content
 
       DeliveryEngine.restore_auto_loaded_context_for_test(workspace)
       assert File.read!(spec_path) == large_content
-      refute File.exists?(Path.join(workspace, "SPEC_FULL.md"))
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
     end
 
     test "trims large CLAUDE.md the same way" do
@@ -1589,12 +1589,12 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
 
       trimmed = File.read!(claude_path)
       assert byte_size(trimmed) < byte_size(large_content)
-      assert trimmed =~ "CLAUDE_FULL.md"
-      assert File.exists?(Path.join(workspace, "CLAUDE_FULL.md"))
+      assert trimmed =~ ".symphony/runtime/context_backups/CLAUDE.md"
+      assert File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/CLAUDE.md"))
 
       DeliveryEngine.restore_auto_loaded_context_for_test(workspace)
       assert File.read!(claude_path) == large_content
-      refute File.exists?(Path.join(workspace, "CLAUDE_FULL.md"))
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/CLAUDE.md"))
     end
 
     test "trims both SPEC.md and CLAUDE.md when both are oversized" do
@@ -1609,14 +1609,14 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
 
       DeliveryEngine.trim_auto_loaded_context_for_test(workspace)
 
-      assert File.exists?(Path.join(workspace, "SPEC_FULL.md"))
-      assert File.exists?(Path.join(workspace, "CLAUDE_FULL.md"))
+      assert File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
+      assert File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/CLAUDE.md"))
       assert byte_size(File.read!(Path.join(workspace, "SPEC.md"))) < byte_size(large)
       assert byte_size(File.read!(Path.join(workspace, "CLAUDE.md"))) < byte_size(large)
 
       DeliveryEngine.restore_auto_loaded_context_for_test(workspace)
-      refute File.exists?(Path.join(workspace, "SPEC_FULL.md"))
-      refute File.exists?(Path.join(workspace, "CLAUDE_FULL.md"))
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/CLAUDE.md"))
       assert File.read!(Path.join(workspace, "SPEC.md")) == large
       assert File.read!(Path.join(workspace, "CLAUDE.md")) == large
     end
@@ -1632,7 +1632,7 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
       DeliveryEngine.trim_auto_loaded_context_for_test(workspace)
 
       assert File.read!(Path.join(workspace, "SPEC.md")) == small_content
-      refute File.exists?(Path.join(workspace, "SPEC_FULL.md"))
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
     end
   end
 end

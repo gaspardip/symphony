@@ -561,6 +561,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          _inspection,
          opts
        ) do
+    Logger.debug("handle_implement: entered for #{issue.identifier}")
     state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
 
     preflight_review_claims =
@@ -596,9 +597,12 @@ defmodule SymphonyElixir.DeliveryEngine do
         state
       end
 
+    Logger.debug("handle_implement: review claims done for #{issue.identifier}")
     implementation_turns = Map.get(state, :implementation_turns, 0)
     effective_implementation_turns = effective_implementation_turns(state)
+    Logger.debug("handle_implement: taking before_snapshot for #{issue.identifier}")
     before_snapshot = RunInspector.inspect(workspace, opts)
+    Logger.debug("handle_implement: before_snapshot done for #{issue.identifier}")
 
     focused_claims =
       focused_review_claims(
@@ -606,8 +610,10 @@ defmodule SymphonyElixir.DeliveryEngine do
         focused_review_claim_limit(state)
       )
 
+    Logger.debug("handle_implement: checking cond branches for #{issue.identifier} impl_turns=#{effective_implementation_turns} max=#{max_turns}")
     cond do
       should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot) ->
+        Logger.debug("handle_implement: resuming validation from retained changes for #{issue.identifier}")
         {:ok, _state} =
           RunStateStore.transition(
             workspace,
@@ -644,6 +650,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         )
 
       true ->
+        Logger.debug("handle_implement: building prompt for #{issue.identifier}")
         prompt =
           implement_prompt(
             issue,
@@ -5026,7 +5033,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp auto_load_file_oversized?(workspace, filename) do
     path = Path.join(workspace, filename)
-    backup = Path.join(workspace, auto_load_backup_name(filename))
+    backup = auto_load_backup_path(workspace, filename)
 
     File.exists?(path) and not File.exists?(backup) and
       match?({:ok, %{size: size}} when size > @auto_load_max_bytes, File.stat(path))
@@ -5034,11 +5041,12 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp trim_auto_loaded_file(workspace, filename) do
     path = Path.join(workspace, filename)
-    backup = Path.join(workspace, auto_load_backup_name(filename))
+    backup = auto_load_backup_path(workspace, filename)
 
     with {:ok, content} <- File.read(path) do
       summary = build_context_summary(content, filename)
-      File.rename!(path, backup)
+      File.mkdir_p!(Path.dirname(backup))
+      File.write!(backup, content)
       File.write!(path, summary)
 
       Logger.info(
@@ -5053,26 +5061,24 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp restore_auto_loaded_file(workspace, filename) do
     path = Path.join(workspace, filename)
-    backup = Path.join(workspace, auto_load_backup_name(filename))
+    backup = auto_load_backup_path(workspace, filename)
 
     if File.exists?(backup) do
-      File.rename!(backup, path)
+      File.write!(path, File.read!(backup))
+      File.rm!(backup)
     end
   end
 
-  defp auto_load_backup_name(filename) do
-    ext = Path.extname(filename)
-    base = Path.basename(filename, ext)
-    "#{base}_FULL#{ext}"
+  defp auto_load_backup_path(workspace, filename) do
+    Path.join([workspace, ".symphony", "runtime", "context_backups", filename])
   end
 
   defp build_context_summary(content, filename) when is_binary(content) do
     lines = String.split(content, ~r/\r?\n/)
     header = lines |> Enum.take(@auto_load_summary_lines) |> Enum.join("\n")
-    backup = auto_load_backup_name(filename)
 
     header <>
       "\n\n---\n_This file was auto-trimmed by the Symphony runner to reduce context cost. " <>
-      "The full version is at `#{backup}`._\n"
+      "The full version is at `.symphony/runtime/context_backups/#{filename}`._\n"
   end
 end
