@@ -2830,6 +2830,8 @@ defmodule SymphonyElixir.Orchestrator do
       |> terminate_running_issue(issue_id, false)
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
+        issue: running_entry.issue,
+        delay_type: :continuation,
         error: "stalled for #{elapsed_ms}ms without codex activity"
       })
     else
@@ -3698,17 +3700,18 @@ defmodule SymphonyElixir.Orchestrator do
 
       _ ->
         if metadata[:resume_persisted_issue?] == true or
-             (metadata[:budget_retry] == true and is_struct(metadata[:issue], Issue)) do
-          # Bypass tracker fetch when:
-          # - orphaned active recovery (persisted run_state is authoritative)
-          # - budget retry (the issue was already validated at dispatch time)
+             is_struct(metadata[:issue], Issue) do
+          # Bypass tracker fetch when a validated issue is already in metadata:
+          # - orphaned active recovery (persisted run_state)
+          # - budget retry (issue validated at dispatch time)
+          # - stall retry (issue was running moments ago)
           bypass_issue =
             if metadata[:resume_persisted_issue?],
               do: manual_retry_issue_fallback(metadata),
               else: metadata[:issue]
 
           Logger.info(
-            "Resuming without tracker fetch for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id} reason=#{if metadata[:budget_retry], do: "budget_retry", else: "persisted_active"}"
+            "Resuming without tracker fetch for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}"
           )
 
           handle_retry_issue_lookup(bypass_issue, state, issue_id, attempt, metadata)
@@ -3825,9 +3828,9 @@ defmodule SymphonyElixir.Orchestrator do
           metadata[:delay_type] == :passive_continuation ->
             &dispatch_passive_issue/3
 
-          metadata[:resume_persisted_issue?] == true or metadata[:budget_retry] == true ->
-            # Skip revalidation for recovery/budget retries — the issue was
-            # already validated at original dispatch time.
+          metadata[:resume_persisted_issue?] == true or is_struct(metadata[:issue], Issue) ->
+            # Skip revalidation when the retry carries a validated issue
+            # (recovery, budget, or stall retries).
             &do_dispatch_issue/3
 
           true ->
