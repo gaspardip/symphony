@@ -265,6 +265,28 @@ defmodule SymphonyElixir.RunPolicy do
       Map.get(running_entry, :workspace_path) ||
         Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
 
+    # If the agent produced code changes, skip the budget stop and let the
+    # delivery engine proceed to validation.  The changes exist and need to
+    # be validated, not discarded.
+    if workspace_has_code_changes?(workspace) do
+      Logger.info("Budget check skipped for #{Map.get(issue, :identifier)} — workspace has pending code changes")
+      :ok
+    else
+      do_maybe_stop_for_token_budget(issue, running_entry, token_budget, review_fix_budget, broad_implement_budget, workspace)
+    end
+  end
+
+  defp workspace_has_code_changes?(workspace) when is_binary(workspace) do
+    case RunInspector.changed_paths(workspace) do
+      paths when is_list(paths) and paths != [] -> true
+      _ -> false
+    end
+  end
+
+  defp workspace_has_code_changes?(_workspace), do: false
+
+  defp do_maybe_stop_for_token_budget(issue, running_entry, token_budget, review_fix_budget, broad_implement_budget, workspace) do
+
     run_state = RunStateStore.load_or_default(workspace, issue)
     stage_budget = current_stage_token_budget(issue, running_entry, workspace, run_state)
     total_budget = current_total_token_budget(token_budget, issue, running_entry, run_state)

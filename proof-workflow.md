@@ -22,8 +22,8 @@ workspace:
 hooks:
   after_create: |
     git clone --no-single-branch https://github.com/gaspardip/symphony .
-    git fetch origin main:refs/remotes/origin/main
-    git branch --set-upstream-to=origin/main main
+    git update-ref refs/remotes/origin/main "$(git rev-parse HEAD)"
+    touch .hook_ran_marker
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
