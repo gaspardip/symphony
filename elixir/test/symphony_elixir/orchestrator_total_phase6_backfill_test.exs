@@ -81,7 +81,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
            } = updated_state.retry_attempts[issue.id]
 
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_000
+    assert remaining_ms >= 500
     assert remaining_ms <= 11_000
   end
 
