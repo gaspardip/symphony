@@ -558,7 +558,6 @@ defmodule SymphonyElixir.DeliveryEngine do
          _inspection,
          opts
        ) do
-    Logger.debug("handle_implement: entered for #{issue.identifier}")
     state = maybe_persist_reconciled_review_feedback(state, workspace, opts)
 
     preflight_review_claims =
@@ -594,12 +593,9 @@ defmodule SymphonyElixir.DeliveryEngine do
         state
       end
 
-    Logger.debug("handle_implement: review claims done for #{issue.identifier}")
     implementation_turns = Map.get(state, :implementation_turns, 0)
     effective_implementation_turns = effective_implementation_turns(state)
-    Logger.debug("handle_implement: taking before_snapshot for #{issue.identifier}")
     before_snapshot = RunInspector.inspect(workspace, opts)
-    Logger.debug("handle_implement: before_snapshot done for #{issue.identifier}")
 
     focused_claims =
       focused_review_claims(
@@ -607,10 +603,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         focused_review_claim_limit(state)
       )
 
-    Logger.debug("handle_implement: checking cond branches for #{issue.identifier} impl_turns=#{effective_implementation_turns} max=#{max_turns}")
     cond do
       should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot) ->
-        Logger.debug("handle_implement: resuming validation from retained changes for #{issue.identifier}")
         {:ok, _state} =
           RunStateStore.transition(
             workspace,
@@ -647,7 +641,6 @@ defmodule SymphonyElixir.DeliveryEngine do
         )
 
       true ->
-        Logger.debug("handle_implement: building prompt for #{issue.identifier}")
         prompt =
           implement_prompt(
             issue,

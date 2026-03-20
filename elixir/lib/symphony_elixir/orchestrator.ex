@@ -7021,6 +7021,7 @@ defmodule SymphonyElixir.Orchestrator do
         |> terminate_running_issue(issue_id, false)
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: Map.get(running_entry, :identifier) || issue_id,
+          issue: running_entry.issue,
           delay_type: :continuation,
           error: Map.get(metadata, :summary, "adaptive token retry"),
           budget_retry: true,
