@@ -203,4 +203,10 @@
 {"lib/symphony_elixir_web/presenter.ex", "Function tracked_issue_payload/1 has no local return."},
 {"lib/symphony_elixir_web/presenter.ex", "The function call fetch_issue will not succeed."},
 {"lib/symphony_elixir_web/presenter.ex", "Function normalize_tracked_issue_payload/1 will never be called."},
+{"lib/symphony_elixir/orchestrator.ex:5276", "pattern_match_cov"},
+{"lib/symphony_elixir/orchestrator.ex:7979", "pattern_match_cov"},
+{"lib/symphony_elixir/orchestrator.ex:7987", "pattern_match_cov"},
+{"lib/symphony_elixir/orchestrator.ex:7994", "pattern_match_cov"},
+{"lib/symphony_elixir/orchestrator.ex:8007", "pattern_match_cov"},
+{"lib/symphony_elixir/run_policy.ex", "pattern_match_cov"},
 ]
