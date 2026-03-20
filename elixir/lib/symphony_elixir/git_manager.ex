@@ -99,7 +99,7 @@ defmodule SymphonyElixir.GitManager do
     git_ok(
       command_runner,
       workspace,
-      ["fetch", "origin", "--prune", "#{base_branch}:refs/remotes/origin/#{base_branch}"]
+      ["fetch", "origin", "#{base_branch}:refs/remotes/origin/#{base_branch}"]
     )
   end
 
