@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "7262055276bc"
+  project_slug: "symphony-0c79b11b75ea"
   handoff_mode: assignee
   active_states:
     - Todo
@@ -15,15 +15,13 @@ tracker:
     - Duplicate
     - Done
 polling:
-  interval_ms: 30000
-  healing_interval_ms: 120000
+  interval_ms: 600000
+  healing_interval_ms: 1800000
 workspace:
-  root: /tmp/symphony-workspaces-mainproof-20260319
+  root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --no-single-branch https://github.com/gaspardip/symphony .
-    git fetch origin main:refs/remotes/origin/main
-    git branch --set-upstream-to=origin/main main
+    git clone --depth 1 https://github.com/openai/symphony .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
@@ -48,12 +46,7 @@ policy:
   token_budget:
     per_turn_input: 150000
     per_issue_total: 500000
-runner:
-  instance_name: symphony-mainproof
-  channel: canary
-  self_host_project: true
 codex:
-  stall_timeout_ms: 900000
   command: codex --model gpt-5.4 app-server
   reasoning:
     stages:
@@ -65,3 +58,24 @@ codex:
   turn_sandbox_policy:
     type: dangerFullAccess
 ---
+
+Ticket `{{ issue.identifier }}`.
+
+{% if attempt %}Retry attempt #{{ attempt }}. Resume from the existing workspace.{% endif %}
+
+- Title: {{ issue.title }}
+- Status: {{ issue.state }}
+- URL: {{ issue.url }}
+- Labels: {{ issue.labels }}
+
+{% if issue.description %}
+{{ issue.description }}
+{% else %}
+No description provided.
+{% endif %}
+
+Symphony owns branching, commits, PRs, checks, merges, and tracker state.
+Do not perform those steps yourself.
+Use the repo harness as the source of truth for validation and proof.
+Keep shell usage narrow and avoid large output.
+End each implementation turn by calling `report_agent_turn_result` exactly once.
