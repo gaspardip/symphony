@@ -4,10 +4,11 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, RunInspector, RunStateStore}
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
   @bootstrap_metadata_entries MapSet.new([".symphony"])
+  @runtime_metadata_entries MapSet.new([".symphony"])
 
   @spec create_for_issue(map() | String.t() | nil) :: {:ok, Path.t()} | {:error, term()}
   def create_for_issue(issue_or_identifier) do
@@ -33,6 +34,7 @@ defmodule SymphonyElixir.Workspace do
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
         Logger.error("Workspace creation failed #{issue_log_context(issue_context)} error=#{Exception.message(error)}")
+
         {:error, error}
     end
   end
@@ -50,8 +52,12 @@ defmodule SymphonyElixir.Workspace do
         prepare_bootstrap_workspace(workspace)
 
       File.dir?(workspace) ->
-        clean_tmp_artifacts(workspace)
-        {:ok, %{after_create?: false, preserved_metadata_dir: nil}}
+        if reset_required?(workspace) or checkout_repair_required?(workspace) do
+          create_workspace(workspace)
+        else
+          clean_tmp_artifacts(workspace)
+          {:ok, %{after_create?: false, preserved_metadata_dir: nil}}
+        end
 
       File.exists?(workspace) ->
         File.rm_rf!(workspace)
@@ -66,6 +72,35 @@ defmodule SymphonyElixir.Workspace do
     File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
     {:ok, %{after_create?: true, preserved_metadata_dir: nil}}
+  end
+
+  defp reset_required?(workspace) when is_binary(workspace) do
+    case RunStateStore.load(workspace) do
+      {:ok, run_state} ->
+        not RunStateStore.canonical_workspace_for_current_runtime?(workspace, run_state)
+
+      _ ->
+        false
+    end
+  end
+
+  defp checkout_repair_required?(workspace) do
+    Config.policy_require_checkout?() and
+      not RunInspector.inspect(workspace).git? and
+      stale_runtime_metadata_only?(workspace)
+  end
+
+  defp stale_runtime_metadata_only?(workspace) do
+    case File.ls(workspace) do
+      {:ok, entries} ->
+        entries
+        |> Enum.reject(&MapSet.member?(@excluded_entries, &1))
+        |> MapSet.new()
+        |> MapSet.equal?(@runtime_metadata_entries)
+
+      {:error, _reason} ->
+        false
+    end
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}

@@ -7,6 +7,7 @@ defmodule SymphonyElixir.RunStateStore do
   alias SymphonyElixir.RunLedger
   alias SymphonyElixir.RunnerRuntime
   alias SymphonyElixir.Config
+  alias SymphonyElixir.Workspace
 
   @relative_dir ".symphony"
   @filename "run_state.json"
@@ -245,6 +246,14 @@ defmodule SymphonyElixir.RunStateStore do
     :ok
   end
 
+  @spec canonical_workspace_for_current_runtime?(Path.t(), map()) :: boolean()
+  def canonical_workspace_for_current_runtime?(workspace, state)
+      when is_binary(workspace) and is_map(state) do
+    workspace_matches_state?(workspace, state) and
+      workspace_root_matches_current_runtime?(state) and
+      workspace_instance_matches_current_runtime?(state)
+  end
+
   defp maybe_record_stage_transition(state, stage, reason, false) do
     state
     |> bump_stage_transition_count(stage)
@@ -438,6 +447,36 @@ defmodule SymphonyElixir.RunStateStore do
         state_identifier == issue_identifier
 
       true ->
+        true
+    end
+  end
+
+  defp workspace_matches_state?(workspace, state) when is_binary(workspace) and is_map(state) do
+    case Map.get(state, :issue_identifier) do
+      identifier when is_binary(identifier) and identifier != "" ->
+        Path.expand(workspace) == Path.expand(Workspace.path_for_issue(identifier))
+
+      _ ->
+        false
+    end
+  end
+
+  defp workspace_root_matches_current_runtime?(state) when is_map(state) do
+    case Map.get(state, :runner_workspace_root) do
+      root when is_binary(root) and root != "" ->
+        Path.expand(root) == Path.expand(Config.workspace_root())
+
+      _ ->
+        true
+    end
+  end
+
+  defp workspace_instance_matches_current_runtime?(state) when is_map(state) do
+    case Map.get(state, :runner_instance_id) do
+      instance_id when is_binary(instance_id) and instance_id != "" ->
+        instance_id == Config.runner_instance_id()
+
+      _ ->
         true
     end
   end

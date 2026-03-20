@@ -1,16 +1,20 @@
 id: dogfood
 title: Self Dogfood
 status: active
-summary: Symphony uses its own runtime against the Symphony repo with assignee-first routing, the self-development harness, and release safety.
+summary: Symphony uses its own runtime against the Symphony repo with assignee-first routing, the self-development harness, release-aware runner reporting, stale-workspace isolation for self-host loops, and automatic recreation of canonical self-host workspaces that have lost their Git checkout.
 source_paths:
   - docs/DOGFOOD_OPERATIONS.md
   - docs/SYMPHONY_SELF_DOGFOOD_EXECUTION_PLAN.md
   - AGENTS.md
   - elixir/lib/symphony_elixir/runner_runtime.ex
+  - elixir/lib/symphony_elixir/workspace.ex
 acceptance_signals:
   - Symphony project issues can run end to end through the self-host queue
   - Runner promotion and rollback remain separate from issue routing
+  - Dogfood operator state reports the active promoted release checkout instead of a stale launcher cwd when the runner is executing from a promoted install
+  - Re-entering a self-host issue does not silently reuse a workspace owned by another runner instance or an archived non-canonical directory
+  - Re-entering a self-host issue also recreates a canonical runtime-owned workspace when the Git checkout is missing, so the clone/bootstrap hook reruns instead of leaving the issue blocked at `checkout`
 dependencies:
   - harness
   - runtime-core
-last_updated_by_issue: CLZ-16
+last_updated_by_issue: CLZ-22
