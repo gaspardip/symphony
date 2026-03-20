@@ -186,6 +186,17 @@ defmodule SymphonyElixir.PRWatcher do
     end
   end
 
+  @spec follow_up_stage(map()) :: String.t()
+  def follow_up_stage(feedback) when is_map(feedback) do
+    items = Map.get(feedback, :items) || Map.get(feedback, "items") || []
+
+    if Enum.any?(items, &(Map.get(&1, :disposition) == "needs_verification")) do
+      "review_verification"
+    else
+      "implement"
+    end
+  end
+
   defp build_feedback_items(feedback, thread_states, workspace) do
     review_decision = Map.get(feedback, :review_decision) || Map.get(feedback, "review_decision")
 
