@@ -3,6 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Keep worker-run Mix/Hex writes inside the workspace so sandboxed runs do not
+# depend on user-global state under ~/.mix or ~/.hex.
+source "$ROOT_DIR/scripts/symphony-runtime-env.sh"
+
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2

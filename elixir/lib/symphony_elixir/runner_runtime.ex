@@ -85,6 +85,13 @@ defmodule SymphonyElixir.RunnerRuntime do
     }
   end
 
+  @spec canary_required_labels() :: [String.t()]
+  def canary_required_labels do
+    Config.runner_install_root()
+    |> load_metadata()
+    |> canary_required_labels()
+  end
+
   @spec instance_id() :: String.t()
   def instance_id do
     Config.runner_instance_id()

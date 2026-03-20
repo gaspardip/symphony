@@ -19,6 +19,32 @@ defmodule SymphonyElixir.RepoCompatibilityTest do
     end
   end
 
+  test "accepts a base branch that is fetchable from origin even when not tracked locally" do
+    root = temp_workspace("repo-compat-fetchable-base")
+    source = Path.join(root, "source")
+    workspace = Path.join(root, "workspace")
+
+    try do
+      write_compatible_workspace!(source)
+      git_ok!(source, ["add", ".symphony/harness.yml"])
+      git_ok!(source, ["commit", "-m", "track harness"])
+      git_ok!(source, ["checkout", "-b", "codex/proof-feature"])
+      File.write!(Path.join(source, "FEATURE.md"), "proof\n")
+      git_ok!(source, ["add", "FEATURE.md"])
+      git_ok!(source, ["commit", "-m", "feature"])
+
+      git_ok!(Path.dirname(workspace), ["clone", "--depth", "1", "--branch", "codex/proof-feature", source, workspace])
+
+      assert {_, 1} = System.cmd("git", ["rev-parse", "--verify", "--quiet", "origin/main"], cd: workspace)
+
+      assert {:ok, report} = RepoCompatibility.report(workspace)
+      assert report.compatible
+      assert Enum.any?(report.checks, &(&1.id == "branch_base_setup" and &1.status == :passed))
+    after
+      File.rm_rf(root)
+    end
+  end
+
   test "reports missing behavioral proof as incompatible" do
     workspace = temp_workspace("repo-compat-no-proof")
 
@@ -172,5 +198,9 @@ defmodule SymphonyElixir.RepoCompatibilityTest do
     File.write!(Path.join(workspace, "README.md"), "initial\n")
     System.cmd("git", ["add", "README.md"], cd: workspace)
     System.cmd("git", ["commit", "-m", "initial"], cd: workspace)
+  end
+
+  defp git_ok!(workspace, args) do
+    assert {_, 0} = System.cmd("git", args, cd: workspace)
   end
 end

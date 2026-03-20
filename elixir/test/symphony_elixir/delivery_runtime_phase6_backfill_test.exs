@@ -1415,7 +1415,7 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
        ),
        do: {"", 1}
 
-  defp checkout_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
+  defp checkout_command_runner("git", ["fetch", "origin", "main:refs/remotes/origin/main"], _opts), do: {"", 0}
   defp checkout_command_runner("git", ["checkout", "symphony/mt-runtime"], _opts), do: {"", 1}
 
   defp checkout_command_runner(
@@ -1544,5 +1544,95 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
 
   defp unique_issue_id(prefix) do
     "#{prefix}-#{System.unique_integer([:positive])}"
+  end
+
+  describe "auto-loaded context trimming" do
+    test "trims large SPEC.md and restores it" do
+      workspace = Path.join(System.tmp_dir!(), "context-trim-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf!(workspace) end)
+
+      large_content =
+        Enum.map_join(1..300, "\n", fn i -> "## Section #{i}\n\nDetailed content for section #{i} with enough text." end)
+
+      spec_path = Path.join(workspace, "SPEC.md")
+      File.write!(spec_path, large_content)
+      assert byte_size(large_content) > 8_192
+
+      DeliveryEngine.trim_auto_loaded_context_for_test(workspace)
+
+      trimmed = File.read!(spec_path)
+      assert byte_size(trimmed) < byte_size(large_content)
+      assert trimmed =~ "auto-trimmed by the Symphony runner"
+      assert trimmed =~ ".symphony/runtime/context_backups/SPEC.md"
+      assert File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
+      assert File.read!(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md")) == large_content
+
+      DeliveryEngine.restore_auto_loaded_context_for_test(workspace)
+      assert File.read!(spec_path) == large_content
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
+    end
+
+    test "trims large CLAUDE.md the same way" do
+      workspace = Path.join(System.tmp_dir!(), "context-trim-claude-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf!(workspace) end)
+
+      large_content =
+        Enum.map_join(1..300, "\n", fn i -> "## Rule #{i}\n\nAlways do thing #{i} when writing code." end)
+
+      claude_path = Path.join(workspace, "CLAUDE.md")
+      File.write!(claude_path, large_content)
+      assert byte_size(large_content) > 8_192
+
+      DeliveryEngine.trim_auto_loaded_context_for_test(workspace)
+
+      trimmed = File.read!(claude_path)
+      assert byte_size(trimmed) < byte_size(large_content)
+      assert trimmed =~ ".symphony/runtime/context_backups/CLAUDE.md"
+      assert File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/CLAUDE.md"))
+
+      DeliveryEngine.restore_auto_loaded_context_for_test(workspace)
+      assert File.read!(claude_path) == large_content
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/CLAUDE.md"))
+    end
+
+    test "trims both SPEC.md and CLAUDE.md when both are oversized" do
+      workspace = Path.join(System.tmp_dir!(), "context-trim-both-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf!(workspace) end)
+
+      large = Enum.map_join(1..300, "\n", fn i -> "## Section #{i}\n\nContent #{i} padded." end)
+
+      File.write!(Path.join(workspace, "SPEC.md"), large)
+      File.write!(Path.join(workspace, "CLAUDE.md"), large)
+
+      DeliveryEngine.trim_auto_loaded_context_for_test(workspace)
+
+      assert File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
+      assert File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/CLAUDE.md"))
+      assert byte_size(File.read!(Path.join(workspace, "SPEC.md"))) < byte_size(large)
+      assert byte_size(File.read!(Path.join(workspace, "CLAUDE.md"))) < byte_size(large)
+
+      DeliveryEngine.restore_auto_loaded_context_for_test(workspace)
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/CLAUDE.md"))
+      assert File.read!(Path.join(workspace, "SPEC.md")) == large
+      assert File.read!(Path.join(workspace, "CLAUDE.md")) == large
+    end
+
+    test "skips small files" do
+      workspace = Path.join(System.tmp_dir!(), "context-trim-small-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf!(workspace) end)
+
+      small_content = "# SPEC\n\nSmall spec."
+      File.write!(Path.join(workspace, "SPEC.md"), small_content)
+
+      DeliveryEngine.trim_auto_loaded_context_for_test(workspace)
+
+      assert File.read!(Path.join(workspace, "SPEC.md")) == small_content
+      refute File.exists?(Path.join(workspace, ".symphony/runtime/context_backups/SPEC.md"))
+    end
   end
 end

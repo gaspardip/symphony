@@ -648,7 +648,12 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     issue = %Issue{id: "issue-stage-budget", identifier: "MT-914A", state: "In Progress"}
 
-    assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded, details: details}} =
+    assert {:stop,
+            %RunPolicy.Violation{
+              code: :broad_implement_scope_exhausted,
+              rule_id: "budget.broad_implement_scope_exhausted",
+              details: details
+            }} =
              RunPolicy.maybe_stop_for_token_budget(issue, %{
                stage: "implement",
                codex_input_tokens: 130_000,
@@ -657,7 +662,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                turn_started_input_tokens: 0
              })
 
-    assert details == "Budget per_turn_input exceeded with observed value 130000."
+    assert details ==
+             "Observed per-turn input 130000 after Symphony retried with a narrower broad-implement context and no smaller safe retry remained."
   end
 
   test "run policy records soft token pressure for stage-aware budgets" do
@@ -1796,12 +1802,79 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                stage: "blocked",
                resume_context: %{
                  budget_mode: "broad_implement",
+                 budget_admission_reason: "no_target_path",
                  budget_last_stop_code: "budget.broad_implement_scope_exhausted",
                  budget_pressure_level: "critical",
                  budget_last_observed_input_tokens: 150_000
                },
                stop_reason: %{rule_id: "budget.broad_implement_scope_exhausted"}
              } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget retry mines focus paths from issue text when no prior summary exists" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-issue-path-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-issue-path",
+      identifier: "MT-914BROADISSUE",
+      state: "In Progress",
+      title: "Document runner control endpoints",
+      description: "Update docs/DOGFOOD_OPERATIONS.md and docs/OBSERVABILITY_RUNBOOK.md with the runner control endpoints."
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 issue: issue,
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 codex_input_tokens: 150_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{}
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: [target_path | _rest],
+                 already_learned: already_learned
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+
+      assert target_path in ["docs/DOGFOOD_OPERATIONS.md", "docs/OBSERVABILITY_RUNBOOK.md"]
+      assert already_learned =~ target_path
     after
       File.rm_rf(workspace_root)
     end
@@ -1863,6 +1936,78 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
                  already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
                }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "generic per-turn input stops persist explicit broad admission reasons when the retry lane is ineligible" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          verify: %{
+            per_turn_input_soft: 40_000,
+            per_turn_input_hard: 80_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 2
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-budget-admission-reason-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-budget-admission-reason",
+      identifier: "MT-914BROADVERIFY",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "verify", %{})
+
+      assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded, details: details}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 issue: issue,
+                 workspace: workspace,
+                 stage: "verify",
+                 turn_count: 1,
+                 codex_input_tokens: 100_000,
+                 codex_output_tokens: 0,
+                 codex_total_tokens: 100_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{}
+               })
+
+      assert details =~ "Broad-implement admission reason: stage_not_implement"
+
+      assert %{
+               stage: "blocked",
+               resume_context: %{
+                 budget_mode: "broad",
+                 budget_admission_reason: "stage_not_implement",
+                 budget_last_stop_code: "budget.per_turn_input_exceeded",
+                 budget_last_observed_input_tokens: 100_000
+               },
+               last_decision: %{
+                 metadata: %{
+                   budget_admission_reason: "stage_not_implement"
+                 }
+               },
+               stop_reason: %{rule_id: "budget.per_turn_input_exceeded"}
              } = RunStateStore.load_or_default(workspace, issue)
     after
       File.rm_rf(workspace_root)

@@ -331,6 +331,7 @@ defmodule SymphonyElixir.RunStateStore do
       last_ledger_event_id: nil,
       last_merge: nil,
       stop_reason: nil,
+      worker_pid: nil,
       lease_owner: nil,
       lease_owner_instance_id: nil,
       lease_owner_channel: nil,

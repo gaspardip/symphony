@@ -325,6 +325,18 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                issue_id: issue.id,
                issue_identifier: issue.identifier,
                issue_source: "tracker",
+               stop_reason: %{
+                 code: "per_turn_input_budget_exceeded",
+                 rule_id: "budget.per_turn_input_exceeded",
+                 failure_class: "budget",
+                 summary: "Token budget exceeded"
+               },
+               resume_context: %{
+                 budget_mode: "broad",
+                 budget_admission_reason: "stage_not_implement",
+                 budget_last_stop_code: "budget.per_turn_input_exceeded",
+                 budget_last_observed_input_tokens: 100_000
+               },
                last_decision_summary: nil,
                next_human_action: nil,
                last_rule_id: nil,
@@ -349,6 +361,9 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert payload.operator_summary.human_action_required == "Retry the operator refresh."
     assert payload.operator_summary.rule_id == "policy.retry_refresh"
     assert payload.operator_summary.failure_class == "policy"
+    assert payload.budget_runtime.mode == "broad"
+    assert payload.budget_runtime.admission_reason == "stage_not_implement"
+    assert payload.budget_runtime.last_stop_code == "budget.per_turn_input_exceeded"
   end
 
   test "presenter refresh and control payloads normalize timestamps and unexpected results" do

@@ -121,6 +121,14 @@ defmodule SymphonyElixir.DeliveryEngine do
   def retryable_implementation_error_for_test(reason), do: retryable_implementation_error?(reason)
 
   @doc false
+  @spec trim_auto_loaded_context_for_test(Path.t()) :: :ok
+  def trim_auto_loaded_context_for_test(workspace), do: trim_auto_loaded_context(workspace)
+
+  @doc false
+  @spec restore_auto_loaded_context_for_test(Path.t()) :: :ok
+  def restore_auto_loaded_context_for_test(workspace), do: restore_auto_loaded_context(workspace)
+
+  @doc false
   @spec non_retryable_implementation_error_for_test(term()) :: boolean()
   def non_retryable_implementation_error_for_test(reason),
     do: non_retryable_implementation_error?(reason)
@@ -646,6 +654,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
         clear_turn_result(issue)
         clear_turn_runtime_errors(issue)
+        trim_auto_loaded_context(workspace)
 
         try do
           with {:ok, _turn_session} <-
@@ -797,6 +806,7 @@ defmodule SymphonyElixir.DeliveryEngine do
               end
           end
         after
+          restore_auto_loaded_context(workspace)
           clear_turn_result(issue)
           clear_turn_runtime_errors(issue)
         end
@@ -2500,6 +2510,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     [
       "Broad implement retry lane: active",
+      maybe_named_line("Admission reason", resume_context[:budget_admission_reason], 80),
       maybe_named_line("Budget pressure", resume_context[:budget_pressure_level], 40),
       maybe_named_line("Budget retry count", resume_context[:budget_retry_count], 20),
       maybe_named_list("Target paths", target_paths, 6),
@@ -2724,6 +2735,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_resume_context_key("already_learned"), do: :already_learned
   defp normalize_resume_context_key("next_required_path"), do: :next_required_path
   defp normalize_resume_context_key("budget_expansion_used"), do: :budget_expansion_used
+  defp normalize_resume_context_key("budget_admission_reason"), do: :budget_admission_reason
   defp normalize_resume_context_key("token_pressure"), do: :token_pressure
   defp normalize_resume_context_key(_key), do: nil
 
@@ -4958,5 +4970,105 @@ defmodule SymphonyElixir.DeliveryEngine do
       _ ->
         false
     end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Auto-loaded context trimming
+  #
+  # Agent CLIs auto-load certain root files into every turn's context window:
+  #   - Codex: SPEC.md
+  #   - Claude Code: CLAUDE.md
+  #
+  # A 77 KB spec eats ~19K tokens of the per-turn budget before the agent reads
+  # a single file.  We swap oversized auto-loaded files for lightweight summaries
+  # before the session starts and restore the originals after.  This works for
+  # any repo — no per-project config needed.
+  # ---------------------------------------------------------------------------
+
+  @auto_loaded_files ["SPEC.md", "CLAUDE.md"]
+  @auto_load_max_bytes 8_192
+  @auto_load_summary_lines 60
+  @auto_load_marker ".symphony/runtime/.context_trimmed"
+
+  defp trim_auto_loaded_context(workspace) when is_binary(workspace) do
+    trimmed =
+      @auto_loaded_files
+      |> Enum.filter(&auto_load_file_oversized?(workspace, &1))
+      |> Enum.map(&trim_auto_loaded_file(workspace, &1))
+      |> Enum.reject(&is_nil/1)
+
+    if trimmed != [] do
+      marker_path = Path.join(workspace, @auto_load_marker)
+      File.mkdir_p!(Path.dirname(marker_path))
+      File.write!(marker_path, Enum.join(trimmed, "\n"))
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to trim auto-loaded context: #{Exception.message(error)}")
+  end
+
+  defp restore_auto_loaded_context(workspace) when is_binary(workspace) do
+    marker_path = Path.join(workspace, @auto_load_marker)
+
+    if File.exists?(marker_path) do
+      marker_path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.each(&restore_auto_loaded_file(workspace, &1))
+
+      File.rm(marker_path)
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to restore auto-loaded context: #{Exception.message(error)}")
+  end
+
+  defp auto_load_file_oversized?(workspace, filename) do
+    path = Path.join(workspace, filename)
+    backup = auto_load_backup_path(workspace, filename)
+
+    File.exists?(path) and not File.exists?(backup) and
+      match?({:ok, %{size: size}} when size > @auto_load_max_bytes, File.stat(path))
+  end
+
+  defp trim_auto_loaded_file(workspace, filename) do
+    path = Path.join(workspace, filename)
+    backup = auto_load_backup_path(workspace, filename)
+
+    with {:ok, content} <- File.read(path) do
+      summary = build_context_summary(content, filename)
+      File.mkdir_p!(Path.dirname(backup))
+      File.write!(backup, content)
+      File.write!(path, summary)
+
+      Logger.info("Trimmed #{filename} from #{byte_size(content)} to #{byte_size(summary)} bytes for agent session")
+
+      filename
+    else
+      _ -> nil
+    end
+  end
+
+  defp restore_auto_loaded_file(workspace, filename) do
+    path = Path.join(workspace, filename)
+    backup = auto_load_backup_path(workspace, filename)
+
+    if File.exists?(backup) do
+      File.write!(path, File.read!(backup))
+      File.rm!(backup)
+    end
+  end
+
+  defp auto_load_backup_path(workspace, filename) do
+    Path.join([workspace, ".symphony", "runtime", "context_backups", filename])
+  end
+
+  defp build_context_summary(content, filename) when is_binary(content) do
+    lines = String.split(content, ~r/\r?\n/)
+    header = lines |> Enum.take(@auto_load_summary_lines) |> Enum.join("\n")
+
+    header <>
+      "\n\n---\n_This file was auto-trimmed by the Symphony runner to reduce context cost. " <>
+      "The full version is at `.symphony/runtime/context_backups/#{filename}`._\n"
   end
 end

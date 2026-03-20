@@ -2707,6 +2707,501 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
              "DeliveryEngine already owns the broad retry prompt shape."
   end
 
+  test "worker dispatch rewinds blocked budget run state before startup" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-budget-retry-rewind-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-broad-retry-rewind",
+      identifier: "MT-BROAD-RETRY-REWIND",
+      title: "Rewind blocked retry state",
+      description: "resume blocked broad retry state during active dispatch",
+      state: "Blocked",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               stop_reason: %{
+                 code: "per_turn_input_budget_exceeded",
+                 rule_id: "budget.per_turn_input_exceeded",
+                 failure_class: "budget",
+                 summary: "Token budget exceeded"
+               },
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_auto_narrowed: true,
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                 already_learned: "Stay inside DeliveryEngine and avoid repo-wide rediscovery."
+               }
+             })
+
+    assert {:ok, rewound_run_state} =
+             Orchestrator.ensure_dispatch_run_state_for_test(%State{}, workspace, issue, %{})
+
+    assert rewound_run_state.stage == "implement"
+
+    assert get_in(rewound_run_state, [:resume_context, :target_paths]) == [
+             "elixir/lib/symphony_elixir/delivery_engine.ex"
+           ]
+
+    assert get_in(rewound_run_state, [:resume_context, :already_learned]) ==
+             "Stay inside DeliveryEngine and avoid repo-wide rediscovery."
+
+    assert rewound_run_state.reason == "Dispatch resuming persisted blocked run state"
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert persisted_run_state.stage == "implement"
+  end
+
+  test "worker dispatch rewinds blocked compatibility stop back to checkout" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-compatibility-retry-rewind-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-compat-retry-rewind",
+      identifier: "MT-COMPAT-RETRY-REWIND",
+      title: "Rewind blocked compatibility state",
+      description: "resume blocked compatibility stop during active dispatch",
+      state: "Todo",
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "blocked", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               stop_reason: %{
+                 code: "repo_not_compatible",
+                 rule_id: "compatibility.not_certified",
+                 failure_class: "environment",
+                 summary: "The repo failed compatibility checks before execution."
+               }
+             })
+
+    assert {:ok, rewound_run_state} =
+             Orchestrator.ensure_dispatch_run_state_for_test(%State{}, workspace, issue, %{})
+
+    assert rewound_run_state.stage == "checkout"
+    assert rewound_run_state.stop_reason == nil
+    assert rewound_run_state.reason == "Dispatch resuming persisted blocked run state"
+
+    assert {:ok, persisted_run_state} = SymphonyElixir.RunStateStore.load(workspace)
+    assert persisted_run_state.stage == "checkout"
+    assert persisted_run_state.stop_reason == nil
+  end
+
+  test "reconcile keeps a running broad retry alive when tracker state lags as blocked" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-broad-retry-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil
+    )
+
+    issue = %Issue{
+      id: "issue-broad-retry-reconcile",
+      identifier: "MT-BROAD-RETRY-RECONCILE",
+      title: "Keep resumable blocked retry running",
+      description: "do not tear down a running broad retry when tracker state still says blocked",
+      state: "Blocked",
+      labels: ["dogfood:symphony"]
+    }
+
+    issue_id = issue.id
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    ref = Process.monitor(worker)
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _state} =
+             SymphonyElixir.RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: issue.source,
+               stop_reason: nil,
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_auto_narrowed: true,
+                 target_paths: ["docs/DOGFOOD_OPERATIONS.md"],
+                 already_learned: "Stay inside docs/DOGFOOD_OPERATIONS.md and avoid unrelated reads or repo-wide rediscovery."
+               }
+             })
+
+    assert Orchestrator.issue_routable_to_worker_for_test(issue)
+    assert Orchestrator.issue_matches_required_labels_for_test(issue)
+
+    {_resume_state, resumed_issue} = Orchestrator.maybe_resume_blocked_issue_for_test(%State{}, issue)
+    assert resumed_issue.state == "In Progress"
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    state = %State{
+      lease_owner: "test-owner",
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      running: %{
+        issue.id => %{
+          pid: worker,
+          ref: ref,
+          identifier: issue.identifier,
+          issue: issue,
+          workspace: workspace,
+          workspace_path: workspace,
+          stage: "implement",
+          resume_context: %{
+            budget_mode: "broad_implement",
+            budget_retry_count: 1,
+            target_paths: ["docs/DOGFOOD_OPERATIONS.md"]
+          },
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue.id])
+    }
+
+    next_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    assert %{^issue_id => running_entry} = next_state.running
+    assert running_entry.issue.state == "In Progress"
+    assert MapSet.member?(next_state.claimed, issue.id)
+  end
+
+  test "recovery rebuilds a live running entry from persisted worker pid" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-live-worker-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-live-worker-recovery",
+      identifier: "MT-LIVE-WORKER-RECOVERY",
+      title: "Recover live worker",
+      description: "rebuild running state from persisted worker metadata after orchestrator loss",
+      state: "In Progress",
+      source: :tracker,
+      labels: ["ops"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    worker_pid = worker |> :erlang.pid_to_list() |> List.to_string()
+
+    on_exit(fn ->
+      if Process.alive?(worker) do
+        Process.exit(worker, :kill)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _run_state} =
+             RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: issue.source,
+               issue_state: issue.state,
+               worker_pid: worker_pid,
+               lease_owner: "stale-owner",
+               lease_owner_instance_id: "stable:stable-runner",
+               lease_owner_channel: "stable",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 target_paths: ["docs/DOGFOOD_OPERATIONS.md"]
+               }
+             })
+
+    state =
+      Orchestrator.recover_live_running_workers_for_test(%State{
+        lease_owner: "replacement-owner",
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      })
+
+    issue_id = issue.id
+    assert %{^issue_id => running_entry} = state.running
+    assert running_entry.pid == worker
+    assert running_entry.dispatch_stage == "implement"
+    assert get_in(running_entry, [:resume_context, :budget_mode]) == "broad_implement"
+    assert MapSet.member?(state.claimed, issue.id)
+  end
+
+  test "startup seeds orphaned active retries for same-runner persisted work without a live worker pid" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-orphaned-active-retry-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-orphaned-active-retry",
+      identifier: "MT-ORPHANED-ACTIVE-RETRY",
+      title: "Resume orphaned active work",
+      description: "seed a continuation retry after runner restart when the active worker is gone",
+      state: "In Progress",
+      source: :tracker,
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _run_state} =
+             RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: issue.source,
+               issue_state: issue.state,
+               issue_title: issue.title,
+               issue_description: issue.description,
+               lease_owner: "previous-owner",
+               lease_owner_instance_id: "stable:stable-runner",
+               lease_owner_channel: "stable",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 target_paths: ["docs/DOGFOOD_OPERATIONS.md"]
+               }
+             })
+
+    state =
+      Orchestrator.seed_orphaned_active_retries_for_test(%State{
+        lease_owner: "replacement-owner",
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      })
+
+    issue_id = issue.id
+    assert %{^issue_id => retry_entry} = state.retry_attempts
+    assert retry_entry.attempt == 1
+    assert retry_entry.delay_type == :continuation
+    assert retry_entry.resume_persisted_issue? == true
+    assert match?(%Issue{id: ^issue_id}, retry_entry.issue)
+    assert is_reference(retry_entry.timer_ref)
+    Process.cancel_timer(retry_entry.timer_ref)
+  end
+
+  test "startup seeds orphaned active retries when the same-runner lease snapshot is missing" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-orphaned-active-retry-missing-lease-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-orphaned-active-retry-missing-lease",
+      identifier: "MT-ORPHANED-ACTIVE-RETRY-MISSING-LEASE",
+      title: "Resume orphaned active work without persisted lease",
+      description: "seed a continuation retry after an older recovery path cleared the lease snapshot",
+      state: "In Progress",
+      source: :tracker,
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    on_exit(fn ->
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _run_state} =
+             RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: issue.source,
+               issue_state: issue.state,
+               issue_title: issue.title,
+               issue_description: issue.description,
+               runner_instance_id: "stable:stable-runner",
+               runner_channel: "stable",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 target_paths: ["docs/DOGFOOD_OPERATIONS.md"]
+               }
+             })
+
+    state =
+      Orchestrator.seed_orphaned_active_retries_for_test(%State{
+        lease_owner: "replacement-owner",
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      })
+
+    issue_id = issue.id
+    assert %{^issue_id => retry_entry} = state.retry_attempts
+    assert retry_entry.attempt == 1
+    assert retry_entry.delay_type == :continuation
+    assert retry_entry.resume_persisted_issue? == true
+    assert match?(%Issue{id: ^issue_id}, retry_entry.issue)
+    assert is_reference(retry_entry.timer_ref)
+    Process.cancel_timer(retry_entry.timer_ref)
+  end
+
+  test "dispatch reclaims a same-runner lease when the persisted worker pid is dead" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator-same-runner-lease-reclaim-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      hook_after_create: nil,
+      runner_instance_name: "stable-runner",
+      runner_channel: "stable"
+    )
+
+    issue = %Issue{
+      id: "issue-same-runner-lease-reclaim",
+      identifier: "MT-SAME-RUNNER-LEASE-RECLAIM",
+      title: "Reclaim same-runner lease",
+      description: "resume dispatch when the previous local owner died without releasing its lease",
+      state: "Todo",
+      source: :tracker,
+      labels: ["ops"]
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+    File.rm_rf!(workspace)
+    File.mkdir_p!(Path.join(workspace, ".symphony"))
+
+    dead_worker = spawn(fn -> :ok end)
+    dead_worker_pid = dead_worker |> :erlang.pid_to_list() |> List.to_string()
+    dead_ref = Process.monitor(dead_worker)
+
+    assert_receive {:DOWN, ^dead_ref, :process, ^dead_worker, _reason}
+
+    on_exit(fn ->
+      LeaseManager.release(issue.id)
+      File.rm_rf(workspace_root)
+    end)
+
+    assert {:ok, _run_state} =
+             RunStateStore.transition(workspace, "implement", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: issue.source,
+               issue_state: "In Progress",
+               worker_pid: dead_worker_pid,
+               lease_owner: "previous-owner",
+               lease_owner_instance_id: "stable:stable-runner",
+               lease_owner_channel: "stable"
+             })
+
+    claim_issue_lease!(issue.id, issue.identifier, "previous-owner")
+
+    parent = self()
+
+    returned_state =
+      Orchestrator.do_dispatch_issue_for_test(
+        %State{lease_owner: "replacement-owner"},
+        issue,
+        nil,
+        reclaim_same_runner_lease?: true,
+        spawn_fun: fn state, dispatched_issue, attempt, recipient ->
+          send(parent, {:spawned, dispatched_issue.id, attempt, recipient})
+          state
+        end
+      )
+
+    issue_id = issue.id
+    assert_receive {:spawned, ^issue_id, nil, _recipient}
+    assert returned_state.lease_owner == "replacement-owner"
+
+    assert {:ok, lease} = LeaseManager.read(issue.id)
+    assert lease["owner"] == "replacement-owner"
+
+    assert {:ok, persisted_run_state} = RunStateStore.load(workspace)
+    assert persisted_run_state.worker_pid == nil
+  end
+
   test "worker dispatch seeds missing run state with retry budget focus" do
     workspace_root =
       Path.join(
@@ -3141,6 +3636,82 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     refute MapSet.member?(next_state.claimed, issue_id)
     refute Map.has_key?(next_state.retry_attempts, issue_id)
+  end
+
+  test "retry lookup resumes from persisted active issue metadata when tracker state is stale" do
+    unique = System.unique_integer([:positive])
+    workspace_root = Path.join(System.tmp_dir!(), "orchestrator-retry-persisted-#{unique}")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      max_concurrent_agents: 0
+    )
+
+    issue = %Issue{
+      id: "issue-retry-persisted-#{unique}",
+      identifier: "MT-RETRY-PERSISTED-#{unique}",
+      title: "Retry persisted issue metadata",
+      description: "Persisted active run should win over stale tracker blocked state",
+      state: "Blocked",
+      labels: ["dogfood:symphony"]
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    workspace = Workspace.path_for_issue(issue.identifier)
+    File.mkdir_p!(workspace)
+
+    :ok =
+      RunStateStore.save(workspace, %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        issue_source: issue.source,
+        stage: "implement",
+        effective_policy_class: "fully_autonomous",
+        resume_context: %{
+          budget_mode: "broad_implement",
+          budget_retry_count: 1,
+          target_paths: ["docs/DOGFOOD_OPERATIONS.md"]
+        }
+      })
+
+    orchestrator_name = Module.concat(__MODULE__, :"RetryPersistedIssue#{unique}")
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    persisted_issue = %Issue{issue | state: "In Progress"}
+
+    {:noreply, next_state} =
+      Orchestrator.handle_retry_issue_lookup_for_test(
+        issue,
+        %State{
+          retry_attempts: %{},
+          running: %{},
+          claimed: MapSet.new([issue.id]),
+          max_concurrent_agents: 0,
+          lease_owner: :sys.get_state(pid).lease_owner
+        },
+        issue.id,
+        1,
+        %{
+          identifier: issue.identifier,
+          issue: persisted_issue,
+          resume_persisted_issue?: true,
+          delay_type: :continuation
+        }
+      )
+
+    assert MapSet.member?(next_state.claimed, issue.id)
+    assert Map.has_key?(next_state.retry_attempts, issue.id)
+    assert next_state.retry_attempts[issue.id].issue.state == "In Progress"
   end
 
   test "manual continuation retry reuses seeded issue metadata when tracker lookup is empty" do

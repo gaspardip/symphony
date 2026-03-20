@@ -71,6 +71,38 @@ defmodule SymphonyElixir.RunInspectorTest do
     assert RunInspector.required_checks_passed?(snapshot)
   end
 
+  test "run_harness_command injects workspace-local runtime env into shell commands" do
+    workspace = Path.join(System.tmp_dir!(), "inspector-runtime-env-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+
+    on_exit(fn -> File.rm_rf!(workspace) end)
+
+    # Shell runner that captures the env passed via opts
+    capture_runner = fn _workspace, _command, opts ->
+      env = Keyword.get(opts, :env, [])
+      env_str = Enum.map_join(env, "\n", fn {k, v} -> "#{k}=#{v}" end)
+      {env_str, 0}
+    end
+
+    harness = %RepoHarness{preflight_command: "echo preflight"}
+
+    result = RunInspector.run_preflight(workspace, harness, shell_runner: capture_runner)
+
+    assert result.status == :passed
+    assert result.output =~ "MIX_HOME="
+    assert result.output =~ "HEX_HOME="
+    assert result.output =~ "MIX_ARCHIVES="
+    assert result.output =~ ".symphony/runtime/mix_home"
+    assert result.output =~ ".symphony/runtime/hex_home"
+    assert result.output =~ ".symphony/runtime/mix_archives"
+
+    # Verify the runtime dirs were created
+    runtime_home = Path.join(workspace, ".symphony/runtime")
+    assert File.dir?(Path.join(runtime_home, "mix_home"))
+    assert File.dir?(Path.join(runtime_home, "hex_home"))
+    assert File.dir?(Path.join(runtime_home, "mix_archives"))
+  end
+
   test "ready_for_merge requires an open pull request even when checks and reviews pass" do
     harness = %RepoHarness{required_checks: ["ci / validate"]}
 

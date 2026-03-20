@@ -16,6 +16,7 @@ defmodule SymphonyElixirWeb.Presenter do
     RiskClassifier,
     RunInspector,
     RunLedger,
+    RunPolicy,
     RunStateStore,
     RunnerRuntime,
     StatusDashboard,
@@ -371,6 +372,7 @@ defmodule SymphonyElixirWeb.Presenter do
             detail_entry,
             decision_history
           ),
+        budget_runtime: normalize_budget_runtime(Map.get(detail_entry || %{}, :budget_runtime)),
         last_decision: normalize_command_result(Map.get(run_state || %{}, :last_decision)),
         stop_reason: Map.get(run_state || %{}, :stop_reason),
         compatibility_report: compatibility_report_from(run_state),
@@ -697,7 +699,22 @@ defmodule SymphonyElixirWeb.Presenter do
         last_post_deploy_verify: Map.get(run_state || %{}, :last_post_deploy_verify),
         merge_sha: Map.get(run_state || %{}, :merge_sha),
         deploy_approved: Map.get(run_state || %{}, :deploy_approved, false),
-        stop_reason: Map.get(run_state || %{}, :stop_reason)
+        stop_reason: Map.get(run_state || %{}, :stop_reason),
+        budget_runtime:
+          RunPolicy.budget_runtime(
+            budget_runtime_issue(tracked_issue, run_state),
+            %{
+              stage: Map.get(run_state || %{}, :stage),
+              workspace: workspace_path,
+              workspace_path: workspace_path,
+              turn_count: Map.get(run_state || %{}, :implementation_turns, 0),
+              codex_input_tokens: 0,
+              codex_output_tokens: 0,
+              codex_total_tokens: 0,
+              turn_started_input_tokens: 0,
+              resume_context: Map.get(run_state || %{}, :resume_context, %{})
+            }
+          )
       }
     end
   end
@@ -2264,6 +2281,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp normalize_budget_runtime(runtime) when is_map(runtime) do
     %{
       mode: Map.get(runtime, :mode) || Map.get(runtime, "mode") || "broad",
+      admission_reason: Map.get(runtime, :admission_reason) || Map.get(runtime, "admission_reason"),
       pressure_level: Map.get(runtime, :pressure_level) || Map.get(runtime, "pressure_level") || "normal",
       retry_count: Map.get(runtime, :retry_count) || Map.get(runtime, "retry_count") || 0,
       window_base_turn: Map.get(runtime, :window_base_turn) || Map.get(runtime, "window_base_turn"),
@@ -2278,6 +2296,12 @@ defmodule SymphonyElixirWeb.Presenter do
         Map.get(runtime, :total_extension_used) ||
           Map.get(runtime, "total_extension_used") ||
           false,
+      target_paths: Map.get(runtime, :target_paths) || Map.get(runtime, "target_paths") || [],
+      next_required_path: Map.get(runtime, :next_required_path) || Map.get(runtime, "next_required_path"),
+      expansion_used:
+        Map.get(runtime, :expansion_used) ||
+          Map.get(runtime, "expansion_used") ||
+          false,
       per_turn_input_soft: Map.get(runtime, :per_turn_input_soft) || Map.get(runtime, "per_turn_input_soft"),
       per_turn_input_hard: Map.get(runtime, :per_turn_input_hard) || Map.get(runtime, "per_turn_input_hard"),
       max_turns_in_window: Map.get(runtime, :max_turns_in_window) || Map.get(runtime, "max_turns_in_window"),
@@ -2291,6 +2315,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp normalize_budget_runtime(_runtime) do
     %{
       mode: "broad",
+      admission_reason: nil,
       pressure_level: "normal",
       retry_count: 0,
       window_base_turn: nil,
@@ -2300,6 +2325,9 @@ defmodule SymphonyElixirWeb.Presenter do
       scope_ids: [],
       auto_narrowed: false,
       total_extension_used: false,
+      target_paths: [],
+      next_required_path: nil,
+      expansion_used: false,
       per_turn_input_soft: nil,
       per_turn_input_hard: nil,
       max_turns_in_window: nil,
@@ -2307,6 +2335,27 @@ defmodule SymphonyElixirWeb.Presenter do
       per_issue_total_extension: nil
     }
   end
+
+  defp budget_runtime_issue(%{} = tracked_issue, run_state) do
+    %{
+      id: entry_value(tracked_issue, "id") || Map.get(run_state || %{}, :issue_id),
+      identifier:
+        entry_value(tracked_issue, "identifier") ||
+          Map.get(run_state || %{}, :issue_identifier),
+      title: entry_value(tracked_issue, "title"),
+      description: entry_value(tracked_issue, "description"),
+      labels: entry_value(tracked_issue, "labels") || []
+    }
+  end
+
+  defp budget_runtime_issue(_tracked_issue, run_state) when is_map(run_state) do
+    %{
+      id: Map.get(run_state, :issue_id),
+      identifier: Map.get(run_state, :issue_identifier)
+    }
+  end
+
+  defp budget_runtime_issue(_tracked_issue, _run_state), do: %{}
 
   defp budget_status_payload(current, nil) do
     %{current: current, limit: nil, remaining: nil, tone: "muted"}
