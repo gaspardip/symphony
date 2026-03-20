@@ -76,8 +76,6 @@ defmodule SymphonyElixir.DeliveryEngine do
     else
       Logger.info("Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}")
 
-      trim_auto_loaded_context(workspace)
-
       with {:ok, app_session} <- AppServer.start_session(workspace) do
         Logger.info("Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}")
 
@@ -92,7 +90,6 @@ defmodule SymphonyElixir.DeliveryEngine do
             opts
           )
         after
-          restore_auto_loaded_context(workspace)
           AppServer.stop_session(app_session)
         end
       else
@@ -664,6 +661,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
         clear_turn_result(issue)
         clear_turn_runtime_errors(issue)
+        trim_auto_loaded_context(workspace)
 
         try do
           with {:ok, _turn_session} <-
@@ -815,6 +813,7 @@ defmodule SymphonyElixir.DeliveryEngine do
               end
           end
         after
+          restore_auto_loaded_context(workspace)
           clear_turn_result(issue)
           clear_turn_runtime_errors(issue)
         end
