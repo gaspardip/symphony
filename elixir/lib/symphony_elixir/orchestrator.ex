@@ -3697,16 +3697,21 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       _ ->
-        if metadata[:resume_persisted_issue?] == true do
-          # Bypass tracker fetch for orphaned active recovery; the persisted issue
-          # already carries enough state to redispatch without a Linear round-trip.
-          persisted_issue = manual_retry_issue_fallback(metadata)
+        if metadata[:resume_persisted_issue?] == true or
+             (metadata[:budget_retry] == true and is_struct(metadata[:issue], Issue)) do
+          # Bypass tracker fetch when:
+          # - orphaned active recovery (persisted run_state is authoritative)
+          # - budget retry (the issue was already validated at dispatch time)
+          bypass_issue =
+            if metadata[:resume_persisted_issue?],
+              do: manual_retry_issue_fallback(metadata),
+              else: metadata[:issue]
 
           Logger.info(
-            "Resuming persisted active run without tracker fetch for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}"
+            "Resuming without tracker fetch for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id} reason=#{if metadata[:budget_retry], do: "budget_retry", else: "persisted_active"}"
           )
 
-          handle_retry_issue_lookup(persisted_issue, state, issue_id, attempt, metadata)
+          handle_retry_issue_lookup(bypass_issue, state, issue_id, attempt, metadata)
         else
           case tracker_read(state, candidate_issue_fetcher) do
             {%State{} = next_state, {:ok, issues}} ->
@@ -3820,9 +3825,9 @@ defmodule SymphonyElixir.Orchestrator do
           metadata[:delay_type] == :passive_continuation ->
             &dispatch_passive_issue/3
 
-          metadata[:resume_persisted_issue?] == true ->
-            # Skip revalidation for orphaned active recovery — the persisted
-            # run_state is authoritative and the tracker may be unreachable.
+          metadata[:resume_persisted_issue?] == true or metadata[:budget_retry] == true ->
+            # Skip revalidation for recovery/budget retries — the issue was
+            # already validated at original dispatch time.
             &do_dispatch_issue/3
 
           true ->
