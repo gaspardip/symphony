@@ -203,6 +203,7 @@
 {"lib/symphony_elixir_web/presenter.ex", "Function tracked_issue_payload/1 has no local return."},
 {"lib/symphony_elixir_web/presenter.ex", "The function call fetch_issue will not succeed."},
 {"lib/symphony_elixir_web/presenter.ex", "Function normalize_tracked_issue_payload/1 will never be called."},
+{"lib/symphony_elixir_web/presenter.ex", "Function budget_runtime_issue/2 will never be called."},
 {"lib/symphony_elixir/orchestrator.ex", "The pattern variable _issue@1 can never match the type, because it is covered by previous clauses."},
 {"lib/symphony_elixir/orchestrator.ex", "The pattern variable __run_state@1 can never match the type, because it is covered by previous clauses."},
 {"lib/symphony_elixir/run_policy.ex", "The pattern can never match the type true."},
