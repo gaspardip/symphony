@@ -410,7 +410,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp maybe_put_effort(params, _effort), do: params
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-    receive_loop(port, on_message, Config.codex_turn_timeout_ms(), "", tool_executor, auto_approve_requests)
+    receive_loop(port, on_message, Config.agent_turn_timeout_ms(), "", tool_executor, auto_approve_requests)
   end
 
   defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
@@ -970,7 +970,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp await_response(port, request_id) do
-    with_timeout_response(port, request_id, Config.codex_read_timeout_ms(), "")
+    with_timeout_response(port, request_id, Config.agent_read_timeout_ms(), "")
   end
 
   defp with_timeout_response(port, request_id, timeout_ms, pending_line) do

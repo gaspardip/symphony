@@ -36,14 +36,14 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
 
     send(
       pid,
-      {:codex_worker_update, "issue-malformed", %{event: :notification, payload: %{"summaryText" => "missing timestamp"}}}
+      {:agent_worker_update, "issue-malformed", %{event: :notification, payload: %{"summaryText" => "missing timestamp"}}}
     )
 
     Process.sleep(20)
     after_state = :sys.get_state(pid)
 
     assert after_state.running == before_state.running
-    assert after_state.codex_totals == before_state.codex_totals
+    assert after_state.agent_totals == before_state.agent_totals
     assert after_state.retry_attempts == before_state.retry_attempts
   end
 
@@ -551,9 +551,9 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
       issue: %{issue | title: "stale"},
       session_id: nil,
       turn_count: 0,
-      last_codex_message: nil,
-      last_codex_timestamp: nil,
-      last_codex_event: nil,
+      last_agent_message: nil,
+      last_agent_timestamp: nil,
+      last_agent_event: nil,
       started_at: DateTime.utc_now()
     }
 
@@ -706,9 +706,9 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
                 issue: issue,
                 session_id: nil,
                 turn_count: 0,
-                last_codex_message: nil,
-                last_codex_timestamp: nil,
-                last_codex_event: nil,
+                last_agent_message: nil,
+                last_agent_timestamp: nil,
+                last_agent_event: nil,
                 started_at: DateTime.utc_now()
               }
         },

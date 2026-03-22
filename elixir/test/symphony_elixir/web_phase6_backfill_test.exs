@@ -61,7 +61,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
         paused: [],
         skipped: [],
         queue: [],
-        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
         rate_limits: nil,
         polling: %{}
       }
@@ -1114,6 +1114,23 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert Presenter.state_payload(orchestrator_name, 50).error.code == "snapshot_unavailable"
   end
 
+  test "presenter state payload tolerates skipped entries without lease metadata" do
+    orchestrator_name = Module.concat(__MODULE__, :PresenterNilLeaseOrchestrator)
+
+    snapshot =
+      rich_snapshot()
+      |> Map.put(:skipped, [Map.put(rich_skipped_entry(), :lease, nil)])
+
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: snapshot})
+
+    state_payload = Presenter.state_payload(orchestrator_name, 50)
+
+    assert [%{issue_identifier: "MT-SKIP", lease: lease}] = state_payload.skipped
+    assert lease.owner == nil
+    assert lease.status == nil
+    assert lease.reclaimable == false
+  end
+
   test "issue payload falls back to the latest ledger decision when no run state exists" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
@@ -1861,12 +1878,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                identifier: "MT-SUMMARY",
                state: "Human Review",
                session_id: "thread-abcdef1234567890",
-               codex_app_server_pid: nil,
-               codex_total_tokens: 12_345,
+               agent_process_id: nil,
+               agent_total_tokens: 12_345,
                runtime_seconds: 65,
                turn_count: 2,
-               last_codex_event: "turn_completed",
-               last_codex_message: %{event: :session_started, message: %{"session_id" => "sess-1"}}
+               last_agent_event: "turn_completed",
+               last_agent_message: %{event: :session_started, message: %{"session_id" => "sess-1"}}
              },
              100
            ) =~ "thre...567890"
@@ -1876,12 +1893,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                identifier: "MT-SUMMARY",
                state: "Human Review",
                session_id: "thread-abcdef1234567890",
-               codex_app_server_pid: nil,
-               codex_total_tokens: 12_345,
+               agent_process_id: nil,
+               agent_total_tokens: 12_345,
                runtime_seconds: 65,
                turn_count: 2,
-               last_codex_event: "turn_completed",
-               last_codex_message: %{event: :session_started, message: %{"session_id" => "sess-1"}}
+               last_agent_event: "turn_completed",
+               last_agent_message: %{event: :session_started, message: %{"session_id" => "sess-1"}}
              },
              100
            ) =~ "12,345"
@@ -1891,12 +1908,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                identifier: "MT-SUMMARY",
                state: "Human Review",
                session_id: "thread-abcdef1234567890",
-               codex_app_server_pid: nil,
-               codex_total_tokens: 12_345,
+               agent_process_id: nil,
+               agent_total_tokens: 12_345,
                runtime_seconds: 65,
                turn_count: 2,
-               last_codex_event: "turn_completed",
-               last_codex_message: %{event: :session_started, message: %{"session_id" => "sess-1"}}
+               last_agent_event: "turn_completed",
+               last_agent_message: %{event: :session_started, message: %{"session_id" => "sess-1"}}
              },
              100
            ) =~ "1m 5s / 2"
@@ -1908,17 +1925,17 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert String.length(StatusDashboard.tps_graph_for_test([{580_000, 90}, {560_000, 30}], 600_000, 120)) == 24
     assert StatusDashboard.format_timestamp_for_test(~U[2026-03-07 17:00:00.999Z]) == "2026-03-07 17:00:00Z"
 
-    assert StatusDashboard.humanize_codex_message(%{
+    assert StatusDashboard.humanize_agent_message(%{
              event: :turn_input_required,
              message: %{}
            }) == "turn blocked: waiting for user input"
 
-    assert StatusDashboard.humanize_codex_message(%{
+    assert StatusDashboard.humanize_agent_message(%{
              event: :session_started,
              message: %{"session_id" => "sess-1"}
            }) == "session started (sess-1)"
 
-    assert StatusDashboard.humanize_codex_message(%{
+    assert StatusDashboard.humanize_agent_message(%{
              message: %{"error" => %{"message" => "boom"}}
            }) == "error: boom"
 
@@ -1959,14 +1976,14 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert SymphonyElixirWeb.DashboardLive.helper_for_test(:pretty_value, [nil]) == "n/a"
 
     assert Presenter.helper_for_test(:issue_status, [%{}, %{}, nil, nil, nil, nil]) == "running"
-    assert Presenter.helper_for_test(:codex_activity_payload, [:oops]) == []
+    assert Presenter.helper_for_test(:agent_activity_payload, [:oops]) == []
     assert Presenter.helper_for_test(:ledger_activity_payload, [:oops]) == []
     assert Presenter.helper_for_test(:runner_activity_payload, [:oops]) == []
     assert Presenter.helper_for_test(:ledger_message, [%{"event_type" => "dispatch.started"}]) == "dispatch.started"
     assert Presenter.helper_for_test(:runner_history_message, [%{"summary" => "runner.promoted", "metadata" => %{}}]) == "runner.promoted"
     assert Presenter.helper_for_test(:required_checks_passed, [[], [%{name: "build", conclusion: "success"}]])
     assert Presenter.helper_for_test(:normalize_command_result, [123]) == %{status: nil, command: nil, output: "123"}
-    assert Presenter.helper_for_test(:codex_activity_tone, [%{event: "agent_message"}]) == "muted"
+    assert Presenter.helper_for_test(:agent_activity_tone, [%{event: "agent_message"}]) == "muted"
     assert Presenter.helper_for_test(:ledger_activity_tone, ["dispatch.started"]) == "info"
     assert Presenter.helper_for_test(:entry_value, [:oops, "event"]) == nil
     assert Presenter.helper_for_test(:truncate_text, [123, 5]) == "123"
@@ -1995,13 +2012,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
           state: "In Progress",
           session_id: "thread-web",
           turn_count: 3,
-          codex_app_server_pid: nil,
-          last_codex_message: "rendered",
-          last_codex_timestamp: nil,
-          last_codex_event: :notification,
-          codex_input_tokens: 2,
-          codex_output_tokens: 3,
-          codex_total_tokens: 5,
+          agent_process_id: nil,
+          last_agent_message: "rendered",
+          last_agent_timestamp: nil,
+          last_agent_event: :notification,
+          agent_input_tokens: 2,
+          agent_output_tokens: 3,
+          agent_total_tokens: 5,
           started_at: DateTime.utc_now()
         }
       ],
@@ -2009,7 +2026,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       paused: [],
       skipped: [],
       queue: [],
-      codex_totals: %{input_tokens: 2, output_tokens: 3, total_tokens: 5, seconds_running: 12.5},
+      agent_totals: %{input_tokens: 2, output_tokens: 3, total_tokens: 5, seconds_running: 12.5},
       rate_limits: nil,
       polling: %{poll_interval_ms: 1_000, next_poll_in_ms: 500, checking?: false},
       runner: %{instance_name: "test-runner", runner_mode: "stable"}
@@ -2023,7 +2040,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       paused: [],
       skipped: [],
       queue: [],
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       rate_limits: nil,
       polling: %{},
       runner: %{}
@@ -2037,7 +2054,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       paused: [rich_paused_entry()],
       skipped: [rich_skipped_entry()],
       queue: [rich_queue_entry()],
-      codex_totals: %{input_tokens: 44, output_tokens: 13, total_tokens: 57, seconds_running: 65},
+      agent_totals: %{input_tokens: 44, output_tokens: 13, total_tokens: 57, seconds_running: 65},
       rate_limits: %{
         limit_id: "gpt-5",
         primary: %{remaining: 10, limit: 20},
@@ -2125,7 +2142,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       paused: [],
       skipped: [],
       queue: [],
-      codex_totals: %{input_tokens: 3, output_tokens: 2, total_tokens: 5, seconds_running: 5},
+      agent_totals: %{input_tokens: 3, output_tokens: 2, total_tokens: 5, seconds_running: 5},
       rate_limits: nil,
       polling: %{poll_interval_ms: nil, next_poll_in_ms: nil, checking?: false},
       runner: %{},
@@ -2141,7 +2158,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       paused: [],
       skipped: [],
       queue: [],
-      codex_totals: %{input_tokens: 1, output_tokens: 2, total_tokens: 3, seconds_running: 4},
+      agent_totals: %{input_tokens: 1, output_tokens: 2, total_tokens: 3, seconds_running: 4},
       rate_limits: %{
         limit_id: "gpt-5",
         primary: %{remaining: 10, limit: 20},
@@ -2202,7 +2219,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       paused: [],
       skipped: [],
       queue: [queue_policy_entry()],
-      codex_totals: %{input_tokens: 12, output_tokens: 8, total_tokens: 20, seconds_running: 15},
+      agent_totals: %{input_tokens: 12, output_tokens: 8, total_tokens: 20, seconds_running: 15},
       rate_limits: nil,
       polling: %{poll_interval_ms: 1_000, next_poll_in_ms: 250, checking?: false},
       runner: %{instance_name: "runner-matrix", runner_mode: "stable"},
@@ -2219,20 +2236,20 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       stage: "validate",
       session_id: "thread-abcdef1234567890",
       turn_count: 2,
-      codex_app_server_pid: nil,
-      last_codex_message: turn_completed_message("completed", 11, 4, 15),
-      last_codex_timestamp: ~U[2026-03-07 15:10:00Z],
-      last_codex_event: "turn_completed",
-      recent_codex_updates: [
+      agent_process_id: nil,
+      last_agent_message: turn_completed_message("completed", 11, 4, 15),
+      last_agent_timestamp: ~U[2026-03-07 15:10:00Z],
+      last_agent_event: "turn_completed",
+      recent_agent_updates: [
         %{
           timestamp: ~U[2026-03-07 15:09:30Z],
           event: :turn_failed,
           message: %{"params" => %{"error" => %{"message" => "compiler boom"}}}
         }
       ],
-      codex_input_tokens: 16,
-      codex_output_tokens: 8,
-      codex_total_tokens: 24,
+      agent_input_tokens: 16,
+      agent_output_tokens: 8,
+      agent_total_tokens: 24,
       current_turn_input_tokens: 9,
       runtime_seconds: 65,
       started_at: ~U[2026-03-07 15:00:00Z],
@@ -2398,14 +2415,14 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       stage: "publish",
       session_id: "thread-green",
       turn_count: 1,
-      codex_app_server_pid: "4242",
-      last_codex_message: thread_started_message("thread-green"),
-      last_codex_timestamp: ~U[2026-03-07 16:01:00Z],
-      last_codex_event: "session_started",
-      recent_codex_updates: [],
-      codex_input_tokens: 3,
-      codex_output_tokens: 2,
-      codex_total_tokens: 5,
+      agent_process_id: "4242",
+      last_agent_message: thread_started_message("thread-green"),
+      last_agent_timestamp: ~U[2026-03-07 16:01:00Z],
+      last_agent_event: "session_started",
+      recent_agent_updates: [],
+      agent_input_tokens: 3,
+      agent_output_tokens: 2,
+      agent_total_tokens: 5,
       current_turn_input_tokens: 1,
       runtime_seconds: 5,
       started_at: ~U[2026-03-07 16:00:00Z],
@@ -2473,14 +2490,14 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       stage: "await_checks",
       session_id: nil,
       turn_count: 0,
-      codex_app_server_pid: nil,
-      last_codex_message: nil,
-      last_codex_timestamp: nil,
-      last_codex_event: :notification,
-      recent_codex_updates: [],
-      codex_input_tokens: 0,
-      codex_output_tokens: 0,
-      codex_total_tokens: 0,
+      agent_process_id: nil,
+      last_agent_message: nil,
+      last_agent_timestamp: nil,
+      last_agent_event: :notification,
+      recent_agent_updates: [],
+      agent_input_tokens: 0,
+      agent_output_tokens: 0,
+      agent_total_tokens: 0,
       current_turn_input_tokens: 0,
       runtime_seconds: 0,
       started_at: ~U[2026-03-07 17:10:00Z],
@@ -2532,14 +2549,14 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       stage: "publish",
       session_id: "thread-attached",
       turn_count: 1,
-      codex_app_server_pid: "4242",
-      last_codex_message: thread_started_message("thread-attached"),
-      last_codex_timestamp: ~U[2026-03-07 17:11:00Z],
-      last_codex_event: "thread_started",
-      recent_codex_updates: [],
-      codex_input_tokens: 2,
-      codex_output_tokens: 1,
-      codex_total_tokens: 3,
+      agent_process_id: "4242",
+      last_agent_message: thread_started_message("thread-attached"),
+      last_agent_timestamp: ~U[2026-03-07 17:11:00Z],
+      last_agent_event: "thread_started",
+      recent_agent_updates: [],
+      agent_input_tokens: 2,
+      agent_output_tokens: 1,
+      agent_total_tokens: 3,
       current_turn_input_tokens: 2,
       runtime_seconds: 8,
       started_at: ~U[2026-03-07 17:10:30Z],
@@ -2594,14 +2611,14 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       token_pressure: "high",
       session_id: "thread-await-checks",
       turn_count: 2,
-      codex_app_server_pid: "4343",
-      last_codex_message: turn_completed_message("completed", 5, 2, 7),
-      last_codex_timestamp: ~U[2026-03-07 17:12:00Z],
-      last_codex_event: "turn_completed",
-      recent_codex_updates: [],
-      codex_input_tokens: 5,
-      codex_output_tokens: 2,
-      codex_total_tokens: 7,
+      agent_process_id: "4343",
+      last_agent_message: turn_completed_message("completed", 5, 2, 7),
+      last_agent_timestamp: ~U[2026-03-07 17:12:00Z],
+      last_agent_event: "turn_completed",
+      recent_agent_updates: [],
+      agent_input_tokens: 5,
+      agent_output_tokens: 2,
+      agent_total_tokens: 7,
       current_turn_input_tokens: 5,
       runtime_seconds: 12,
       started_at: ~U[2026-03-07 17:09:30Z],
@@ -2671,14 +2688,14 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       token_pressure: nil,
       session_id: nil,
       turn_count: 0,
-      codex_app_server_pid: nil,
-      last_codex_message: nil,
-      last_codex_timestamp: ~U[2026-03-07 17:11:00Z],
-      last_codex_event: "stage_transition",
-      recent_codex_updates: [],
-      codex_input_tokens: 0,
-      codex_output_tokens: 0,
-      codex_total_tokens: 0,
+      agent_process_id: nil,
+      last_agent_message: nil,
+      last_agent_timestamp: ~U[2026-03-07 17:11:00Z],
+      last_agent_event: "stage_transition",
+      recent_agent_updates: [],
+      agent_input_tokens: 0,
+      agent_output_tokens: 0,
+      agent_total_tokens: 0,
       current_turn_input_tokens: 0,
       runtime_seconds: 6,
       started_at: ~U[2026-03-07 17:10:30Z],

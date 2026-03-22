@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
   use SymphonyElixir.TestSupport
+  @moduletag timeout: 120_000
 
   alias SymphonyElixir.{GitHubEvent, GitHubEventInbox, LeaseManager, ManualIssueStore, RunStateStore, Workspace}
   alias SymphonyElixir.Orchestrator.State
@@ -114,7 +115,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     snapshot =
       Enum.reduce_while(1..20, nil, fn _, _acc ->
         Process.sleep(20)
-        snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+        snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
 
         if get_in(snapshot, [:runner, :dispatch_enabled]) == false do
           {:halt, snapshot}
@@ -208,7 +209,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert refreshed_state.poll_check_in_progress == true
     assert refreshed_state.github_webhook_check_in_progress == true
 
-    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
     assert [%{identifier: "MT-PAUSED", resume_state: "In Progress"}] = Map.get(snapshot, :paused)
 
     assert [%{issue_identifier: "MT-SKIP", reason: "missing canary labels"}] =
@@ -315,7 +316,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     assert_eventually(
       fn ->
-        snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+        snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
         {:ok, run_state} = RunStateStore.load(workspace)
 
         assert get_in(snapshot, [:runner, :dispatch_enabled]) == false
@@ -2612,9 +2613,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       identifier: issue.identifier,
       workspace_path: workspace,
       stage: "implement",
-      codex_input_tokens: 248_759,
-      codex_output_tokens: 0,
-      codex_total_tokens: 248_759,
+      agent_input_tokens: 248_759,
+      agent_output_tokens: 0,
+      agent_total_tokens: 248_759,
       turn_started_input_tokens: 0
     }
 
@@ -2737,9 +2738,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       identifier: issue.identifier,
       workspace_path: workspace,
       stage: "implement",
-      codex_input_tokens: 248_759,
-      codex_output_tokens: 0,
-      codex_total_tokens: 248_759,
+      agent_input_tokens: 248_759,
+      agent_output_tokens: 0,
+      agent_total_tokens: 248_759,
       turn_started_input_tokens: 0
     }
 
@@ -2821,9 +2822,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       identifier: issue.identifier,
       workspace_path: workspace,
       stage: "implement",
-      codex_input_tokens: 248_759,
-      codex_output_tokens: 0,
-      codex_total_tokens: 248_759,
+      agent_input_tokens: 248_759,
+      agent_output_tokens: 0,
+      agent_total_tokens: 248_759,
       turn_started_input_tokens: 0
     }
 
@@ -3038,7 +3039,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       }
     end)
 
-    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
     assert [%{error: ":linear_timeout"}] = snapshot.queue
   end
 

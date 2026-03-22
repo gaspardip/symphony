@@ -62,7 +62,7 @@ defmodule SymphonyElixirWeb.Presenter do
             priority_overrides: Map.get(snapshot, :priority_overrides, %{}),
             policy_overrides: Map.get(snapshot, :policy_overrides, %{}),
             pr_watcher: pr_watcher_payload(),
-            codex_totals: snapshot.codex_totals,
+            agent_totals: snapshot.agent_totals,
             rate_limits: snapshot.rate_limits,
             runner: runner_payload,
             webhooks: Map.get(snapshot, :webhooks, %{}),
@@ -351,7 +351,7 @@ defmodule SymphonyElixirWeb.Presenter do
         paused: paused,
         queue: queue,
         logs: %{
-          codex_session_logs: []
+          agent_session_logs: []
         },
         recent_events: (running_payload && running_payload.recent_activity) || [],
         decision_history: decision_history,
@@ -739,10 +739,10 @@ defmodule SymphonyElixirWeb.Presenter do
       stage_history: Map.get(entry, :stage_history, []),
       session_id: entry.session_id,
       turn_count: Map.get(entry, :turn_count, 0),
-      last_event: entry.last_codex_event,
-      last_message: summarize_message(entry.last_codex_message),
+      last_event: entry.last_agent_event,
+      last_message: summarize_message(entry.last_agent_message),
       started_at: iso8601(entry.started_at),
-      last_event_at: iso8601(entry.last_codex_timestamp),
+      last_event_at: iso8601(entry.last_agent_timestamp),
       runtime_seconds: Map.get(entry, :runtime_seconds, 0),
       workspace: workspace,
       harness: harness,
@@ -772,13 +772,13 @@ defmodule SymphonyElixirWeb.Presenter do
       last_decision: normalize_command_result(Map.get(entry, :last_decision)),
       recent_activity:
         recent_activity_payload(
-          Map.get(entry, :recent_codex_updates, []),
+          Map.get(entry, :recent_agent_updates, []),
           Map.get(ledger_by_issue, entry.identifier, [])
         ),
       tokens: %{
-        input_tokens: entry.codex_input_tokens,
-        output_tokens: entry.codex_output_tokens,
-        total_tokens: entry.codex_total_tokens,
+        input_tokens: entry.agent_input_tokens,
+        output_tokens: entry.agent_output_tokens,
+        total_tokens: entry.agent_total_tokens,
         current_turn_input_tokens: Map.get(entry, :current_turn_input_tokens, 0)
       }
     }
@@ -1138,7 +1138,11 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp lease_payload(entry) when is_map(entry) do
-    raw_lease = Map.get(entry, :lease, %{})
+    raw_lease =
+      case Map.get(entry, :lease) do
+        %{} = lease -> lease
+        _ -> %{}
+      end
 
     %{
       owner: Map.get(raw_lease, :lease_owner) || Map.get(entry, :lease_owner),
@@ -1203,7 +1207,7 @@ defmodule SymphonyElixirWeb.Presenter do
       priority_overrides: %{},
       policy_overrides: %{},
       pr_watcher: pr_watcher_payload(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       rate_limits: nil,
       runner: %{},
       webhooks: %{},
@@ -2220,12 +2224,12 @@ defmodule SymphonyElixirWeb.Presenter do
         ),
       per_issue_total:
         budget_status_payload(
-          Map.get(entry, :codex_total_tokens, 0),
+          Map.get(entry, :agent_total_tokens, 0),
           Map.get(budget_runtime, :per_issue_total_limit) || Config.policy_per_issue_total_budget()
         ),
       per_issue_total_output:
         budget_status_payload(
-          Map.get(entry, :codex_output_tokens, 0),
+          Map.get(entry, :agent_output_tokens, 0),
           Config.policy_per_issue_total_output_budget()
         ),
       review_fix: budget_runtime
@@ -2297,29 +2301,29 @@ defmodule SymphonyElixirWeb.Presenter do
     %{current: current, limit: limit, remaining: remaining, tone: tone}
   end
 
-  defp recent_activity_payload(codex_updates, ledger_entries) do
-    (codex_activity_payload(codex_updates) ++ ledger_activity_payload(ledger_entries))
+  defp recent_activity_payload(agent_updates, ledger_entries) do
+    (agent_activity_payload(agent_updates) ++ ledger_activity_payload(ledger_entries))
     |> Enum.sort_by(&activity_sort_key/1, :desc)
     |> Enum.take(10)
   end
 
-  defp codex_activity_payload(codex_updates) when is_list(codex_updates) do
-    Enum.map(codex_updates, fn update ->
+  defp agent_activity_payload(agent_updates) when is_list(agent_updates) do
+    Enum.map(agent_updates, fn update ->
       %{
-        source: "codex",
+        source: "agent",
         at: iso8601(Map.get(update, :timestamp) || Map.get(update, "timestamp")),
         event:
           Map.get(update, :event)
           |> Kernel.||(Map.get(update, "event"))
           |> to_string(),
         message: summarize_message(update),
-        tone: codex_activity_tone(update)
+        tone: agent_activity_tone(update)
       }
     end)
     |> Enum.reject(&is_nil(&1.at))
   end
 
-  defp codex_activity_payload(_codex_updates), do: []
+  defp agent_activity_payload(_agent_updates), do: []
 
   defp ledger_activity_payload(entries) when is_list(entries) do
     Enum.map(entries, fn entry ->
@@ -2601,7 +2605,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp activity_sort_key(entry), do: Map.get(entry, :at) || ""
 
-  defp codex_activity_tone(update) do
+  defp agent_activity_tone(update) do
     event =
       Map.get(update, :event)
       |> Kernel.||(Map.get(update, "event"))
@@ -2647,7 +2651,7 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp summarize_message(nil), do: nil
-  defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
+  defp summarize_message(message), do: StatusDashboard.humanize_agent_message(message)
 
   defp truncate_text(text, max) when is_binary(text) and is_integer(max) and max > 0 do
     if String.length(text) <= max do
@@ -2789,14 +2793,14 @@ defmodule SymphonyElixirWeb.Presenter do
         )
       )
 
-  def helper_for_test(:codex_activity_payload, [updates]), do: codex_activity_payload(updates)
+  def helper_for_test(:agent_activity_payload, [updates]), do: agent_activity_payload(updates)
   def helper_for_test(:ledger_activity_payload, [entries]), do: ledger_activity_payload(entries)
   def helper_for_test(:runner_activity_payload, [entries]), do: runner_activity_payload(entries)
   def helper_for_test(:ledger_message, [entry]), do: ledger_message(entry)
   def helper_for_test(:runner_history_message, [entry]), do: runner_history_message(entry)
   def helper_for_test(:required_checks_passed, [required_checks, check_statuses]), do: required_checks_passed?(required_checks, check_statuses)
   def helper_for_test(:normalize_command_result, [result]), do: normalize_command_result(result)
-  def helper_for_test(:codex_activity_tone, [update]), do: codex_activity_tone(update)
+  def helper_for_test(:agent_activity_tone, [update]), do: agent_activity_tone(update)
   def helper_for_test(:ledger_activity_tone, [event]), do: ledger_activity_tone(event)
   def helper_for_test(:entry_value, [entry, key]), do: entry_value(entry, key)
   def helper_for_test(:truncate_text, [text, max]), do: truncate_text(text, max)

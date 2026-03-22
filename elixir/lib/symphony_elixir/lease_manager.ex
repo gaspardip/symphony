@@ -240,6 +240,6 @@ defmodule SymphonyElixir.LeaseManager do
   defp normalize_timestamp(_timestamp, now), do: DateTime.to_iso8601(now)
 
   defp default_ttl_ms do
-    max(Config.codex_stall_timeout_ms(), max(Config.poll_interval_ms() * 4, 60_000))
+    max(Config.agent_stall_timeout_ms(), max(Config.poll_interval_ms() * 4, 60_000))
   end
 end

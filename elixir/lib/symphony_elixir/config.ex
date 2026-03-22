@@ -47,11 +47,17 @@ defmodule SymphonyElixir.Config do
       "balanced" => "medium",
       "deep" => "high",
       "rigorous" => "xhigh"
+    },
+    "claude" => %{
+      "minimal" => "low",
+      "balanced" => "medium",
+      "deep" => "high",
+      "rigorous" => "high"
     }
   }
-  @default_codex_turn_timeout_ms 3_600_000
-  @default_codex_read_timeout_ms 5_000
-  @default_codex_stall_timeout_ms 300_000
+  @default_agent_turn_timeout_ms 3_600_000
+  @default_agent_read_timeout_ms 5_000
+  @default_agent_stall_timeout_ms 300_000
   @default_policy_require_checkout true
   @default_policy_require_pr_before_review true
   @default_policy_require_validation true
@@ -204,38 +210,41 @@ defmodule SymphonyElixir.Config do
                                  max_concurrent_agents_by_state: [
                                    type: {:map, :string, :pos_integer},
                                    default: %{}
-                                 ]
-                               ]
-                             ],
-                             codex: [
-                               type: :map,
-                               default: %{},
-                               keys: [
-                                 command: [type: :string, default: @default_codex_command],
-                                 runtime_profile: [
-                                   type: :map,
-                                   default: %{},
-                                   keys: [
-                                     codex_home: [type: {:or, [:string, nil]}, default: nil],
-                                     inherit_env: [type: :boolean, default: true],
-                                     env_allowlist: [type: {:list, :string}, default: []]
-                                   ]
                                  ],
+                                 provider: [type: {:or, [:string, nil]}, default: nil],
+                                 model: [type: {:or, [:string, nil]}, default: nil],
+                                 providers: [type: {:or, [:map, nil]}, default: nil],
                                  reasoning: [
                                    type: :map,
                                    default: %{}
                                  ],
                                  turn_timeout_ms: [
                                    type: :integer,
-                                   default: @default_codex_turn_timeout_ms
+                                   default: @default_agent_turn_timeout_ms
                                  ],
                                  read_timeout_ms: [
                                    type: :integer,
-                                   default: @default_codex_read_timeout_ms
+                                   default: @default_agent_read_timeout_ms
                                  ],
                                  stall_timeout_ms: [
                                    type: :integer,
-                                   default: @default_codex_stall_timeout_ms
+                                   default: @default_agent_stall_timeout_ms
+                                 ],
+                                 codex: [
+                                   type: :map,
+                                   default: %{},
+                                   keys: [
+                                     command: [type: :string, default: @default_codex_command],
+                                     runtime_profile: [
+                                       type: :map,
+                                       default: %{},
+                                       keys: [
+                                         codex_home: [type: {:or, [:string, nil]}, default: nil],
+                                         inherit_env: [type: :boolean, default: true],
+                                         env_allowlist: [type: {:list, :string}, default: []]
+                                       ]
+                                     ]
+                                   ]
                                  ]
                                ]
                              ],
@@ -865,14 +874,37 @@ defmodule SymphonyElixir.Config do
 
   def max_concurrent_agents_for_state(_state_name), do: max_concurrent_agents()
 
+  @spec agent_provider() :: String.t()
+  def agent_provider do
+    get_in(validated_workflow_options(), [:agent, :provider]) || "codex"
+  end
+
+  @spec agent_model() :: String.t() | nil
+  def agent_model do
+    get_in(validated_workflow_options(), [:agent, :model])
+  end
+
+  @spec agent_provider_for_stage(String.t() | atom()) :: String.t() | nil
+  def agent_provider_for_stage(stage) do
+    stage_key =
+      case stage do
+        s when is_atom(s) -> s
+        s when is_binary(s) -> String.to_existing_atom(s)
+      end
+
+    get_in(validated_workflow_options(), [:agent, :providers, stage_key])
+  rescue
+    ArgumentError -> nil
+  end
+
   @spec codex_command() :: String.t()
   def codex_command do
-    get_in(validated_workflow_options(), [:codex, :command])
+    get_in(validated_workflow_options(), [:agent, :codex, :command])
   end
 
   @spec codex_runtime_profile() :: codex_runtime_profile_settings()
   def codex_runtime_profile do
-    runtime_profile = get_in(validated_workflow_options(), [:codex, :runtime_profile]) || %{}
+    runtime_profile = get_in(validated_workflow_options(), [:agent, :codex, :runtime_profile]) || %{}
 
     %{
       codex_home:
@@ -913,12 +945,15 @@ defmodule SymphonyElixir.Config do
     Map.get(mapping, tier)
   end
 
-  @spec codex_turn_effort(String.t() | atom()) :: String.t() | nil
-  def codex_turn_effort(stage), do: provider_reasoning_value("codex", stage)
+  @spec agent_turn_effort(String.t() | atom()) :: String.t() | nil
+  def agent_turn_effort(stage) do
+    provider = agent_provider()
+    provider_reasoning_value(provider, stage)
+  end
 
-  @spec codex_turn_timeout_ms() :: pos_integer()
-  def codex_turn_timeout_ms do
-    get_in(validated_workflow_options(), [:codex, :turn_timeout_ms])
+  @spec agent_turn_timeout_ms() :: pos_integer()
+  def agent_turn_timeout_ms do
+    get_in(validated_workflow_options(), [:agent, :turn_timeout_ms])
   end
 
   @spec codex_approval_policy() :: String.t() | map()
@@ -945,15 +980,15 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec codex_read_timeout_ms() :: pos_integer()
-  def codex_read_timeout_ms do
-    get_in(validated_workflow_options(), [:codex, :read_timeout_ms])
+  @spec agent_read_timeout_ms() :: pos_integer()
+  def agent_read_timeout_ms do
+    get_in(validated_workflow_options(), [:agent, :read_timeout_ms])
   end
 
-  @spec codex_stall_timeout_ms() :: non_neg_integer()
-  def codex_stall_timeout_ms do
+  @spec agent_stall_timeout_ms() :: non_neg_integer()
+  def agent_stall_timeout_ms do
     validated_workflow_options()
-    |> get_in([:codex, :stall_timeout_ms])
+    |> get_in([:agent, :stall_timeout_ms])
     |> max(0)
   end
 
@@ -1392,8 +1427,7 @@ defmodule SymphonyElixir.Config do
       workspace: extract_workspace_options(section_map(config, "workspace")),
       manual: extract_manual_options(section_map(config, "manual")),
       runner: extract_runner_options(section_map(config, "runner")),
-      agent: extract_agent_options(section_map(config, "agent")),
-      codex: extract_codex_options(section_map(config, "codex")),
+      agent: extract_merged_agent_options(config),
       policy: extract_policy_options(section_map(config, "policy")),
       profiles: extract_profiles_options(section_map(config, "profiles")),
       company: extract_company_options(section_map(config, "company")),
@@ -1673,25 +1707,51 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp extract_agent_options(section) do
-    %{}
-    |> put_if_present(:max_concurrent_agents, integer_value(Map.get(section, "max_concurrent_agents")))
-    |> put_if_present(:max_turns, positive_integer_value(Map.get(section, "max_turns")))
-    |> put_if_present(:max_retry_backoff_ms, positive_integer_value(Map.get(section, "max_retry_backoff_ms")))
-    |> put_if_present(
-      :max_concurrent_agents_by_state,
-      state_limits_value(Map.get(section, "max_concurrent_agents_by_state"))
-    )
+  defp extract_merged_agent_options(config) do
+    agent_section = section_map(config, "agent")
+    legacy_codex_section = section_map(config, "codex")
+
+    # Orchestrator-level from agent: section
+    base =
+      %{}
+      |> put_if_present(:max_concurrent_agents, integer_value(Map.get(agent_section, "max_concurrent_agents")))
+      |> put_if_present(:max_turns, positive_integer_value(Map.get(agent_section, "max_turns")))
+      |> put_if_present(:max_retry_backoff_ms, positive_integer_value(Map.get(agent_section, "max_retry_backoff_ms")))
+      |> put_if_present(
+        :max_concurrent_agents_by_state,
+        state_limits_value(Map.get(agent_section, "max_concurrent_agents_by_state"))
+      )
+
+    # Generic runtime settings: prefer agent: section, fall back to legacy codex: section
+    runtime_source = if Map.has_key?(agent_section, "turn_timeout_ms"), do: agent_section, else: legacy_codex_section
+
+    generic =
+      base
+      |> put_if_present(:provider, binary_value(Map.get(agent_section, "provider") || Map.get(legacy_codex_section, "provider")))
+      |> put_if_present(:model, binary_value(Map.get(agent_section, "model") || Map.get(legacy_codex_section, "model")))
+      |> put_if_present(:providers, map_value(Map.get(agent_section, "providers") || Map.get(legacy_codex_section, "providers")))
+      |> put_if_present(:reasoning, reasoning_settings_value(Map.get(agent_section, "reasoning") || Map.get(legacy_codex_section, "reasoning")))
+      |> put_if_present(:turn_timeout_ms, integer_value(Map.get(runtime_source, "turn_timeout_ms")))
+      |> put_if_present(:read_timeout_ms, integer_value(Map.get(runtime_source, "read_timeout_ms")))
+      |> put_if_present(:stall_timeout_ms, integer_value(Map.get(runtime_source, "stall_timeout_ms")))
+
+    # Codex-specific: prefer agent.codex nested section, fall back to legacy codex: top-level
+    codex_nested = section_map(agent_section, "codex")
+    codex_source = if codex_nested != %{}, do: codex_nested, else: legacy_codex_section
+
+    codex_opts = extract_codex_provider_options(codex_source)
+
+    if codex_opts == %{} do
+      generic
+    else
+      Map.put(generic, :codex, codex_opts)
+    end
   end
 
-  defp extract_codex_options(section) do
+  defp extract_codex_provider_options(section) do
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:runtime_profile, runtime_profile_value(Map.get(section, "runtime_profile")))
-    |> put_if_present(:reasoning, reasoning_settings_value(Map.get(section, "reasoning")))
-    |> put_if_present(:turn_timeout_ms, integer_value(Map.get(section, "turn_timeout_ms")))
-    |> put_if_present(:read_timeout_ms, integer_value(Map.get(section, "read_timeout_ms")))
-    |> put_if_present(:stall_timeout_ms, integer_value(Map.get(section, "stall_timeout_ms")))
   end
 
   defp runtime_profile_value(section) when is_map(section) do
@@ -1904,7 +1964,7 @@ defmodule SymphonyElixir.Config do
   defp policy_review_fix_token_budget_value(_value), do: :omit
 
   defp reasoning_stages do
-    overrides = get_in(validated_workflow_options(), [:codex, :reasoning, :stages]) || %{}
+    overrides = get_in(validated_workflow_options(), [:agent, :reasoning, :stages]) || %{}
 
     @default_reasoning_stages
     |> Map.merge(overrides)
@@ -1915,7 +1975,7 @@ defmodule SymphonyElixir.Config do
 
     overrides =
       validated_workflow_options()
-      |> get_in([:codex, :reasoning, :providers, provider_key, :reasoning_map])
+      |> get_in([:agent, :reasoning, :providers, provider_key, :reasoning_map])
       |> case do
         value when is_map(value) -> value
         _ -> %{}
@@ -1985,6 +2045,9 @@ defmodule SymphonyElixir.Config do
   end
 
   defp binary_value(_value, _opts), do: :omit
+
+  defp map_value(value) when is_map(value) and map_size(value) > 0, do: value
+  defp map_value(_value), do: :omit
 
   defp command_value(value) when is_binary(value) do
     case String.trim(value) do
@@ -2130,7 +2193,7 @@ defmodule SymphonyElixir.Config do
   end
 
   defp resolve_codex_approval_policy do
-    case fetch_value([["codex", "approval_policy"]], :missing) do
+    case fetch_value([["agent", "codex", "approval_policy"], ["codex", "approval_policy"]], :missing) do
       :missing ->
         {:ok, @default_codex_approval_policy}
 
@@ -2155,7 +2218,7 @@ defmodule SymphonyElixir.Config do
   end
 
   defp resolve_codex_thread_sandbox do
-    case fetch_value([["codex", "thread_sandbox"]], :missing) do
+    case fetch_value([["agent", "codex", "thread_sandbox"], ["codex", "thread_sandbox"]], :missing) do
       :missing ->
         {:ok, @default_codex_thread_sandbox}
 
@@ -2177,7 +2240,7 @@ defmodule SymphonyElixir.Config do
   end
 
   defp resolve_codex_turn_sandbox_policy(workspace) do
-    case fetch_value([["codex", "turn_sandbox_policy"]], :missing) do
+    case fetch_value([["agent", "codex", "turn_sandbox_policy"], ["codex", "turn_sandbox_policy"]], :missing) do
       :missing ->
         {:ok, default_codex_turn_sandbox_policy(workspace)}
 

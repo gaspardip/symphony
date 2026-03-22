@@ -1,13 +1,13 @@
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in an isolated workspace with Codex.
+  Executes a single issue in an isolated workspace with the configured agent provider.
   """
 
   require Logger
   alias SymphonyElixir.{DeliveryEngine, Linear.Issue, RunPolicy, Workspace}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
-  def run(issue, codex_update_recipient \\ nil, opts \\ []) do
+  def run(issue, agent_update_recipient \\ nil, opts \\ []) do
     Logger.info("Starting agent run for #{issue_context(issue)}")
 
     case Workspace.create_for_issue(issue) do
@@ -17,7 +17,7 @@ defmodule SymphonyElixir.AgentRunner do
 
           with :ok <- log_step("before_run_hook", issue, fn -> Workspace.run_before_run_hook(workspace, issue) end),
                :ok <- log_step("pre_run_policy", issue, fn -> RunPolicy.enforce_pre_run(issue, workspace) end),
-               :ok <- log_step("delivery_engine", issue, fn -> run_codex_turns(workspace, issue, codex_update_recipient, opts) end) do
+               :ok <- log_step("delivery_engine", issue, fn -> run_agent_turns(workspace, issue, agent_update_recipient, opts) end) do
             :ok
           else
             {:stop, reason} ->
@@ -41,8 +41,8 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts) do
-    DeliveryEngine.run(workspace, issue, codex_update_recipient, opts)
+  defp run_agent_turns(workspace, issue, agent_update_recipient, opts) do
+    DeliveryEngine.run(workspace, issue, agent_update_recipient, opts)
   end
 
   defp log_step(step, issue, fun) when is_binary(step) and is_function(fun, 0) do

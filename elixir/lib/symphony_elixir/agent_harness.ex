@@ -18,6 +18,26 @@ defmodule SymphonyElixir.AgentHarness do
   def enabled?(%RepoHarness{agent_harness: agent_harness}) when is_map(agent_harness), do: true
   def enabled?(_), do: false
 
+  @spec progress_file_path(Path.t(), Issue.t() | map()) :: {:ok, Path.t()} | {:error, term()}
+  def progress_file_path(workspace, issue) when is_binary(workspace) do
+    case RepoHarness.load(workspace) do
+      {:ok, %RepoHarness{} = harness} ->
+        case fetch_agent_harness(harness) do
+          {:ok, config} ->
+            case progress_relative_path(issue, config) do
+              {:ok, rel_path} -> {:ok, Path.join(workspace, rel_path)}
+              error -> error
+            end
+
+          _ ->
+            {:error, :no_agent_harness}
+        end
+
+      _ ->
+        {:error, :no_harness}
+    end
+  end
+
   @spec initialize(Path.t(), Issue.t() | map(), RepoHarness.t()) :: {:ok, map()} | {:error, term()}
   def initialize(workspace, issue, %RepoHarness{} = harness) when is_binary(workspace) and is_map(issue) do
     with true <- enabled?(harness) or {:error, :disabled},

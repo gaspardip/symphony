@@ -129,7 +129,7 @@ defmodule SymphonyElixir.Observability do
           %{
             session_id: Map.get(running_entry, :session_id),
             turn_count: Map.get(running_entry, :turn_count),
-            codex_event: Map.get(update, :event),
+            agent_event: Map.get(update, :event),
             model_provider: update_usage_value(update, "provider"),
             model_name: update_usage_value(update, "model"),
             reasoning_tier: Map.get(running_entry, :reasoning_tier)

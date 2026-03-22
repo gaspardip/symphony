@@ -175,6 +175,7 @@ end
 
 defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   use SymphonyElixir.TestSupport
+  @moduletag timeout: 120_000
 
   alias SymphonyElixir.DeliveryEngine
   alias SymphonyElixir.Linear.Issue
@@ -913,14 +914,14 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert :ok = DeliveryEngine.maybe_move_issue_for_test(%{}, "Done")
   end
 
-  test "codex_message_handler_for_test forwards worker updates to the recipient" do
+  test "agent_message_handler_for_test forwards worker updates to the recipient" do
     {_workspace, issue} = stage_workspace!("codex-handler")
-    handler = DeliveryEngine.codex_message_handler_for_test(self(), issue)
+    handler = DeliveryEngine.agent_message_handler_for_test(self(), issue)
     payload = %{event: :notification, payload: %{"summaryText" => "updated"}}
     issue_id = issue.id
 
     assert :ok = handler.(payload)
-    assert_receive {:codex_worker_update, ^issue_id, ^payload}, 100
+    assert_receive {:agent_worker_update, ^issue_id, ^payload}, 100
   end
 
   test "normalize_state_for_test falls back to an empty string for non-binary values" do

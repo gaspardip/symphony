@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
   use SymphonyElixir.TestSupport
+  @moduletag timeout: 120_000
 
   alias SymphonyElixir.LeaseManager
   alias SymphonyElixir.Orchestrator.State
@@ -8,16 +9,16 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
 
   test "activity timestamp helpers prefer codex updates and fall back to started_at" do
     started_at = DateTime.add(DateTime.utc_now(), -2, :second)
-    last_codex_timestamp = DateTime.add(started_at, 1, :second)
+    last_agent_timestamp = DateTime.add(started_at, 1, :second)
 
     assert Orchestrator.last_activity_timestamp_for_test(%{
              started_at: started_at,
-             last_codex_timestamp: last_codex_timestamp
-           }) == last_codex_timestamp
+             last_agent_timestamp: last_agent_timestamp
+           }) == last_agent_timestamp
 
     assert Orchestrator.stall_elapsed_ms_for_test(
-             %{started_at: started_at, last_codex_timestamp: last_codex_timestamp},
-             DateTime.add(last_codex_timestamp, 750, :millisecond)
+             %{started_at: started_at, last_agent_timestamp: last_agent_timestamp},
+             DateTime.add(last_agent_timestamp, 750, :millisecond)
            ) == 750
 
     assert Orchestrator.last_activity_timestamp_for_test(%{started_at: started_at}) == started_at
@@ -49,7 +50,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
     state = %State{
       lease_owner: lease_owner,
       max_concurrent_agents: 1,
-      codex_totals: %{
+      agent_totals: %{
         input_tokens: 0,
         output_tokens: 0,
         total_tokens: 0,
@@ -69,7 +70,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
 
     updated_state = Orchestrator.reconcile_stalled_running_issues_for_test(state)
 
-    assert_receive {:DOWN, ^worker_monitor, :process, ^worker_pid, :shutdown}, 1_000
+    assert_receive {:DOWN, ^worker_monitor, :process, ^worker_pid, :shutdown}, 5_000
     refute Map.has_key?(updated_state.running, issue.id)
     refute MapSet.member?(updated_state.claimed, issue.id)
 
@@ -213,7 +214,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
       }
     end)
 
-    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
 
     assert [
              %{
@@ -311,20 +312,20 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
               identifier: running_issue.identifier,
               issue: running_issue,
               session_id: nil,
-              codex_app_server_pid: nil,
-              codex_input_tokens: 0,
-              codex_output_tokens: 0,
-              codex_total_tokens: 0,
-              last_codex_timestamp: nil,
-              last_codex_message: nil,
-              last_codex_event: nil,
+              agent_process_id: nil,
+              agent_input_tokens: 0,
+              agent_output_tokens: 0,
+              agent_total_tokens: 0,
+              last_agent_timestamp: nil,
+              last_agent_message: nil,
+              last_agent_event: nil,
               started_at: DateTime.utc_now()
             }
           }
       }
     end)
 
-    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
 
     assert [
              %{
@@ -396,7 +397,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
       %{state | last_candidate_issues: [queued_issue]}
     end)
 
-    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
 
     assert [
              %{

@@ -7,7 +7,8 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   require Logger
 
-  alias SymphonyElixir.Codex.{AppServer, DynamicTool}
+  alias SymphonyElixir.AgentProvider
+  alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.AgentHarness
   alias SymphonyElixir.Config
   alias SymphonyElixir.GitManager
@@ -41,7 +42,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   @turn_runtime_error_key_prefix :symphony_turn_runtime_error
   @await_checks_missing_limit 6
   @publish_followup_stage "merge_readiness"
-  @codex_turn_error_methods ["codex/event/stream_error", "codex/event/error", "error"]
+  @agent_turn_error_methods ["codex/event/stream_error", "codex/event/error", "error"]
   @review_fix_max_turns 6
   @dialyzer {:nowarn_function, refreshed_review_claims: 3}
   @dialyzer {:nowarn_function, refreshed_review_threads: 3}
@@ -60,7 +61,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   @spec run(Path.t(), Issue.t(), pid() | nil, keyword()) ::
           :ok | {:done, Issue.t()} | {:stop, term()} | {:error, term()}
-  def run(workspace, %Issue{} = issue, codex_update_recipient, opts \\ [])
+  def run(workspace, %Issue{} = issue, agent_update_recipient, opts \\ [])
       when is_binary(workspace) do
     max_turns = Keyword.get(opts, :max_turns, Config.agent_max_turns())
 
@@ -70,31 +71,33 @@ defmodule SymphonyElixir.DeliveryEngine do
     stage = current_stage(workspace, issue)
 
     if passive_stage?(stage) do
-      Logger.info("Skipping Codex session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}")
+      Logger.info("Skipping agent session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}")
 
-      do_run(nil, workspace, issue, codex_update_recipient, issue_state_fetcher, max_turns, opts)
+      do_run(nil, workspace, issue, agent_update_recipient, issue_state_fetcher, max_turns, opts)
     else
-      Logger.info("Starting Codex session bootstrap for #{issue.identifier} workspace=#{workspace}")
+      provider = AgentProvider.resolve_for_stage(stage)
+      Logger.info("Starting agent session bootstrap for #{issue.identifier} provider=#{inspect(provider)} workspace=#{workspace}")
 
-      with {:ok, app_session} <- AppServer.start_session(workspace) do
-        Logger.info("Codex session bootstrap succeeded for #{issue.identifier} thread_id=#{app_session.thread_id}")
+      with {:ok, app_session} <- provider.start_session(workspace) do
+        session_id = Map.get(app_session, :thread_id) || Map.get(app_session, :session_id, "unknown")
+        Logger.info("Agent session bootstrap succeeded for #{issue.identifier} session_id=#{session_id}")
 
         try do
           do_run(
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
-            opts
+            Keyword.put(opts, :agent_provider, provider)
           )
         after
-          AppServer.stop_session(app_session)
+          provider.stop_session(app_session)
         end
       else
         {:error, reason} = error ->
-          Logger.error("Codex session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
+          Logger.error("Agent session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
 
           error
       end
@@ -134,9 +137,9 @@ defmodule SymphonyElixir.DeliveryEngine do
   def maybe_move_issue_for_test(issue, target_state), do: maybe_move_issue(issue, target_state)
 
   @doc false
-  @spec codex_message_handler_for_test(pid() | nil, term()) :: term()
-  def codex_message_handler_for_test(recipient, issue),
-    do: codex_message_handler(recipient, issue)
+  @spec agent_message_handler_for_test(pid() | nil, term()) :: term()
+  def agent_message_handler_for_test(recipient, issue),
+    do: agent_message_handler(recipient, issue)
 
   @doc false
   @spec normalize_state_for_test(term()) :: term()
@@ -270,7 +273,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          app_session,
          workspace,
          issue,
-         codex_update_recipient,
+         agent_update_recipient,
          issue_state_fetcher,
          max_turns,
          opts
@@ -293,7 +296,20 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            state,
+            inspection,
+            opts
+          )
+
+        "plan" ->
+          handle_plan(
+            app_session,
+            workspace,
+            issue,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -306,7 +322,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -319,7 +335,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -332,7 +348,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -345,7 +361,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -358,7 +374,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -371,7 +387,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -384,7 +400,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -397,7 +413,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -410,7 +426,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             app_session,
             workspace,
             issue,
-            codex_update_recipient,
+            agent_update_recipient,
             issue_state_fetcher,
             max_turns,
             state,
@@ -474,8 +490,7 @@ defmodule SymphonyElixir.DeliveryEngine do
            GitManager.prepare_issue_branch(workspace, issue, inspection.harness, opts),
          {:ok, harness} <- RepoHarness.load(workspace),
          {:ok, policy_resolution} <- resolve_policy(issue, state, workspace),
-         next_stage <-
-           if(AgentHarness.enabled?(harness), do: "initialize_harness", else: "implement"),
+         next_stage <- checkout_next_stage(harness),
          {:ok, _state} <-
            RunStateStore.transition(workspace, next_stage, %{
              issue_id: issue.id,
@@ -491,6 +506,10 @@ defmodule SymphonyElixir.DeliveryEngine do
     else
       error -> handle_checkout_error(workspace, issue, error)
     end
+  end
+
+  defp checkout_next_stage(harness) do
+    if AgentHarness.enabled?(harness), do: "initialize_harness", else: "plan"
   end
 
   defp handle_initialize_harness(
@@ -511,7 +530,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         {:ok, _state} =
           RunStateStore.transition(
             workspace,
-            "implement",
+            "plan",
             Map.merge(
               %{
                 last_harness_init: Map.merge(attrs, %{status: "passed"}),
@@ -537,6 +556,120 @@ defmodule SymphonyElixir.DeliveryEngine do
           @blocked_state
         )
     end
+  end
+
+  defp handle_plan(
+         app_session,
+         workspace,
+         issue,
+         recipient,
+         fetcher,
+         max_turns,
+         state,
+         _inspection,
+         opts
+       ) do
+    prompt = plan_prompt(issue, state, workspace)
+
+    clear_turn_result(issue)
+    clear_turn_runtime_errors(issue)
+
+    provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve())
+
+    try do
+      with {:ok, _turn} <-
+             provider.run_turn(
+               app_session,
+               prompt,
+               issue,
+               Keyword.merge(
+                 opts,
+                 stage: "plan",
+                 effort: Config.agent_turn_effort("implement"),
+                 on_message: agent_message_handler(recipient, issue),
+                 tool_executor: tool_executor(issue, opts)
+               )
+             ),
+           {:ok, _turn_result} <- fetch_turn_result(issue),
+           {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
+           :ok <- ensure_issue_still_active(refreshed_issue),
+           {:ok, _state} <-
+             RunStateStore.transition(workspace, "implement", %{
+               plan_completed: true
+             }) do
+        do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
+      else
+        {:error, :missing_turn_result} ->
+          Logger.warning("Plan turn completed without turn result, advancing to implement")
+
+          {:ok, _state} = RunStateStore.transition(workspace, "implement", %{plan_completed: false})
+          do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+
+        {:error, {:turn_runtime_error, reason}} ->
+          block_issue(workspace, issue, :plan_turn_error, inspect(reason), @blocked_state)
+
+        {:done, finished_issue} ->
+          {:done, finished_issue}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    rescue
+      error ->
+        Logger.error("Plan turn crashed: #{inspect(error)}")
+        {:ok, _state} = RunStateStore.transition(workspace, "implement", %{plan_completed: false})
+        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+    end
+  end
+
+  defp plan_prompt(issue, _state, workspace) do
+    acceptance = IssueAcceptance.from_issue(issue)
+
+    acceptance_text =
+      case acceptance.criteria do
+        [] -> "- #{acceptance.summary}"
+        criteria -> Enum.map_join(criteria, "\n", &"- #{&1}")
+      end
+
+    progress_path =
+      case AgentHarness.progress_file_path(workspace, issue) do
+        {:ok, path} -> Path.relative_to(path, workspace)
+        _ -> ".symphony/progress/#{issue.identifier}.md"
+      end
+
+    """
+    #{SymphonyElixir.PromptBuilder.build_prompt(issue)}
+
+    You are running a planning turn for this issue. Your job is to read the codebase, understand the task, and write an implementation plan.
+
+    Steps:
+    1. Read the issue description and acceptance criteria carefully.
+    2. Explore the relevant source files to understand the codebase context.
+    3. Write a progress file at `#{progress_path}` with these exact Markdown H2 sections:
+
+    ## Goal
+    One sentence describing what this ticket achieves.
+
+    ## Acceptance
+    #{acceptance_text}
+
+    ## Plan
+    A numbered step-by-step implementation plan. For each step, name the specific file(s) to modify and what to change.
+
+    ## Work Log
+    (Leave empty — will be filled during implementation.)
+
+    ## Evidence
+    (Leave empty — will be filled after implementation.)
+
+    ## Next Step
+    The first concrete action for the implementation turn.
+
+    Rules:
+    - Do NOT modify any source code. Only write the progress file.
+    - Read relevant files to understand what needs to change before writing the plan.
+    - Be specific about file paths and functions in your plan.
+    """
   end
 
   defp handle_implement(
@@ -648,8 +781,10 @@ defmodule SymphonyElixir.DeliveryEngine do
         clear_turn_runtime_errors(issue)
 
         try do
+          provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve())
+
           with {:ok, _turn_session} <-
-                 AppServer.run_turn(
+                 provider.run_turn(
                    app_session,
                    prompt,
                    issue,
@@ -659,7 +794,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      effort: implement_effort(state),
                      forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
                      command_output_budget: implement_command_output_budget(state),
-                     on_message: codex_message_handler(recipient, issue),
+                     on_message: agent_message_handler(recipient, issue),
                      tool_executor: tool_executor(issue, opts)
                    )
                  ),
@@ -3612,7 +3747,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp implement_effort(state) do
     if focused_review_claims(Map.get(state, :review_claims, %{})) == [] do
-      Config.codex_turn_effort("implement")
+      Config.agent_turn_effort("implement")
     else
       "low"
     end
@@ -3923,7 +4058,7 @@ defmodule SymphonyElixir.DeliveryEngine do
               summary: summary,
               reason: implementation_error_to_map(reason)
             },
-            reason: "Retrying implementation after Codex turn error: #{summary}"
+            reason: "Retrying implementation after agent turn error: #{summary}"
           })
 
         do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
@@ -3963,35 +4098,35 @@ defmodule SymphonyElixir.DeliveryEngine do
         "Implement turn attempted a runtime-owned validation command: #{safe_detail_text(details)}"
 
       _ ->
-        "Codex turn failed: #{safe_detail_text(details)}"
+        "Agent turn failed: #{safe_detail_text(details)}"
     end
   end
 
   defp implementation_turn_error_summary({:port_exit, status}),
-    do: "Codex app-server exited during the turn with status #{status}."
+    do: "Agent process exited during the turn with status #{status}."
 
   defp implementation_turn_error_summary(:turn_timeout),
-    do: "Codex turn timed out before completing."
+    do: "Agent turn timed out before completing."
 
-  defp implementation_turn_error_summary({:codex_notification_error, method, details}),
-    do: "Codex reported #{method}: #{safe_detail_text(details)}"
+  defp implementation_turn_error_summary({:agent_notification_error, method, details}),
+    do: "Agent reported #{method}: #{safe_detail_text(details)}"
 
   defp implementation_turn_error_summary({:turn_cancelled, details}),
-    do: "Codex turn was cancelled: #{safe_detail_text(details)}"
+    do: "Agent turn was cancelled: #{safe_detail_text(details)}"
 
   defp implementation_turn_error_summary({:approval_required, details}),
-    do: "Codex requested approval unexpectedly: #{safe_detail_text(details)}"
+    do: "Agent requested approval unexpectedly: #{safe_detail_text(details)}"
 
   defp implementation_turn_error_summary({:turn_input_required, details}),
-    do: "Codex requested operator input unexpectedly: #{safe_detail_text(details)}"
+    do: "Agent requested operator input unexpectedly: #{safe_detail_text(details)}"
 
   defp implementation_turn_error_summary(reason), do: safe_detail_text(reason)
 
   defp implementation_error_to_map(reasons) when is_list(reasons),
     do: Enum.map(reasons, &implementation_error_to_map/1)
 
-  defp implementation_error_to_map({:codex_notification_error, method, details}),
-    do: %{type: "codex_notification_error", method: method, details: safe_detail_text(details)}
+  defp implementation_error_to_map({:agent_notification_error, method, details}),
+    do: %{type: "agent_notification_error", method: method, details: safe_detail_text(details)}
 
   defp implementation_error_to_map({tag, details}) when is_atom(tag),
     do: %{type: Atom.to_string(tag), details: safe_detail_text(details)}
@@ -4251,12 +4386,12 @@ defmodule SymphonyElixir.DeliveryEngine do
     }
   end
 
-  defp codex_message_handler(recipient, issue) do
+  defp agent_message_handler(recipient, issue) do
     fn message ->
       maybe_capture_turn_runtime_error(issue, message)
 
       if is_pid(recipient) and is_binary(issue.id) do
-        send(recipient, {:codex_worker_update, issue.id, message})
+        send(recipient, {:agent_worker_update, issue.id, message})
       end
 
       :ok
@@ -4271,10 +4406,10 @@ defmodule SymphonyElixir.DeliveryEngine do
          event: :notification,
          payload: %{"method" => method} = payload
        })
-       when method in @codex_turn_error_methods do
+       when method in @agent_turn_error_methods do
     record_turn_runtime_error(
       issue,
-      {:codex_notification_error, method, Map.get(payload, "params", %{})}
+      {:agent_notification_error, method, Map.get(payload, "params", %{})}
     )
   end
 

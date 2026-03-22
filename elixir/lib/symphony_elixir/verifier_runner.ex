@@ -1,10 +1,10 @@
 defmodule SymphonyElixir.VerifierRunner do
   @moduledoc """
-  Runs the hybrid publish gate: deterministic smoke first, then a read-only Codex verifier.
+  Runs the hybrid publish gate: deterministic smoke first, then a read-only agent verifier.
   """
 
+  alias SymphonyElixir.AgentProvider
   alias SymphonyElixir.BehavioralProof
-  alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.Config
   alias SymphonyElixir.DebugArtifacts
   alias SymphonyElixir.IssueAcceptance
@@ -127,15 +127,17 @@ defmodule SymphonyElixir.VerifierRunner do
     clear_verifier_result(issue)
 
     verifier_opts = [
-      effort: Config.codex_turn_effort("verifier"),
+      effort: Config.agent_turn_effort("verifier"),
       on_message: Keyword.get(opts, :on_message, fn _message -> :ok end),
       tool_executor: verifier_tool_executor(issue),
       issue: issue
     ]
 
-    with {:ok, session} <- AppServer.start_session(workspace, verifier_opts) do
+    provider = AgentProvider.resolve_for_stage("verifier")
+
+    with {:ok, session} <- provider.start_session(workspace, verifier_opts) do
       try do
-        with {:ok, _turn_session} <- AppServer.run_turn(session, prompt, verifier_issue(issue), verifier_opts),
+        with {:ok, _turn_session} <- provider.run_turn(session, prompt, verifier_issue(issue), verifier_opts),
              {:ok, result} <- fetch_verifier_result(issue) do
           after_snapshot = RunInspector.inspect(workspace, opts)
 
@@ -147,7 +149,7 @@ defmodule SymphonyElixir.VerifierRunner do
         end
       after
         clear_verifier_result(issue)
-        AppServer.stop_session(session)
+        provider.stop_session(session)
       end
     end
   end

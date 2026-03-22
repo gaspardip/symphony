@@ -53,7 +53,7 @@ defmodule SymphonyElixir.TelemetrySmokeTest do
       paused: [],
       skipped: [],
       queue: [],
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0},
       rate_limits: %{},
       runner: %{
         instance_name: "stable-smoke",

@@ -975,12 +975,12 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
       issue: issue,
       session_id: "thread-turn",
       turn_count: 1,
-      codex_input_tokens: 0,
-      codex_output_tokens: 0,
-      codex_total_tokens: 0,
-      codex_last_reported_input_tokens: 0,
-      codex_last_reported_output_tokens: 0,
-      codex_last_reported_total_tokens: 0,
+      agent_input_tokens: 0,
+      agent_output_tokens: 0,
+      agent_total_tokens: 0,
+      agent_last_reported_input_tokens: 0,
+      agent_last_reported_output_tokens: 0,
+      agent_last_reported_total_tokens: 0,
       turn_started_input_tokens: 0,
       started_at: DateTime.utc_now()
     }
@@ -994,7 +994,7 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:agent_worker_update, issue_id,
        %{
          event: :notification,
          payload: %{

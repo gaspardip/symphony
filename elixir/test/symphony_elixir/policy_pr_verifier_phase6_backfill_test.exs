@@ -435,9 +435,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     assert {:stop, %RunPolicy.Violation{code: :per_issue_total_budget_exceeded, details: details}} =
              RunPolicy.maybe_stop_for_token_budget(issue, %{
-               codex_input_tokens: 4,
-               codex_output_tokens: 2,
-               codex_total_tokens: 11,
+               agent_input_tokens: 4,
+               agent_output_tokens: 2,
+               agent_total_tokens: 11,
                turn_started_input_tokens: 1
              })
 
@@ -454,9 +454,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     assert {:stop, %RunPolicy.Violation{code: :per_issue_output_budget_exceeded, details: details}} =
              RunPolicy.maybe_stop_for_token_budget(issue, %{
-               codex_input_tokens: 4,
-               codex_output_tokens: 7,
-               codex_total_tokens: 11,
+               agent_input_tokens: 4,
+               agent_output_tokens: 7,
+               agent_total_tokens: 11,
                turn_started_input_tokens: 1
              })
 
@@ -473,9 +473,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     assert :ok =
              RunPolicy.maybe_stop_for_token_budget(issue, %{
-               codex_input_tokens: 3,
-               codex_output_tokens: 4,
-               codex_total_tokens: 7,
+               agent_input_tokens: 3,
+               agent_output_tokens: 4,
+               agent_total_tokens: 7,
                turn_started_input_tokens: 9
              })
 
@@ -503,9 +503,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded, details: details}} =
              RunPolicy.maybe_stop_for_token_budget(issue, %{
                stage: "implement",
-               codex_input_tokens: 130_000,
-               codex_output_tokens: 0,
-               codex_total_tokens: 130_000,
+               agent_input_tokens: 130_000,
+               agent_output_tokens: 0,
+               agent_total_tokens: 130_000,
                turn_started_input_tokens: 0
              })
 
@@ -553,9 +553,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       assert :ok =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
-                 codex_input_tokens: 65_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 65_000,
+                 agent_input_tokens: 65_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 65_000,
                  turn_started_input_tokens: 0
                })
 
@@ -606,9 +606,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded}} =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
-                 codex_input_tokens: 130_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 130_000,
+                 agent_input_tokens: 130_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 130_000,
                  turn_started_input_tokens: 0
                })
 
@@ -678,9 +678,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
         assert :ok =
                  RunPolicy.maybe_stop_for_token_budget(issue, %{
                    stage: "implement",
-                   codex_input_tokens: 130_000,
-                   codex_output_tokens: 0,
-                   codex_total_tokens: 130_000,
+                   agent_input_tokens: 130_000,
+                   agent_output_tokens: 0,
+                   agent_total_tokens: 130_000,
                    turn_started_input_tokens: 0
                  })
       end)
@@ -730,27 +730,27 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       assert :ok =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
-                 codex_input_tokens: 130_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 130_000,
+                 agent_input_tokens: 130_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 130_000,
                  turn_started_input_tokens: 0
                })
 
       assert :ok =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
-                 codex_input_tokens: 145_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 145_000,
+                 agent_input_tokens: 145_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 145_000,
                  turn_started_input_tokens: 0
                })
 
       assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded}} =
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
-                 codex_input_tokens: 155_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 155_000,
+                 agent_input_tokens: 155_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 155_000,
                  turn_started_input_tokens: 0
                })
     after
@@ -802,9 +802,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       running_entry = %{
         dispatch_stage: "implement",
         workspace_path: workspace,
-        codex_input_tokens: 210_000,
-        codex_output_tokens: 0,
-        codex_total_tokens: 210_000,
+        agent_input_tokens: 210_000,
+        agent_output_tokens: 0,
+        agent_total_tokens: 210_000,
         turn_started_input_tokens: 0
       }
 
@@ -815,8 +815,8 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
       assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded}} =
                RunPolicy.maybe_stop_for_token_budget(mismatched_issue, %{
                  running_entry
-                 | codex_input_tokens: 225_000,
-                   codex_total_tokens: 225_000
+                 | agent_input_tokens: 225_000,
+                   agent_total_tokens: 225_000
                })
     after
       File.rm_rf(workspace_root)
@@ -878,9 +878,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
                  workspace_path: workspace,
-                 codex_input_tokens: 160_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 690_000,
+                 agent_input_tokens: 160_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 690_000,
                  turn_started_input_tokens: 0
                })
 
@@ -888,9 +888,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
                  workspace_path: workspace,
-                 codex_input_tokens: 160_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 730_000,
+                 agent_input_tokens: 160_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 730_000,
                  turn_started_input_tokens: 0
                })
     after
@@ -948,9 +948,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                RunPolicy.maybe_stop_for_token_budget(issue, %{
                  stage: "implement",
                  workspace_path: workspace,
-                 codex_input_tokens: 160_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 510_000,
+                 agent_input_tokens: 160_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 510_000,
                  turn_started_input_tokens: 0
                })
     after
@@ -965,9 +965,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
 
     assert :ok =
              RunPolicy.maybe_stop_for_token_budget(issue, %{
-               codex_input_tokens: 500,
-               codex_output_tokens: 100,
-               codex_total_tokens: 900,
+               agent_input_tokens: 500,
+               agent_output_tokens: 100,
+               agent_total_tokens: 900,
                turn_started_input_tokens: 0
              })
 
@@ -1011,9 +1011,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  workspace: workspace,
                  stage: "implement",
                  turn_count: 1,
-                 codex_input_tokens: 130_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 130_000,
+                 agent_input_tokens: 130_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 130_000,
                  turn_started_input_tokens: 0,
                  resume_context: %{
                    budget_mode: "review_fix",
@@ -1078,9 +1078,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  workspace: workspace,
                  stage: "implement",
                  turn_count: 1,
-                 codex_input_tokens: 130_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 130_000,
+                 agent_input_tokens: 130_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 130_000,
                  turn_started_input_tokens: 0,
                  resume_context: %{
                    budget_mode: "review_fix",
@@ -1151,9 +1151,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  issue: issue,
                  identifier: issue.identifier,
                  turn_count: 1,
-                 codex_input_tokens: 130_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 130_000,
+                 agent_input_tokens: 130_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 130_000,
                  turn_started_input_tokens: 0,
                  resume_context: %{
                    budget_mode: "review_fix",
@@ -1193,9 +1193,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
              RunPolicy.maybe_stop_for_token_budget(issue, %{
                stage: "implement",
                turn_count: 4,
-               codex_input_tokens: 140_000,
-               codex_output_tokens: 0,
-               codex_total_tokens: 140_000,
+               agent_input_tokens: 140_000,
+               agent_output_tokens: 0,
+               agent_total_tokens: 140_000,
                turn_started_input_tokens: 0,
                resume_context: %{
                  budget_mode: "review_fix",
@@ -1209,9 +1209,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
              RunPolicy.maybe_stop_for_token_budget(issue, %{
                stage: "implement",
                turn_count: 6,
-               codex_input_tokens: 200_000,
-               codex_output_tokens: 0,
-               codex_total_tokens: 200_000,
+               agent_input_tokens: 200_000,
+               agent_output_tokens: 0,
+               agent_total_tokens: 200_000,
                turn_started_input_tokens: 0,
                resume_context: %{
                  budget_mode: "review_fix",
@@ -1258,9 +1258,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  workspace: workspace,
                  stage: "implement",
                  turn_count: 3,
-                 codex_input_tokens: 20_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 510_000,
+                 agent_input_tokens: 20_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 510_000,
                  turn_started_input_tokens: 0,
                  resume_context: %{
                    budget_mode: "review_fix",
@@ -1278,9 +1278,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  workspace: workspace,
                  stage: "implement",
                  turn_count: 4,
-                 codex_input_tokens: 20_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 700_001,
+                 agent_input_tokens: 20_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 700_001,
                  turn_started_input_tokens: 0,
                  resume_context: %{
                    budget_mode: "review_fix",
@@ -1322,9 +1322,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
              RunPolicy.maybe_stop_for_token_budget(issue, %{
                stage: "implement",
                turn_count: 5,
-               codex_input_tokens: 230_000,
-               codex_output_tokens: 0,
-               codex_total_tokens: 230_000,
+               agent_input_tokens: 230_000,
+               agent_output_tokens: 0,
+               agent_total_tokens: 230_000,
                turn_started_input_tokens: 0,
                resume_context: %{
                  budget_mode: "review_fix",
@@ -1339,9 +1339,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
              RunPolicy.maybe_stop_for_token_budget(issue, %{
                stage: "implement",
                turn_count: 12,
-               codex_input_tokens: 230_000,
-               codex_output_tokens: 0,
-               codex_total_tokens: 230_000,
+               agent_input_tokens: 230_000,
+               agent_output_tokens: 0,
+               agent_total_tokens: 230_000,
                turn_started_input_tokens: 0,
                resume_context: %{
                  budget_mode: "review_fix",
@@ -1393,9 +1393,9 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
                  workspace: workspace,
                  stage: "implement",
                  turn_count: 5,
-                 codex_input_tokens: 230_000,
-                 codex_output_tokens: 0,
-                 codex_total_tokens: 230_000,
+                 agent_input_tokens: 230_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 230_000,
                  turn_started_input_tokens: 0,
                  resume_context: %{
                    budget_mode: "review_fix",

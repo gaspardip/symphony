@@ -38,14 +38,14 @@ defmodule SymphonyElixir.OrchestratorPhase6Test do
 
     send(
       pid,
-      {:codex_worker_update, "missing-issue", %{event: :notification, payload: %{method: "noop"}, timestamp: DateTime.utc_now()}}
+      {:agent_worker_update, "missing-issue", %{event: :notification, payload: %{method: "noop"}, timestamp: DateTime.utc_now()}}
     )
 
     Process.sleep(20)
     after_state = :sys.get_state(pid)
 
     assert after_state.running == before_state.running
-    assert after_state.codex_totals == before_state.codex_totals
+    assert after_state.agent_totals == before_state.agent_totals
   end
 
   test "retry_issue for a missing retry entry is a no-op" do

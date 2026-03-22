@@ -139,9 +139,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.reasoning_tier_for_stage("verify") == "deep"
     assert Config.reasoning_tier_for_stage("verifier") == "rigorous"
 
-    assert Config.codex_turn_effort("implement") == "medium"
-    assert Config.codex_turn_effort("verify") == "high"
-    assert Config.codex_turn_effort("verifier") == "xhigh"
+    assert Config.agent_turn_effort("implement") == "medium"
+    assert Config.agent_turn_effort("verify") == "high"
+    assert Config.agent_turn_effort("verifier") == "xhigh"
   end
 
   test "company mode defaults to the policy pack and can be overridden explicitly" do
@@ -185,9 +185,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.reasoning_tier_for_stage("verify") == "rigorous"
     assert Config.reasoning_tier_for_stage("verifier") == "balanced"
 
-    assert Config.codex_turn_effort("implement") == "high"
-    assert Config.codex_turn_effort("verify") == "high"
-    assert Config.codex_turn_effort("verifier") == "medium"
+    assert Config.agent_turn_effort("implement") == "high"
+    assert Config.agent_turn_effort("verify") == "high"
+    assert Config.agent_turn_effort("verifier") == "medium"
   end
 
   test "workspace path is deterministic per issue identifier" do
@@ -622,7 +622,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -644,7 +644,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -664,7 +664,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -887,9 +887,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "excludeSlashTmp" => false
            }
 
-    assert Config.codex_turn_timeout_ms() == 3_600_000
-    assert Config.codex_read_timeout_ms() == 5_000
-    assert Config.codex_stall_timeout_ms() == 300_000
+    assert Config.agent_turn_timeout_ms() == 3_600_000
+    assert Config.agent_read_timeout_ms() == 5_000
+    assert Config.agent_stall_timeout_ms() == 300_000
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
     assert Config.codex_command() == "codex app-server --model gpt-5.3-codex"
@@ -931,13 +931,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.max_concurrent_agents() == 10
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: "bad")
-    assert Config.codex_turn_timeout_ms() == 3_600_000
+    assert Config.agent_turn_timeout_ms() == 3_600_000
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_read_timeout_ms: "bad")
-    assert Config.codex_read_timeout_ms() == 5_000
+    assert Config.agent_read_timeout_ms() == 5_000
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
-    assert Config.codex_stall_timeout_ms() == 300_000
+    assert Config.agent_stall_timeout_ms() == 300_000
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},

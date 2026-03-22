@@ -243,7 +243,7 @@ defmodule SymphonyElixir.RuleCatalog do
     turn_failed: %{
       rule_id: "implementation.turn_failed",
       failure_class: "implementation",
-      human_action: "Inspect the Codex session or app-server failure details and retry the issue after the underlying runtime problem is resolved."
+      human_action: "Inspect the agent session or failure details and retry the issue after the underlying runtime problem is resolved."
     },
     command_output_budget_exceeded: %{
       rule_id: "implementation.command_output_budget_exceeded",

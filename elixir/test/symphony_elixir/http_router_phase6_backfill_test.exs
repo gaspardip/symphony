@@ -147,7 +147,7 @@ defmodule SymphonyElixir.HttpRouterPhase6BackfillTest do
       paused: [],
       skipped: [],
       queue: [],
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       rate_limits: nil,
       polling: %{}
     }

@@ -387,7 +387,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert state_payload["counts"]["paused"] == 0
     assert state_payload["counts"]["queue"] == 0
 
-    assert state_payload["codex_totals"] == %{
+    assert state_payload["agent_totals"] == %{
              "input_tokens" => 4,
              "output_tokens" => 8,
              "total_tokens" => 12,
@@ -436,7 +436,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert issue_payload["workspace"] == %{"path" => Path.join(Config.workspace_root(), "MT-HTTP")}
     assert issue_payload["attempts"] == %{"restart_count" => 0, "current_retry_attempt" => 0}
     assert issue_payload["retry"] == nil
-    assert issue_payload["logs"] == %{"codex_session_logs" => []}
+    assert issue_payload["logs"] == %{"agent_session_logs" => []}
     assert issue_payload["recent_events"] == []
     assert issue_payload["last_error"] == nil
     assert issue_payload["tracked"] == %{}
@@ -746,8 +746,8 @@ defmodule SymphonyElixir.ExtensionsTest do
           state: "In Progress",
           session_id: "thread-http",
           turn_count: 8,
-          last_codex_event: :notification,
-          last_codex_message: %{
+          last_agent_event: :notification,
+          last_agent_message: %{
             event: :notification,
             message: %{
               payload: %{
@@ -760,10 +760,10 @@ defmodule SymphonyElixir.ExtensionsTest do
               }
             }
           },
-          last_codex_timestamp: DateTime.utc_now(),
-          codex_input_tokens: 10,
-          codex_output_tokens: 12,
-          codex_total_tokens: 22,
+          last_agent_timestamp: DateTime.utc_now(),
+          agent_input_tokens: 10,
+          agent_output_tokens: 12,
+          agent_total_tokens: 22,
           started_at: DateTime.utc_now()
         }
       ])
@@ -876,13 +876,13 @@ defmodule SymphonyElixir.ExtensionsTest do
           state: "In Progress",
           session_id: "thread-http",
           turn_count: 7,
-          codex_app_server_pid: nil,
-          last_codex_message: "rendered",
-          last_codex_timestamp: nil,
-          last_codex_event: :notification,
-          codex_input_tokens: 4,
-          codex_output_tokens: 8,
-          codex_total_tokens: 12,
+          agent_process_id: nil,
+          last_agent_message: "rendered",
+          last_agent_timestamp: nil,
+          last_agent_event: :notification,
+          agent_input_tokens: 4,
+          agent_output_tokens: 8,
+          agent_total_tokens: 12,
           started_at: DateTime.utc_now()
         }
       ],
@@ -895,7 +895,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           error: "boom"
         }
       ],
-      codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
+      agent_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}},
       webhooks: %{
         health: "healthy",
