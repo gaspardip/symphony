@@ -57,6 +57,25 @@ codex:
   thread_sandbox: danger-full-access
   turn_sandbox_policy:
     type: dangerFullAccess
+  # Provider-agnostic agent config options (examples — uncomment and adjust as needed):
+  #
+  # Set a default provider for all stages:
+  #   provider: anthropic
+  #
+  # Set a default model for all stages:
+  #   model: claude-sonnet-4-6
+  #
+  # Per-stage provider/model routing (overrides the top-level provider/model):
+  #   providers:
+  #     implement:
+  #       provider: anthropic
+  #       model: claude-sonnet-4-6
+  #     verify:
+  #       provider: openai
+  #       model: gpt-5.4
+  #     verifier:
+  #       provider: anthropic
+  #       model: claude-opus-4-6
 ---
 
 Ticket `{{ issue.identifier }}`.
