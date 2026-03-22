@@ -1,6 +1,33 @@
 defmodule SymphonyElixir.AgentProvider do
   @moduledoc """
   Behaviour for agent providers. Implement this to add a new coding agent to Symphony.
+
+  ## Callbacks
+
+  The behaviour defines three callbacks that every provider must implement:
+
+  - `c:start_session/2` — initialise a provider session in a given workspace directory and
+    return an opaque `t:session/0` map used by subsequent calls.
+  - `c:run_turn/4` — execute one prompt turn within an existing session and return a
+    `t:turn_result/0` describing the outcome and token usage.
+  - `c:stop_session/1` — tear down the session and release any associated resources.
+
+  ## Adding a new provider
+
+  1. Create a module that `@behaviour SymphonyElixir.AgentProvider`.
+  2. Implement all three callbacks: `start_session/2`, `run_turn/4`, and `stop_session/1`.
+  3. Register the provider string in the application config and add a matching clause to the
+     private `resolve_module/1` function in this module (e.g. `"myprovider" -> MyApp.AgentProvider.MyProvider`).
+
+  ## Provider resolution
+
+  - `resolve/1` — reads the provider from the `:provider` option or, when absent, from the
+    application configuration via `SymphonyElixir.Config.agent_provider/0`. Use this as the
+    default resolution path.
+  - `resolve_for_stage/2` — looks up a stage-specific override via
+    `SymphonyElixir.Config.agent_provider_for_stage/1` before falling back to `resolve/1`.
+    Use this when different pipeline stages (e.g. `implement` vs `review`) should be handled
+    by different providers.
   """
 
   alias SymphonyElixir.Config
