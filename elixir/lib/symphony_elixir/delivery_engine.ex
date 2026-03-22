@@ -576,50 +576,26 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve())
 
-    try do
-      with {:ok, _turn} <-
-             provider.run_turn(
-               app_session,
-               prompt,
-               issue,
-               Keyword.merge(
-                 opts,
-                 stage: "plan",
-                 effort: Config.agent_turn_effort("implement"),
-                 on_message: agent_message_handler(recipient, issue),
-                 tool_executor: tool_executor(issue, opts)
-               )
-             ),
-           {:ok, _turn_result} <- fetch_turn_result(issue),
-           {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
-           :ok <- ensure_issue_still_active(refreshed_issue),
-           {:ok, _state} <-
-             RunStateStore.transition(workspace, "implement", %{
-               plan_completed: true
-             }) do
-        do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
-      else
-        {:error, :missing_turn_result} ->
-          Logger.warning("Plan turn completed without turn result, advancing to implement")
+    turn_result =
+      provider.run_turn(
+        app_session,
+        prompt,
+        issue,
+        Keyword.merge(
+          opts,
+          stage: "plan",
+          effort: Config.agent_turn_effort("implement"),
+          on_message: agent_message_handler(recipient, issue),
+          tool_executor: tool_executor(issue, opts)
+        )
+      )
 
-          {:ok, _state} = RunStateStore.transition(workspace, "implement", %{plan_completed: false})
-          do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+    plan_completed = match?({:ok, _}, turn_result) and match?({:ok, _}, fetch_turn_result(issue))
 
-        {:error, {:turn_runtime_error, reason}} ->
-          block_issue(workspace, issue, :plan_turn_error, inspect(reason), @blocked_state)
+    Logger.info("Plan turn finished for #{issue.identifier} plan_completed=#{plan_completed}")
 
-        {:done, finished_issue} ->
-          {:done, finished_issue}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    rescue
-      error ->
-        Logger.error("Plan turn crashed: #{inspect(error)}")
-        {:ok, _state} = RunStateStore.transition(workspace, "implement", %{plan_completed: false})
-        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
-    end
+    {:ok, _state} = RunStateStore.transition(workspace, "implement", %{plan_completed: plan_completed})
+    do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
   end
 
   defp plan_prompt(issue, _state, workspace) do
@@ -800,8 +776,6 @@ defmodule SymphonyElixir.DeliveryEngine do
                  ),
                {:ok, turn_result} <- fetch_turn_result(issue),
                after_snapshot <- RunInspector.inspect(workspace, opts),
-               {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
-               :ok <- ensure_issue_still_active(refreshed_issue),
                {:ok, next_stage} <-
                  implement_next_stage(turn_result, before_snapshot, after_snapshot),
                updated_review_claims =
@@ -836,7 +810,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      },
                      resume_context_attrs(
                        workspace,
-                       refreshed_issue,
+                       issue,
                        state,
                        after_snapshot,
                        %{
@@ -851,7 +825,9 @@ defmodule SymphonyElixir.DeliveryEngine do
                        opts
                      )
                    )
-                 ) do
+                 ),
+               {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
+               :ok <- ensure_issue_still_active(refreshed_issue) do
             do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
           else
             {:error, {:turn_runtime_error, reason}} ->
