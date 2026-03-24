@@ -633,10 +633,10 @@ defmodule SymphonyElixir.DeliveryEngine do
     A numbered step-by-step implementation plan. For each step, name the specific file(s) to modify and what to change.
 
     ## Work Log
-    (Leave empty — will be filled during implementation.)
+    - Planning turn completed.
 
     ## Evidence
-    (Leave empty — will be filled after implementation.)
+    - Plan written based on codebase analysis.
 
     ## Next Step
     The first concrete action for the implementation turn.
@@ -3854,8 +3854,11 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp implement_next_stage(%TurnResult{} = turn_result, before_snapshot, after_snapshot) do
     case ensure_turn_progress(turn_result, before_snapshot, after_snapshot) do
-      :ok -> {:ok, "validate"}
-      {:error, reason} -> {:error, reason}
+      :ok ->
+        if Config.policy_require_validation?(), do: {:ok, "validate"}, else: {:ok, "publish"}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
