@@ -35,4 +35,21 @@ defmodule SymphonyElixir.AgentProviderTest do
                SymphonyElixir.AgentProvider.Claude
     end
   end
+
+  describe "per-stage model resolution" do
+    test "agent_model_for_stage returns nil when no models configured" do
+      assert Config.agent_model_for_stage("plan") == nil
+      assert Config.agent_model_for_stage("implement") == nil
+      assert Config.agent_model_for_stage("verifier") == nil
+    end
+
+    test "agent_model returns global default" do
+      # Default WORKFLOW.md has no model set
+      assert Config.agent_model() == nil
+    end
+
+    test "agent_model_for_stage returns nil for unknown stages" do
+      assert Config.agent_model_for_stage("nonexistent") == nil
+    end
+  end
 end

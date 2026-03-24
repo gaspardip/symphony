@@ -120,13 +120,16 @@ defmodule SymphonyElixir.AgentProvider.Claude do
   # -- Test helpers --
 
   @doc false
+  @spec parse_stream_line_for_test(binary(), StreamState.t()) :: {StreamState.t(), map() | nil}
   def parse_stream_line_for_test(line, state), do: parse_stream_line(line, state)
 
   @doc false
+  @spec synthesize_turn_result_for_test(StreamState.t(), (String.t(), map() -> map()) | nil) :: map()
   def synthesize_turn_result_for_test(state, tool_executor),
     do: synthesize_turn_result(state, tool_executor)
 
   @doc false
+  @spec detect_changed_files_for_test(StreamState.t(), Path.t()) :: StreamState.t()
   def detect_changed_files_for_test(state, workspace),
     do: detect_changed_files(state, workspace)
 

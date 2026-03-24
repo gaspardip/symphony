@@ -135,13 +135,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "config exposes default abstract reasoning tiers and codex mappings by stage" do
     write_workflow_file!(Workflow.workflow_file_path())
 
+    assert Config.reasoning_tier_for_stage("plan") == "deep"
     assert Config.reasoning_tier_for_stage("implement") == "balanced"
     assert Config.reasoning_tier_for_stage("verify") == "deep"
     assert Config.reasoning_tier_for_stage("verifier") == "rigorous"
 
+    assert Config.agent_turn_effort("plan") == "high"
     assert Config.agent_turn_effort("implement") == "medium"
     assert Config.agent_turn_effort("verify") == "high"
     assert Config.agent_turn_effort("verifier") == "xhigh"
+  end
+
+  test "config returns per-stage model overrides and falls back to global" do
+    write_workflow_file!(Workflow.workflow_file_path())
+
+    # No per-stage models configured — all nil
+    assert Config.agent_model_for_stage("plan") == nil
+    assert Config.agent_model_for_stage("implement") == nil
+    assert Config.agent_model_for_stage("verifier") == nil
+    assert Config.agent_model() == nil
   end
 
   test "company mode defaults to the policy pack and can be overridden explicitly" do

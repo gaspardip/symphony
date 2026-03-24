@@ -584,7 +584,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         Keyword.merge(
           opts,
           stage: "plan",
-          effort: Config.agent_turn_effort("implement"),
+          effort: Config.agent_turn_effort("plan"),
+          model: Config.agent_model_for_stage("plan") || Config.agent_model(),
           on_message: agent_message_handler(recipient, issue),
           tool_executor: tool_executor(issue, opts)
         )
@@ -768,6 +769,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      opts,
                      stage: "implement",
                      effort: implement_effort(state),
+                     model: Config.agent_model_for_stage("implement") || Config.agent_model(),
                      forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
                      command_output_budget: implement_command_output_budget(state),
                      on_message: agent_message_handler(recipient, issue),
