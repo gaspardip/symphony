@@ -128,6 +128,7 @@ defmodule SymphonyElixir.VerifierRunner do
 
     verifier_opts = [
       effort: Config.agent_turn_effort("verifier"),
+      model: Config.agent_model_for_stage("verifier") || Config.agent_model(),
       on_message: Keyword.get(opts, :on_message, fn _message -> :ok end),
       tool_executor: verifier_tool_executor(issue),
       issue: issue

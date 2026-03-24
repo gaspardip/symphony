@@ -37,6 +37,7 @@ defmodule SymphonyElixir.Config do
   @default_max_retry_backoff_ms 300_000
   @default_codex_command "codex app-server"
   @default_reasoning_stages %{
+    plan: "deep",
     implement: "balanced",
     verify: "deep",
     verifier: "rigorous"
@@ -214,6 +215,7 @@ defmodule SymphonyElixir.Config do
                                  provider: [type: {:or, [:string, nil]}, default: nil],
                                  model: [type: {:or, [:string, nil]}, default: nil],
                                  providers: [type: {:or, [:map, nil]}, default: nil],
+                                 models: [type: {:or, [:map, nil]}, default: nil],
                                  reasoning: [
                                    type: :map,
                                    default: %{}
@@ -893,6 +895,19 @@ defmodule SymphonyElixir.Config do
       end
 
     get_in(validated_workflow_options(), [:agent, :providers, stage_key])
+  rescue
+    ArgumentError -> nil
+  end
+
+  @spec agent_model_for_stage(String.t() | atom()) :: String.t() | nil
+  def agent_model_for_stage(stage) do
+    stage_key =
+      case stage do
+        s when is_atom(s) -> s
+        s when is_binary(s) -> String.to_existing_atom(s)
+      end
+
+    get_in(validated_workflow_options(), [:agent, :models, stage_key])
   rescue
     ArgumentError -> nil
   end
@@ -1730,6 +1745,7 @@ defmodule SymphonyElixir.Config do
       |> put_if_present(:provider, binary_value(Map.get(agent_section, "provider") || Map.get(legacy_codex_section, "provider")))
       |> put_if_present(:model, binary_value(Map.get(agent_section, "model") || Map.get(legacy_codex_section, "model")))
       |> put_if_present(:providers, map_value(Map.get(agent_section, "providers") || Map.get(legacy_codex_section, "providers")))
+      |> put_if_present(:models, models_value(Map.get(agent_section, "models")))
       |> put_if_present(:reasoning, reasoning_settings_value(Map.get(agent_section, "reasoning") || Map.get(legacy_codex_section, "reasoning")))
       |> put_if_present(:turn_timeout_ms, integer_value(Map.get(runtime_source, "turn_timeout_ms")))
       |> put_if_present(:read_timeout_ms, integer_value(Map.get(runtime_source, "read_timeout_ms")))
@@ -2048,6 +2064,22 @@ defmodule SymphonyElixir.Config do
 
   defp map_value(value) when is_map(value) and map_size(value) > 0, do: value
   defp map_value(_value), do: :omit
+
+  defp models_value(section) when is_map(section) do
+    result =
+      section
+      |> Enum.reduce(%{}, fn {k, v}, acc ->
+        case {scalar_string_value(k), binary_value(v)} do
+          {:omit, _} -> acc
+          {_, :omit} -> acc
+          {key, model} -> Map.put(acc, String.to_atom(key), model)
+        end
+      end)
+
+    if map_size(result) > 0, do: result, else: :omit
+  end
+
+  defp models_value(_value), do: :omit
 
   defp command_value(value) when is_binary(value) do
     case String.trim(value) do
