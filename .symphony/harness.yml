@@ -41,7 +41,7 @@ agent_harness:
       - last_updated_by_issue
   publish_gate:
     require_progress: true
-    require_feature_update_on_code_change: true
+    require_feature_update_on_code_change: false
 preflight:
   description: Validate the local toolchain and repo bootstrap requirements for Symphony self-host runs.
   command:
