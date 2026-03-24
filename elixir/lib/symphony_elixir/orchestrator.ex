@@ -472,53 +472,8 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_promote_review_ready_issues()
           |> maybe_dispatch_mode(mode)
         else
-          {:error, :missing_linear_api_token} ->
-            Logger.error("Linear API token missing in WORKFLOW.md")
-            state
-
-          {:error, :missing_linear_project_slug} ->
-            Logger.error("Linear project slug missing in WORKFLOW.md")
-            state
-
-          {:error, :missing_tracker_kind} ->
-            Logger.error("Tracker kind missing in WORKFLOW.md")
-            state
-
-          {:error, {:unsupported_tracker_kind, kind}} ->
-            Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-            state
-
-          {:error, {:invalid_tracker_handoff_mode, value}} ->
-            Logger.error("Invalid tracker.handoff_mode in WORKFLOW.md: #{inspect(value)}")
-            state
-
-          {:error, {:invalid_codex_approval_policy, value}} ->
-            Logger.error("Invalid agent.codex.approval_policy in WORKFLOW.md: #{inspect(value)}")
-            state
-
-          {:error, {:invalid_codex_thread_sandbox, value}} ->
-            Logger.error("Invalid agent.codex.thread_sandbox in WORKFLOW.md: #{inspect(value)}")
-            state
-
-          {:error, {:invalid_codex_turn_sandbox_policy, reason}} ->
-            Logger.error("Invalid agent.codex.turn_sandbox_policy in WORKFLOW.md: #{inspect(reason)}")
-            state
-
-          {:error, {:missing_workflow_file, path, reason}} ->
-            Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-            state
-
-          {:error, :workflow_front_matter_not_a_map} ->
-            Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-
-            state
-
-          {:error, {:workflow_parse_error, reason}} ->
-            Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-            state
-
           {:error, reason} ->
-            Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
+            Logger.error("Dispatch blocked by config validation: #{inspect(reason)}")
             %{state | skipped_issues: [], candidate_fetch_error: reason}
         end
     end

@@ -78,6 +78,9 @@ defmodule SymphonyElixir.AgentProvider.Claude do
       # Merge stream-detected files with actual git changes
       stream_state = detect_changed_files(stream_state, session.workspace)
 
+      # Auto-commit any changes (Claude doesn't commit like Codex does)
+      stream_state = maybe_auto_commit(stream_state, session.workspace)
+
       # Synthesize turn result from stream events and invoke tool_executor
       synthesize_turn_result(stream_state, tool_executor)
 
@@ -249,6 +252,31 @@ defmodule SymphonyElixir.AgentProvider.Claude do
 
       {:error, _} ->
         {state, nil}
+    end
+  end
+
+  # Auto-commit changes after a turn — Claude writes files but doesn't commit
+  defp maybe_auto_commit(%StreamState{files_touched: []} = state, _workspace), do: state
+
+  defp maybe_auto_commit(%StreamState{} = state, workspace) do
+    message = state.result_text || "Agent turn completed"
+
+    case System.cmd("git", ["add", "-A"], cd: workspace, stderr_to_stdout: true) do
+      {_, 0} ->
+        case System.cmd("git", ["diff", "--cached", "--quiet"], cd: workspace, stderr_to_stdout: true) do
+          {_, 0} ->
+            # Nothing staged — skip commit
+            state
+
+          {_, 1} ->
+            # Changes staged — commit
+            System.cmd("git", ["commit", "-m", message], cd: workspace, stderr_to_stdout: true)
+            Logger.info("Auto-committed agent changes in #{workspace}")
+            state
+        end
+
+      _ ->
+        state
     end
   end
 

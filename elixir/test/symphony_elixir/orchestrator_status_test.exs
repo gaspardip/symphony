@@ -1062,10 +1062,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     log =
       capture_log(fn ->
         assert {:noreply, invalid_handoff_state} = Orchestrator.handle_info(:run_poll_cycle, state)
-        assert invalid_handoff_state.candidate_fetch_error == nil
+        assert invalid_handoff_state.candidate_fetch_error == {:invalid_tracker_handoff_mode, "not-a-mode"}
       end)
 
-    assert log =~ "Invalid tracker.handoff_mode"
+    assert log =~ "Dispatch blocked by config validation"
   end
 
   test "orchestrator poll cycle records generic tracker config validation failures" do
@@ -1095,7 +1095,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         assert next_state.skipped_issues == []
       end)
 
-    assert log =~ "Failed to fetch from tracker: {:invalid_policy_default_issue_class, \"bogus\"}"
+    assert log =~ "Dispatch blocked by config validation"
   end
 
   test "orchestrator webhook cycle drains valid persisted tracker events and updates routing cache" do
