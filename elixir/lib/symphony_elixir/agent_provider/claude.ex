@@ -46,13 +46,13 @@ defmodule SymphonyElixir.AgentProvider.Claude do
 
   @impl true
   def run_turn(session, prompt, issue, opts \\ []) do
+    model = Keyword.get(opts, :model, session.model)
+    effective_session = %{session | model: model}
     full_prompt = build_full_prompt(prompt, session.workspace, opts)
-    args = build_cli_args(session, full_prompt, opts)
+    args = build_cli_args(effective_session, full_prompt, opts)
     executable = claude_executable()
 
-    Logger.info(
-      "Claude CLI turn starting issue=#{issue_identifier(issue)} model=#{session.model} workspace=#{session.workspace}"
-    )
+    Logger.info("Claude CLI turn starting issue=#{issue_identifier(issue)} model=#{model} workspace=#{session.workspace}")
 
     port =
       Port.open(
