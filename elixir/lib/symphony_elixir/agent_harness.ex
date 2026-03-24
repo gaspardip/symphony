@@ -315,16 +315,24 @@ defmodule SymphonyElixir.AgentHarness do
   end
 
   defp harness_changed_paths(workspace) do
-    case System.cmd("git", ["status", "--porcelain"], cd: workspace, stderr_to_stdout: true) do
-      {output, 0} ->
-        output
-        |> String.split(~r/\r?\n/, trim: true)
-        |> Enum.flat_map(&expand_status_paths(workspace, &1))
-        |> Enum.uniq()
+    uncommitted =
+      case System.cmd("git", ["status", "--porcelain"], cd: workspace, stderr_to_stdout: true) do
+        {output, 0} ->
+          output
+          |> String.split(~r/\r?\n/, trim: true)
+          |> Enum.flat_map(&expand_status_paths(workspace, &1))
 
-      _ ->
-        []
-    end
+        _ ->
+          []
+      end
+
+    branch_diff =
+      case System.cmd("git", ["diff", "main", "--name-only"], cd: workspace, stderr_to_stdout: true) do
+        {output, 0} -> String.split(output, ~r/\r?\n/, trim: true)
+        _ -> []
+      end
+
+    Enum.uniq(uncommitted ++ branch_diff)
   end
 
   defp expand_status_paths(workspace, line) do
