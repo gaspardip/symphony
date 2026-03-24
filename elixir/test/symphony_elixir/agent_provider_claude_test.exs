@@ -297,7 +297,9 @@ defmodule SymphonyElixir.AgentProvider.ClaudeTest do
       workspace = Path.join(test_root, "workspace")
       File.mkdir_p!(workspace)
 
-      System.cmd("git", ["init"], cd: workspace)
+      System.cmd("git", ["init", "--initial-branch=main"], cd: workspace)
+      System.cmd("git", ["config", "user.email", "test@test.com"], cd: workspace)
+      System.cmd("git", ["config", "user.name", "Test"], cd: workspace)
       File.write!(Path.join(workspace, "existing.txt"), "original")
       System.cmd("git", ["add", "-A"], cd: workspace)
       System.cmd("git", ["commit", "-m", "init"], cd: workspace)

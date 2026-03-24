@@ -310,9 +310,9 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
         assert {:noreply, _} = Orchestrator.handle_info(:run_poll_cycle, state)
       end)
 
-    assert log =~ "workflow front matter must decode to a map"
-    assert log =~ "Failed to parse WORKFLOW.md"
-    assert log =~ "Missing WORKFLOW.md at"
+    assert log =~ "Dispatch blocked by config validation"
+    assert log =~ "workflow_front_matter_not_a_map"
+    assert log =~ "missing_workflow_file"
   end
 
   test "sort_issues_for_dispatch_for_test falls back to an empty orchestrator state" do
