@@ -1570,13 +1570,40 @@ defmodule SymphonyElixir.DeliveryEngine do
           )
 
         check_rollup.state == :failed ->
-          block_issue(
-            workspace,
-            issue,
-            :required_checks_failed,
-            "Required checks failed on the PR: #{Enum.join(check_rollup.failed, ", ")}",
-            @blocked_state
-          )
+          ci_fix_attempts = Map.get(state, :ci_fix_attempts, 0)
+
+          if ci_fix_attempts < 2 do
+            Logger.info("CI checks failed for #{issue.identifier}, retrying implement (attempt #{ci_fix_attempts + 1})")
+
+            {:ok, _state} =
+              RunStateStore.transition(
+                workspace,
+                "implement",
+                Map.merge(await_checks_attrs, %{
+                  ci_fix_attempts: ci_fix_attempts + 1,
+                  last_ci_failure: %{
+                    failed_checks: check_rollup.failed,
+                    pr_url: inspection.pr_url
+                  },
+                  resume_context: %{
+                    next_objective:
+                      "Fix the failing CI checks: #{Enum.join(check_rollup.failed, ", ")}. " <>
+                        "Read the CI output, identify the errors, and fix them. " <>
+                        "Common issues: mix format, missing @spec, dialyzer type errors, test failures."
+                  }
+                })
+              )
+
+            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+          else
+            block_issue(
+              workspace,
+              issue,
+              :required_checks_failed,
+              "Required checks failed after #{ci_fix_attempts} fix attempts: #{Enum.join(check_rollup.failed, ", ")}",
+              @blocked_state
+            )
+          end
 
         check_rollup.state == :cancelled ->
           block_issue(
