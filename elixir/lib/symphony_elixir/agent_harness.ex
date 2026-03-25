@@ -327,9 +327,15 @@ defmodule SymphonyElixir.AgentHarness do
       end
 
     branch_diff =
-      case System.cmd("git", ["diff", "main", "--name-only"], cd: workspace, stderr_to_stdout: true) do
-        {output, 0} -> String.split(output, ~r/\r?\n/, trim: true)
-        _ -> []
+      case System.cmd("git", ["diff", "origin/main", "--name-only"], cd: workspace, stderr_to_stdout: true) do
+        {output, 0} ->
+          String.split(output, ~r/\r?\n/, trim: true)
+
+        _ ->
+          case System.cmd("git", ["diff", "main", "--name-only"], cd: workspace, stderr_to_stdout: true) do
+            {output, 0} -> String.split(output, ~r/\r?\n/, trim: true)
+            _ -> []
+          end
       end
 
     Enum.uniq(uncommitted ++ branch_diff)
