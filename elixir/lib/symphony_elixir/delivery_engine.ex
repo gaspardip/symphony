@@ -617,35 +617,40 @@ defmodule SymphonyElixir.DeliveryEngine do
     """
     #{SymphonyElixir.PromptBuilder.build_prompt(issue)}
 
-    You are running a planning turn for this issue. Your job is to read the codebase, understand the task, and write an implementation plan.
+    You are running a PLANNING turn. You must:
 
-    Steps:
-    1. Read the issue description and acceptance criteria carefully.
-    2. Explore the relevant source files to understand the codebase context.
-    3. Write a progress file at `#{progress_path}` with these exact Markdown H2 sections:
+    1. READ the issue description above carefully — it specifies exactly which files to change and what to do.
+    2. READ every source file mentioned in the issue description. If the description mentions `delivery_engine.ex`, open it and read the relevant functions. Do the same for every file referenced.
+    3. WRITE a progress file at `#{progress_path}` with a DETAILED implementation plan.
+
+    The progress file MUST contain these exact Markdown H2 sections with REAL content (not placeholders):
 
     ## Goal
-    One sentence describing what this ticket achieves.
+    One sentence: what this ticket achieves.
 
     ## Acceptance
     #{acceptance_text}
 
     ## Plan
-    A numbered step-by-step implementation plan. For each step, name the specific file(s) to modify and what to change.
+    A numbered list where EACH step names:
+    - The exact file path (e.g., `elixir/lib/symphony_elixir/delivery_engine.ex`)
+    - The exact function to modify or add
+    - What the change does, with enough detail that another developer could implement it
 
     ## Work Log
-    - Planning turn completed.
+    - Read the codebase and wrote the implementation plan.
 
     ## Evidence
-    - Plan written based on codebase analysis.
+    - List the files you read and what you learned from each.
 
     ## Next Step
-    The first concrete action for the implementation turn.
+    The first specific action: which file to open, which function to edit, what to add.
 
-    Rules:
-    - Do NOT modify any source code. Only write the progress file.
-    - Read relevant files to understand what needs to change before writing the plan.
-    - Be specific about file paths and functions in your plan.
+    IMPORTANT:
+    - Do NOT write placeholder text like "Outline steps here" — write the ACTUAL plan.
+    - Do NOT modify source code in this turn — only write the progress file.
+    - You MUST read the relevant source files before writing the plan. A plan without reading code is useless.
+    - Spend most of your turn reading files. The plan should reflect what you actually found in the code.
     """
   end
 

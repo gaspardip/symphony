@@ -16,7 +16,7 @@ defmodule SymphonyElixir.AgentProvider.Claude do
   alias SymphonyElixir.Config
 
   @default_model "claude-sonnet-4-6"
-  @default_max_turns 10
+  @default_max_turns 30
   @line_buffer_bytes 1_048_576
 
   # Stream accumulator for collecting events during a turn
