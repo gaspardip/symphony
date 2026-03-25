@@ -113,6 +113,32 @@ defmodule SymphonyElixir.Observability.Metrics do
         event_name: [:symphony, :debug, :artifact, :stored],
         measurement: :bytes,
         tags: [:event_type]
+      ),
+      counter("symphony.agent_turn.starts.total",
+        event_name: [:symphony, :agent_turn, :start],
+        measurement: :count,
+        tags: [:stage, :provider, :model]
+      ),
+      counter("symphony.agent_turn.stops.total",
+        event_name: [:symphony, :agent_turn, :stop],
+        measurement: :count,
+        tags: [:stage, :provider, :model, :result]
+      ),
+      distribution("symphony.agent_turn.duration",
+        event_name: [:symphony, :agent_turn, :stop],
+        measurement: :duration_ms,
+        reporter_options: [buckets: [100, 500, 1_000, 5_000, 15_000, 60_000, 300_000]],
+        tags: [:stage, :result]
+      ),
+      sum("symphony.agent_turn.input_tokens.total",
+        event_name: [:symphony, :agent_turn, :stop],
+        measurement: :input_tokens,
+        tags: [:stage, :model]
+      ),
+      sum("symphony.agent_turn.output_tokens.total",
+        event_name: [:symphony, :agent_turn, :stop],
+        measurement: :output_tokens,
+        tags: [:stage, :model]
       )
     ]
   end

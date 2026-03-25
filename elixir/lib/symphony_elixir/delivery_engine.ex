@@ -575,6 +575,10 @@ defmodule SymphonyElixir.DeliveryEngine do
     clear_turn_runtime_errors(issue)
 
     provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve())
+    model = Config.agent_model_for_stage("plan") || Config.agent_model()
+
+    emit_agent_turn_start("plan", inspect(provider), model, issue)
+    start_time = System.monotonic_time(:millisecond)
 
     turn_result =
       provider.run_turn(
@@ -585,11 +589,13 @@ defmodule SymphonyElixir.DeliveryEngine do
           opts,
           stage: "plan",
           effort: Config.agent_turn_effort("plan"),
-          model: Config.agent_model_for_stage("plan") || Config.agent_model(),
+          model: model,
           on_message: agent_message_handler(recipient, issue),
           tool_executor: tool_executor(issue, opts)
         )
       )
+
+    emit_agent_turn_stop("plan", inspect(provider), model, issue, start_time, turn_result)
 
     plan_completed = match?({:ok, _}, turn_result) and match?({:ok, _}, fetch_turn_result(issue))
 
@@ -764,23 +770,31 @@ defmodule SymphonyElixir.DeliveryEngine do
 
         try do
           provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve())
+          model = Config.agent_model_for_stage("implement") || Config.agent_model()
 
-          with {:ok, _turn_session} <-
-                 provider.run_turn(
-                   app_session,
-                   prompt,
-                   issue,
-                   Keyword.merge(
-                     opts,
-                     stage: "implement",
-                     effort: implement_effort(state),
-                     model: Config.agent_model_for_stage("implement") || Config.agent_model(),
-                     forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
-                     command_output_budget: implement_command_output_budget(state),
-                     on_message: agent_message_handler(recipient, issue),
-                     tool_executor: tool_executor(issue, opts)
-                   )
-                 ),
+          emit_agent_turn_start("implement", inspect(provider), model, issue)
+          start_time = System.monotonic_time(:millisecond)
+
+          turn_session_result =
+            provider.run_turn(
+              app_session,
+              prompt,
+              issue,
+              Keyword.merge(
+                opts,
+                stage: "implement",
+                effort: implement_effort(state),
+                model: model,
+                forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
+                command_output_budget: implement_command_output_budget(state),
+                on_message: agent_message_handler(recipient, issue),
+                tool_executor: tool_executor(issue, opts)
+              )
+            )
+
+          emit_agent_turn_stop("implement", inspect(provider), model, issue, start_time, turn_session_result)
+
+          with {:ok, _turn_session} <- turn_session_result,
                {:ok, turn_result} <- fetch_turn_result(issue),
                after_snapshot <- RunInspector.inspect(workspace, opts),
                {:ok, next_stage} <-
@@ -4785,6 +4799,39 @@ defmodule SymphonyElixir.DeliveryEngine do
     else
       false
     end
+  end
+
+  @doc false
+  def emit_agent_turn_start(stage, provider_name, model, issue) do
+    Observability.emit(
+      [:symphony, :agent_turn, :start],
+      %{count: 1},
+      %{stage: stage, provider: provider_name, model: model, issue_identifier: issue.identifier}
+    )
+  end
+
+  @doc false
+  def emit_agent_turn_stop(stage, provider_name, model, issue, start_time, turn_result) do
+    duration_ms = System.monotonic_time(:millisecond) - start_time
+
+    {input_tokens, output_tokens, result} =
+      case turn_result do
+        {:ok, %{usage: %{input_tokens: input, output_tokens: output}}} -> {input, output, "ok"}
+        {:ok, _} -> {0, 0, "ok"}
+        _ -> {0, 0, "error"}
+      end
+
+    Observability.emit(
+      [:symphony, :agent_turn, :stop],
+      %{duration_ms: duration_ms, input_tokens: input_tokens, output_tokens: output_tokens},
+      %{
+        stage: stage,
+        provider: provider_name,
+        model: model,
+        issue_identifier: issue.identifier,
+        result: result
+      }
+    )
   end
 
   defp merge_limit_reached?(state) do

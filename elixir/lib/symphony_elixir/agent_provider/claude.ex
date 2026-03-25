@@ -46,6 +46,7 @@ defmodule SymphonyElixir.AgentProvider.Claude do
 
   @impl true
   def run_turn(session, prompt, issue, opts \\ []) do
+    start_time = System.monotonic_time(:millisecond)
     model = Keyword.get(opts, :model, session.model)
     effective_session = %{session | model: model}
     full_prompt = build_full_prompt(prompt, session.workspace, opts)
@@ -98,7 +99,8 @@ defmodule SymphonyElixir.AgentProvider.Claude do
        %{
          result: exit_result,
          session_id: session.session_id,
-         usage: stream_state.usage
+         usage: stream_state.usage,
+         duration_ms: System.monotonic_time(:millisecond) - start_time
        }}
     catch
       kind, reason ->
