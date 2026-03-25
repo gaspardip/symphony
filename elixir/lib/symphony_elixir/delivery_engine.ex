@@ -508,6 +508,20 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
+  defp plan_already_exists?(workspace, issue) do
+    case AgentHarness.progress_file_path(workspace, issue) do
+      {:ok, path} -> File.exists?(path) and not blank_file?(path)
+      _ -> false
+    end
+  end
+
+  defp blank_file?(path) do
+    case File.read(path) do
+      {:ok, content} -> String.trim(content) == ""
+      _ -> true
+    end
+  end
+
   defp checkout_next_stage(harness) do
     if AgentHarness.enabled?(harness), do: "initialize_harness", else: "plan"
   end
@@ -569,6 +583,16 @@ defmodule SymphonyElixir.DeliveryEngine do
          _inspection,
          opts
        ) do
+    if plan_already_exists?(workspace, issue) do
+      Logger.info("Plan already exists for #{issue.identifier}, skipping plan turn")
+      {:ok, _state} = RunStateStore.transition(workspace, "implement", %{plan_completed: true})
+      do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+    else
+      do_plan_turn(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts)
+    end
+  end
+
+  defp do_plan_turn(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts) do
     prompt = plan_prompt(issue, state, workspace)
 
     clear_turn_result(issue)
