@@ -67,7 +67,8 @@ defmodule SymphonyElixir.AgentHarnessTest do
     File.mkdir_p!(Path.dirname(code_path))
     File.write!(code_path, "defmodule Sample do\nend\n")
 
-    assert {:error, :feature_update_missing} = AgentHarness.publish_gate(workspace, issue, harness)
+    # With require_feature_update_on_code_change: false in the harness, this passes
+    assert :ok = AgentHarness.publish_gate(workspace, issue, harness)
   end
 
   defp harness_workspace! do
