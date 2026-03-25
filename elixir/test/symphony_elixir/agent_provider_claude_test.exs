@@ -10,7 +10,7 @@ defmodule SymphonyElixir.AgentProvider.ClaudeTest do
       assert {:ok, session} = Claude.start_session(workspace)
       assert session.workspace == Path.expand(workspace)
       assert session.model == "claude-sonnet-4-6"
-      assert session.max_turns == 10
+      assert session.max_turns == 30
       assert is_binary(session.session_id)
       assert String.starts_with?(session.session_id, "claude-")
     end
