@@ -116,6 +116,15 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @spec health(Conn.t(), map()) :: Conn.t()
+  def health(conn, _params) do
+    json(conn, %{
+      status: "ok",
+      timestamp: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      version: SymphonyElixir.RunnerRuntime.runtime_version()
+    })
+  end
+
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
   def method_not_allowed(conn, _params) do
     error_response(conn, 405, "method_not_allowed", "Method not allowed")
