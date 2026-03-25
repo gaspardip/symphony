@@ -4802,6 +4802,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   @doc false
+  @spec emit_agent_turn_start(String.t(), String.t(), String.t() | nil, map()) :: :ok
   def emit_agent_turn_start(stage, provider_name, model, issue) do
     Observability.emit(
       [:symphony, :agent_turn, :start],
@@ -4811,6 +4812,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   @doc false
+  @spec emit_agent_turn_stop(String.t(), String.t(), String.t() | nil, map(), integer(), term()) :: :ok
   def emit_agent_turn_stop(stage, provider_name, model, issue, start_time, turn_result) do
     duration_ms = System.monotonic_time(:millisecond) - start_time
 
