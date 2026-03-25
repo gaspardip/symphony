@@ -68,7 +68,7 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
 
       assert result.overall_percentage == 100.0
       assert Enum.any?(summary, &String.contains?(&1, "100.00%"))
-      assert Enum.any?(summary, &String.contains?(&1, "85.0%"))
+      assert Enum.any?(summary, &String.contains?(&1, "85.00%"))
     after
       File.rm_rf(cover_dir)
     end
