@@ -210,6 +210,39 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert {:done, %Issue{id: ^issue_id}} = DeliveryEngine.run(workspace, issue, nil)
   end
 
+  test "plan and implement turns emit structured lifecycle logs" do
+    {workspace, issue} = git_stage_workspace!("turn-lifecycle-logging")
+
+    RunStateStore.transition(workspace, "plan", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("turn-lifecycle-logging")
+    )
+
+    log =
+      capture_log(fn ->
+        assert {:stop, :noop_turn} =
+                 DeliveryEngine.run(workspace, issue, nil, command_runner: &checkout_command_runner/3)
+      end)
+
+    assert log =~ "delivery_engine.agent_turn"
+    assert log =~ "event=delivery_engine.agent_turn"
+    assert log =~ "stage=plan"
+    assert log =~ "stage=implement"
+    assert log =~ "provider=codex"
+    assert log =~ "model=nil"
+    assert log =~ "issue=MT-PHASE6"
+    assert log =~ "duration_ms="
+    assert log =~ "tokens=%{input_tokens: 0, output_tokens: 0, total_tokens: 0}"
+    assert log =~ "result=provider=turn_completed,turn=completed,plan_completed=true"
+    assert log =~ "result=provider=turn_completed,turn=completed"
+  end
+
   test "publish finalization refreshes addressed replies and resolves safe threads" do
     review_threads = %{
       "comment:2926989348" => %{
@@ -1989,6 +2022,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     File.write!(binary, """
     #!/bin/sh
     count=0
+    turn_count=0
     while IFS= read -r line; do
       count=$((count + 1))
       case "$count" in
@@ -1997,6 +2031,24 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
           ;;
         3)
           printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-phase6"}}}'
+          ;;
+        *)
+          case "$line" in
+            *'"method":"turn/start"'*)
+              turn_count=$((turn_count + 1))
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-phase6"}}}'
+
+              if [ "#{suffix}" = "turn-lifecycle-logging" ]; then
+                if [ "$turn_count" -eq 1 ]; then
+                  printf '%s\\n' '{"id":99,"method":"item/tool/call","params":{"tool":"report_agent_turn_result","arguments":{"summary":"Plan ready","files_touched":[],"needs_another_turn":false,"blocked":false,"blocker_type":"none"}}}'
+                else
+                  printf '%s\\n' '{"id":99,"method":"item/tool/call","params":{"tool":"report_agent_turn_result","arguments":{"summary":"Implementation ready","files_touched":[],"needs_another_turn":false,"blocked":false,"blocker_type":"none"}}}'
+                fi
+
+                printf '%s\\n' '{"method":"turn/completed"}'
+              fi
+              ;;
+          esac
           ;;
       esac
     done

@@ -13,6 +13,9 @@ Add structured, stage-aware lifecycle logging around delivery-engine agent turns
 
 ## Work Log
 - Read the codebase and wrote the implementation plan.
+- Implemented structured plan and implement turn lifecycle logging in `delivery_engine.ex`, including timed provider execution, provider/model/issue normalization, token normalization, and stage-specific result summaries.
+- Added a phase-6 `capture_log` regression that drives a real `plan -> implement` turn sequence through the fake Codex app-server path and asserts the lifecycle event payload in the captured log output.
+- Verified the new regression in isolation with `mix test test/symphony_elixir/delivery_engine_phase6_test.exs:213 --trace --max-failures 1`.
 
 ## Evidence
 - `elixir/lib/symphony_elixir/delivery_engine.ex`: `handle_plan/9` skips when a progress file already exists, `do_plan_turn/8` calls `provider.run_turn/4` and only logs `plan_completed` as plain text, and `handle_implement/9` runs `provider.run_turn/4` inside a large `with` before fetching a normalized `TurnResult`.
@@ -31,4 +34,4 @@ Add structured, stage-aware lifecycle logging around delivery-engine agent turns
 - `.symphony/progress/CLZ-49.md`: the existing progress file was a placeholder and did not reflect the current code paths, so it needed a real implementation plan based on the files above.
 
 ## Next Step
-Open `elixir/lib/symphony_elixir/delivery_engine.ex`, add a private helper that wraps `provider.run_turn/4` with timing and metadata normalization, and then switch `do_plan_turn/8` to call that helper for the `"plan"` stage before updating `handle_implement/9`.
+If more time is available in a later turn, revisit the existing `delivery_engine_phase6_test.exs` review-fix budget coverage path, which stalled in this environment at `scoped review-fix retries count implementation turns from the retry window base` during the broader file run.

@@ -671,8 +671,15 @@ defmodule SymphonyElixir.DeliveryEngine do
          _inspection,
          opts
        ) do
+    provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve_for_stage("plan"))
+    model = Config.agent_model_for_stage("plan") || Config.agent_model()
+
     if plan_already_exists?(workspace, issue) do
-      Logger.info("Plan already exists for #{issue.identifier}, skipping plan turn")
+      log_agent_turn_lifecycle(
+        agent_turn_log_context("plan", provider, model, issue, 0, default_turn_tokens()),
+        "provider=skipped,turn=skipped,plan_completed=false"
+      )
+
       progress_path = progress_path_for_issue(workspace, issue)
 
       {:ok, _state} =
@@ -683,7 +690,16 @@ defmodule SymphonyElixir.DeliveryEngine do
 
       do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
     else
-      do_plan_turn(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts)
+      do_plan_turn(
+        app_session,
+        workspace,
+        issue,
+        recipient,
+        fetcher,
+        max_turns,
+        state,
+        Keyword.put(opts, :agent_provider, provider)
+      )
     end
   end
 
@@ -693,26 +709,29 @@ defmodule SymphonyElixir.DeliveryEngine do
     clear_turn_result(issue)
     clear_turn_runtime_errors(issue)
 
-    provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve())
+    provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve_for_stage("plan"))
+    model = Config.agent_model_for_stage("plan") || Config.agent_model()
 
-    turn_result =
-      provider.run_turn(
-        app_session,
-        prompt,
-        issue,
-        Keyword.merge(
-          opts,
-          stage: "plan",
-          effort: Config.agent_turn_effort("plan"),
-          model: Config.agent_model_for_stage("plan") || Config.agent_model(),
-          on_message: agent_message_handler(recipient, issue),
-          tool_executor: tool_executor(issue, opts)
-        )
+    turn_opts =
+      Keyword.merge(
+        opts,
+        stage: "plan",
+        effort: Config.agent_turn_effort("plan"),
+        model: model,
+        on_message: agent_message_handler(recipient, issue),
+        tool_executor: tool_executor(issue, opts)
       )
 
-    plan_completed = match?({:ok, _}, turn_result) and match?({:ok, _}, fetch_turn_result(issue))
+    {provider_turn_result, turn_log_context} =
+      run_logged_agent_turn(provider, app_session, prompt, issue, turn_opts)
 
-    Logger.info("Plan turn finished for #{issue.identifier} plan_completed=#{plan_completed}")
+    reported_turn_result = fetch_turn_result(issue)
+    plan_completed = match?({:ok, _}, provider_turn_result) and match?({:ok, _}, reported_turn_result)
+
+    log_agent_turn_lifecycle(
+      turn_log_context,
+      plan_turn_log_result(provider_turn_result, reported_turn_result, plan_completed)
+    )
 
     progress_path = progress_path_for_issue(workspace, issue)
 
@@ -896,132 +915,147 @@ defmodule SymphonyElixir.DeliveryEngine do
         clear_turn_runtime_errors(issue)
 
         try do
-          provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve())
+          provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve_for_stage("implement"))
+          model = Config.agent_model_for_stage("implement") || Config.agent_model()
 
-          with {:ok, _turn_session} <-
-                 provider.run_turn(
-                   app_session,
-                   prompt,
-                   issue,
-                   Keyword.merge(
-                     opts,
-                     stage: "implement",
-                     effort: implement_effort(state),
-                     model: Config.agent_model_for_stage("implement") || Config.agent_model(),
-                     forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
-                     command_output_budget: implement_command_output_budget(state),
-                     on_message: agent_message_handler(recipient, issue),
-                     tool_executor: tool_executor(issue, opts)
+          turn_opts =
+            Keyword.merge(
+              opts,
+              stage: "implement",
+              effort: implement_effort(state),
+              model: model,
+              forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
+              command_output_budget: implement_command_output_budget(state),
+              on_message: agent_message_handler(recipient, issue),
+              tool_executor: tool_executor(issue, opts)
+            )
+
+          {provider_turn_result, turn_log_context} =
+            run_logged_agent_turn(provider, app_session, prompt, issue, turn_opts)
+
+          with {:ok, _turn_session} <- provider_turn_result,
+               {:ok, turn_result} <- fetch_turn_result(issue) do
+            log_agent_turn_lifecycle(
+              turn_log_context,
+              implement_turn_log_result(provider_turn_result, {:ok, turn_result})
+            )
+
+            with after_snapshot <- RunInspector.inspect(workspace, opts),
+                 {:ok, next_stage} <-
+                   implement_next_stage(turn_result, before_snapshot, after_snapshot),
+                 updated_review_claims =
+                   advance_review_claims_after_turn(
+                     preflight_review_claims,
+                     focused_claims,
+                     turn_result
+                   ),
+                 updated_review_threads =
+                   sync_review_claims_into_threads(
+                     Map.get(state, :review_threads, %{}),
+                     updated_review_claims
                    )
-                 ),
-               {:ok, turn_result} <- fetch_turn_result(issue),
-               after_snapshot <- RunInspector.inspect(workspace, opts),
-               {:ok, next_stage} <-
-                 implement_next_stage(turn_result, before_snapshot, after_snapshot),
-               updated_review_claims =
-                 advance_review_claims_after_turn(
-                   preflight_review_claims,
-                   focused_claims,
-                   turn_result
-                 ),
-               updated_review_threads =
-                 sync_review_claims_into_threads(
-                   Map.get(state, :review_threads, %{}),
-                   updated_review_claims
-                 )
-                 |> maybe_post_autonomous_review_replies(
-                   workspace,
-                   after_snapshot.pr_url || Map.get(state, :pr_url),
-                   state,
-                   opts
-                 ),
-               {:ok, _state} <-
-                 RunStateStore.transition(
-                   workspace,
-                   next_stage,
-                   Map.merge(
-                     %{
-                       implementation_turns: implementation_turns + 1,
-                       review_claims: updated_review_claims,
-                       review_threads: updated_review_threads,
-                       last_turn_result: TurnResult.to_map(turn_result),
-                       branch: after_snapshot.branch || Map.get(state, :branch),
-                       pr_url: after_snapshot.pr_url || Map.get(state, :pr_url)
-                     },
-                     resume_context_attrs(
-                       workspace,
-                       issue,
-                       state,
-                       after_snapshot,
+                   |> maybe_post_autonomous_review_replies(
+                     workspace,
+                     after_snapshot.pr_url || Map.get(state, :pr_url),
+                     state,
+                     opts
+                   ),
+                 {:ok, _state} <-
+                   RunStateStore.transition(
+                     workspace,
+                     next_stage,
+                     Map.merge(
                        %{
-                         last_turn_summary: turn_result.summary,
-                         next_objective:
-                           next_objective_for_stage(
-                             next_stage,
-                             turn_result,
-                             updated_review_claims
-                           )
+                         implementation_turns: implementation_turns + 1,
+                         review_claims: updated_review_claims,
+                         review_threads: updated_review_threads,
+                         last_turn_result: TurnResult.to_map(turn_result),
+                         branch: after_snapshot.branch || Map.get(state, :branch),
+                         pr_url: after_snapshot.pr_url || Map.get(state, :pr_url)
                        },
-                       opts
+                       resume_context_attrs(
+                         workspace,
+                         issue,
+                         state,
+                         after_snapshot,
+                         %{
+                           last_turn_summary: turn_result.summary,
+                           next_objective:
+                             next_objective_for_stage(
+                               next_stage,
+                               turn_result,
+                               updated_review_claims
+                             )
+                         },
+                         opts
+                       )
                      )
-                   )
-                 ),
-               {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
-               :ok <- ensure_issue_still_active(refreshed_issue) do
-            do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
+                   ),
+                 {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
+                 :ok <- ensure_issue_still_active(refreshed_issue) do
+              do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
+            else
+              {:error, {:noop_turn, _summary}} ->
+                block_issue(
+                  workspace,
+                  issue,
+                  :noop_turn,
+                  "The turn produced no code change and no PR.",
+                  @blocked_state
+                )
+
+              {:error, {:agent_blocked, %TurnResult{} = turn_result}} ->
+                block_issue(
+                  workspace,
+                  issue,
+                  turn_result.blocker_type,
+                  turn_result.summary,
+                  @blocked_state
+                )
+
+              {:done, finished_issue} ->
+                {:done, finished_issue}
+
+              {:skip, finished_issue} ->
+                {:done, finished_issue}
+
+              {:error, reason} ->
+                cond do
+                  retryable_implementation_error?(reason) ->
+                    handle_implementation_turn_error(
+                      app_session,
+                      workspace,
+                      issue,
+                      recipient,
+                      fetcher,
+                      max_turns,
+                      state,
+                      opts,
+                      reason
+                    )
+
+                  non_retryable_implementation_error?(reason) ->
+                    block_issue(
+                      workspace,
+                      issue,
+                      implementation_error_code(reason),
+                      implementation_turn_error_summary(reason),
+                      @blocked_state
+                    )
+
+                  true ->
+                    {:error, reason}
+                end
+            end
           else
-            {:error, {:turn_runtime_error, reason}} ->
-              handle_implementation_turn_error(
-                app_session,
-                workspace,
-                issue,
-                recipient,
-                fetcher,
-                max_turns,
-                state,
-                opts,
-                reason
+            error ->
+              log_agent_turn_lifecycle(
+                turn_log_context,
+                implement_turn_log_result(provider_turn_result, error)
               )
 
-            {:error, {:invalid_turn_result, reason}} ->
-              block_issue(workspace, issue, :invalid_turn_result, inspect(reason), @blocked_state)
-
-            {:error, :missing_turn_result} ->
-              block_issue(
-                workspace,
-                issue,
-                :missing_turn_result,
-                "The agent did not report `report_agent_turn_result` before the turn ended.",
-                @blocked_state
-              )
-
-            {:error, {:noop_turn, _summary}} ->
-              block_issue(
-                workspace,
-                issue,
-                :noop_turn,
-                "The turn produced no code change and no PR.",
-                @blocked_state
-              )
-
-            {:error, {:agent_blocked, %TurnResult{} = turn_result}} ->
-              block_issue(
-                workspace,
-                issue,
-                turn_result.blocker_type,
-                turn_result.summary,
-                @blocked_state
-              )
-
-            {:done, finished_issue} ->
-              {:done, finished_issue}
-
-            {:skip, finished_issue} ->
-              {:done, finished_issue}
-
-            {:error, reason} ->
-              cond do
-                retryable_implementation_error?(reason) ->
+              case error do
+                {:error, {:turn_runtime_error, reason}} ->
                   handle_implementation_turn_error(
                     app_session,
                     workspace,
@@ -1034,17 +1068,69 @@ defmodule SymphonyElixir.DeliveryEngine do
                     reason
                   )
 
-                non_retryable_implementation_error?(reason) ->
+                {:error, {:invalid_turn_result, reason}} ->
+                  block_issue(workspace, issue, :invalid_turn_result, inspect(reason), @blocked_state)
+
+                {:error, :missing_turn_result} ->
                   block_issue(
                     workspace,
                     issue,
-                    implementation_error_code(reason),
-                    implementation_turn_error_summary(reason),
+                    :missing_turn_result,
+                    "The agent did not report `report_agent_turn_result` before the turn ended.",
                     @blocked_state
                   )
 
-                true ->
-                  {:error, reason}
+                {:error, {:noop_turn, _summary}} ->
+                  block_issue(
+                    workspace,
+                    issue,
+                    :noop_turn,
+                    "The turn produced no code change and no PR.",
+                    @blocked_state
+                  )
+
+                {:error, {:agent_blocked, %TurnResult{} = turn_result}} ->
+                  block_issue(
+                    workspace,
+                    issue,
+                    turn_result.blocker_type,
+                    turn_result.summary,
+                    @blocked_state
+                  )
+
+                {:done, finished_issue} ->
+                  {:done, finished_issue}
+
+                {:skip, finished_issue} ->
+                  {:done, finished_issue}
+
+                {:error, reason} ->
+                  cond do
+                    retryable_implementation_error?(reason) ->
+                      handle_implementation_turn_error(
+                        app_session,
+                        workspace,
+                        issue,
+                        recipient,
+                        fetcher,
+                        max_turns,
+                        state,
+                        opts,
+                        reason
+                      )
+
+                    non_retryable_implementation_error?(reason) ->
+                      block_issue(
+                        workspace,
+                        issue,
+                        implementation_error_code(reason),
+                        implementation_turn_error_summary(reason),
+                        @blocked_state
+                      )
+
+                    true ->
+                      {:error, reason}
+                  end
               end
           end
         after
@@ -4102,6 +4188,152 @@ defmodule SymphonyElixir.DeliveryEngine do
         {:error, {:invalid_turn_result, other}}
     end
   end
+
+  defp run_logged_agent_turn(provider, app_session, prompt, issue, opts) do
+    started_at = System.monotonic_time()
+    turn_result = provider.run_turn(app_session, prompt, issue, opts)
+
+    duration_ms =
+      System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
+
+    log_context =
+      agent_turn_log_context(
+        Keyword.get(opts, :stage),
+        provider,
+        Keyword.get(opts, :model),
+        issue,
+        duration_ms,
+        normalize_turn_tokens(turn_result)
+      )
+
+    {turn_result, log_context}
+  end
+
+  defp log_agent_turn_lifecycle(log_context, result) do
+    Logger.info(
+      "event=delivery_engine.agent_turn stage=#{log_context.stage} provider=#{log_context.provider} model=#{inspect(log_context.model)} issue=#{log_context.issue} duration_ms=#{log_context.duration_ms} tokens=#{inspect(log_context.tokens)} result=#{result}",
+      event: "delivery_engine.agent_turn",
+      stage: log_context.stage,
+      provider: log_context.provider,
+      model: log_context.model,
+      issue: log_context.issue,
+      issue_identifier: log_context.issue_identifier,
+      duration_ms: log_context.duration_ms,
+      tokens: log_context.tokens,
+      result: result
+    )
+  end
+
+  defp agent_turn_log_context(stage, provider, model, issue, duration_ms, tokens) do
+    %{
+      stage: stage,
+      provider: normalize_turn_provider(provider),
+      model: model,
+      issue: normalize_issue_log_value(issue),
+      issue_identifier: Map.get(issue, :identifier),
+      duration_ms: duration_ms,
+      tokens: tokens
+    }
+  end
+
+  defp plan_turn_log_result(provider_turn_result, reported_turn_result, plan_completed) do
+    "provider=#{normalize_provider_turn_outcome(provider_turn_result)},turn=#{normalize_reported_turn_outcome(reported_turn_result)},plan_completed=#{plan_completed}"
+  end
+
+  defp implement_turn_log_result(provider_turn_result, reported_turn_result) do
+    "provider=#{normalize_provider_turn_outcome(provider_turn_result)},turn=#{normalize_reported_turn_outcome(reported_turn_result)}"
+  end
+
+  defp normalize_turn_provider(SymphonyElixir.AgentProvider.Codex), do: "codex"
+  defp normalize_turn_provider(SymphonyElixir.AgentProvider.CodexCLI), do: "codex-cli"
+  defp normalize_turn_provider(SymphonyElixir.AgentProvider.Claude), do: "claude"
+  defp normalize_turn_provider(provider) when is_binary(provider), do: provider
+  defp normalize_turn_provider(provider) when is_atom(provider), do: Atom.to_string(provider)
+  defp normalize_turn_provider(provider), do: inspect(provider)
+
+  defp normalize_issue_log_value(%Issue{identifier: identifier, id: issue_id}) do
+    identifier || issue_id || "unknown"
+  end
+
+  defp normalize_issue_log_value(issue) when is_map(issue) do
+    Map.get(issue, :identifier) || Map.get(issue, :id) || "unknown"
+  end
+
+  defp normalize_issue_log_value(_issue), do: "unknown"
+
+  defp normalize_turn_tokens({:ok, response}) when is_map(response) do
+    usage = Map.get(response, :usage) || Map.get(response, "usage")
+
+    case usage do
+      usage when is_map(usage) ->
+        input_tokens = normalize_token_count(Map.get(usage, :input_tokens) || Map.get(usage, "input_tokens"))
+        output_tokens = normalize_token_count(Map.get(usage, :output_tokens) || Map.get(usage, "output_tokens"))
+        total_tokens = normalize_token_count(Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens"))
+
+        %{
+          input_tokens: input_tokens,
+          output_tokens: output_tokens,
+          total_tokens: if(total_tokens > 0, do: total_tokens, else: input_tokens + output_tokens)
+        }
+
+      _ ->
+        default_turn_tokens()
+    end
+  end
+
+  defp normalize_turn_tokens(_turn_result), do: default_turn_tokens()
+
+  defp default_turn_tokens do
+    %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
+  end
+
+  defp normalize_token_count(nil), do: 0
+  defp normalize_token_count(value) when is_integer(value), do: max(value, 0)
+
+  defp normalize_token_count(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {parsed, _rest} -> max(parsed, 0)
+      :error -> 0
+    end
+  end
+
+  defp normalize_token_count(_value), do: 0
+
+  defp normalize_provider_turn_outcome({:ok, response}) when is_map(response) do
+    response
+    |> Map.get(:result, Map.get(response, "result"))
+    |> normalize_turn_outcome_value("completed")
+  end
+
+  defp normalize_provider_turn_outcome({:error, reason}) do
+    normalize_turn_outcome_value(reason, "error")
+  end
+
+  defp normalize_provider_turn_outcome(_result), do: "unknown"
+
+  defp normalize_reported_turn_outcome({:ok, %TurnResult{blocked: true, blocker_type: blocker_type}}) do
+    "blocked:#{blocker_type || "unknown"}"
+  end
+
+  defp normalize_reported_turn_outcome({:ok, %TurnResult{needs_another_turn: true}}),
+    do: "needs_another_turn"
+
+  defp normalize_reported_turn_outcome({:ok, %TurnResult{}}), do: "completed"
+
+  defp normalize_reported_turn_outcome({:error, reason}) do
+    normalize_turn_outcome_value(reason, "missing")
+  end
+
+  defp normalize_reported_turn_outcome({:done, _issue}), do: "done"
+  defp normalize_reported_turn_outcome({:skip, _issue}), do: "skip"
+  defp normalize_reported_turn_outcome(_result), do: "unknown"
+
+  defp normalize_turn_outcome_value({tag, _details}, _default) when is_atom(tag),
+    do: Atom.to_string(tag)
+
+  defp normalize_turn_outcome_value(value, _default) when is_atom(value), do: Atom.to_string(value)
+  defp normalize_turn_outcome_value(value, _default) when is_binary(value), do: value
+  defp normalize_turn_outcome_value(_value, default), do: default
 
   defp tool_executor(issue, opts) do
     fn tool, arguments ->
