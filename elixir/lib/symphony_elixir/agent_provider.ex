@@ -40,6 +40,7 @@ defmodule SymphonyElixir.AgentProvider do
   defp resolve_module(provider) do
     case provider do
       "claude" -> SymphonyElixir.AgentProvider.Claude
+      "codex-cli" -> SymphonyElixir.AgentProvider.CodexCLI
       "codex" -> SymphonyElixir.AgentProvider.Codex
       module when is_atom(module) -> module
       _ -> SymphonyElixir.AgentProvider.Codex
