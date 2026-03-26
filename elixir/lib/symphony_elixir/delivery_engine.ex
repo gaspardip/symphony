@@ -510,15 +510,31 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp plan_already_exists?(workspace, issue) do
     case AgentHarness.progress_file_path(workspace, issue) do
-      {:ok, path} -> File.exists?(path) and not blank_file?(path)
-      _ -> false
+      {:ok, path} ->
+        case File.read(path) do
+          {:ok, content} -> has_real_plan?(content)
+          _ -> false
+        end
+
+      _ ->
+        false
     end
   end
 
-  defp blank_file?(path) do
-    case File.read(path) do
-      {:ok, content} -> String.trim(content) == ""
-      _ -> true
+  # A real plan has a ## Plan section with specific file paths — not just template placeholders
+  defp has_real_plan?(content) do
+    case Regex.run(~r/## Plan\s*\n([\s\S]*?)(?=\n## |\z)/, content) do
+      [_, body] ->
+        trimmed = String.trim(body)
+        # Must have actual content AND reference at least one file path
+        trimmed != "" and
+          not String.contains?(trimmed, "Outline") and
+          not String.contains?(trimmed, "implementation steps here") and
+          (String.contains?(trimmed, ".ex") or String.contains?(trimmed, ".exs") or
+             String.contains?(trimmed, "/lib/") or String.contains?(trimmed, "/test/"))
+
+      _ ->
+        false
     end
   end
 
