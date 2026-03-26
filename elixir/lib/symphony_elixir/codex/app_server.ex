@@ -1,6 +1,38 @@
 defmodule SymphonyElixir.Codex.AppServer do
   @moduledoc """
-  Minimal client for the Codex app-server JSON-RPC 2.0 stream over stdio.
+  JSON-RPC 2.0 client for driving the Codex app-server over a stdio port.
+
+  The module owns the app-server process lifecycle, sends the `initialize`,
+  `thread/start`, and `turn/start` requests, and then keeps reading the JSON-RPC
+  event stream until the turn completes or fails. `run/4` is the convenience
+  entry point for the full flow, while the lower-level API is:
+
+  - `start_session/2` to start the port, initialize the JSON-RPC connection,
+    resolve runtime settings, and open a Codex thread.
+  - `run_turn/4` to start a turn inside that thread, stream messages, and handle
+    approvals and dynamic tool calls while the turn is running.
+  - `stop_session/1` to stop the underlying port when the caller is done.
+
+  Approval and sandbox settings come from `Config.codex_runtime_settings/1`.
+  `start_session/2` stores the resolved values on the returned session so each
+  turn reuses the same approval policy and thread sandbox while supplying the
+  per-turn sandbox policy on `turn/start`. In practice:
+
+  - the thread-level sandbox is sent as `"sandbox"` during `thread/start`
+  - the turn-level sandbox policy is sent as `"sandboxPolicy"` during `turn/start`
+  - the approval policy is sent on both requests so the server sees the same
+    approval mode for the thread and its turns
+
+  When the approval policy resolves to `"never"`, the session marks approval
+  requests as auto-approved and answers supported `requestUserInput` prompts
+  without interactive operator input. Other approval modes leave those requests
+  pending so the caller can surface them as turn errors.
+
+  Dynamic tools are registered up front during `thread/start` by sending
+  `DynamicTool.tool_specs/0` as `"dynamicTools"`. During the turn stream,
+  `item/tool/call` approval requests are executed through the configured
+  `:tool_executor` callback, which defaults to `DynamicTool.execute/2`, and the
+  tool result is written back to the app-server as the JSON-RPC response.
   """
 
   require Logger
