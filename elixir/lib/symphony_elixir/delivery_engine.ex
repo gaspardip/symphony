@@ -601,7 +601,14 @@ defmodule SymphonyElixir.DeliveryEngine do
        ) do
     if plan_already_exists?(workspace, issue) do
       Logger.info("Plan already exists for #{issue.identifier}, skipping plan turn")
-      {:ok, _state} = RunStateStore.transition(workspace, "implement", %{plan_completed: true})
+      progress_path = progress_path_for_issue(workspace, issue)
+
+      {:ok, _state} =
+        RunStateStore.transition(workspace, "implement", %{
+          plan_completed: true,
+          resume_context: %{next_objective: "Follow the implementation plan in #{progress_path}. Read it first, then implement each step."}
+        })
+
       do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
     else
       do_plan_turn(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts)
@@ -635,8 +642,22 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     Logger.info("Plan turn finished for #{issue.identifier} plan_completed=#{plan_completed}")
 
-    {:ok, _state} = RunStateStore.transition(workspace, "implement", %{plan_completed: plan_completed})
+    progress_path = progress_path_for_issue(workspace, issue)
+
+    {:ok, _state} =
+      RunStateStore.transition(workspace, "implement", %{
+        plan_completed: plan_completed,
+        resume_context: %{next_objective: "Follow the implementation plan in #{progress_path}. Read it first, then implement each step."}
+      })
+
     do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+  end
+
+  defp progress_path_for_issue(workspace, issue) do
+    case AgentHarness.progress_file_path(workspace, issue) do
+      {:ok, path} -> Path.relative_to(path, workspace)
+      _ -> ".symphony/progress/#{issue.identifier}.md"
+    end
   end
 
   defp plan_prompt(issue, _state, workspace) do
@@ -2310,7 +2331,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             "- Limit shell usage to narrow reads of the target files and minimal diff/status checks.",
             "- Keep command output small. Do not stream long logs or dump large files into the turn.",
             "- If you complete this scope but additional verified review claims or failed checks remain, set `needs_another_turn=true`.",
-            "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
+            "- Focus on writing code. Symphony will track your changes automatically.",
             "",
             "Resume context:",
             resume_context_block(resume_context),
@@ -2350,7 +2371,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             "- Do not inventory the entire repo or dump full diffs during `implement`: avoid `rg --files`, `fd`, `find .`, and full `git diff`; use targeted file reads and `git diff --stat` only.",
             "- Limit shell usage to targeted inspection and editing support only: prefer `rg`, `sed -n`, narrow file reads, and small `git status` or `git diff --stat` commands.",
             "- Keep command output small. Do not stream long logs or dump large files into the turn.",
-            "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
+            "- Focus on writing code. Symphony will track your changes automatically.",
             "- `files_touched` must list every path you changed this turn.",
             "- Set `blocked=true` only for a true blocker you cannot resolve from the repo or local environment.",
             "- Set `needs_another_turn=true` only when more implementation work is still required after this turn.",
@@ -2387,7 +2408,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             "- Limit shell usage to narrow reads of the listed files and minimal diff/status checks.",
             "- Keep command output small. Do not stream long logs or dump large files into the turn.",
             "- If you complete this claim batch but additional verified review claims remain, set `needs_another_turn=true`.",
-            "- At the end of the turn, call `#{@report_turn_result_tool}` exactly once.",
+            "- Focus on writing code. Symphony will track your changes automatically.",
             "",
             "Resume context:",
             focused_resume_context_block(resume_context),
