@@ -11,6 +11,7 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
 
   require Logger
 
+  alias SymphonyElixir.AgentProvider.CommitHelper
   alias SymphonyElixir.Config
 
   @default_model "gpt-5.4"
@@ -76,11 +77,11 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
     try do
       {exit_result, stream_state} = receive_stream(port, on_message, %StreamState{})
 
-      stream_state = detect_changed_files(stream_state, session.workspace)
-      maybe_patch_progress_file(session.workspace, stream_state)
-      stream_state = maybe_auto_commit(stream_state, session.workspace)
+      stream_state = CommitHelper.detect_changed_files(stream_state, session.workspace)
+      CommitHelper.maybe_patch_progress_file(session.workspace, stream_state)
+      stream_state = CommitHelper.maybe_auto_commit(stream_state, session.workspace)
 
-      synthesize_turn_result(stream_state, tool_executor)
+      CommitHelper.synthesize_turn_result(stream_state, tool_executor)
 
       on_message.(%{
         event: :turn_completed,
@@ -198,130 +199,6 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
   end
 
   defp extract_files_from_item(state, _item), do: state
-
-  # -- Shared helpers (same as Claude adapter) --
-
-  defp detect_changed_files(%StreamState{} = state, workspace) do
-    uncommitted =
-      case System.cmd("git", ["status", "--porcelain"], cd: workspace, stderr_to_stdout: true) do
-        {output, 0} ->
-          output
-          |> String.split(~r/\r?\n/, trim: true)
-          |> Enum.map(fn line -> String.slice(line, 3..-1//1) |> String.trim() end)
-          |> Enum.reject(&(&1 == ""))
-
-        _ ->
-          []
-      end
-
-    branch_diff =
-      case System.cmd("git", ["diff", "origin/main", "--name-only"],
-             cd: workspace,
-             stderr_to_stdout: true
-           ) do
-        {output, 0} -> String.split(output, ~r/\r?\n/, trim: true)
-        _ -> []
-      end
-
-    Enum.uniq(state.files_touched ++ uncommitted ++ branch_diff)
-    |> then(&%{state | files_touched: &1})
-  end
-
-  defp maybe_auto_commit(%StreamState{files_touched: []} = state, _workspace), do: state
-
-  defp maybe_auto_commit(%StreamState{} = state, workspace) do
-    message = state.result_text || "Agent turn completed"
-
-    elixir_dir = Path.join(workspace, "elixir")
-    if File.dir?(elixir_dir), do: System.cmd("mix", ["format"], cd: elixir_dir, stderr_to_stdout: true)
-
-    case System.cmd("git", ["add", "-A"], cd: workspace, stderr_to_stdout: true) do
-      {_, 0} ->
-        case System.cmd("git", ["diff", "--cached", "--quiet"],
-               cd: workspace,
-               stderr_to_stdout: true
-             ) do
-          {_, 0} ->
-            state
-
-          {_, 1} ->
-            System.cmd("git", ["commit", "-m", message], cd: workspace, stderr_to_stdout: true)
-            Logger.info("Auto-committed agent changes in #{workspace}")
-            state
-        end
-
-      _ ->
-        state
-    end
-  end
-
-  defp maybe_patch_progress_file(workspace, %StreamState{} = state) do
-    progress_dir = Path.join(workspace, ".symphony/progress")
-
-    case File.ls(progress_dir) do
-      {:ok, files} ->
-        Enum.each(files, fn file ->
-          if String.ends_with?(file, ".md") do
-            path = Path.join(progress_dir, file)
-            content = File.read!(path)
-            patched = patch_empty_sections(content, state)
-            if patched != content, do: File.write!(path, patched)
-          end
-        end)
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp patch_empty_sections(content, state) do
-    summary = state.result_text || "Turn completed."
-    files = state.files_touched |> Enum.reject(&(&1 == "")) |> Enum.take(10)
-
-    content
-    |> ensure_section_content("Work Log", "- #{summary}")
-    |> ensure_section_content("Evidence", files_evidence(files))
-  end
-
-  defp ensure_section_content(content, section, fallback) do
-    regex = ~r/(## #{Regex.escape(section)}\s*\n)((?:\s*\n)*?)(?=## |\z)/
-
-    case Regex.run(regex, content) do
-      [full, header, body] ->
-        if String.trim(body) == "",
-          do: String.replace(content, full, header <> fallback <> "\n\n", global: false),
-          else: content
-
-      _ ->
-        content
-    end
-  end
-
-  defp files_evidence([]), do: "- Changes applied."
-  defp files_evidence(files), do: Enum.map_join(files, "\n", &"- `#{&1}`")
-
-  defp synthesize_turn_result(%StreamState{} = state, tool_executor) do
-    summary = state.result_text || "Turn completed."
-
-    files =
-      state.files_touched
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.uniq()
-
-    turn_result_data = %{
-      "summary" => summary,
-      "files_touched" => files,
-      "needs_another_turn" => false,
-      "blocked" => state.error != nil,
-      "blocker_type" => if(state.error, do: "implementation", else: "none")
-    }
-
-    if is_function(tool_executor, 2) do
-      tool_executor.("report_agent_turn_result", turn_result_data)
-    end
-
-    turn_result_data
-  end
 
   # -- Helpers --
 

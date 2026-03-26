@@ -13,6 +13,7 @@ defmodule SymphonyElixir.AgentProvider.Claude do
 
   require Logger
 
+  alias SymphonyElixir.AgentProvider.CommitHelper
   alias SymphonyElixir.Config
 
   @default_model "claude-sonnet-4-6"
@@ -76,16 +77,16 @@ defmodule SymphonyElixir.AgentProvider.Claude do
       {exit_result, stream_state} = receive_stream(port, on_message, %StreamState{})
 
       # Merge stream-detected files with actual git changes
-      stream_state = detect_changed_files(stream_state, session.workspace)
+      stream_state = CommitHelper.detect_changed_files(stream_state, session.workspace)
 
       # Ensure progress file sections are non-empty (harness gate requires it)
-      maybe_patch_progress_file(session.workspace, stream_state)
+      CommitHelper.maybe_patch_progress_file(session.workspace, stream_state)
 
       # Auto-commit any changes (Claude doesn't commit like Codex does)
-      stream_state = maybe_auto_commit(stream_state, session.workspace)
+      stream_state = CommitHelper.maybe_auto_commit(stream_state, session.workspace)
 
       # Synthesize turn result from stream events and invoke tool_executor
-      synthesize_turn_result(stream_state, tool_executor)
+      CommitHelper.synthesize_turn_result(stream_state, tool_executor)
 
       on_message.(%{
         event: :turn_completed,
@@ -126,12 +127,12 @@ defmodule SymphonyElixir.AgentProvider.Claude do
   @doc false
   @spec synthesize_turn_result_for_test(StreamState.t(), (String.t(), map() -> map()) | nil) :: map()
   def synthesize_turn_result_for_test(state, tool_executor),
-    do: synthesize_turn_result(state, tool_executor)
+    do: CommitHelper.synthesize_turn_result(state, tool_executor)
 
   @doc false
   @spec detect_changed_files_for_test(StreamState.t(), Path.t()) :: StreamState.t()
   def detect_changed_files_for_test(state, workspace),
-    do: detect_changed_files(state, workspace)
+    do: CommitHelper.detect_changed_files(state, workspace)
 
   # -- CLI argument building --
 
@@ -261,109 +262,6 @@ defmodule SymphonyElixir.AgentProvider.Claude do
     end
   end
 
-  # Ensure progress file has non-empty required sections (harness publish gate requires it)
-  defp maybe_patch_progress_file(workspace, %StreamState{} = state) do
-    progress_dir = Path.join(workspace, ".symphony/progress")
-
-    case File.ls(progress_dir) do
-      {:ok, files} ->
-        Enum.each(files, fn file ->
-          if String.ends_with?(file, ".md") do
-            path = Path.join(progress_dir, file)
-            content = File.read!(path)
-            patched = patch_empty_sections(content, state)
-
-            if patched != content do
-              File.write!(path, patched)
-            end
-          end
-        end)
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp patch_empty_sections(content, state) do
-    summary = state.result_text || "Turn completed."
-    files = state.files_touched |> Enum.reject(&(&1 == "")) |> Enum.take(10)
-
-    content
-    |> ensure_section_content("Work Log", "- #{summary}")
-    |> ensure_section_content("Evidence", files_evidence(files))
-  end
-
-  defp ensure_section_content(content, section, fallback) do
-    # Match ## Section\n followed by empty lines or next section
-    regex = ~r/(## #{Regex.escape(section)}\s*\n)((?:\s*\n)*?)(?=## |\z)/
-
-    case Regex.run(regex, content) do
-      [full, header, body] ->
-        if String.trim(body) == "" do
-          String.replace(content, full, header <> fallback <> "\n\n", global: false)
-        else
-          content
-        end
-
-      _ ->
-        content
-    end
-  end
-
-  defp files_evidence([]), do: "- Changes applied."
-  defp files_evidence(files), do: Enum.map_join(files, "\n", &"- `#{&1}`")
-
-  # Auto-commit changes after a turn — Claude writes files but doesn't commit
-  defp maybe_auto_commit(%StreamState{files_touched: []} = state, _workspace), do: state
-
-  defp maybe_auto_commit(%StreamState{} = state, workspace) do
-    message = state.result_text || "Agent turn completed"
-
-    # Run mix format before committing if elixir dir exists
-    elixir_dir = Path.join(workspace, "elixir")
-
-    if File.dir?(elixir_dir) do
-      System.cmd("mix", ["format"], cd: elixir_dir, stderr_to_stdout: true)
-    end
-
-    case System.cmd("git", ["add", "-A"], cd: workspace, stderr_to_stdout: true) do
-      {_, 0} ->
-        case System.cmd("git", ["diff", "--cached", "--quiet"], cd: workspace, stderr_to_stdout: true) do
-          {_, 0} ->
-            state
-
-          {_, 1} ->
-            System.cmd("git", ["commit", "-m", message], cd: workspace, stderr_to_stdout: true)
-            Logger.info("Auto-committed agent changes in #{workspace}")
-            state
-        end
-
-      _ ->
-        state
-    end
-  end
-
-  # Detect files changed via git status after the turn completes
-  defp detect_changed_files(%StreamState{} = state, workspace) do
-    case System.cmd("git", ["diff", "--name-only", "HEAD"], cd: workspace, stderr_to_stdout: true) do
-      {output, 0} ->
-        git_files = output |> String.split("\n", trim: true)
-
-        {untracked, 0} =
-          System.cmd("git", ["ls-files", "--others", "--exclude-standard"],
-            cd: workspace,
-            stderr_to_stdout: true
-          )
-
-        new_files = untracked |> String.split("\n", trim: true)
-        all_files = Enum.uniq(state.files_touched ++ git_files ++ new_files)
-        %{state | files_touched: all_files}
-
-      _ ->
-        state
-    end
-  end
-
   # Extract file paths from tool_use content blocks (Write, Edit tools)
   defp extract_files_from_content(%StreamState{} = state, content) when is_list(content) do
     new_files =
@@ -404,33 +302,6 @@ defmodule SymphonyElixir.AgentProvider.Claude do
   end
 
   defp normalize_usage(_), do: %{input_tokens: 0, output_tokens: 0}
-
-  # -- Turn result synthesis --
-
-  defp synthesize_turn_result(%StreamState{} = state, tool_executor) do
-    summary = state.result_text || "Turn completed."
-
-    files =
-      state.files_touched
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.uniq()
-
-    turn_result_data = %{
-      "summary" => summary,
-      "files_touched" => files,
-      "needs_another_turn" => false,
-      "blocked" => state.error != nil,
-      "blocker_type" => if(state.error, do: "implementation", else: "none")
-    }
-
-    # Invoke the tool_executor to store the result in the process dict
-    # (same contract as the Codex dynamic tool flow)
-    if is_function(tool_executor, 2) do
-      tool_executor.("report_agent_turn_result", turn_result_data)
-    end
-
-    turn_result_data
-  end
 
   # -- Helpers --
 

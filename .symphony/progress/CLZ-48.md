@@ -18,19 +18,17 @@ Extract the duplicated post-turn commit/progress/result logic out of the Claude 
 7. `.symphony/progress/CLZ-48.md` — after implementation, replace this planning note with the completed work log, validation evidence from the repo harness, and the concrete next follow-up if any behavior drift is discovered during extraction.
 
 ## Work Log
-- Read the codebase and wrote the implementation plan.
+- Added `SymphonyElixir.AgentProvider.CommitHelper` and moved shared changed-file detection, progress patching, auto-commit, and turn-result synthesis into it.
+- Updated both CLI adapters to delegate the shared post-stream flow to `CommitHelper` and removed their duplicated private implementations.
+- Added focused helper coverage for changed-file detection, progress patching, turn-result synthesis, and auto-commit behavior with a generic test state struct.
 
 ## Evidence
-- `.symphony/harness.yml`: confirmed the required progress-file sections and that repo-owned validation commands are `./scripts/symphony-preflight.sh`, `./scripts/symphony-validate.sh`, `./scripts/symphony-smoke.sh`, `./scripts/symphony-post-merge.sh`, `./scripts/symphony-artifacts.sh`, plus `mix harness.check`.
-- `.symphony/knowledge/codebase-map.md`: confirmed the agent-provider code lives under `elixir/lib/symphony_elixir/agent_provider` and that this ticket stays inside the Elixir runtime boundary.
-- `.symphony/knowledge/testing-and-ops.md`: confirmed validation should use the harness scripts and `mix harness.check` rather than ad hoc commands.
-- `elixir/lib/symphony_elixir/agent_provider/claude.ex`: found the current `run_turn/4` flow and the duplicated private `detect_changed_files/2`, `maybe_patch_progress_file/2`, `maybe_auto_commit/2`, and `synthesize_turn_result/2` functions; also found public test wrappers already exposed for `detect_changed_files/2` and `synthesize_turn_result/2`.
-- `elixir/lib/symphony_elixir/agent_provider/codex_cli.ex`: found the same four responsibilities duplicated privately in `run_turn/4`, with a different `detect_changed_files/2` implementation that uses `git status --porcelain` plus `git diff origin/main --name-only` instead of Claude’s `git diff --name-only HEAD` plus untracked-file scan.
-- `elixir/lib/symphony_elixir/agent_provider.ex`: confirmed the provider behaviour does not need new callbacks for this extraction.
-- `elixir/lib/symphony_elixir/agent_provider/codex.ex`: confirmed the AppServer-backed provider is unrelated to this extraction and should remain unchanged.
-- `elixir/test/symphony_elixir/agent_provider_claude_test.exs`: found existing coverage for Claude stream parsing, synthesized turn-result payloads, and git-based changed-file detection, which gives a baseline for the shared helper semantics.
-- `elixir/test/symphony_elixir/agent_provider_test.exs`: confirmed current provider tests only exercise provider resolution, so the new shared helper needs its own dedicated test file.
-- `.symphony/progress/CLZ-48.md`: found an existing placeholder progress entry and replaced it with a concrete implementation plan for this planning turn.
+- `elixir/lib/symphony_elixir/agent_provider/commit_helper.ex`: centralizes the shared post-turn helper logic and normalizes changed-file detection on tracked diff-from-HEAD plus untracked files.
+- `elixir/lib/symphony_elixir/agent_provider/claude.ex`: now delegates the shared post-turn flow and keeps the existing public test wrappers pointed at the extracted helper.
+- `elixir/lib/symphony_elixir/agent_provider/codex_cli.ex`: now delegates the same shared post-turn flow and no longer carries its local copy of the helper logic.
+- `elixir/test/symphony_elixir/commit_helper_test.exs`: covers turn-result synthesis, git-based changed-file collection, progress patching, and auto-commit behavior directly against the shared helper.
+- `mix test test/symphony_elixir/commit_helper_test.exs`: passed with 7 tests and 0 failures after tightening the fixture expectations to match the helper contract.
+- `mix test test/symphony_elixir/agent_provider_claude_test.exs`: passed with 24 tests and 0 failures after the extraction.
 
 ## Next Step
-Open `elixir/lib/symphony_elixir/agent_provider/commit_helper.ex`, add the new `SymphonyElixir.AgentProvider.CommitHelper` module, and implement `detect_changed_files/2` first so both adapters can be switched to the shared helper without guessing at the canonical git-based file-detection behavior.
+- Hand the branch back to the runtime for repo-owned validation and the remaining autonomous delivery steps.
