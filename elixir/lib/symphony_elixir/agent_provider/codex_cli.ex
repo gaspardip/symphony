@@ -54,9 +54,7 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
       prompt
     ]
 
-    Logger.info(
-      "Codex CLI turn starting issue=#{issue_identifier(issue)} model=#{model} workspace=#{session.workspace}"
-    )
+    Logger.info("Codex CLI turn starting issue=#{issue_identifier(issue)} model=#{model} workspace=#{session.workspace}")
 
     port =
       Port.open(
