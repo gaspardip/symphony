@@ -319,15 +319,20 @@ defmodule SymphonyElixir.AgentProvider.Claude do
   defp maybe_auto_commit(%StreamState{} = state, workspace) do
     message = state.result_text || "Agent turn completed"
 
+    # Run mix format before committing if elixir dir exists
+    elixir_dir = Path.join(workspace, "elixir")
+
+    if File.dir?(elixir_dir) do
+      System.cmd("mix", ["format"], cd: elixir_dir, stderr_to_stdout: true)
+    end
+
     case System.cmd("git", ["add", "-A"], cd: workspace, stderr_to_stdout: true) do
       {_, 0} ->
         case System.cmd("git", ["diff", "--cached", "--quiet"], cd: workspace, stderr_to_stdout: true) do
           {_, 0} ->
-            # Nothing staged — skip commit
             state
 
           {_, 1} ->
-            # Changes staged — commit
             System.cmd("git", ["commit", "-m", message], cd: workspace, stderr_to_stdout: true)
             Logger.info("Auto-committed agent changes in #{workspace}")
             state

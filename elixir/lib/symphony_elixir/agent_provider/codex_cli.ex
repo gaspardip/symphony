@@ -234,6 +234,9 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
   defp maybe_auto_commit(%StreamState{} = state, workspace) do
     message = state.result_text || "Agent turn completed"
 
+    elixir_dir = Path.join(workspace, "elixir")
+    if File.dir?(elixir_dir), do: System.cmd("mix", ["format"], cd: elixir_dir, stderr_to_stdout: true)
+
     case System.cmd("git", ["add", "-A"], cd: workspace, stderr_to_stdout: true) do
       {_, 0} ->
         case System.cmd("git", ["diff", "--cached", "--quiet"],
