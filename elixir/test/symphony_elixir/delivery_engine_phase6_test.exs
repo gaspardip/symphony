@@ -1088,7 +1088,8 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     RunStateStore.transition(workspace, "await_checks", %{
       issue_id: issue.id,
       issue_identifier: issue.identifier,
-      pr_url: "https://github.com/example/repo/pull/10"
+      pr_url: "https://github.com/example/repo/pull/10",
+      ci_fix_attempts: 2
     })
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -1101,6 +1102,35 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
              DeliveryEngine.run(workspace, issue, nil, command_runner: &failed_checks_command_runner/3)
 
     assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}
+  end
+
+  test "await_checks auto-retries CI failures with late session bootstrap" do
+    {workspace, issue} = git_stage_workspace!("await-ci-retry")
+
+    RunStateStore.transition(workspace, "await_checks", %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      pr_url: "https://github.com/example/repo/pull/10",
+      ci_fix_attempts: 0
+    })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: Path.dirname(workspace),
+      codex_command: fake_codex_binary!("await-ci-retry")
+    )
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        _result =
+          DeliveryEngine.run(workspace, issue, nil, command_runner: &failed_checks_command_runner/3)
+      end)
+
+    assert log =~ "Late session bootstrap for active stage implement"
+    assert log =~ "CI checks failed"
+
+    {:ok, state} = RunStateStore.load(workspace)
+    assert Map.get(state, :ci_fix_attempts) >= 1
   end
 
   test "await_checks bypasses codex bootstrap for passive polling" do

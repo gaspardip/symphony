@@ -2007,6 +2007,20 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       end
 
     workspace = Path.join(workspace_root, spawned_issue.identifier)
+
+    # The spawned worker writes state asynchronously; wait for it.
+    :ok =
+      Enum.reduce_while(1..50, :timeout, fn _, _ ->
+        case SymphonyElixir.RunStateStore.load(workspace) do
+          {:ok, _} ->
+            {:halt, :ok}
+
+          {:error, :enoent} ->
+            Process.sleep(100)
+            {:cont, :timeout}
+        end
+      end)
+
     assert {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
     assert {:ok, lease} = LeaseManager.read(spawned_issue.id)
     assert run_state.lease_owner == owner

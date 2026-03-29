@@ -287,6 +287,78 @@ defmodule SymphonyElixir.DeliveryEngine do
     max_turns = effective_max_turns(workflow_profile.max_turns_override || max_turns, state)
 
     stage = Map.get(state, :stage, "checkout")
+
+    if is_nil(app_session) and not passive_stage?(stage) do
+      bootstrap_session_and_run(
+        workspace,
+        issue,
+        agent_update_recipient,
+        issue_state_fetcher,
+        max_turns,
+        stage,
+        opts
+      )
+    else
+      do_run_dispatched(
+        app_session,
+        workspace,
+        issue,
+        agent_update_recipient,
+        issue_state_fetcher,
+        max_turns,
+        state,
+        stage,
+        opts
+      )
+    end
+  end
+
+  defp bootstrap_session_and_run(
+         workspace,
+         issue,
+         agent_update_recipient,
+         issue_state_fetcher,
+         max_turns,
+         stage,
+         opts
+       ) do
+    provider = Keyword.get(opts, :agent_provider) || AgentProvider.resolve_for_stage(stage)
+
+    Logger.info("Late session bootstrap for active stage #{stage} issue=#{issue.identifier} provider=#{inspect(provider)}")
+
+    with {:ok, app_session} <- provider.start_session(workspace) do
+      try do
+        do_run(
+          app_session,
+          workspace,
+          issue,
+          agent_update_recipient,
+          issue_state_fetcher,
+          max_turns,
+          Keyword.put(opts, :agent_provider, provider)
+        )
+      after
+        provider.stop_session(app_session)
+      end
+    else
+      {:error, reason} = error ->
+        Logger.error("Late session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
+
+        error
+    end
+  end
+
+  defp do_run_dispatched(
+         app_session,
+         workspace,
+         issue,
+         agent_update_recipient,
+         issue_state_fetcher,
+         max_turns,
+         state,
+         stage,
+         opts
+       ) do
     inspection = RunInspector.inspect(workspace, opts)
 
     Observability.with_stage(stage, issue_observability_metadata(issue, state), fn ->
