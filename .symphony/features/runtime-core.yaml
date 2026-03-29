@@ -68,4 +68,4 @@ acceptance_signals:
   - Seeded manual continuation retries can reuse the persisted issue envelope and workspace branch identity so local stable-ingress replays survive the `review_verification` to `implement` handoff
 dependencies:
   - harness
-last_updated_by_issue: CLZ-31
+last_updated_by_issue: CLZ-49

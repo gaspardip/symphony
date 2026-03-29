@@ -12,4 +12,4 @@ acceptance_signals:
 dependencies:
   - runtime-core
   - harness
-last_updated_by_issue: CLZ-22
+last_updated_by_issue: CLZ-49
