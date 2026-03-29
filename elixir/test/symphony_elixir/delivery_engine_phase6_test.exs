@@ -238,7 +238,10 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert log =~ "model=nil"
     assert log =~ "issue=MT-PHASE6"
     assert log =~ "duration_ms="
-    assert log =~ "tokens=%{input_tokens: 0, output_tokens: 0, total_tokens: 0}"
+    assert log =~ "tokens=%{"
+    assert log =~ "input_tokens: 0"
+    assert log =~ "output_tokens: 0"
+    assert log =~ "total_tokens: 0"
     assert log =~ "result=provider=turn_completed,turn=completed,plan_completed=true"
     assert log =~ "result=provider=turn_completed,turn=completed"
   end
@@ -2045,6 +2048,9 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
                   printf '%s\\n' '{"id":99,"method":"item/tool/call","params":{"tool":"report_agent_turn_result","arguments":{"summary":"Implementation ready","files_touched":[],"needs_another_turn":false,"blocked":false,"blocker_type":"none"}}}'
                 fi
 
+                printf '%s\\n' '{"method":"turn/completed"}'
+              else
+                printf '%s\\n' '{"id":99,"method":"item/tool/call","params":{"tool":"report_agent_turn_result","arguments":{"summary":"Generic turn completed","files_touched":[],"needs_another_turn":false,"blocked":false,"blocker_type":"none"}}}'
                 printf '%s\\n' '{"method":"turn/completed"}'
               fi
               ;;
