@@ -205,7 +205,7 @@
 {"lib/symphony_elixir_web/presenter.ex", "Function normalize_tracked_issue_payload/1 will never be called."},
 {"lib/symphony_elixir/agent_provider/claude.ex", "Unknown type: SymphonyElixir.AgentProvider.Claude.StreamState.t/0."},
 {"lib/symphony_elixir/orchestrator.ex", "The pattern pattern <_issue@1, __refreshed_issue@1> can never match the type, because it is covered by previous clauses."},
-{"lib/symphony_elixir/orchestrator.ex", "The pattern pattern <_inspection@1"},
+{"lib/symphony_elixir/orchestrator.ex", "The pattern pattern <_inspection@1 ="},
 {"lib/symphony_elixir/workspace.ex", "The pattern pattern <__workspace@1, __issue_context@1, __lifecycle@1> can never match the type, because it is covered by previous clauses."},
 {"lib/symphony_elixir/workspace.ex", "The pattern pattern <__workspace@1, __lifecycle@1> can never match the type, because it is covered by previous clauses."},
 {"lib/symphony_elixir_web/presenter.ex", "Function apply_persisted_review_state/2 will never be called."},
