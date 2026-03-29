@@ -41,6 +41,7 @@
 {"lib/symphony_elixir/credential_registry.ex", "The function call contractor_mode? will not succeed."},
 {"lib/symphony_elixir/delivery_engine.ex", "The guard clause can never succeed."},
 {"lib/symphony_elixir/delivery_engine.ex", "The pattern variable _ can never match the type, because it is covered by previous clauses."},
+{"lib/symphony_elixir/delivery_engine.ex", "The pattern variable __issue@1 can never match the type, because it is covered by previous clauses."},
 {"lib/symphony_elixir/delivery_engine.ex", "Function risk_review_required?/4 has no local return."},
 {"lib/symphony_elixir/delivery_engine.ex", "The function call contractor_mode? will not succeed."},
 {"lib/symphony_elixir/issue_source.ex", "The function call create_comment will not succeed."},
