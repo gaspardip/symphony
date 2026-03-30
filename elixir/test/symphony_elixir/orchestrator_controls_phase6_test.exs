@@ -1794,6 +1794,35 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert Enum.any?(record.comments, &String.contains?(Map.get(&1, "body", ""), "policy.pack_disallows_class"))
   end
 
+  test "candidate processing clears oversized routing cache before remembering fresh entries" do
+    issue = %Issue{
+      id: "issue-cache-bounded",
+      identifier: "MT-CACHE-BOUNDED",
+      title: "Cache bounded",
+      description: "ensure routing cache is bounded",
+      state: "Todo",
+      assignee_id: "worker-1",
+      labels: ["dogfood:symphony"]
+    }
+
+    oversized_cache =
+      1..501
+      |> Enum.map(fn index ->
+        {"stale-#{index}", %{state: "Todo", assignee_id: nil, labels: [], updated_at: nil}}
+      end)
+      |> Map.new()
+
+    next_state =
+      Orchestrator.process_candidate_issues_for_test(
+        %Orchestrator.State{issue_routing_cache: oversized_cache},
+        [issue]
+      )
+
+    assert map_size(next_state.issue_routing_cache) == 1
+    assert next_state.issue_routing_cache[issue.id].state == "Todo"
+    assert next_state.issue_routing_cache[issue.id].assignee_id == "worker-1"
+  end
+
   test "dispatch helper functions cover label gates blockers and revalidation outcomes" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",

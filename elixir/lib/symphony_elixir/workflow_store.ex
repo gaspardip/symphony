@@ -60,7 +60,7 @@ defmodule SymphonyElixir.WorkflowStore do
 
   @impl true
   def handle_call(:current, _from, %State{} = state) do
-    case reload_state(state) do
+    case maybe_refresh_current(state) do
       {:ok, new_state} ->
         {:reply, {:ok, new_state.workflow}, new_state}
 
@@ -128,6 +128,26 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
+  defp maybe_refresh_current(%State{} = state) do
+    path = Workflow.workflow_file_path()
+    cached_quick_stamp = quick_stamp(state.stamp)
+
+    case current_quick_stamp(path) do
+      {:ok, stamp} ->
+        cond do
+          path != state.path or stamp != cached_quick_stamp ->
+            reload_state(state)
+
+          true ->
+            reload_current_path(path, state)
+        end
+
+      {:error, reason} ->
+        log_reload_error(path, reason)
+        {:error, reason, state}
+    end
+  end
+
   defp load_state(path) do
     with {:ok, workflow} <- Workflow.load(path),
          {:ok, stamp} <- current_stamp(path) do
@@ -146,6 +166,16 @@ defmodule SymphonyElixir.WorkflowStore do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp current_quick_stamp(path) when is_binary(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, stat} -> {:ok, {stat.mtime, stat.size}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp quick_stamp({mtime, size, _hash}), do: {mtime, size}
+  defp quick_stamp(_stamp), do: nil
 
   defp log_reload_error(path, reason) do
     Logger.error("Failed to reload workflow path=#{path} reason=#{inspect(reason)}; keeping last known good configuration")

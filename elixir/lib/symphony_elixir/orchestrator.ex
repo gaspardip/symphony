@@ -44,6 +44,8 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @completed_retention_ms 7 * 24 * 60 * 60 * 1000
+  @issue_routing_cache_max_keys 500
   @paused_state "Paused"
   @blocked_state "Blocked"
   @merging_state "Merging"
@@ -87,7 +89,7 @@ defmodule SymphonyElixir.Orchestrator do
       :current_poll_mode,
       :lease_owner,
       running: %{},
-      completed: MapSet.new(),
+      completed: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
       paused_issue_states: %{},
@@ -214,6 +216,10 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | poll_check_in_progress: false,
         current_poll_mode: nil,
+        completed:
+          state.completed
+          |> Enum.reject(fn {_issue_id, completed_at_ms} -> now_ms - completed_at_ms > @completed_retention_ms end)
+          |> Map.new(),
         next_healing_poll_due_at_ms: next_healing_poll_due_at_ms
     }
 
@@ -1042,7 +1048,7 @@ defmodule SymphonyElixir.Orchestrator do
       issue_id when is_binary(issue_id) and issue_id != "" ->
         case LeaseManager.read(issue_id) do
           {:ok, lease} ->
-            owner = lease_owner_from_snapshot(lease)
+            owner = LeaseManager.snapshot_for_state(lease).lease_owner
 
             cond do
               owner == state.lease_owner ->
@@ -2092,6 +2098,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp remember_issue_cache_entries(cache, issues) when is_list(issues) do
+    cache =
+      if map_size(cache) > @issue_routing_cache_max_keys do
+        %{}
+      else
+        cache
+      end
+
     Enum.reduce(issues, cache, &remember_issue_cache_entry(&2, &1))
   end
 
@@ -2843,7 +2856,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp partition_issues_by_label_gate(_issues, _state), do: {[], []}
 
   defp skipped_issue_entry(%Issue{} = issue, reason, %State{} = state) do
-    workspace_path = Path.join(Config.workspace_root(), issue.identifier || issue.id || "issue")
+    workspace_path = Workspace.path_for_issue(issue.identifier || issue.id)
     run_state = load_run_state(workspace_path, issue)
 
     {policy_class, policy_source, policy_override} =
@@ -3512,7 +3525,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp complete_issue(%State{} = state, issue_id) do
     %{
       state
-      | completed: MapSet.put(state.completed, issue_id),
+      | completed: Map.put(state.completed, issue_id, System.monotonic_time(:millisecond)),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
   end
@@ -4487,7 +4500,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   # credo:disable-for-next-line
   defp running_snapshot_entry(issue_id, metadata, now, state) do
-    workspace_path = Path.join(Config.workspace_root(), metadata.identifier || issue_id)
+    workspace_path = Workspace.path_for_issue(metadata.identifier || issue_id)
     inspection = RunInspector.inspect(workspace_path, include_pr_details: false)
     run_state = load_run_state(workspace_path, metadata.issue)
     lease = stateful_lease_details(issue_id, run_state, now)
@@ -4706,8 +4719,7 @@ defmodule SymphonyElixir.Orchestrator do
         retry_attempts: state.retry_attempts
       )
       |> Enum.map(fn entry ->
-        workspace_path =
-          Path.join(Config.workspace_root(), entry.identifier || entry.issue_id || "issue")
+        workspace_path = Workspace.path_for_issue(entry.identifier || entry.issue_id)
 
         run_state = load_run_state(workspace_path, entry.issue)
         {policy_class, policy_source, policy_override} = policy_snapshot_values(entry.issue, state, run_state)
@@ -6316,7 +6328,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_promote_review_ready_issue(%State{} = state, %Issue{} = issue) do
-    workspace = Path.join(Config.workspace_root(), issue.identifier || issue.id || "issue")
+    workspace = Workspace.path_for_issue(issue.identifier || issue.id)
     inspection = RunInspector.inspect(workspace)
 
     case resolve_policy(issue, state) do
@@ -6910,7 +6922,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_run_state(identifier, issue) when is_binary(identifier) and identifier != "" do
     identifier
-    |> then(&Path.join(Config.workspace_root(), &1))
+    |> Workspace.path_for_issue()
     |> load_run_state(issue)
   end
 
@@ -7097,7 +7109,7 @@ defmodule SymphonyElixir.Orchestrator do
     human_action =
       Map.get(conflict, :human_action) || RuleCatalog.human_action(:policy_invalid_labels)
 
-    workspace = Path.join(Config.workspace_root(), issue.identifier || issue.id || "issue")
+    workspace = Workspace.path_for_issue(issue.identifier || issue.id)
 
     ledger_event =
       RunLedger.record("runtime.stopped", %{
@@ -7228,7 +7240,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp persist_policy_override_for_identifier(identifier, override) when is_binary(identifier) do
-    workspace = Path.join(Config.workspace_root(), identifier)
+    workspace = Workspace.path_for_issue(identifier)
 
     if File.exists?(workspace) do
       _ =
@@ -7411,11 +7423,12 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         case LeaseManager.read(issue_id) do
           {:ok, lease} ->
-            owner = lease_owner_from_snapshot(lease)
+            snapshot = LeaseManager.snapshot_for_state(lease)
+            owner = snapshot.lease_owner
 
             cond do
               owner == state.lease_owner ->
-                {:ok, lease_snapshot_for_state(lease), false}
+                {:ok, snapshot, false}
 
               LeaseManager.reclaimable?(lease) or
                   same_runner_instance_lease_reclaimable?(run_state) ->
@@ -7427,7 +7440,7 @@ defmodule SymphonyElixir.Orchestrator do
                          run_state
                        ),
                      {:ok, refreshed_lease} <- LeaseManager.read(issue_id) do
-                  {:ok, lease_snapshot_for_state(refreshed_lease), true}
+                  {:ok, LeaseManager.snapshot_for_state(refreshed_lease), true}
                 else
                   {:error, :claimed} -> {:skip, owner}
                   {:error, reason} -> {:error, reason}
@@ -7440,7 +7453,7 @@ defmodule SymphonyElixir.Orchestrator do
           {:error, :missing} ->
             with :ok <- LeaseManager.acquire(issue_id, issue_identifier, state.lease_owner),
                  {:ok, lease} <- LeaseManager.read(issue_id) do
-              {:ok, lease_snapshot_for_state(lease), true}
+              {:ok, LeaseManager.snapshot_for_state(lease), true}
             else
               {:error, :claimed} -> {:skip, :claimed}
               {:error, reason} -> {:error, reason}
@@ -7471,7 +7484,7 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(issue, :id) || Map.get(issue, "id") do
       issue_id when is_binary(issue_id) and issue_id != "" ->
         with {:ok, lease} <- LeaseManager.read(issue_id) do
-          RunStateStore.sync_lease(workspace, issue, lease_snapshot_for_state(lease))
+          RunStateStore.sync_lease(workspace, issue, LeaseManager.snapshot_for_state(lease))
         end
 
       _ ->
@@ -7561,22 +7574,6 @@ defmodule SymphonyElixir.Orchestrator do
     present?(Map.get(run_state, :lease_owner)) and
       Map.get(run_state, :lease_owner_instance_id) == RunnerRuntime.instance_id() and
       Map.get(run_state, :lease_owner_channel) == Config.runner_channel()
-  end
-
-  defp lease_snapshot_for_state(lease) when is_map(lease) do
-    %{
-      lease_owner: lease_owner_from_snapshot(lease),
-      lease_owner_instance_id: RunnerRuntime.instance_id(),
-      lease_owner_channel: Config.runner_channel(),
-      lease_acquired_at: lease["acquired_at"] || lease[:acquired_at],
-      lease_updated_at: lease["updated_at"] || lease[:updated_at],
-      lease_status: "held",
-      lease_epoch: lease["epoch"] || lease[:epoch]
-    }
-  end
-
-  defp lease_owner_from_snapshot(lease) when is_map(lease) do
-    lease["owner"] || lease[:owner]
   end
 
   defp apply_token_delta(agent_totals, token_delta) do
