@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  project_slug: "7262055276bc"
   handoff_mode: assignee
   active_states:
     - Todo
@@ -14,6 +14,8 @@ tracker:
     - Canceled
     - Duplicate
     - Done
+runner:
+  channel: canary
 polling:
   interval_ms: 600000
   healing_interval_ms: 1800000
@@ -21,7 +23,7 @@ workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    git clone --depth 1 https://github.com/gaspardip/symphony.git .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
