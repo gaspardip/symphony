@@ -3118,8 +3118,9 @@ defmodule SymphonyElixir.Orchestrator do
     workspace = Workspace.path_for_issue(issue.identifier)
     dispatch_stage = normalize_dispatch_stage(issue)
 
-    with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
-         stage <- Map.get(run_state, :stage),
+    run_state = RunStateStore.load_or_default(workspace, issue)
+
+    with stage <- Map.get(run_state, :stage),
          {:ok, pid} <-
            start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
              AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)

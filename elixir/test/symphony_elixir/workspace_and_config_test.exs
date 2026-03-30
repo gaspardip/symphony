@@ -1117,4 +1117,69 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
     assert Config.workflow_prompt() == workflow_prompt
   end
+
+  test "run_state written after workspace creation is not overwritten by cloned repo state" do
+    alias SymphonyElixir.RunStateStore
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-run-state-ordering-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "repo\n")
+
+      # Commit a stale run_state.json inside the template repo
+      stale_state_dir = Path.join(template_repo, ".symphony")
+      File.mkdir_p!(stale_state_dir)
+
+      stale_state = %{
+        "stage" => "stale_from_repo",
+        "issue_id" => "old-issue",
+        "issue_identifier" => "OLD-1"
+      }
+
+      File.write!(Path.join(stale_state_dir, "run_state.json"), Jason.encode!(stale_state))
+
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "."])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial with stale run_state"])
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git clone --depth 1 #{template_repo} ."
+      )
+
+      issue = %Issue{id: "new-issue-123", identifier: "S-99", state: %{name: "Todo"}}
+
+      # Workspace creation runs the after_create hook (git clone), which brings in the
+      # stale .symphony/run_state.json from the repo.
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert File.exists?(Path.join(workspace, ".git"))
+
+      # The cloned repo's stale run_state is present after clone
+      cloned_state_path = RunStateStore.state_path(workspace)
+      assert File.exists?(cloned_state_path)
+
+      # Now write the dispatch run_state AFTER workspace creation (the fixed ordering).
+      # This simulates what AgentRunner.ensure_dispatch_run_state does.
+      dispatch_state = RunStateStore.load_or_default(workspace, issue)
+      :ok = RunStateStore.save(workspace, dispatch_state)
+
+      # The persisted run_state must reflect the new dispatch, not the stale repo state.
+      assert {:ok, loaded} = RunStateStore.load(workspace)
+      assert loaded.issue_id == "new-issue-123"
+      assert loaded.issue_identifier == "S-99"
+      assert loaded.stage != "stale_from_repo"
+    after
+      File.rm_rf(test_root)
+    end
+  end
 end
