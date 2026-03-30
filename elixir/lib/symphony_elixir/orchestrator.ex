@@ -2223,6 +2223,11 @@ defmodule SymphonyElixir.Orchestrator do
   def terminate_task_for_test(pid), do: terminate_task(pid)
 
   @doc false
+  @doc false
+  @spec paused_snapshot_entries_for_test(term()) :: [map()]
+  def paused_snapshot_entries_for_test(paused_issue_states),
+    do: paused_snapshot_entries(paused_issue_states)
+
   @spec partition_issues_by_label_gate_for_test([Issue.t()], term()) :: term()
   def partition_issues_by_label_gate_for_test(issues, %State{} = state) do
     partition_issues_by_label_gate(issues, state)
@@ -4574,6 +4579,8 @@ defmodule SymphonyElixir.Orchestrator do
     end)
     |> Enum.sort_by(&(&1.identifier || &1.issue_id || ""))
   end
+
+  defp paused_snapshot_entries(_paused_issue_states), do: []
 
   defp skipped_snapshot_entries(skipped_issues) when is_list(skipped_issues) do
     Enum.map(skipped_issues, fn entry ->

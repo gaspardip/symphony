@@ -350,6 +350,19 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
              RuleCatalog.human_action(:policy_review_required)
   end
 
+  test "paused_snapshot_entries tolerates nil or non-map input" do
+    assert Orchestrator.paused_snapshot_entries_for_test(nil) == []
+    assert Orchestrator.paused_snapshot_entries_for_test([]) == []
+    assert Orchestrator.paused_snapshot_entries_for_test(%{}) == []
+
+    result =
+      Orchestrator.paused_snapshot_entries_for_test(%{
+        "issue-1" => %{identifier: "MT-1", source: :manual}
+      })
+
+    assert [%{issue_id: "issue-1", identifier: "MT-1"}] = result
+  end
+
   test "snapshot queue tolerates nil last_decision in persisted run state" do
     workspace_root = unique_workspace_root!("queue-nil-last-decision")
 
