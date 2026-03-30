@@ -64,7 +64,7 @@ defmodule SymphonyElixir.AgentRunner do
         lease_result =
           if is_binary(issue_id) and issue_id != "" do
             with {:ok, lease} <- LeaseManager.read(issue_id) do
-              RunStateStore.sync_lease(workspace, issue, lease_snapshot(lease))
+              RunStateStore.sync_lease(workspace, issue, LeaseManager.snapshot_for_state(lease))
             end
           else
             {:error, :missing}
@@ -82,18 +82,6 @@ defmodule SymphonyElixir.AgentRunner do
       {:error, _reason} ->
         :ok
     end
-  end
-
-  defp lease_snapshot(lease) when is_map(lease) do
-    %{
-      lease_owner: lease["owner"] || lease[:owner],
-      lease_owner_instance_id: SymphonyElixir.RunnerRuntime.instance_id(),
-      lease_owner_channel: SymphonyElixir.Config.runner_channel(),
-      lease_acquired_at: lease["acquired_at"] || lease[:acquired_at],
-      lease_updated_at: lease["updated_at"] || lease[:updated_at],
-      lease_status: "held",
-      lease_epoch: lease["epoch"] || lease[:epoch]
-    }
   end
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
