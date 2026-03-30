@@ -157,7 +157,24 @@ defmodule SymphonyElixir.Linear.Client do
 
       true ->
         with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slug, Config.linear_active_states(), assignee_filter)
+          state_names = Config.linear_active_states()
+          assignee_desc = format_assignee_filter(assignee_filter)
+
+          Logger.info("[dispatch] query project_slug=#{project_slug} states=#{inspect(state_names)} assignee=#{assignee_desc}")
+
+          case do_fetch_by_states(project_slug, state_names, assignee_filter) do
+            {:ok, issues} = result ->
+              if issues == [] do
+                Logger.warning("[dispatch] 0 candidates returned — project_slug=#{project_slug} states=#{inspect(state_names)} assignee=#{assignee_desc}")
+              else
+                Logger.info("[dispatch] query returned #{length(issues)} candidate(s)")
+              end
+
+              result
+
+            error ->
+              error
+          end
         end
     end
   end
@@ -689,4 +706,8 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp rate_limited_errors?(_errors), do: false
+
+  defp format_assignee_filter(nil), do: "any"
+  defp format_assignee_filter(%{configured_assignee: assignee}), do: inspect(assignee)
+  defp format_assignee_filter(_), do: "unknown"
 end

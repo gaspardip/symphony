@@ -512,7 +512,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp process_candidate_issues(%State{} = state, issues) when is_list(issues) do
     {state, candidate_issues} = block_candidate_policy_conflicts(state, issues)
+    policy_blocked_count = length(issues) - length(candidate_issues)
     {eligible_issues, skipped_issues} = partition_issues_by_label_gate(candidate_issues, state)
+
+    Logger.info("[dispatch] candidates=#{length(issues)} policy_blocked=#{policy_blocked_count} eligible=#{length(eligible_issues)} skipped=#{length(skipped_issues)}")
 
     next_state = %{
       state
@@ -523,8 +526,20 @@ defmodule SymphonyElixir.Orchestrator do
     }
 
     if available_slots(next_state) > 0 do
-      choose_issues(eligible_issues, next_state)
+      pre_dispatch_running = map_size(next_state.running)
+      result_state = choose_issues(eligible_issues, next_state)
+      dispatched_count = map_size(result_state.running) - pre_dispatch_running
+
+      skip_reasons =
+        skipped_issues
+        |> Enum.frequencies_by(fn entry -> Map.get(entry, :reason, "unknown") end)
+
+      Logger.info("[dispatch] poll summary: discovered=#{length(issues)} eligible=#{length(eligible_issues)} dispatched=#{dispatched_count} skipped_reasons=#{inspect(skip_reasons)}")
+
+      result_state
     else
+      Logger.info("[dispatch] no available slots — skipping dispatch of #{length(eligible_issues)} eligible issue(s)")
+
       next_state
     end
   end
@@ -2784,8 +2799,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp partition_issues_by_label_gate(issues, %State{} = state) when is_list(issues) do
     Enum.reduce(issues, {[], []}, fn issue, {eligible, skipped} ->
       case dispatch_skip_reason(issue, state) do
-        nil -> {[issue | eligible], skipped}
-        reason -> {eligible, [skipped_issue_entry(issue, reason, state) | skipped]}
+        nil ->
+          {[issue | eligible], skipped}
+
+        reason ->
+          Logger.info("[dispatch] skip #{issue.identifier || issue.id} reason=#{inspect(reason)}")
+
+          {eligible, [skipped_issue_entry(issue, reason, state) | skipped]}
       end
     end)
     |> then(fn {eligible, skipped} ->
@@ -2858,15 +2878,44 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     pack = PolicyPack.resolve(policy_pack_name(issue, state))
+    id = issue.identifier || issue.id
 
-    candidate_issue?(issue, active_states, terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      !issue_paused?(state, issue) and
-      !MapSet.member?(claimed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      available_slots(state) > 0 and
-      company_slots_available?(state, pack) and
-      state_slots_available?(issue, running)
+    cond do
+      !candidate_issue?(issue, active_states, terminal_states) ->
+        Logger.info("[dispatch] reject #{id} check=candidate_issue")
+        false
+
+      todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
+        Logger.info("[dispatch] reject #{id} check=blocked_by_non_terminal")
+        false
+
+      issue_paused?(state, issue) ->
+        Logger.info("[dispatch] reject #{id} check=issue_paused")
+        false
+
+      MapSet.member?(claimed, issue.id) ->
+        Logger.info("[dispatch] reject #{id} check=already_claimed")
+        false
+
+      Map.has_key?(running, issue.id) ->
+        Logger.info("[dispatch] reject #{id} check=already_running")
+        false
+
+      available_slots(state) <= 0 ->
+        Logger.info("[dispatch] reject #{id} check=no_available_slots")
+        false
+
+      !company_slots_available?(state, pack) ->
+        Logger.info("[dispatch] reject #{id} check=company_slots_exhausted")
+        false
+
+      !state_slots_available?(issue, running) ->
+        Logger.info("[dispatch] reject #{id} check=state_slots_exhausted")
+        false
+
+      true ->
+        true
+    end
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
