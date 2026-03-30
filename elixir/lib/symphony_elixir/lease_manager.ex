@@ -165,7 +165,7 @@ defmodule SymphonyElixir.LeaseManager do
       updated_at: DateTime.to_iso8601(now)
     }
 
-    File.write(path, Jason.encode!(payload), [:write])
+    write_json_atomically(path, payload)
   end
 
   defp acquire_decision(existing, owner, now, ttl_ms) do
@@ -238,6 +238,19 @@ defmodule SymphonyElixir.LeaseManager do
   end
 
   defp normalize_timestamp(_timestamp, now), do: DateTime.to_iso8601(now)
+
+  defp write_json_atomically(path, payload) when is_binary(path) and is_map(payload) do
+    tmp_path = "#{path}.tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.write(tmp_path, Jason.encode!(payload), [:write]),
+         :ok <- File.rename(tmp_path, path) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        File.rm(tmp_path)
+        error
+    end
+  end
 
   defp default_ttl_ms do
     max(Config.agent_stall_timeout_ms(), max(Config.poll_interval_ms() * 4, 60_000))
