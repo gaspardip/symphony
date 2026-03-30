@@ -24,6 +24,7 @@ workspace:
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/gaspardip/symphony.git .
+    git checkout HEAD -- .symphony/
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
