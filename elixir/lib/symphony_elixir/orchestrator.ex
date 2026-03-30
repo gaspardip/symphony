@@ -119,7 +119,8 @@ defmodule SymphonyElixir.Orchestrator do
       github_webhook_last_rejected_rule_id: nil,
       github_inbox_last_drained_at: nil,
       github_webhook_check_in_progress: false,
-      github_last_assignment: nil
+      github_last_assignment: nil,
+      first_poll_completed: false
     ]
   end
 
@@ -525,6 +526,8 @@ defmodule SymphonyElixir.Orchestrator do
         issue_routing_cache: remember_issue_cache_entries(state.issue_routing_cache, issues)
     }
 
+    next_state = maybe_warn_first_poll(next_state, length(issues))
+
     if available_slots(next_state) > 0 do
       pre_dispatch_running = map_size(next_state.running)
       result_state = choose_issues(eligible_issues, next_state)
@@ -542,6 +545,30 @@ defmodule SymphonyElixir.Orchestrator do
 
       next_state
     end
+  end
+
+  defp maybe_warn_first_poll(%State{first_poll_completed: true} = state, _candidate_count),
+    do: state
+
+  defp maybe_warn_first_poll(%State{first_poll_completed: false} = state, candidate_count) do
+    if candidate_count == 0 do
+      assignee = Config.linear_assignee()
+
+      if is_binary(assignee) and assignee != "" do
+        Logger.warning(
+          "[dispatch] First poll returned 0 candidates with assignee filter '#{assignee}'. " <>
+            "Issues may not be assigned to this user."
+        )
+      end
+
+      Logger.warning(
+        "[dispatch] First poll returned 0 candidates. " <>
+          "Query: project_slug=#{Config.linear_project_slug()} " <>
+          "states=#{inspect(Config.linear_active_states())}"
+      )
+    end
+
+    %{state | first_poll_completed: true}
   end
 
   defp block_candidate_policy_conflicts(%State{} = state, issues) when is_list(issues) do
