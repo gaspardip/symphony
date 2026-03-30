@@ -13,8 +13,10 @@ defmodule SymphonyElixir.Util do
   @spec now_iso8601() :: String.t()
   def now_iso8601, do: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
-  @spec issue_log_context(%{id: term(), identifier: term()}) :: String.t()
-  def issue_log_context(%{id: id, identifier: identifier}) do
+  @spec issue_log_context(map()) :: String.t()
+  def issue_log_context(issue) when is_map(issue) do
+    id = Map.get(issue, :id) || Map.get(issue, "id")
+    identifier = Map.get(issue, :identifier) || Map.get(issue, "identifier")
     "issue_id=#{id} issue_identifier=#{identifier}"
   end
 
