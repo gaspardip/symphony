@@ -37,6 +37,80 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "blocked workspace is force-cleaned on re-dispatch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-blocked-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root
+      )
+
+      # Simulate a previously failed workspace with blocked run_state
+      workspace = Path.join(workspace_root, "S-blocked")
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.write!(Path.join(workspace, "stale_file.txt"), "leftover from failed clone")
+
+      File.write!(
+        Path.join([workspace, ".symphony", "run_state.json"]),
+        Jason.encode!(%{"stage" => "blocked", "issue_id" => "S-blocked"})
+      )
+
+      # Re-dispatch should clean and recreate (after_create? = true)
+      assert {:ok, ^workspace} = Workspace.create_for_issue("S-blocked")
+
+      # Stale files should be gone — workspace was force-cleaned
+      refute File.exists?(Path.join(workspace, "stale_file.txt"))
+
+      # The workspace directory itself should exist (freshly created)
+      assert File.dir?(workspace)
+
+      # The old blocked run_state.json should also be gone
+      refute File.exists?(Path.join([workspace, ".symphony", "run_state.json"]))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "non-blocked workspace is NOT force-cleaned on re-dispatch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-non-blocked-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root
+      )
+
+      # Simulate an existing workspace in implement stage (not blocked)
+      workspace = Path.join(workspace_root, "S-active")
+      File.mkdir_p!(Path.join(workspace, ".symphony"))
+      File.write!(Path.join(workspace, "work_in_progress.txt"), "keep me")
+
+      File.write!(
+        Path.join([workspace, ".symphony", "run_state.json"]),
+        Jason.encode!(%{"stage" => "implement", "issue_id" => "S-active"})
+      )
+
+      # Re-dispatch should NOT clean the workspace
+      assert {:ok, ^workspace} = Workspace.create_for_issue("S-active")
+
+      # Work-in-progress file should still be there
+      assert File.exists?(Path.join(workspace, "work_in_progress.txt"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "config validation rejects invalid dogfood runner harnesses on startup" do
     workspace_root =
       Path.join(

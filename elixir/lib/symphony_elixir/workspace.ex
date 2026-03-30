@@ -46,6 +46,11 @@ defmodule SymphonyElixir.Workspace do
 
   defp ensure_workspace(workspace) do
     cond do
+      blocked_workspace?(workspace) ->
+        Logger.info("Cleaning blocked workspace for re-dispatch workspace=#{workspace}")
+        File.rm_rf!(workspace)
+        create_workspace(workspace)
+
       bootstrap_only_workspace?(workspace) ->
         prepare_bootstrap_workspace(workspace)
 
@@ -194,6 +199,19 @@ defmodule SymphonyElixir.Workspace do
     end)
 
     File.rm_rf!(source_dir)
+  end
+
+  defp blocked_workspace?(workspace) when is_binary(workspace) do
+    run_state_path = Path.join([workspace, ".symphony", "run_state.json"])
+
+    with true <- File.dir?(workspace),
+         {:ok, payload} <- File.read(run_state_path),
+         {:ok, decoded} <- Jason.decode(payload),
+         true <- is_map(decoded) do
+      Map.get(decoded, "stage") == "blocked"
+    else
+      _ -> false
+    end
   end
 
   defp bootstrap_only_workspace?(workspace) when is_binary(workspace) do
