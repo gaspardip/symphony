@@ -44,6 +44,8 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @completed_retention_ms 7 * 24 * 60 * 60 * 1000
+  @issue_routing_cache_max_keys 500
   @paused_state "Paused"
   @blocked_state "Blocked"
   @merging_state "Merging"
@@ -87,7 +89,7 @@ defmodule SymphonyElixir.Orchestrator do
       :current_poll_mode,
       :lease_owner,
       running: %{},
-      completed: MapSet.new(),
+      completed: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
       paused_issue_states: %{},
@@ -214,6 +216,10 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | poll_check_in_progress: false,
         current_poll_mode: nil,
+        completed:
+          state.completed
+          |> Enum.reject(fn {_issue_id, completed_at_ms} -> now_ms - completed_at_ms > @completed_retention_ms end)
+          |> Map.new(),
         next_healing_poll_due_at_ms: next_healing_poll_due_at_ms
     }
 
@@ -2092,6 +2098,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp remember_issue_cache_entries(cache, issues) when is_list(issues) do
+    cache =
+      if map_size(cache) > @issue_routing_cache_max_keys do
+        %{}
+      else
+        cache
+      end
+
     Enum.reduce(issues, cache, &remember_issue_cache_entry(&2, &1))
   end
 
@@ -3514,7 +3527,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp complete_issue(%State{} = state, issue_id) do
     %{
       state
-      | completed: MapSet.put(state.completed, issue_id),
+      | completed: Map.put(state.completed, issue_id, System.monotonic_time(:millisecond)),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
   end

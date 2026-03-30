@@ -925,6 +925,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       :sys.get_state(pid)
       |> Map.put(:poll_check_in_progress, false)
       |> Map.put(:current_poll_mode, nil)
+      |> Map.put(:completed, %{
+        "stale-issue" => System.monotonic_time(:millisecond) - 8 * 24 * 60 * 60 * 1000,
+        "fresh-issue" => System.monotonic_time(:millisecond)
+      })
 
     assert {:noreply, healing_state} = Orchestrator.handle_info(:healing_tick, state)
     assert healing_state.poll_check_in_progress == true
@@ -935,6 +939,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert healed_state.poll_check_in_progress == false
     assert healed_state.current_poll_mode == nil
     assert is_integer(healed_state.next_healing_poll_due_at_ms)
+    refute Map.has_key?(healed_state.completed, "stale-issue")
+    assert Map.has_key?(healed_state.completed, "fresh-issue")
 
     accepted_at = ~U[2026-03-08 05:30:00Z]
 
