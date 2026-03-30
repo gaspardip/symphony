@@ -47,13 +47,13 @@ defmodule SymphonyElixir.ManualIssueStore do
   def fetch_issues_by_states(states) when is_list(states) do
     normalized_states =
       states
-      |> Enum.map(&normalize_state/1)
+      |> Enum.map(&(to_string(&1) |> SymphonyElixir.Util.normalize_state()))
       |> MapSet.new()
 
     {:ok,
      list_issues()
      |> Enum.filter(fn %Issue{state: state} ->
-       MapSet.member?(normalized_states, normalize_state(state))
+       MapSet.member?(normalized_states, SymphonyElixir.Util.normalize_state(state))
      end)}
   end
 
@@ -392,11 +392,4 @@ defmodule SymphonyElixir.ManualIssueStore do
   end
 
   defp summarize_text(_text), do: nil
-
-  defp normalize_state(value) do
-    value
-    |> to_string()
-    |> String.trim()
-    |> String.downcase()
-  end
 end

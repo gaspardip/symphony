@@ -21,7 +21,7 @@ defmodule SymphonyElixir.DebugArtifacts do
       serialized = serialize_payload(payload)
       bounded = bound_content(serialized)
       sha256 = :crypto.hash(:sha256, bounded.data) |> Base.encode16(case: :lower)
-      artifact_id = "dbg_" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+      artifact_id = SymphonyElixir.Util.generate_id("dbg_")
       day = Date.utc_today() |> Date.to_iso8601()
       root = Config.observability_debug_artifact_root()
       directory = Path.join(root, day)
@@ -34,7 +34,7 @@ defmodule SymphonyElixir.DebugArtifacts do
         sha256: sha256,
         bytes: byte_size(bounded.data),
         truncated: bounded.truncated?,
-        stored_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+        stored_at: SymphonyElixir.Util.now_iso8601(),
         metadata: metadata
       }
 

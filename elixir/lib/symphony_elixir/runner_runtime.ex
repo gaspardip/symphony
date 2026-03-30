@@ -539,7 +539,7 @@ defmodule SymphonyElixir.RunnerRuntime do
          }}
 
       true ->
-        requested_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+        requested_at = SymphonyElixir.Util.now_iso8601()
 
         case command_runner().("bash", [script | args], stderr_to_stdout: true) do
           {output, 0} ->

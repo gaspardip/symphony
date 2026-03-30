@@ -149,8 +149,8 @@ defmodule SymphonyElixir.WorkflowProfile do
 
   @spec approval_gate_state?(String.t() | nil, keyword()) :: boolean()
   def approval_gate_state?(state, opts) when is_binary(state) do
-    normalized = normalize_state(state)
-    Enum.any?(approval_gate_states(opts), &(normalize_state(&1) == normalized))
+    normalized = normalize_approval_gate_state_key(state)
+    Enum.any?(approval_gate_states(opts), &(normalize_approval_gate_state_key(&1) == normalized))
   end
 
   def approval_gate_state?(_state, _opts), do: false
@@ -162,7 +162,7 @@ defmodule SymphonyElixir.WorkflowProfile do
 
   @spec approval_gate_kind(String.t() | nil) :: String.t()
   def approval_gate_kind(state) when is_binary(state) do
-    case normalize_state(state) do
+    case normalize_approval_gate_state_key(state) do
       "client approval" -> "client_approval"
       "deploy approval" -> "deploy_approval"
       "human review" -> "review"
@@ -205,10 +205,9 @@ defmodule SymphonyElixir.WorkflowProfile do
   defp normalize_max_turns(value) when is_integer(value) and value > 0, do: value
   defp normalize_max_turns(_value), do: nil
 
-  defp normalize_state(value) when is_binary(value) do
+  defp normalize_approval_gate_state_key(value) do
     value
-    |> String.trim()
-    |> String.downcase()
+    |> SymphonyElixir.Util.normalize_state()
     |> String.replace(~r/[\s_-]+/u, " ")
   end
 end

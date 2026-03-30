@@ -475,7 +475,7 @@ defmodule SymphonyElixir.AgentHarness do
   end
 
   defp timestamp do
-    DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    SymphonyElixir.Util.now_iso8601()
   end
 
   defp present_value?(nil), do: false

@@ -113,7 +113,7 @@ defmodule SymphonyElixir.RunStateStore do
     path = state_path(workspace)
     state = ensure_runner_metadata(state)
     :ok = File.mkdir_p(Path.dirname(path))
-    File.write(path, Jason.encode!(state), [:write])
+    write_json_atomically(path, state)
   end
 
   @spec transition(Path.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
@@ -222,7 +222,7 @@ defmodule SymphonyElixir.RunStateStore do
   defp update_stage_history(state, stage, reason) do
     entry = %{
       stage: stage,
-      at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      at: SymphonyElixir.Util.now_iso8601(),
       reason: reason
     }
 
@@ -322,6 +322,19 @@ defmodule SymphonyElixir.RunStateStore do
       Map.get(state, :issue_source) || Map.get(defaults, :issue_source)
     )
     |> ensure_runner_metadata()
+  end
+
+  defp write_json_atomically(path, payload) when is_binary(path) and is_map(payload) do
+    tmp_path = "#{path}.tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.write(tmp_path, Jason.encode!(payload), [:write]),
+         :ok <- File.rename(tmp_path, path) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        File.rm(tmp_path)
+        error
+    end
   end
 
   defp ensure_runner_metadata(state) when is_map(state) do

@@ -148,7 +148,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp resolve_cached_state_id(team_id, issue_id, state_name)
        when is_binary(team_id) and is_binary(issue_id) and is_binary(state_name) do
     ensure_state_cache_table!()
-    cache_key = {:team_state, team_id, normalize_state_name(state_name)}
+    cache_key = {:team_state, team_id, SymphonyElixir.Util.normalize_state(state_name)}
 
     case :ets.lookup(@state_cache_table, cache_key) do
       [{^cache_key, state_id}] when is_binary(state_id) ->
@@ -179,11 +179,5 @@ defmodule SymphonyElixir.Linear.Adapter do
   rescue
     ArgumentError ->
       :ok
-  end
-
-  defp normalize_state_name(state_name) do
-    state_name
-    |> String.trim()
-    |> String.downcase()
   end
 end

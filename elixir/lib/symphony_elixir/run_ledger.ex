@@ -36,7 +36,7 @@ defmodule SymphonyElixir.RunLedger do
     entry =
       attrs
       |> Map.put(:event, to_string(event_type))
-      |> Map.put_new(:at, DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+      |> Map.put_new(:at, SymphonyElixir.Util.now_iso8601())
 
     path = ledger_file_path()
     :ok = File.mkdir_p(Path.dirname(path))
@@ -116,8 +116,8 @@ defmodule SymphonyElixir.RunLedger do
       schema_version: @schema_version,
       event: event_type,
       event_type: event_type,
-      event_id: generate_event_id(),
-      at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      event_id: SymphonyElixir.Util.generate_id("evt_"),
+      at: SymphonyElixir.Util.now_iso8601(),
       issue_id: Map.get(attrs, :issue_id),
       issue_identifier: Map.get(attrs, :issue_identifier),
       stage: Map.get(attrs, :stage),
@@ -146,10 +146,6 @@ defmodule SymphonyElixir.RunLedger do
     attrs
     |> Enum.reject(fn {key, _value} -> key in @reserved_keys end)
     |> Map.new()
-  end
-
-  defp generate_event_id do
-    "evt_" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
   end
 
   defp normalize_actor_type(nil), do: nil

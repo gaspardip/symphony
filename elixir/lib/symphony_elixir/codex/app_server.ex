@@ -114,7 +114,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:ok, turn_id} ->
           session_id = "#{thread_id}-#{turn_id}"
           Process.put(@command_monitor_key, command_monitor(opts))
-          Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
+          Logger.info("Codex session started for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}")
 
           emit_message(
             on_message,
@@ -130,7 +130,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           try do
             case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
               {:ok, result} ->
-                Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
+                Logger.info("Codex session completed for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}")
 
                 {:ok,
                  %{
@@ -141,7 +141,7 @@ defmodule SymphonyElixir.Codex.AppServer do
                  }}
 
               {:error, reason} ->
-                Logger.warning("Codex session ended with error for #{issue_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+                Logger.warning("Codex session ended with error for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
                 emit_message(
                   on_message,
@@ -160,7 +160,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           end
 
         {:error, reason} ->
-          Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
+          Logger.error("Codex session failed for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
           emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
           {:error, reason}
       end
@@ -1041,10 +1041,6 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp likely_json_payload?(_payload_string), do: false
-
-  defp issue_context(%{id: issue_id, identifier: identifier}) do
-    "issue_id=#{issue_id} issue_identifier=#{identifier}"
-  end
 
   defp stop_port(port) when is_port(port) do
     case :erlang.port_info(port) do
