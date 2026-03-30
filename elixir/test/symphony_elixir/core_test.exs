@@ -1023,7 +1023,7 @@ defmodule SymphonyElixir.CoreTest do
     state = :sys.get_state(pid, 15_000)
 
     refute Map.has_key?(state.running, issue_id)
-    assert MapSet.member?(state.completed, issue_id)
+    assert Map.has_key?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, -5_000, 1_100)
@@ -1134,7 +1134,7 @@ defmodule SymphonyElixir.CoreTest do
     state = :sys.get_state(pid, 15_000)
 
     refute Map.has_key?(state.retry_attempts, issue_id)
-    assert MapSet.member?(state.completed, issue_id)
+    assert Map.has_key?(state.completed, issue_id)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do

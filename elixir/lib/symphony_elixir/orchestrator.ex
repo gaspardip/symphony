@@ -44,6 +44,8 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @completed_retention_ms 7 * 24 * 60 * 60 * 1000
+  @issue_routing_cache_max_keys 500
   @paused_state "Paused"
   @blocked_state "Blocked"
   @merging_state "Merging"
@@ -216,7 +218,7 @@ defmodule SymphonyElixir.Orchestrator do
         current_poll_mode: nil,
         completed:
           state.completed
-          |> Enum.reject(fn {_issue_id, completed_at_ms} -> now_ms - completed_at_ms > 7 * 24 * 3600 * 1000 end)
+          |> Enum.reject(fn {_issue_id, completed_at_ms} -> now_ms - completed_at_ms > @completed_retention_ms end)
           |> Map.new(),
         next_healing_poll_due_at_ms: next_healing_poll_due_at_ms
     }
@@ -2097,7 +2099,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp remember_issue_cache_entries(cache, issues) when is_list(issues) do
     cache =
-      if map_size(cache) > 500 do
+      if map_size(cache) > @issue_routing_cache_max_keys do
         %{}
       else
         cache
