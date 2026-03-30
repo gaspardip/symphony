@@ -87,7 +87,7 @@ defmodule SymphonyElixir.Orchestrator do
       :current_poll_mode,
       :lease_owner,
       running: %{},
-      completed: MapSet.new(),
+      completed: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
       paused_issue_states: %{},
@@ -214,6 +214,10 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | poll_check_in_progress: false,
         current_poll_mode: nil,
+        completed:
+          state.completed
+          |> Enum.reject(fn {_issue_id, completed_at_ms} -> now_ms - completed_at_ms > 7 * 24 * 3600 * 1000 end)
+          |> Map.new(),
         next_healing_poll_due_at_ms: next_healing_poll_due_at_ms
     }
 
@@ -2092,6 +2096,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp remember_issue_cache_entries(cache, issues) when is_list(issues) do
+    cache =
+      if map_size(cache) > 500 do
+        %{}
+      else
+        cache
+      end
+
     Enum.reduce(issues, cache, &remember_issue_cache_entry(&2, &1))
   end
 
@@ -3514,7 +3525,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp complete_issue(%State{} = state, issue_id) do
     %{
       state
-      | completed: MapSet.put(state.completed, issue_id),
+      | completed: Map.put(state.completed, issue_id, System.monotonic_time(:millisecond)),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
   end
