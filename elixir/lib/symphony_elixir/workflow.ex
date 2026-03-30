@@ -37,7 +37,6 @@ defmodule SymphonyElixir.Workflow do
   def current do
     case Process.whereis(WorkflowStore) do
       pid when is_pid(pid) ->
-        _ = WorkflowStore.refresh_if_stale()
         WorkflowStore.current()
 
       _ ->
