@@ -873,7 +873,7 @@ defmodule SymphonyElixir.Config do
   def max_concurrent_agents_for_state(state_name) when is_binary(state_name) do
     state_limits = get_in(validated_workflow_options(), [:agent, :max_concurrent_agents_by_state])
     global_limit = max_concurrent_agents()
-    Map.get(state_limits, normalize_issue_state(state_name), global_limit)
+    Map.get(state_limits, SymphonyElixir.Util.normalize_state(state_name), global_limit)
   end
 
   def max_concurrent_agents_for_state(_state_name), do: max_concurrent_agents()
@@ -2220,7 +2220,7 @@ defmodule SymphonyElixir.Config do
     |> Enum.reduce(%{}, fn {state_name, limit}, acc ->
       case parse_positive_integer(limit) do
         {:ok, parsed} ->
-          Map.put(acc, normalize_issue_state(to_string(state_name)), parsed)
+          Map.put(acc, SymphonyElixir.Util.normalize_state(to_string(state_name)), parsed)
 
         :error ->
           acc
@@ -2343,12 +2343,6 @@ defmodule SymphonyElixir.Config do
       "excludeTmpdirEnvVar" => false,
       "excludeSlashTmp" => false
     }
-  end
-
-  defp normalize_issue_state(state_name) when is_binary(state_name) do
-    state_name
-    |> String.trim()
-    |> String.downcase()
   end
 
   defp normalize_tracker_kind(kind) when is_binary(kind) do

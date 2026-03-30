@@ -4,16 +4,16 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{DeliveryEngine, LeaseManager, Linear.Issue, RunPolicy, RunStateStore, Workspace}
+  alias SymphonyElixir.{DeliveryEngine, LeaseManager, RunPolicy, RunStateStore, Workspace}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, agent_update_recipient \\ nil, opts \\ []) do
-    Logger.info("Starting agent run for #{issue_context(issue)}")
+    Logger.info("Starting agent run for #{SymphonyElixir.Util.issue_log_context(issue)}")
 
     case Workspace.create_for_issue(issue) do
       {:ok, workspace} ->
         try do
-          Logger.info("Workspace ready for #{issue_context(issue)} workspace=#{workspace}")
+          Logger.info("Workspace ready for #{SymphonyElixir.Util.issue_log_context(issue)} workspace=#{workspace}")
           ensure_dispatch_run_state(workspace, issue)
 
           with :ok <- log_step("before_run_hook", issue, fn -> Workspace.run_before_run_hook(workspace, issue) end),
@@ -22,23 +22,23 @@ defmodule SymphonyElixir.AgentRunner do
             :ok
           else
             {:stop, reason} ->
-              Logger.warning("Agent run stopped by policy for #{issue_context(issue)}: #{inspect(reason)}")
+              Logger.warning("Agent run stopped by policy for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
               :ok
 
             {:done, _issue} ->
               :ok
 
             {:error, reason} ->
-              Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-              raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+              Logger.error("Agent run failed for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
+              raise RuntimeError, "Agent run failed for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}"
           end
         after
           Workspace.run_after_run_hook(workspace, issue)
         end
 
       {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        Logger.error("Agent run failed for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
+        raise RuntimeError, "Agent run failed for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}"
     end
   end
 
@@ -47,9 +47,9 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp log_step(step, issue, fun) when is_binary(step) and is_function(fun, 0) do
-    Logger.info("Starting #{step} for #{issue_context(issue)}")
+    Logger.info("Starting #{step} for #{SymphonyElixir.Util.issue_log_context(issue)}")
     result = fun.()
-    Logger.info("Finished #{step} for #{issue_context(issue)} result=#{inspect(result)}")
+    Logger.info("Finished #{step} for #{SymphonyElixir.Util.issue_log_context(issue)} result=#{inspect(result)}")
     result
   end
 
@@ -94,9 +94,5 @@ defmodule SymphonyElixir.AgentRunner do
       lease_status: "held",
       lease_epoch: lease["epoch"] || lease[:epoch]
     }
-  end
-
-  defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
-    "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 end

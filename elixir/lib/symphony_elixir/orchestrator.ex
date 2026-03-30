@@ -2663,29 +2663,29 @@ defmodule SymphonyElixir.Orchestrator do
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
-        Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
+        Logger.info("Issue moved to terminal state: #{SymphonyElixir.Util.issue_log_context(issue)} state=#{issue.state}; stopping active agent")
 
         terminate_running_issue(state, issue.id, true)
 
       match?({:error, _}, resolve_policy(issue, state)) ->
-        Logger.info("Issue has invalid policy routing: #{issue_context(issue)} labels=#{inspect(Issue.label_names(issue))}; moving issue to #{@blocked_state}")
+        Logger.info("Issue has invalid policy routing: #{SymphonyElixir.Util.issue_log_context(issue)} labels=#{inspect(Issue.label_names(issue))}; moving issue to #{@blocked_state}")
 
         block_issue_for_policy_conflict(state, issue)
 
       !issue_routable_to_worker?(issue) ->
-        Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
+        Logger.info("Issue no longer routed to this worker: #{SymphonyElixir.Util.issue_log_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
 
       !issue_routed_to_current_runner_channel?(issue) ->
         Logger.info(
-          "Issue no longer matches the current runner channel: #{issue_context(issue)} target_channel=#{issue_target_runner_channel(issue)} current_channel=#{Config.runner_channel()}; stopping active agent"
+          "Issue no longer matches the current runner channel: #{SymphonyElixir.Util.issue_log_context(issue)} target_channel=#{issue_target_runner_channel(issue)} current_channel=#{Config.runner_channel()}; stopping active agent"
         )
 
         terminate_running_issue(state, issue.id, false)
 
       !issue_matches_required_labels?(issue) ->
-        Logger.info("Issue no longer matches the configured label gate: #{issue_context(issue)} labels=#{inspect(Issue.label_names(issue))}; stopping active agent")
+        Logger.info("Issue no longer matches the configured label gate: #{SymphonyElixir.Util.issue_log_context(issue)} labels=#{inspect(Issue.label_names(issue))}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
 
@@ -2693,7 +2693,7 @@ defmodule SymphonyElixir.Orchestrator do
         refresh_running_issue_state(state, issue)
 
       true ->
-        Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
+        Logger.info("Issue moved to non-active state: #{SymphonyElixir.Util.issue_log_context(issue)} state=#{issue.state}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
     end
@@ -2969,11 +2969,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp company_slots_available?(_state, _pack), do: true
 
   defp running_issue_count_for_state(running, issue_state) when is_map(running) do
-    normalized_state = normalize_issue_state(issue_state)
+    normalized_state = SymphonyElixir.Util.normalize_state(issue_state)
 
     Enum.count(running, fn
       {_id, %{issue: %Issue{state: state_name}}} ->
-        normalize_issue_state(state_name) == normalized_state
+        SymphonyElixir.Util.normalize_state(state_name) == normalized_state
 
       _ ->
         false
@@ -3050,7 +3050,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        )
        when is_binary(issue_state) and is_list(blockers) do
-    normalize_issue_state(issue_state) == "todo" and
+    SymphonyElixir.Util.normalize_state(issue_state) == "todo" and
       Enum.any?(blockers, fn
         %{state: blocker_state} when is_binary(blocker_state) ->
           !terminal_issue_state?(blocker_state, terminal_states)
@@ -3063,32 +3063,28 @@ defmodule SymphonyElixir.Orchestrator do
   defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
-    MapSet.member?(terminal_states, normalize_issue_state(state_name))
+    MapSet.member?(terminal_states, SymphonyElixir.Util.normalize_state(state_name))
   end
 
   defp terminal_issue_state?(_state_name, _terminal_states), do: false
 
   defp active_issue_state?(state_name, active_states) when is_binary(state_name) do
-    MapSet.member?(active_states, normalize_issue_state(state_name))
-  end
-
-  defp normalize_issue_state(state_name) when is_binary(state_name) do
-    String.downcase(String.trim(state_name))
+    MapSet.member?(active_states, SymphonyElixir.Util.normalize_state(state_name))
   end
 
   defp terminal_state_set do
     Config.linear_terminal_states()
-    |> Enum.map(&normalize_issue_state/1)
+    |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
   end
 
   defp active_state_set do
     Config.linear_active_states()
-    |> Enum.map(&normalize_issue_state/1)
+    |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
-    |> MapSet.put(normalize_issue_state(@merging_state))
+    |> MapSet.put(SymphonyElixir.Util.normalize_state(@merging_state))
   end
 
   defp normalize_labels(labels) do
@@ -3126,17 +3122,19 @@ defmodule SymphonyElixir.Orchestrator do
         dispatch_fun.(state, refreshed_issue, attempt)
 
       {:skip, :missing} ->
-        Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
+        Logger.info("Skipping dispatch; issue no longer active or visible: #{SymphonyElixir.Util.issue_log_context(issue)}")
 
         state
 
       {:skip, %Issue{} = refreshed_issue} ->
-        Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
+        Logger.info(
+          "Skipping stale dispatch after issue refresh: #{SymphonyElixir.Util.issue_log_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}"
+        )
 
         state
 
       {:error, reason} ->
-        Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
+        Logger.warning("Skipping dispatch; issue refresh failed for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
         state
     end
@@ -3167,18 +3165,18 @@ defmodule SymphonyElixir.Orchestrator do
             spawn_fun.(state, issue, attempt, recipient)
 
           {:error, reason} ->
-            Logger.warning("Skipping dispatch; failed to persist lease state for #{issue_context(issue)}: #{inspect(reason)}")
+            Logger.warning("Skipping dispatch; failed to persist lease state for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
             LeaseManager.release(issue.id, state.lease_owner)
             state
         end
 
       {:error, :claimed} ->
-        Logger.info("Skipping dispatch; lease already held for #{issue_context(issue)}")
+        Logger.info("Skipping dispatch; lease already held for #{SymphonyElixir.Util.issue_log_context(issue)}")
         state
 
       {:error, reason} ->
-        Logger.warning("Skipping dispatch; failed to acquire lease for #{issue_context(issue)}: #{inspect(reason)}")
+        Logger.warning("Skipping dispatch; failed to acquire lease for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
         state
     end
@@ -3204,7 +3202,7 @@ defmodule SymphonyElixir.Orchestrator do
       ref = Process.monitor(pid)
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
-      Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
+      Logger.info("Dispatching issue to agent: #{SymphonyElixir.Util.issue_log_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
       ledger_event =
         RunLedger.record("dispatch.started", %{
@@ -3262,7 +3260,7 @@ defmodule SymphonyElixir.Orchestrator do
       }
     else
       {:error, reason} ->
-        Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+        Logger.error("Unable to spawn agent for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
         LeaseManager.release(issue.id, state.lease_owner)
         maybe_clear_persisted_lease(Workspace.path_for_issue(issue))
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
@@ -3335,7 +3333,7 @@ defmodule SymphonyElixir.Orchestrator do
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
       dispatch_stage = normalize_dispatch_stage(issue)
 
-      Logger.info("Dispatching issue to passive runtime worker: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
+      Logger.info("Dispatching issue to passive runtime worker: #{SymphonyElixir.Util.issue_log_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
       ledger_event =
         RunLedger.record("dispatch.started", %{
@@ -3395,7 +3393,7 @@ defmodule SymphonyElixir.Orchestrator do
       }
     else
       {:error, reason} ->
-        Logger.error("Unable to spawn passive runtime worker for #{issue_context(issue)}: #{inspect(reason)}")
+        Logger.error("Unable to spawn passive runtime worker for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
         unless MapSet.member?(state.claimed, issue.id) do
           LeaseManager.release(issue.id, state.lease_owner)
@@ -3702,7 +3700,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:noreply, dispatch_runtime_issue(state, issue, attempt, dispatch_fun, &dispatch_passive_issue/3)}
     else
-      Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
+      Logger.debug("No available slots for retrying #{SymphonyElixir.Util.issue_log_context(issue)}; retrying again")
 
       {:noreply,
        schedule_issue_retry(
@@ -3984,10 +3982,6 @@ defmodule SymphonyElixir.Orchestrator do
     do: session_id
 
   defp running_entry_session_id(_running_entry), do: "n/a"
-
-  defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
-    "issue_id=#{issue_id} issue_identifier=#{identifier}"
-  end
 
   defp available_slots(%State{} = state) do
     max(
@@ -6344,7 +6338,7 @@ defmodule SymphonyElixir.Orchestrator do
               })
 
             {:error, reason} ->
-              Logger.warning("Failed to auto-promote #{issue_context(issue)} to #{@merging_state}: #{inspect(reason)}")
+              Logger.warning("Failed to auto-promote #{SymphonyElixir.Util.issue_log_context(issue)} to #{@merging_state}: #{inspect(reason)}")
           end
 
           state
@@ -6430,7 +6424,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_update_issue_state(issue_id, current_state, target_state)
        when is_binary(issue_id) and is_binary(target_state) do
-    if normalize_issue_state(current_state || "") == normalize_issue_state(target_state) do
+    if SymphonyElixir.Util.normalize_state(current_state || "") == SymphonyElixir.Util.normalize_state(target_state) do
       :ok
     else
       IssueSource.update_issue_state(%{id: issue_id}, target_state)
@@ -6509,7 +6503,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_paused?(_state, _issue), do: false
 
   defp pause_resume_state(state_name) when is_binary(state_name) do
-    normalized = normalize_issue_state(state_name)
+    normalized = SymphonyElixir.Util.normalize_state(state_name)
 
     case normalized do
       "paused" -> "Todo"

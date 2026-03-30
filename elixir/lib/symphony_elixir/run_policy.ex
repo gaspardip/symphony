@@ -155,8 +155,8 @@ defmodule SymphonyElixir.RunPolicy do
         last_observed_input_tokens: Map.get(resume_context, :budget_last_observed_input_tokens),
         scope_kind: Map.get(resume_context, :budget_scope_kind),
         scope_ids: normalize_scope_ids(Map.get(resume_context, :budget_scope_ids)),
-        auto_narrowed: truthy?(Map.get(resume_context, :budget_auto_narrowed)),
-        total_extension_used: truthy?(Map.get(resume_context, :budget_total_extension_used)),
+        auto_narrowed: SymphonyElixir.Util.truthy?(Map.get(resume_context, :budget_auto_narrowed)),
+        total_extension_used: SymphonyElixir.Util.truthy?(Map.get(resume_context, :budget_total_extension_used)),
         per_turn_input_soft: adaptive_budget.per_turn_input_soft,
         per_turn_input_hard: adaptive_budget.per_turn_input_hard,
         max_turns_in_window: adaptive_budget.max_turns_in_window,
@@ -253,10 +253,10 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp promote_todo_issue(%{id: issue_id, state: state} = issue)
        when is_binary(issue_id) and is_binary(state) do
-    if normalize_state(state) == normalize_state(@in_progress_state) do
+    if SymphonyElixir.Util.normalize_state(state) == SymphonyElixir.Util.normalize_state(@in_progress_state) do
       :ok
     else
-      if normalize_state(state) == "todo" do
+      if SymphonyElixir.Util.normalize_state(state) == "todo" do
         case IssueSource.update_issue_state(
                %{id: issue_id, source: Map.get(issue, :source)},
                @in_progress_state
@@ -763,7 +763,7 @@ defmodule SymphonyElixir.RunPolicy do
       total_tokens <= base_budget ->
         :ok
 
-      truthy?(Map.get(resume_context, :budget_total_extension_used)) ->
+      SymphonyElixir.Util.truthy?(Map.get(resume_context, :budget_total_extension_used)) ->
         :ok
 
       not review_fix_total_extension_eligible?(resume_context, extension_budget) ->
@@ -797,7 +797,7 @@ defmodule SymphonyElixir.RunPolicy do
     extension_eligible? = review_fix_total_extension_eligible?(resume_context, extension_budget)
 
     extension_used_or_eligible? =
-      truthy?(Map.get(resume_context, :budget_total_extension_used)) or extension_eligible?
+      SymphonyElixir.Util.truthy?(Map.get(resume_context, :budget_total_extension_used)) or extension_eligible?
 
     cond do
       not is_integer(base_budget) -> nil
@@ -818,7 +818,7 @@ defmodule SymphonyElixir.RunPolicy do
     base_budget = token_budget[:per_issue_total]
     extension_budget = review_fix_budget[:per_issue_total_extension]
 
-    if truthy?(Map.get(resume_context, :budget_total_extension_used)) and is_integer(base_budget) and is_integer(extension_budget) do
+    if SymphonyElixir.Util.truthy?(Map.get(resume_context, :budget_total_extension_used)) and is_integer(base_budget) and is_integer(extension_budget) do
       metadata =
         review_fix_budget_metadata(
           running_entry,
@@ -1050,7 +1050,7 @@ defmodule SymphonyElixir.RunPolicy do
       pressure_level: Map.get(resume_context, :budget_pressure_level),
       scope_kind: Map.get(resume_context, :budget_scope_kind),
       scope_ids: normalize_scope_ids(Map.get(resume_context, :budget_scope_ids)),
-      total_extension_used: truthy?(Map.get(resume_context, :budget_total_extension_used))
+      total_extension_used: SymphonyElixir.Util.truthy?(Map.get(resume_context, :budget_total_extension_used))
     }
     |> Map.merge(extras)
   end
@@ -1070,8 +1070,6 @@ defmodule SymphonyElixir.RunPolicy do
   end
 
   defp normalize_scope_ids(_ids), do: []
-
-  defp truthy?(value), do: value in [true, "true", 1, "1"]
 
   defp current_stage_token_budget(issue, running_entry, workspace, run_state) do
     stage =
@@ -1390,12 +1388,6 @@ defmodule SymphonyElixir.RunPolicy do
 
   defp mapish(value) when is_map(value), do: Enum.into(value, %{})
   defp mapish(_value), do: %{}
-
-  defp normalize_state(state) when is_binary(state) do
-    state
-    |> String.trim()
-    |> String.downcase()
-  end
 
   defp truncate_output(nil), do: "No additional output was captured."
 

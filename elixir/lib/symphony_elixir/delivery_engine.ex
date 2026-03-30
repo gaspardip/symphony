@@ -143,7 +143,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   @doc false
   @spec normalize_state_for_test(term()) :: term()
-  def normalize_state_for_test(state), do: normalize_state(state)
+  def normalize_state_for_test(state), do: SymphonyElixir.Util.normalize_state(state)
 
   @doc false
   @spec active_issue_state_for_test(term()) :: boolean()
@@ -638,7 +638,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                 last_harness_init: Map.merge(attrs, %{status: "passed"}),
                 last_harness_check: %{
                   status: "passed",
-                  checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+                  checked_at: SymphonyElixir.Util.now_iso8601()
                 },
                 harness_status: "ready",
                 harness_attempts: Map.get(state, :harness_attempts, 0) + 1
@@ -3219,7 +3219,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp merge_readiness_summary(pr_body_validation, review_threads) do
     %{
-      checked_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      checked_at: SymphonyElixir.Util.now_iso8601(),
       pr_body_validation_status: merge_readiness_validation_status(pr_body_validation),
       posted_review_threads:
         Enum.count(review_threads, fn {_thread_key, thread_state} ->
@@ -4394,7 +4394,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp maybe_move_issue(%Issue{id: issue_id, state: current_state} = issue, target_state)
        when is_binary(issue_id) and is_binary(target_state) do
-    if normalize_state(current_state) == normalize_state(target_state) do
+    if SymphonyElixir.Util.normalize_state(current_state) == SymphonyElixir.Util.normalize_state(target_state) do
       :ok
     else
       IssueSource.update_issue_state(issue, target_state)
@@ -4793,21 +4793,11 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp maybe_capture_turn_runtime_error(_issue, _message), do: :ok
 
-  defp normalize_state(state) when is_binary(state) do
-    state
-    |> String.trim()
-    |> String.downcase()
-  end
-
-  defp normalize_state(_state), do: ""
-
-  defp truthy?(value), do: value in [true, "true", 1, "1"]
-
   defp active_issue_state?(state_name) when is_binary(state_name) do
-    normalized_state = normalize_state(state_name)
+    normalized_state = SymphonyElixir.Util.normalize_state(state_name)
 
     Config.linear_active_states()
-    |> Enum.any?(fn active_state -> normalize_state(active_state) == normalized_state end)
+    |> Enum.any?(fn active_state -> SymphonyElixir.Util.normalize_state(active_state) == normalized_state end)
   end
 
   defp active_issue_state?(_state_name), do: false
@@ -4980,7 +4970,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp ui_proof_required_checks(verifier_map) when is_map(verifier_map) do
     ui_proof = Map.get(verifier_map, :ui_proof, %{}) || %{}
 
-    if truthy?(Map.get(ui_proof, :merge_required)) do
+    if SymphonyElixir.Util.truthy?(Map.get(ui_proof, :merge_required)) do
       Map.get(ui_proof, :required_checks, []) || []
     else
       []

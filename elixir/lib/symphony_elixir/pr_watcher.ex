@@ -726,10 +726,7 @@ defmodule SymphonyElixir.PRWatcher do
               updated =
                 thread_state
                 |> Map.put("draft_state", "posted")
-                |> Map.put(
-                  "posted_at",
-                  DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-                )
+                |> Map.put("posted_at", SymphonyElixir.Util.now_iso8601())
                 |> Map.put("posted_reply_id", Map.get(reply, :id))
                 |> Map.put("posted_reply_url", Map.get(reply, :url))
                 |> Map.put("reply_refresh_needed", false)
@@ -829,10 +826,7 @@ defmodule SymphonyElixir.PRWatcher do
               updated =
                 thread_state
                 |> Map.put("resolution_state", "resolved")
-                |> Map.put(
-                  "resolved_at",
-                  DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-                )
+                |> Map.put("resolved_at", SymphonyElixir.Util.now_iso8601())
 
               {Map.put(acc, thread_key, updated), resolved + 1, skipped}
 

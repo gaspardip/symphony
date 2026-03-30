@@ -222,7 +222,7 @@ defmodule SymphonyElixir.RunStateStore do
   defp update_stage_history(state, stage, reason) do
     entry = %{
       stage: stage,
-      at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      at: SymphonyElixir.Util.now_iso8601(),
       reason: reason
     }
 

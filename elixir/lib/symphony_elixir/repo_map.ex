@@ -102,7 +102,7 @@ defmodule SymphonyElixir.RepoMap do
 
   defp proof_summary(proof) when is_map(proof) do
     %{
-      required: truthy?(Map.get(proof, :required) || Map.get(proof, "required")),
+      required: SymphonyElixir.Util.truthy?(Map.get(proof, :required) || Map.get(proof, "required")),
       mode: normalize_optional_string(Map.get(proof, :mode) || Map.get(proof, "mode")),
       source_paths: normalize_string_list(Map.get(proof, :source_paths) || Map.get(proof, "source_paths")),
       test_paths: normalize_string_list(Map.get(proof, :test_paths) || Map.get(proof, "test_paths")),
@@ -153,8 +153,4 @@ defmodule SymphonyElixir.RepoMap do
   defp normalize_optional_string(_value), do: nil
 
   defp is_nil_or_blank?(value), do: is_nil(normalize_optional_string(value))
-
-  defp truthy?(true), do: true
-  defp truthy?("true"), do: true
-  defp truthy?(_value), do: false
 end

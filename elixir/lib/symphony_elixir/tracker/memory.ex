@@ -16,12 +16,12 @@ defmodule SymphonyElixir.Tracker.Memory do
   def fetch_issues_by_states(state_names) do
     normalized_states =
       state_names
-      |> Enum.map(&normalize_state/1)
+      |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
       |> MapSet.new()
 
     {:ok,
      Enum.filter(issue_entries(), fn %Issue{state: state} ->
-       MapSet.member?(normalized_states, normalize_state(state))
+       MapSet.member?(normalized_states, SymphonyElixir.Util.normalize_state(state))
      end)}
   end
 
@@ -89,12 +89,4 @@ defmodule SymphonyElixir.Tracker.Memory do
       _ -> :ok
     end
   end
-
-  defp normalize_state(state) when is_binary(state) do
-    state
-    |> String.trim()
-    |> String.downcase()
-  end
-
-  defp normalize_state(_state), do: ""
 end

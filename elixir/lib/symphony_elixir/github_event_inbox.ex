@@ -31,9 +31,9 @@ defmodule SymphonyElixir.GitHubEventInbox do
             {acc, state_acc, duplicate_count + 1}
           else
             record = %{
-              id: event.event_id || generate_event_id(),
+              id: event.event_id || SymphonyElixir.Util.generate_id("gh_"),
               dedupe_key: key,
-              enqueued_at: now_iso8601(),
+              enqueued_at: SymphonyElixir.Util.now_iso8601(),
               event: event_payload(event)
             }
 
@@ -205,13 +205,5 @@ defmodule SymphonyElixir.GitHubEventInbox do
       |> Enum.take(-@default_recent_dedupe_limit)
 
     Map.put(state, "seen_dedupe_keys", keys)
-  end
-
-  defp generate_event_id do
-    "gh_" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
-  end
-
-  defp now_iso8601 do
-    DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
   end
 end
