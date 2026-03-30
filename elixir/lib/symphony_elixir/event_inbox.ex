@@ -1,12 +1,14 @@
 defmodule SymphonyElixir.EventInbox do
   @moduledoc false
 
-  alias SymphonyElixir.RunLedger
-
   @default_recent_dedupe_limit 2_000
 
   defmacro __using__(opts) do
-    event_module = Keyword.fetch!(opts, :event_module)
+    event_module =
+      opts
+      |> Keyword.fetch!(:event_module)
+      |> Macro.expand(__CALLER__)
+
     events_filename = Keyword.fetch!(opts, :events_filename)
     state_filename = Keyword.fetch!(opts, :state_filename)
     error_tag = Keyword.fetch!(opts, :error_tag)
@@ -139,7 +141,7 @@ defmodule SymphonyElixir.EventInbox do
 
       @spec base_dir() :: Path.t()
       def base_dir do
-        RunLedger.ledger_file_path()
+        SymphonyElixir.RunLedger.ledger_file_path()
         |> Path.dirname()
         |> Path.expand()
       end
