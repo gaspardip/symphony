@@ -2843,7 +2843,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp partition_issues_by_label_gate(_issues, _state), do: {[], []}
 
   defp skipped_issue_entry(%Issue{} = issue, reason, %State{} = state) do
-    workspace_path = Path.join(Config.workspace_root(), issue.identifier || issue.id || "issue")
+    workspace_path = Workspace.path_for_issue(issue.identifier || issue.id)
     run_state = load_run_state(workspace_path, issue)
 
     {policy_class, policy_source, policy_override} =
@@ -4493,7 +4493,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   # credo:disable-for-next-line
   defp running_snapshot_entry(issue_id, metadata, now, state) do
-    workspace_path = Path.join(Config.workspace_root(), metadata.identifier || issue_id)
+    workspace_path = Workspace.path_for_issue(metadata.identifier || issue_id)
     inspection = RunInspector.inspect(workspace_path, include_pr_details: false)
     run_state = load_run_state(workspace_path, metadata.issue)
     lease = stateful_lease_details(issue_id, run_state, now)
@@ -4712,8 +4712,7 @@ defmodule SymphonyElixir.Orchestrator do
         retry_attempts: state.retry_attempts
       )
       |> Enum.map(fn entry ->
-        workspace_path =
-          Path.join(Config.workspace_root(), entry.identifier || entry.issue_id || "issue")
+        workspace_path = Workspace.path_for_issue(entry.identifier || entry.issue_id)
 
         run_state = load_run_state(workspace_path, entry.issue)
         {policy_class, policy_source, policy_override} = policy_snapshot_values(entry.issue, state, run_state)
@@ -6322,7 +6321,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_promote_review_ready_issue(%State{} = state, %Issue{} = issue) do
-    workspace = Path.join(Config.workspace_root(), issue.identifier || issue.id || "issue")
+    workspace = Workspace.path_for_issue(issue.identifier || issue.id)
     inspection = RunInspector.inspect(workspace)
 
     case resolve_policy(issue, state) do
@@ -6916,7 +6915,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_run_state(identifier, issue) when is_binary(identifier) and identifier != "" do
     identifier
-    |> then(&Path.join(Config.workspace_root(), &1))
+    |> Workspace.path_for_issue()
     |> load_run_state(issue)
   end
 
@@ -7103,7 +7102,7 @@ defmodule SymphonyElixir.Orchestrator do
     human_action =
       Map.get(conflict, :human_action) || RuleCatalog.human_action(:policy_invalid_labels)
 
-    workspace = Path.join(Config.workspace_root(), issue.identifier || issue.id || "issue")
+    workspace = Workspace.path_for_issue(issue.identifier || issue.id)
 
     ledger_event =
       RunLedger.record("runtime.stopped", %{
@@ -7234,7 +7233,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp persist_policy_override_for_identifier(identifier, override) when is_binary(identifier) do
-    workspace = Path.join(Config.workspace_root(), identifier)
+    workspace = Workspace.path_for_issue(identifier)
 
     if File.exists?(workspace) do
       _ =
