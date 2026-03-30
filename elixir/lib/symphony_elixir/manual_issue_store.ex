@@ -47,7 +47,7 @@ defmodule SymphonyElixir.ManualIssueStore do
   def fetch_issues_by_states(states) when is_list(states) do
     normalized_states =
       states
-      |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
+      |> Enum.map(&(to_string(&1) |> SymphonyElixir.Util.normalize_state()))
       |> MapSet.new()
 
     {:ok,
