@@ -1042,7 +1042,7 @@ defmodule SymphonyElixir.Orchestrator do
       issue_id when is_binary(issue_id) and issue_id != "" ->
         case LeaseManager.read(issue_id) do
           {:ok, lease} ->
-            owner = lease_owner_from_snapshot(lease)
+            owner = LeaseManager.snapshot_for_state(lease).lease_owner
 
             cond do
               owner == state.lease_owner ->
@@ -7416,11 +7416,12 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         case LeaseManager.read(issue_id) do
           {:ok, lease} ->
-            owner = lease_owner_from_snapshot(lease)
+            snapshot = LeaseManager.snapshot_for_state(lease)
+            owner = snapshot.lease_owner
 
             cond do
               owner == state.lease_owner ->
-                {:ok, lease_snapshot_for_state(lease), false}
+                {:ok, snapshot, false}
 
               LeaseManager.reclaimable?(lease) or
                   same_runner_instance_lease_reclaimable?(run_state) ->
@@ -7432,7 +7433,7 @@ defmodule SymphonyElixir.Orchestrator do
                          run_state
                        ),
                      {:ok, refreshed_lease} <- LeaseManager.read(issue_id) do
-                  {:ok, lease_snapshot_for_state(refreshed_lease), true}
+                  {:ok, LeaseManager.snapshot_for_state(refreshed_lease), true}
                 else
                   {:error, :claimed} -> {:skip, owner}
                   {:error, reason} -> {:error, reason}
@@ -7445,7 +7446,7 @@ defmodule SymphonyElixir.Orchestrator do
           {:error, :missing} ->
             with :ok <- LeaseManager.acquire(issue_id, issue_identifier, state.lease_owner),
                  {:ok, lease} <- LeaseManager.read(issue_id) do
-              {:ok, lease_snapshot_for_state(lease), true}
+              {:ok, LeaseManager.snapshot_for_state(lease), true}
             else
               {:error, :claimed} -> {:skip, :claimed}
               {:error, reason} -> {:error, reason}
@@ -7476,7 +7477,7 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(issue, :id) || Map.get(issue, "id") do
       issue_id when is_binary(issue_id) and issue_id != "" ->
         with {:ok, lease} <- LeaseManager.read(issue_id) do
-          RunStateStore.sync_lease(workspace, issue, lease_snapshot_for_state(lease))
+          RunStateStore.sync_lease(workspace, issue, LeaseManager.snapshot_for_state(lease))
         end
 
       _ ->
@@ -7566,22 +7567,6 @@ defmodule SymphonyElixir.Orchestrator do
     present?(Map.get(run_state, :lease_owner)) and
       Map.get(run_state, :lease_owner_instance_id) == RunnerRuntime.instance_id() and
       Map.get(run_state, :lease_owner_channel) == Config.runner_channel()
-  end
-
-  defp lease_snapshot_for_state(lease) when is_map(lease) do
-    %{
-      lease_owner: lease_owner_from_snapshot(lease),
-      lease_owner_instance_id: RunnerRuntime.instance_id(),
-      lease_owner_channel: Config.runner_channel(),
-      lease_acquired_at: lease["acquired_at"] || lease[:acquired_at],
-      lease_updated_at: lease["updated_at"] || lease[:updated_at],
-      lease_status: "held",
-      lease_epoch: lease["epoch"] || lease[:epoch]
-    }
-  end
-
-  defp lease_owner_from_snapshot(lease) when is_map(lease) do
-    lease["owner"] || lease[:owner]
   end
 
   defp apply_token_delta(agent_totals, token_delta) do

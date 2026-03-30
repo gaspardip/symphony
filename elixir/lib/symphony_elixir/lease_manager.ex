@@ -3,7 +3,7 @@ defmodule SymphonyElixir.LeaseManager do
   Persists per-issue dispatch leases so multiple orchestrators do not double-run the same issue.
   """
 
-  alias SymphonyElixir.{Config, RunLedger}
+  alias SymphonyElixir.{Config, RunLedger, RunnerRuntime}
 
   @lease_dir "leases"
   @lease_version 1
@@ -68,6 +68,19 @@ defmodule SymphonyElixir.LeaseManager do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @spec snapshot_for_state(map()) :: map()
+  def snapshot_for_state(lease) when is_map(lease) do
+    %{
+      lease_owner: lease["owner"] || lease[:owner],
+      lease_owner_instance_id: RunnerRuntime.instance_id(),
+      lease_owner_channel: Config.runner_channel(),
+      lease_acquired_at: lease["acquired_at"] || lease[:acquired_at],
+      lease_updated_at: lease["updated_at"] || lease[:updated_at],
+      lease_status: "held",
+      lease_epoch: lease["epoch"] || lease[:epoch]
+    }
   end
 
   @spec acquire(String.t(), String.t() | nil, String.t(), keyword()) :: :ok | {:error, term()}
