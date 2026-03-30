@@ -1,0 +1,1 @@
+{"at":"2026-03-12T05:13:47Z","metadata":{"stage_history_size":9,"stage_transition_count":1},"summary":"Transitioned to blocked","event":"stage.transition","stage":"blocked","issue_id":"issue-pause-runtime","issue_identifier":"MT-PAUSE","actor_id":"run_state_store","actor_type":"runtime","event_id":"evt_VvDDoeLr8i7r","event_type":"stage.transition","schema_version":1}
