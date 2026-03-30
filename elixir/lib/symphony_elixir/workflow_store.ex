@@ -32,6 +32,17 @@ defmodule SymphonyElixir.WorkflowStore do
     end
   end
 
+  @spec refresh_if_stale() :: :ok | {:error, term()}
+  def refresh_if_stale do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        GenServer.call(__MODULE__, :refresh_if_stale)
+
+      _ ->
+        :ok
+    end
+  end
+
   @spec force_reload() :: :ok | {:error, term()}
   def force_reload do
     case Process.whereis(__MODULE__) do
@@ -60,12 +71,30 @@ defmodule SymphonyElixir.WorkflowStore do
 
   @impl true
   def handle_call(:current, _from, %State{} = state) do
-    case reload_state(state) do
-      {:ok, new_state} ->
-        {:reply, {:ok, new_state.workflow}, new_state}
+    {:reply, {:ok, state.workflow}, state}
+  end
 
-      {:error, _reason, new_state} ->
-        {:reply, {:ok, new_state.workflow}, new_state}
+  def handle_call(:refresh_if_stale, _from, %State{} = state) do
+    path = Workflow.workflow_file_path()
+    cached_stamp = quick_stamp(state.stamp)
+
+    case current_quick_stamp(path) do
+      {:ok, stamp} ->
+        if path == state.path and stamp == cached_stamp do
+          {:reply, :ok, state}
+        else
+          case reload_state(state) do
+            {:ok, new_state} ->
+              {:reply, :ok, new_state}
+
+            {:error, reason, new_state} ->
+              {:reply, {:error, reason}, new_state}
+          end
+        end
+
+      {:error, reason} ->
+        log_reload_error(path, reason)
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -146,6 +175,16 @@ defmodule SymphonyElixir.WorkflowStore do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp current_quick_stamp(path) when is_binary(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, stat} -> {:ok, {stat.mtime, stat.size}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp quick_stamp({mtime, size, _hash}), do: {mtime, size}
+  defp quick_stamp(_stamp), do: nil
 
   defp log_reload_error(path, reason) do
     Logger.error("Failed to reload workflow path=#{path} reason=#{inspect(reason)}; keeping last known good configuration")
