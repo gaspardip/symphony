@@ -8,7 +8,7 @@ defmodule SymphonyElixir.EventInbox do
           {:ok, %{accepted: non_neg_integer(), duplicates: non_neg_integer(), event_ids: [String.t()]}}
           | {:error, term()}
   def do_enqueue(events, events_path, state_path, config, event_payload_fun) when is_list(events) do
-    %{event_module: event_module, event_id_prefix: event_id_prefix, error_tag: error_tag} = config
+    %{event_module: event_module, event_id_prefix: event_id_prefix} = config
 
     state = load_state(state_path)
 
@@ -53,7 +53,7 @@ defmodule SymphonyElixir.EventInbox do
      }}
   rescue
     error ->
-      {:error, {error_tag, error}}
+      {:error, {Map.fetch!(config, :error_tag), error}}
   end
 
   @doc false
