@@ -3,6 +3,8 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  require Logger
+
   alias NimbleOptions
   alias SymphonyElixir.{IssuePolicy, PolicyPack, RepoHarness, RunnerRuntime, Workflow}
 
@@ -1316,6 +1318,7 @@ defmodule SymphonyElixir.Config do
          :ok <- require_valid_policy_pack(),
          :ok <- require_valid_codex_runtime_settings(),
          :ok <- require_valid_runner_harness() do
+      warn_likely_misconfigurations()
       :ok
     end
   end
@@ -1332,6 +1335,43 @@ defmodule SymphonyElixir.Config do
          turn_sandbox_policy: turn_sandbox_policy
        }}
     end
+  end
+
+  defp warn_likely_misconfigurations do
+    warn_project_slug_format()
+    warn_runner_channel_fallback()
+  end
+
+  defp warn_project_slug_format do
+    slug = linear_project_slug()
+
+    if is_binary(slug) and Regex.match?(~r/^[a-z]+-[a-z0-9]{12}$/i, slug) do
+      hash = slug |> String.split("-") |> List.last()
+
+      Logger.warning(
+        "[config] project_slug '#{slug}' looks like a URL slug (name-hash). " <>
+          "Linear's slugId is usually just the hash portion (e.g., '#{hash}')"
+      )
+    end
+  end
+
+  defp warn_runner_channel_fallback do
+    raw = raw_runner_channel()
+    resolved = runner_channel()
+
+    if is_binary(raw) and String.trim(raw) != "" and
+         String.downcase(String.trim(raw)) != resolved do
+      Logger.warning(
+        "[config] runner.channel '#{raw}' normalized to '#{resolved}' — " <>
+          "invalid values fall back to 'stable'"
+      )
+    end
+  end
+
+  defp raw_runner_channel do
+    validated_workflow_options()
+    |> get_in([:runner, :channel])
+    |> resolve_env_value(System.get_env("SYMPHONY_RUNNER_CHANNEL"))
   end
 
   defp require_tracker_kind do
