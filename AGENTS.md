@@ -1,3 +1,5 @@
+@CLAUDE.md
+
 # Symphony Agent Index
 
 This file is intentionally short. It points agents to the durable repo map and self-development contract instead of duplicating them in the repository root.
