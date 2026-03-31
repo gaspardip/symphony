@@ -78,3 +78,12 @@ The daemon reads `elixir/WORKFLOW.md` at runtime. Key fields:
 2. Push and create PR via `gh pr create`
 3. CI runs `make all` — must pass format, lint, tests, coverage, dialyzer
 4. Merge to main; main CI must stay green
+
+## Agent knowledge
+
+- Harness contract: `.symphony/harness.yml`
+- Durable knowledge: `.symphony/knowledge/` (product, architecture, codebase-map, delivery-loop, testing-and-ops)
+- Per-issue progress: `.symphony/progress/CLZ-XX.md`
+- Feature definitions: `.symphony/features/*.yaml`
+
+For Symphony self-host runs: update the progress file and affected feature YAMLs when changing code. Use repo-owned commands from the harness (preflight, validation, smoke, post-merge) — don't invent alternatives.
