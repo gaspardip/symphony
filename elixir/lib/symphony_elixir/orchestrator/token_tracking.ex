@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
   # integrate_agent_update and helpers
   # ---------------------------------------------------------------------------
 
+  @spec integrate_agent_update(map(), map()) :: {map(), map()}
   def integrate_agent_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
     agent_input_tokens = Map.get(running_entry, :agent_input_tokens, 0)
@@ -53,6 +54,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
     }
   end
 
+  @spec summarize_agent_update(map()) :: map()
   def summarize_agent_update(update) do
     %{
       event: update[:event],
@@ -61,6 +63,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
     }
   end
 
+  @spec append_recent_agent_update(term(), map()) :: list(map())
   def append_recent_agent_update(existing, summarized_update) when is_list(existing) do
     (existing ++ [summarized_update])
     |> Enum.take(-12)
@@ -68,6 +71,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def append_recent_agent_update(_existing, summarized_update), do: [summarized_update]
 
+  @spec agent_process_id_for_update(term(), map()) :: term()
   def agent_process_id_for_update(_existing, %{agent_process_id: pid})
       when is_binary(pid),
       do: pid
@@ -81,11 +85,13 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def agent_process_id_for_update(existing, _update), do: existing
 
+  @spec session_id_for_update(term(), map()) :: term()
   def session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
     do: session_id
 
   def session_id_for_update(existing, _update), do: existing
 
+  @spec turn_count_for_update(term(), term(), map()) :: non_neg_integer()
   def turn_count_for_update(existing_count, existing_session_id, %{
         event: :session_started,
         session_id: session_id
@@ -104,16 +110,13 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def turn_count_for_update(_existing_count, _existing_session_id, _update), do: 0
 
-  def turn_started_input_for_update(_existing, current_total, existing_session_id, %{
+  @spec turn_started_input_for_update(term(), integer(), term(), map()) :: non_neg_integer()
+  def turn_started_input_for_update(_existing, current_total, _existing_session_id, %{
         event: :session_started,
-        session_id: session_id
+        session_id: _session_id
       })
-      when is_integer(current_total) and is_binary(session_id) do
-    if session_id == existing_session_id do
-      current_total
-    else
-      current_total
-    end
+      when is_integer(current_total) do
+    current_total
   end
 
   def turn_started_input_for_update(existing, _current_total, _existing_session_id, _update)
@@ -127,6 +130,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
   # apply_agent_token_delta / apply_agent_rate_limits
   # ---------------------------------------------------------------------------
 
+  @spec apply_agent_token_delta(map(), map()) :: map()
   def apply_agent_token_delta(
         %{agent_totals: agent_totals} = state,
         %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
@@ -137,6 +141,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def apply_agent_token_delta(state, _token_delta), do: state
 
+  @spec apply_agent_rate_limits(term(), map()) :: term()
   def apply_agent_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
       %{} = rate_limits ->
@@ -153,6 +158,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
   # apply_token_delta
   # ---------------------------------------------------------------------------
 
+  @spec apply_token_delta(map(), map()) :: map()
   def apply_token_delta(agent_totals, token_delta) do
     input_tokens = Map.get(agent_totals, :input_tokens, 0) + token_delta.input_tokens
     output_tokens = Map.get(agent_totals, :output_tokens, 0) + token_delta.output_tokens
@@ -173,6 +179,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
   # extract_token_delta / compute_token_delta
   # ---------------------------------------------------------------------------
 
+  @spec extract_token_delta(map() | nil, map()) :: map()
   def extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
     running_entry = running_entry || %{}
     usage = extract_token_usage(update)
@@ -210,6 +217,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
     end)
   end
 
+  @spec compute_token_delta(map(), atom(), map(), atom()) :: map()
   def compute_token_delta(running_entry, token_key, usage, reported_key) do
     next_total = get_token_usage(usage, token_key)
     prev_reported = Map.get(running_entry, reported_key, 0)
@@ -231,6 +239,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
   # extract_token_usage / extract_rate_limits
   # ---------------------------------------------------------------------------
 
+  @spec extract_token_usage(map()) :: map()
   def extract_token_usage(update) do
     payloads = [
       update[:usage],
@@ -247,6 +256,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
       %{}
   end
 
+  @spec extract_rate_limits(map()) :: map() | nil
   def extract_rate_limits(update) do
     rate_limits_from_payload(update[:rate_limits]) ||
       rate_limits_from_payload(Map.get(update, "rate_limits")) ||
@@ -260,6 +270,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
   # Payload introspection helpers
   # ---------------------------------------------------------------------------
 
+  @spec absolute_token_usage_from_payload(term()) :: map() | nil
   def absolute_token_usage_from_payload(payload) when is_map(payload) do
     absolute_paths = [
       ["params", "msg", "payload", "info", "total_token_usage"],
@@ -277,6 +288,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def absolute_token_usage_from_payload(_payload), do: nil
 
+  @spec turn_completed_usage_from_payload(term()) :: map() | nil
   def turn_completed_usage_from_payload(payload) when is_map(payload) do
     method = Map.get(payload, "method") || Map.get(payload, :method)
 
@@ -293,12 +305,14 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def turn_completed_usage_from_payload(_payload), do: nil
 
+  @spec direct_token_usage_from_payload(term()) :: map() | nil
   def direct_token_usage_from_payload(payload) when is_map(payload) do
     if integer_token_map?(payload), do: payload
   end
 
   def direct_token_usage_from_payload(_payload), do: nil
 
+  @spec rate_limits_from_payload(term()) :: map() | nil
   def rate_limits_from_payload(payload) when is_map(payload) do
     direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
 
@@ -320,6 +334,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def rate_limits_from_payload(_payload), do: nil
 
+  @spec rate_limit_payloads(term()) :: map() | nil
   def rate_limit_payloads(payload) when is_map(payload) do
     Map.values(payload)
     |> Enum.reduce_while(nil, fn
@@ -348,6 +363,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
     end)
   end
 
+  @spec rate_limits_map?(term()) :: boolean()
   def rate_limits_map?(payload) when is_map(payload) do
     limit_id =
       Map.get(payload, "limit_id") ||
@@ -366,6 +382,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def rate_limits_map?(_payload), do: false
 
+  @spec explicit_map_at_paths(term(), list()) :: map() | nil
   def explicit_map_at_paths(payload, paths) when is_map(payload) and is_list(paths) do
     Enum.find_value(paths, fn path ->
       value = map_at_path(payload, path)
@@ -376,6 +393,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def explicit_map_at_paths(_payload, _paths), do: nil
 
+  @spec map_at_path(term(), list()) :: term()
   def map_at_path(payload, path) when is_map(payload) and is_list(path) do
     Enum.reduce_while(path, payload, fn key, acc ->
       if is_map(acc) and Map.has_key?(acc, key) do
@@ -388,6 +406,7 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
 
   def map_at_path(_payload, _path), do: nil
 
+  @spec integer_token_map?(term()) :: boolean()
   def integer_token_map?(payload) do
     token_fields = [
       :input_tokens,
@@ -412,13 +431,12 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
       "completionTokens"
     ]
 
-    token_fields
-    |> Enum.any?(fn field ->
-      value = payload_get(payload, field)
-      !is_nil(integer_like(value))
+    Enum.any?(token_fields, fn field ->
+      !is_nil(payload_get(payload, field))
     end)
   end
 
+  @spec get_token_usage(map(), atom()) :: non_neg_integer() | nil
   def get_token_usage(usage, :input),
     do:
       payload_get(usage, [
@@ -459,12 +477,14 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
         :totalTokens
       ])
 
+  @spec payload_get(term(), list() | term()) :: non_neg_integer() | nil
   def payload_get(payload, fields) when is_list(fields) do
     Enum.find_value(fields, fn field -> map_integer_value(payload, field) end)
   end
 
   def payload_get(payload, field), do: map_integer_value(payload, field)
 
+  @spec map_integer_value(term(), term()) :: non_neg_integer() | nil
   def map_integer_value(payload, field) do
     if is_map(payload) do
       value = Map.get(payload, field)
@@ -474,12 +494,14 @@ defmodule SymphonyElixir.Orchestrator.TokenTracking do
     end
   end
 
+  @spec running_seconds(term(), term()) :: non_neg_integer()
   def running_seconds(%DateTime{} = started_at, %DateTime{} = now) do
     max(0, DateTime.diff(now, started_at, :second))
   end
 
   def running_seconds(_started_at, _now), do: 0
 
+  @spec integer_like(term()) :: non_neg_integer() | nil
   def integer_like(value) when is_integer(value) and value >= 0, do: value
 
   def integer_like(value) when is_binary(value) do
