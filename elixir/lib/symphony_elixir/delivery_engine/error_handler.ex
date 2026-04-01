@@ -19,6 +19,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   # ---------------------------------------------------------------------------
 
   @doc "Truncate a detail value to a safe log/comment length."
+  @spec safe_detail_text(term()) :: String.t()
   def safe_detail_text(details) when is_binary(details) do
     details
     |> String.trim()
@@ -37,6 +38,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   # ---------------------------------------------------------------------------
 
   @doc "Run a provider turn and return `{turn_result, log_context}`."
+  @spec run_logged_agent_turn(module(), term(), term(), map(), keyword()) :: {term(), map()}
   def run_logged_agent_turn(provider, app_session, prompt, issue, opts) do
     started_at = System.monotonic_time()
     turn_result = provider.run_turn(app_session, prompt, issue, opts)
@@ -58,6 +60,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   end
 
   @doc "Emit a structured log line for an agent turn lifecycle event."
+  @spec log_agent_turn_lifecycle(map(), term()) :: :ok
   def log_agent_turn_lifecycle(log_context, result) do
     Logger.info(
       "event=delivery_engine.agent_turn stage=#{log_context.stage} provider=#{log_context.provider} model=#{inspect(log_context.model)} issue=#{log_context.issue} duration_ms=#{log_context.duration_ms} tokens=#{inspect(log_context.tokens)} result=#{result}",
@@ -77,6 +80,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   # Turn log-context builders (pure)
   # ---------------------------------------------------------------------------
 
+  @spec agent_turn_log_context(any(), module(), term(), map(), non_neg_integer(), map()) :: map()
   def agent_turn_log_context(stage, provider, model, issue, duration_ms, tokens) do
     %{
       stage: stage,
@@ -89,10 +93,12 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
     }
   end
 
+  @spec plan_turn_log_result(term(), term(), boolean()) :: String.t()
   def plan_turn_log_result(provider_turn_result, reported_turn_result, plan_completed) do
     "provider=#{normalize_provider_turn_outcome(provider_turn_result)},turn=#{normalize_reported_turn_outcome(reported_turn_result)},plan_completed=#{plan_completed}"
   end
 
+  @spec implement_turn_log_result(term(), term()) :: String.t()
   def implement_turn_log_result(provider_turn_result, reported_turn_result) do
     "provider=#{normalize_provider_turn_outcome(provider_turn_result)},turn=#{normalize_reported_turn_outcome(reported_turn_result)}"
   end
@@ -101,6 +107,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   # Normalization helpers (pure)
   # ---------------------------------------------------------------------------
 
+  @spec normalize_turn_provider(term()) :: String.t()
   def normalize_turn_provider(SymphonyElixir.AgentProvider.Codex), do: "codex"
   def normalize_turn_provider(SymphonyElixir.AgentProvider.CodexCLI), do: "codex-cli"
   def normalize_turn_provider(SymphonyElixir.AgentProvider.Claude), do: "claude"
@@ -108,6 +115,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   def normalize_turn_provider(provider) when is_atom(provider), do: Atom.to_string(provider)
   def normalize_turn_provider(provider), do: inspect(provider)
 
+  @spec normalize_issue_log_value(term()) :: String.t()
   def normalize_issue_log_value(%Issue{identifier: identifier, id: issue_id}) do
     identifier || issue_id || "unknown"
   end
@@ -118,6 +126,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
 
   def normalize_issue_log_value(_issue), do: "unknown"
 
+  @spec normalize_turn_tokens(term()) :: map()
   def normalize_turn_tokens({:ok, response}) when is_map(response) do
     usage = Map.get(response, :usage) || Map.get(response, "usage")
 
@@ -140,10 +149,12 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
 
   def normalize_turn_tokens(_turn_result), do: default_turn_tokens()
 
+  @spec default_turn_tokens() :: map()
   def default_turn_tokens do
     %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
   end
 
+  @spec normalize_token_count(term()) :: non_neg_integer()
   def normalize_token_count(nil), do: 0
   def normalize_token_count(value) when is_integer(value), do: max(value, 0)
 
@@ -156,6 +167,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
 
   def normalize_token_count(_value), do: 0
 
+  @spec normalize_provider_turn_outcome(term()) :: String.t()
   def normalize_provider_turn_outcome({:ok, response}) when is_map(response) do
     response
     |> Map.get(:result, Map.get(response, "result"))
@@ -168,6 +180,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
 
   def normalize_provider_turn_outcome(_result), do: "unknown"
 
+  @spec normalize_reported_turn_outcome(term()) :: String.t()
   def normalize_reported_turn_outcome({:ok, %TurnResult{blocked: true, blocker_type: blocker_type}}) do
     "blocked:#{blocker_type || "unknown"}"
   end
@@ -185,6 +198,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   def normalize_reported_turn_outcome({:skip, _issue}), do: "skip"
   def normalize_reported_turn_outcome(_result), do: "unknown"
 
+  @spec normalize_turn_outcome_value(term(), String.t()) :: String.t()
   def normalize_turn_outcome_value({tag, _details}, _default) when is_atom(tag),
     do: Atom.to_string(tag)
 
@@ -196,6 +210,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   # Error classification (pure)
   # ---------------------------------------------------------------------------
 
+  @spec implementation_turn_error_summary(term()) :: String.t()
   def implementation_turn_error_summary(reasons) when is_list(reasons) do
     reasons
     |> Enum.map(&implementation_turn_error_summary/1)
@@ -243,6 +258,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
 
   def implementation_turn_error_summary(reason), do: safe_detail_text(reason)
 
+  @spec implementation_error_to_map(term()) :: map() | list(map())
   def implementation_error_to_map(reasons) when is_list(reasons),
     do: Enum.map(reasons, &implementation_error_to_map/1)
 
@@ -255,6 +271,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   def implementation_error_to_map(reason),
     do: %{type: "unknown", details: safe_detail_text(reason)}
 
+  @spec retryable_implementation_error?(term()) :: boolean()
   def retryable_implementation_error?({:turn_failed, details}) do
     case turn_failed_reason_code(details) do
       "implementation.command_output_budget_exceeded" -> false
@@ -269,6 +286,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   def retryable_implementation_error?(:turn_timeout), do: true
   def retryable_implementation_error?(_reason), do: false
 
+  @spec non_retryable_implementation_error?(term()) :: boolean()
   def non_retryable_implementation_error?({:turn_failed, details}) do
     case turn_failed_reason_code(details) do
       "implementation.command_output_budget_exceeded" -> true
@@ -284,6 +302,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   def non_retryable_implementation_error?({:turn_input_required, _details}), do: true
   def non_retryable_implementation_error?(_reason), do: false
 
+  @spec implementation_error_code(term()) :: atom()
   def implementation_error_code({:turn_failed, details}) do
     case turn_failed_reason_code(details) do
       "implementation.command_output_budget_exceeded" -> :command_output_budget_exceeded
@@ -296,6 +315,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
 
   def implementation_error_code(_reason), do: :turn_failed
 
+  @spec turn_failed_reason_code(term()) :: String.t() | nil
   def turn_failed_reason_code(details) when is_map(details) do
     Map.get(details, :reason) || Map.get(details, "reason")
   end
@@ -312,6 +332,7 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   Returns `{code :: atom(), message :: String.t()}` so the caller can pass them
   to `block_issue/5` without this module needing side-effectful dependencies.
   """
+  @spec classify_checkout_error({:error, term()}) :: {atom(), String.t()}
   def classify_checkout_error({:error, reason})
       when reason in [:missing_harness_version, :missing_required_checks] do
     {reason, "The repo harness contract is incomplete."}
@@ -342,6 +363,6 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   end
 
   def classify_checkout_error({:error, reason}) do
-    {:checkout_failed, reason}
+    {:checkout_failed, inspect(reason)}
   end
 end
