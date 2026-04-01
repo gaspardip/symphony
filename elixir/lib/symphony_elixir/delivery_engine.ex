@@ -2435,6 +2435,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp review_feedback_summary(_review_threads), do: nil
 
   @doc false
+  @spec default_review_feedback_summary(map(), list()) :: String.t() | nil
   def default_review_feedback_summary(state, []),
     do: review_feedback_summary(Map.get(state, :review_threads, %{}))
 
@@ -2442,6 +2443,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   def default_review_feedback_summary(_state, _focused_claims), do: nil
 
   @doc false
+  @spec default_review_claim_summary(map(), list()) :: String.t() | nil
   def default_review_claim_summary(state, []),
     do: ReviewEvidenceCollector.summary(Map.get(state, :review_claims, %{}))
 
@@ -2451,6 +2453,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   @doc false
+  @spec default_next_objective(map(), list()) :: String.t()
   def default_next_objective(_state, []),
     do: "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
 
@@ -2495,6 +2498,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   @doc false
+  @spec focused_review_next_objective(list(), map()) :: String.t()
   def focused_review_next_objective(focused_claims, all_review_claims)
       when is_list(focused_claims) and is_map(all_review_claims) do
     files =
@@ -2531,6 +2535,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   @doc false
   def focused_review_claims(review_claims, limit \\ 2)
 
+  @spec focused_review_claims(map(), non_neg_integer()) :: list()
   def focused_review_claims(review_claims, limit)
       when is_map(review_claims) and is_integer(limit) and limit > 0 do
     review_claims
@@ -2955,6 +2960,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp claim_priority_bucket(_claim_type), do: 4
 
   @doc false
+  @spec focused_review_claim_block(list(), map()) :: String.t()
   def focused_review_claim_block(focused_claims, all_review_claims)
       when is_list(focused_claims) and is_map(all_review_claims) do
     remaining_count =
@@ -3022,6 +3028,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp sync_review_claims_into_threads(review_threads, _review_claims), do: review_threads
 
   @doc false
+  @spec claim_pending_review_fix?(map()) :: boolean()
   def claim_pending_review_fix?(claim) when is_map(claim) do
     claim_value(claim, :disposition) == "accepted" and
       claim_value(claim, :actionable, false) and
@@ -3460,6 +3467,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   @doc false
+  @spec focused_review_claim_limit(map()) :: non_neg_integer()
   def focused_review_claim_limit(state) do
     case get_in(state, [:resume_context, :token_pressure]) do
       "high" -> 1

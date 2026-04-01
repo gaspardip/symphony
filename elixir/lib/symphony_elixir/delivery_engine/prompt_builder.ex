@@ -1,9 +1,10 @@
 defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
   @moduledoc """
-  Pure functions that build agent prompts for delivery engine stages (plan, implement).
+  Builds agent prompts for delivery engine stages (plan, implement).
 
-  Extracted from `SymphonyElixir.DeliveryEngine` — all functions take issue/state/workspace
-  data and return prompt strings or resume-context maps.
+  Extracted from `SymphonyElixir.DeliveryEngine` — functions take issue/state/workspace
+  data and return prompt strings or resume-context maps. Some functions read workspace
+  state (e.g. dirty files, diff summary) as part of building resume context.
   """
 
   # credo:disable-for-this-file
@@ -18,6 +19,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
   # Plan prompt
   # ---------------------------------------------------------------------------
 
+  @spec plan_prompt(map(), term(), String.t()) :: String.t()
   def plan_prompt(issue, _state, workspace) do
     acceptance = IssueAcceptance.from_issue(issue)
 
@@ -77,6 +79,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
   # Implement prompt
   # ---------------------------------------------------------------------------
 
+  @spec implement_prompt(map(), map(), String.t(), map(), term(), non_neg_integer(), non_neg_integer()) :: String.t()
   def implement_prompt(issue, state, workspace, inspection, _opts, turn_number, max_turns) do
     acceptance = IssueAcceptance.from_issue(issue)
     resume_context = resume_context_for_prompt(workspace, issue, state, inspection)
@@ -211,6 +214,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
   # Acceptance criteria
   # ---------------------------------------------------------------------------
 
+  @spec maybe_acceptance_criteria_block(list(), map()) :: String.t() | nil
   def maybe_acceptance_criteria_block([], _resume_context), do: nil
 
   def maybe_acceptance_criteria_block(criteria, resume_context) when is_list(criteria) do
@@ -237,6 +241,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
   # Resume context construction
   # ---------------------------------------------------------------------------
 
+  @spec resume_context_for_prompt(String.t(), map(), map(), map()) :: map()
   def resume_context_for_prompt(workspace, issue, state, inspection) do
     stored =
       case Map.get(state, :resume_context) do
@@ -255,10 +260,12 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     end
   end
 
+  @spec resume_context_stale?(map(), map()) :: boolean()
   def resume_context_stale?(context, inspection) when is_map(context) do
     Map.get(context, :fingerprint) != inspection.fingerprint
   end
 
+  @spec fresh_resume_context(String.t(), map(), map(), map(), map()) :: map()
   def fresh_resume_context(workspace, issue, state, inspection, overrides) do
     target_stage = Map.get(overrides, :target_stage) || Map.get(state, :stage) || "implement"
     stored_resume_context = normalize_resume_context(Map.get(state, :resume_context, %{}))
@@ -301,6 +308,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     |> Map.drop([:target_stage, :review_fix_progress_delta])
   end
 
+  @spec preserved_resume_context(map()) :: map()
   def preserved_resume_context(context) when is_map(context) do
     context
     |> Map.take([
@@ -316,6 +324,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     |> Map.new()
   end
 
+  @spec repo_platform_note(map()) :: String.t() | nil
   def repo_platform_note(%{harness: %{project: %{type: type}}}) when is_binary(type) do
     normalized = String.trim(type)
 
@@ -333,10 +342,12 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
 
   def repo_platform_note(_inspection), do: nil
 
+  @spec resume_context_attrs(String.t(), map(), map(), map(), map(), keyword()) :: map()
   def resume_context_attrs(workspace, issue, state, inspection, overrides, _opts) do
     %{resume_context: refreshed_resume_context(workspace, issue, state, inspection, overrides)}
   end
 
+  @spec refreshed_resume_context(String.t(), map(), map(), map(), map()) :: map()
   def refreshed_resume_context(workspace, issue, state, inspection, overrides) do
     preserved =
       state
@@ -347,6 +358,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     |> Map.merge(preserved)
   end
 
+  @spec resume_context_block(map()) :: String.t()
   def resume_context_block(resume_context) when is_map(resume_context) do
     lines =
       if review_fix_budget_mode?(resume_context) do
@@ -390,6 +402,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     end
   end
 
+  @spec focused_resume_context_block(map()) :: String.t()
   def focused_resume_context_block(resume_context) when is_map(resume_context) do
     lines =
       if review_fix_budget_mode?(resume_context) do
@@ -415,6 +428,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     end
   end
 
+  @spec token_pressure_note(map()) :: String.t() | nil
   def token_pressure_note(resume_context) when is_map(resume_context) do
     cond do
       review_fix_budget_mode?(resume_context) and Map.get(resume_context, :budget_pressure_level) in ["soft", "high", "critical"] ->
@@ -432,6 +446,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
   # Review-fix budget context
   # ---------------------------------------------------------------------------
 
+  @spec review_fix_next_objective(map()) :: String.t() | nil
   def review_fix_next_objective(resume_context) when is_map(resume_context) do
     if review_fix_budget_mode?(resume_context) do
       scope_kind = Map.get(resume_context, :budget_scope_kind, "review_claim_batch")
@@ -445,6 +460,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     end
   end
 
+  @spec review_fix_resume_context(map(), map(), String.t()) :: map()
   def review_fix_resume_context(state, stored_resume_context, "implement") do
     cond do
       review_fix_budget_mode?(stored_resume_context) ->
@@ -463,6 +479,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
 
   def review_fix_resume_context(_state, _stored_resume_context, _target_stage), do: %{}
 
+  @spec initial_review_fix_resume_context(map(), String.t(), list()) :: map()
   def initial_review_fix_resume_context(state, scope_kind, scope_ids) do
     %{
       budget_mode: "review_fix",
@@ -479,6 +496,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     }
   end
 
+  @spec carry_forward_review_fix_budget_context(map()) :: map()
   def carry_forward_review_fix_budget_context(resume_context) do
     Map.take(resume_context, [
       :budget_mode,
@@ -496,6 +514,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
     ])
   end
 
+  @spec review_fix_scope_ids(map(), String.t()) :: list(String.t())
   def review_fix_scope_ids(state, "review_claim_batch") do
     state
     |> Map.get(:review_claims, %{})
@@ -515,11 +534,13 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
 
   def review_fix_scope_ids(_state, _scope_kind), do: []
 
+  @spec review_fix_budget_mode?(term()) :: boolean()
   def review_fix_budget_mode?(resume_context) when is_map(resume_context),
     do: Map.get(resume_context, :budget_mode) == "review_fix"
 
   def review_fix_budget_mode?(_resume_context), do: false
 
+  @spec maybe_increment_review_fix_progress(map(), term()) :: map()
   def maybe_increment_review_fix_progress(resume_context, delta)
       when is_map(resume_context) and is_integer(delta) and delta > 0 do
     if review_fix_budget_mode?(resume_context) do
@@ -535,6 +556,7 @@ defmodule SymphonyElixir.DeliveryEngine.PromptBuilder do
   # Normalize resume context
   # ---------------------------------------------------------------------------
 
+  @spec normalize_resume_context(term()) :: map()
   def normalize_resume_context(context) when is_map(context) do
     context
     |> Enum.into(%{}, fn
