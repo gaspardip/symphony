@@ -7,8 +7,6 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   clauses delegate here and handle `notify_dashboard/0` themselves.
   """
 
-  require Logger
-
   alias SymphonyElixir.BehavioralProof
   alias SymphonyElixir.Config
   alias SymphonyElixir.IssuePolicy
@@ -34,6 +32,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   # Runtime control functions (public API for orchestrator delegation)
   # -------------------------------------------------------------------
 
+  @spec submit_manual_issue_runtime(State.t(), map()) :: {State.t(), map()}
   def submit_manual_issue_runtime(%State{} = state, spec) when is_map(spec) do
     case ManualIssueStore.submit(spec) do
       {:ok, %Issue{} = issue} ->
@@ -73,6 +72,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec pause_issue_runtime(State.t(), String.t()) :: {State.t(), map()}
   def pause_issue_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          :ok <- maybe_update_issue_state(issue.id, issue.state, @paused_state) do
@@ -129,6 +129,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec resume_issue_runtime(State.t(), String.t()) :: {State.t(), map()}
   def resume_issue_runtime(%State{} = state, issue_identifier) do
     with {:ok, paused_entry} <- paused_issue_entry(state, issue_identifier),
          :ok <-
@@ -172,6 +173,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec stop_issue_runtime(State.t(), String.t()) :: {State.t(), map()}
   def stop_issue_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          :ok <-
@@ -218,6 +220,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec hold_issue_for_human_review_runtime(State.t(), String.t()) :: {State.t(), map()}
   def hold_issue_for_human_review_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          {policy_class, policy_source, _policy_override} <- Orchestrator.policy_snapshot_values(issue, state),
@@ -271,6 +274,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec retry_issue_now_runtime(State.t(), String.t()) :: {State.t(), map()}
   def retry_issue_now_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          false <- Orchestrator.issue_paused?(state, issue) do
@@ -324,6 +328,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec refresh_merge_readiness_runtime(State.t(), String.t()) :: {State.t(), map()}
   def refresh_merge_readiness_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          false <- Orchestrator.issue_paused?(state, issue),
@@ -415,6 +420,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec reprioritize_issue_runtime(State.t(), String.t(), term()) :: {State.t(), map()}
   def reprioritize_issue_runtime(%State{} = state, issue_identifier, override_rank) do
     identifier = issue_identifier |> to_string() |> String.trim()
 
@@ -460,6 +466,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec approve_issue_for_merge_runtime(State.t(), String.t()) :: {State.t(), map()}
   def approve_issue_for_merge_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          {policy_class, policy_source, _policy_override} <- Orchestrator.policy_snapshot_values(issue, state),
@@ -540,6 +547,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec approve_issue_for_deploy_runtime(State.t(), String.t()) :: {State.t(), map()}
   def approve_issue_for_deploy_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          {policy_class, policy_source, _policy_override} <- Orchestrator.policy_snapshot_values(issue, state),
@@ -612,6 +620,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec review_thread_action_runtime(State.t(), String.t(), map()) :: {State.t(), map()}
   def review_thread_action_runtime(%State{} = state, issue_identifier, action) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          workspace <- Workspace.path_for_issue(issue.identifier),
@@ -674,6 +683,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec post_review_drafts_runtime(State.t(), String.t()) :: {State.t(), map()}
   def post_review_drafts_runtime(%State{} = state, issue_identifier) do
     with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          workspace <- Workspace.path_for_issue(issue.identifier),
@@ -757,6 +767,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec set_policy_class_runtime(State.t(), String.t(), String.t()) :: {State.t(), map()}
   def set_policy_class_runtime(%State{} = state, issue_identifier, policy_class) do
     identifier = issue_identifier |> to_string() |> String.trim()
 
@@ -808,6 +819,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     end
   end
 
+  @spec clear_policy_override_runtime(State.t(), String.t()) :: {State.t(), map()}
   def clear_policy_override_runtime(%State{} = state, issue_identifier) do
     identifier = issue_identifier |> to_string() |> String.trim()
 
@@ -847,6 +859,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   # -------------------------------------------------------------------
 
   @doc false
+  @spec maybe_schedule_manual_issue_refresh(State.t()) :: State.t()
   def maybe_schedule_manual_issue_refresh(%State{} = state) do
     if state.poll_check_in_progress == true do
       state
@@ -873,6 +886,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   end
 
   @doc false
+  @spec resolve_issue_for_control(State.t(), term()) :: {:ok, Issue.t()} | {:error, atom()}
   def resolve_issue_for_control(%State{} = state, issue_identifier)
       when is_binary(issue_identifier) do
     issue_identifier = String.trim(issue_identifier)
@@ -1259,6 +1273,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   # Resume helpers (retry_issue_now support)
   # -------------------------------------------------------------------
 
+  @spec maybe_resume_blocked_issue(State.t(), Issue.t()) :: {State.t(), Issue.t()}
   def maybe_resume_blocked_issue(%State{} = state, %Issue{} = issue) do
     workspace = Workspace.path_for_issue(issue.identifier)
 

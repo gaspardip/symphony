@@ -122,6 +122,8 @@ defmodule SymphonyElixir.Orchestrator do
       github_last_assignment: nil,
       first_poll_completed: false
     ]
+
+    @type t :: %__MODULE__{}
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -1461,6 +1463,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec seeded_manual_issue_from_run_state(map()) :: map() | nil
   def seeded_manual_issue_from_run_state(run_state) when is_map(run_state) do
     source = normalize_issue_source(Map.get(run_state, :issue_source))
     issue_id = Map.get(run_state, :issue_id)
@@ -2108,6 +2111,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec remember_issue_cache_entry(map(), Issue.t()) :: map()
   def remember_issue_cache_entry(cache, %Issue{id: issue_id} = issue)
       when is_map(cache) and is_binary(issue_id) do
     Map.put(cache, issue_id, %{
@@ -2730,6 +2734,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec terminate_running_issue(State.t(), String.t(), boolean()) :: State.t()
   def terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
     case Map.get(state.running, issue_id) do
       nil ->
@@ -2961,6 +2966,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
 
   @doc false
+  @spec state_slots_available?(term(), map()) :: boolean()
   def state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
     used = running_issue_count_for_state(running, issue_state)
@@ -3031,6 +3037,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_matches_required_labels?(_issue), do: true
 
   @doc false
+  @spec label_gate_status(term()) :: map()
   def label_gate_status(%Issue{source: :manual}) do
     %{eligible?: true, required_labels: [], reason: nil}
   end
@@ -3088,6 +3095,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec terminal_state_set() :: MapSet.t()
   def terminal_state_set do
     Config.linear_terminal_states()
     |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
@@ -3460,6 +3468,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec revalidate_issue_for_dispatch(Issue.t(), term(), MapSet.t()) :: {:ok, Issue.t()} | {:skip, term()} | {:error, term()}
   def revalidate_issue_for_dispatch(%Issue{id: issue_id} = issue, issue_fetcher, terminal_states)
       when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
@@ -4001,6 +4010,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp running_entry_session_id(_running_entry), do: "n/a"
 
   @doc false
+  @spec available_slots(State.t()) :: non_neg_integer()
   def available_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.max_concurrent_agents()) - map_size(state.running),
@@ -4777,6 +4787,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec dispatch_runtime_issue(State.t(), Issue.t(), non_neg_integer()) :: State.t()
   def dispatch_runtime_issue(%State{} = state, %Issue{} = issue, attempt) do
     dispatch_runtime_issue(
       state,
@@ -5035,6 +5046,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec issue_paused?(State.t(), Issue.t()) :: boolean()
   def issue_paused?(%State{} = state, %Issue{id: issue_id}) when is_binary(issue_id) do
     Map.has_key?(state.paused_issue_states, issue_id)
   end
@@ -5154,6 +5166,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec schedule_tick(non_neg_integer()) :: reference()
   def schedule_tick(delay_ms) do
     :timer.send_after(delay_ms, self(), :tick)
     :ok
@@ -5165,6 +5178,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec schedule_poll_cycle_start() :: reference()
   def schedule_poll_cycle_start do
     :timer.send_after(@poll_transition_render_delay_ms, self(), :run_poll_cycle)
     :ok
@@ -5299,6 +5313,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_session_completion_totals(state, _running_entry), do: state
 
   @doc false
+  @spec refresh_runtime_config(State.t()) :: State.t()
   def refresh_runtime_config(%State{} = state) do
     state =
       Enum.reduce(Map.keys(state.running), state, fn issue_id, state_acc ->
@@ -5347,12 +5362,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec retry_candidate_issue?(Issue.t(), MapSet.t()) :: boolean()
   def retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
   end
 
   @doc false
+  @spec dispatch_slots_available?(Issue.t(), State.t()) :: boolean()
   def dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)
   end
@@ -5464,6 +5481,7 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   def policy_snapshot_values(issue, state, run_state \\ %{})
 
+  @spec policy_snapshot_values(term(), term(), map()) :: {term(), term(), term()}
   def policy_snapshot_values(%Issue{} = issue, %State{} = state, run_state)
       when is_map(run_state) do
     override =
@@ -5492,6 +5510,7 @@ defmodule SymphonyElixir.Orchestrator do
   def policy_snapshot_values(_issue, _state, _run_state), do: {nil, nil, nil}
 
   @doc false
+  @spec policy_pack_name(Issue.t(), State.t(), map()) :: String.t() | nil
   def policy_pack_name(%Issue{} = issue, %State{} = state, run_state \\ %{})
       when is_map(run_state) do
     Map.get(run_state, :policy_pack) ||
@@ -5500,6 +5519,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec dispatch_skip_reason(Issue.t(), State.t()) :: String.t() | nil
   def dispatch_skip_reason(%Issue{} = issue, %State{} = state) do
     label_gate = label_gate_status(issue)
     policy_result = resolve_policy(issue, state)
@@ -5564,6 +5584,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec issue_target_runner_channel(Issue.t()) :: String.t()
   def issue_target_runner_channel(%Issue{} = issue) do
     canary_labels =
       RunnerRuntime.canary_required_labels(%{})
@@ -5582,6 +5603,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec next_human_action_for_skip(term()) :: String.t() | nil
   def next_human_action_for_skip("missing required labels"),
     do: "Add the required routing labels before Symphony can dispatch this issue."
 
