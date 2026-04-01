@@ -21,6 +21,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   # Claim sync cluster
   # ---------------------------------------------------------------------------
 
+  @spec sync_review_claims_into_threads(map(), map()) :: map()
   def sync_review_claims_into_threads(review_threads, review_claims)
       when is_map(review_threads) and is_map(review_claims) do
     Enum.reduce(review_claims, review_threads, fn {thread_key, claim}, acc ->
@@ -56,12 +57,14 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def sync_review_claims_into_threads(review_threads, _review_claims), do: review_threads
 
+  @spec claim_pending_review_fix?(map()) :: boolean()
   def claim_pending_review_fix?(claim) when is_map(claim) do
     claim_value(claim, :disposition) == "accepted" and
       claim_value(claim, :actionable, false) and
       claim_value(claim, :implementation_status) != "addressed"
   end
 
+  @spec advance_review_claims_after_turn(map(), list(), TurnResult.t()) :: map()
   def advance_review_claims_after_turn(
         review_claims,
         focused_claims,
@@ -99,6 +102,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     end
   end
 
+  @spec resolved_review_claim_summary?(term()) :: boolean()
   def resolved_review_claim_summary?(summary) when is_binary(summary) do
     normalized = String.downcase(summary)
 
@@ -109,6 +113,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def resolved_review_claim_summary?(_summary), do: false
 
+  @spec review_claim_touched?(term(), list()) :: boolean()
   def review_claim_touched?(claim_path, touched_paths)
       when is_binary(claim_path) and is_struct(touched_paths, MapSet) do
     normalized_claim_path = normalize_review_claim_path(claim_path)
@@ -122,6 +127,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def review_claim_touched?(_claim_path, _touched_paths), do: false
 
+  @spec normalize_review_claim_path(term()) :: term()
   def normalize_review_claim_path(path) when is_binary(path) do
     path
     |> String.trim()
@@ -146,6 +152,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def normalize_review_claim_path(path), do: path
 
+  @spec maybe_put_reply_plan(map(), String.t(), term()) :: map()
   def maybe_put_reply_plan(thread_state, draft_state, _reply_plan)
       when draft_state == "approved_to_post" do
     thread_state
@@ -177,6 +184,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   # Autonomous review posting
   # ---------------------------------------------------------------------------
 
+  @spec maybe_post_autonomous_review_replies(map(), String.t(), String.t() | nil, map(), keyword()) :: map()
   def maybe_post_autonomous_review_replies(review_threads, workspace, pr_url, state, opts)
       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
     pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
@@ -209,6 +217,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   def maybe_post_autonomous_review_replies(review_threads, _workspace, _pr_url, _state, _opts),
     do: review_threads
 
+  @spec promote_autonomous_review_drafts(map(), term()) :: map()
   def promote_autonomous_review_drafts(review_threads, %PolicyPack{})
       when is_map(review_threads) do
     Enum.reduce(review_threads, review_threads, fn {thread_key, thread_state}, acc ->
@@ -225,6 +234,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     end)
   end
 
+  @spec autonomous_review_postable_thread?(term(), map()) :: boolean()
   def autonomous_review_postable_thread?(thread_key, thread_state)
       when is_map(thread_state) do
     draft_state = Map.get(thread_state, "draft_state", "drafted")
@@ -241,6 +251,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def autonomous_review_postable_thread?(_thread_key, _thread_state), do: false
 
+  @spec autonomous_review_refreshable_thread?(term(), map()) :: boolean()
   def autonomous_review_refreshable_thread?(thread_key, thread_state)
       when is_map(thread_state) do
     Map.get(thread_state, "draft_state") == "posted" and
@@ -252,6 +263,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def autonomous_review_refreshable_thread?(_thread_key, _thread_state), do: false
 
+  @spec has_postable_review_drafts?(term()) :: boolean()
   def has_postable_review_drafts?(review_threads) when is_map(review_threads) do
     Enum.any?(review_threads, fn {thread_key, thread_state} ->
       String.starts_with?(to_string(thread_key), "comment:") and
@@ -262,6 +274,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def has_postable_review_drafts?(_review_threads), do: false
 
+  @spec finalize_published_review_threads(term()) :: map()
   def finalize_published_review_threads(review_threads) when is_map(review_threads) do
     Enum.reduce(review_threads, review_threads, fn {thread_key, thread_state}, acc ->
       updated = finalize_published_review_thread(thread_state)
@@ -276,6 +289,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def finalize_published_review_threads(review_threads), do: review_threads
 
+  @spec finalize_published_review_thread(term()) :: map()
   def finalize_published_review_thread(thread_state) when is_map(thread_state) do
     draft_reply = Map.get(thread_state, "draft_reply")
 
@@ -314,6 +328,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def finalize_published_review_thread(thread_state), do: thread_state
 
+  @spec maybe_resolve_autonomous_review_threads(map(), String.t(), String.t() | nil, map(), keyword()) :: map()
   def maybe_resolve_autonomous_review_threads(review_threads, workspace, pr_url, state, opts)
       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
     pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
@@ -351,6 +366,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
       ),
       do: review_threads
 
+  @spec has_resolvable_review_threads?(term()) :: boolean()
   def has_resolvable_review_threads?(review_threads) when is_map(review_threads) do
     Enum.any?(review_threads, fn {thread_key, thread_state} ->
       String.starts_with?(to_string(thread_key), "comment:") and
@@ -360,6 +376,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     end)
   end
 
+  @spec resolvable_review_thread_state?(term()) :: boolean()
   def resolvable_review_thread_state?(thread_state) when is_map(thread_state) do
     case {
       Map.get(thread_state, "resolution_recommendation"),
@@ -374,6 +391,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def resolvable_review_thread_state?(_thread_state), do: false
 
+  @spec present_review_thread_reply?(term()) :: boolean()
   def present_review_thread_reply?(value) when is_binary(value), do: String.trim(value) != ""
   def present_review_thread_reply?(_value), do: false
 
@@ -381,6 +399,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   # Merge readiness feedback
   # ---------------------------------------------------------------------------
 
+  @spec maybe_refresh_preflight_review_claims(map(), String.t()) :: map()
   def maybe_refresh_preflight_review_claims(review_claims, workspace)
       when is_map(review_claims) and is_binary(workspace) do
     pending_verification_claims =
@@ -403,6 +422,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def maybe_refresh_preflight_review_claims(review_claims, _workspace), do: review_claims
 
+  @spec maybe_maintain_merge_readiness(String.t(), map(), map(), map(), keyword()) :: map()
   def maybe_maintain_merge_readiness(workspace, issue, state, inspection, opts)
       when is_binary(workspace) and is_map(issue) and is_map(state) and is_map(inspection) do
     if merge_readiness_maintenance_needed?(state, inspection) do
@@ -455,6 +475,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   def maybe_maintain_merge_readiness(_workspace, _issue, state, _inspection, _opts),
     do: {:ok, state}
 
+  @spec merge_readiness_maintenance_needed?(map(), map()) :: boolean()
   def merge_readiness_maintenance_needed?(state, inspection)
       when is_map(state) and is_map(inspection) do
     pr_url = Map.get(state, :pr_url) || Map.get(inspection, :pr_url)
@@ -466,6 +487,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def merge_readiness_maintenance_needed?(_state, _inspection), do: false
 
+  @spec pr_body_refresh_needed?(map()) :: boolean()
   def pr_body_refresh_needed?(state) when is_map(state) do
     validation = Map.get(state, :last_pr_body_validation) || %{}
     stage = Map.get(state, :stage)
@@ -490,6 +512,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
       check_name in ["validate-pr-description", "pr-description-lint"]
   end
 
+  @spec maybe_refresh_merge_readiness_pr_body(String.t(), map(), map(), map(), keyword()) :: map()
   def maybe_refresh_merge_readiness_pr_body(workspace, issue, state, inspection, opts)
       when is_binary(workspace) and is_map(state) and is_map(inspection) do
     pr_url = Map.get(state, :pr_url) || Map.get(inspection, :pr_url)
@@ -511,19 +534,23 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     {:ok, Map.get(state, :pr_url) || Map.get(inspection, :pr_url), Map.get(state, :last_pr_body_validation)}
   end
 
+  @spec maybe_put_pr_body_validation(map(), term()) :: map()
   def maybe_put_pr_body_validation(state, nil), do: state
   def maybe_put_pr_body_validation(state, validation), do: Map.put(state, :last_pr_body_validation, validation)
 
+  @spec merge_readiness_pr_body_supported?(String.t()) :: boolean()
   def merge_readiness_pr_body_supported?(workspace) when is_binary(workspace) do
     File.exists?(Path.join(workspace, ".github/pull_request_template.md")) and
       File.exists?(Path.join([workspace, "elixir", "lib", "mix", "tasks", "pr_body.check.ex"]))
   end
 
+  @spec maybe_put_review_feedback_pr_url(map(), term()) :: map()
   def maybe_put_review_feedback_pr_url(context, pr_url) when is_map(context) and is_binary(pr_url),
     do: Map.put(context, :review_feedback_pr_url, pr_url)
 
   def maybe_put_review_feedback_pr_url(context, _pr_url), do: context
 
+  @spec merge_readiness_summary(term(), map()) :: String.t()
   def merge_readiness_summary(pr_body_validation, review_threads) do
     %{
       checked_at: SymphonyElixir.Util.now_iso8601(),
@@ -543,11 +570,13 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     }
   end
 
+  @spec merge_readiness_validation_status(term()) :: String.t()
   def merge_readiness_validation_status(nil), do: "unchanged"
   def merge_readiness_validation_status(%{status: status}) when is_binary(status), do: status
   def merge_readiness_validation_status(%{"status" => status}) when is_binary(status), do: status
   def merge_readiness_validation_status(_validation), do: "unknown"
 
+  @spec maybe_persist_reconciled_review_feedback(map(), String.t(), keyword()) :: map()
   def maybe_persist_reconciled_review_feedback(state, workspace, opts)
       when is_map(state) and is_binary(workspace) do
     reconciled_state = maybe_reconcile_live_review_feedback(state, workspace, opts)
@@ -581,6 +610,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def maybe_persist_reconciled_review_feedback(state, _workspace, _opts), do: state
 
+  @spec review_feedback_state_changed?(map(), map()) :: boolean()
   def review_feedback_state_changed?(state, reconciled_state)
       when is_map(state) and is_map(reconciled_state) do
     Map.get(state, :review_threads, %{}) != Map.get(reconciled_state, :review_threads, %{}) or
@@ -590,6 +620,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def review_feedback_state_changed?(_state, _reconciled_state), do: false
 
+  @spec maybe_reconcile_live_review_feedback(map(), String.t(), keyword()) :: map()
   def maybe_reconcile_live_review_feedback(state, workspace, opts)
       when is_map(state) and is_binary(workspace) do
     pr_url = Map.get(state, :pr_url)
@@ -632,6 +663,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def maybe_reconcile_live_review_feedback(state, _workspace, _opts), do: state
 
+  @spec refreshed_review_claims(term(), map(), String.t() | nil) :: map()
   def refreshed_review_claims(items, persisted_claims, pr_url)
       when is_list(items) and is_map(persisted_claims) do
     Enum.reduce(items, persisted_claims, fn item, acc ->
@@ -690,6 +722,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def refreshed_review_claims(_items, persisted_claims, _pr_url), do: persisted_claims
 
+  @spec refreshed_review_threads(term(), map(), String.t() | nil) :: map()
   def refreshed_review_threads(items, persisted_threads, pr_url)
       when is_list(items) and is_map(persisted_threads) do
     Enum.reduce(items, persisted_threads, fn item, acc ->
@@ -709,6 +742,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def refreshed_review_threads(_items, persisted_threads, _pr_url), do: persisted_threads
 
+  @spec refreshed_review_thread_state(map(), map(), String.t() | nil) :: map()
   def refreshed_review_thread_state(item, persisted_thread, pr_url)
       when is_map(item) and is_map(persisted_thread) do
     %{
@@ -759,6 +793,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     }
   end
 
+  @spec refreshed_review_claim_verification_status(term(), map()) :: String.t()
   def refreshed_review_claim_verification_status(persisted, item)
       when is_map(persisted) and is_map(item) do
     persisted_status = Map.get(persisted, "verification_status")
@@ -782,6 +817,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def refreshed_review_claim_verification_status(_persisted, _item), do: "not_needed"
 
+  @spec claim_priority_bucket(term()) :: non_neg_integer()
   def claim_priority_bucket("security_risk"), do: 0
   def claim_priority_bucket("critical_bug"), do: 0
   def claim_priority_bucket("correctness_risk"), do: 1
@@ -789,6 +825,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   def claim_priority_bucket("maintainability"), do: 3
   def claim_priority_bucket(_claim_type), do: 4
 
+  @spec focused_review_claim_block(list(), map()) :: String.t()
   def focused_review_claim_block(focused_claims, all_review_claims)
       when is_list(focused_claims) and is_map(all_review_claims) do
     remaining_count =
@@ -822,6 +859,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def focused_review_claims(review_claims, limit \\ 2)
 
+  @spec focused_review_claims(map(), non_neg_integer()) :: list()
   def focused_review_claims(review_claims, limit)
       when is_map(review_claims) and is_integer(limit) and limit > 0 do
     review_claims
@@ -832,11 +870,13 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     |> Enum.take(limit)
   end
 
+  @spec accepted_actionable_claim_count(map()) :: non_neg_integer()
   def accepted_actionable_claim_count(review_claims) when is_map(review_claims) do
     review_claims
     |> Enum.count(fn {_thread_key, claim} -> claim_pending_review_fix?(claim) end)
   end
 
+  @spec review_feedback_summary(term()) :: String.t() | nil
   def review_feedback_summary(review_threads) when is_map(review_threads) do
     review_threads
     |> Enum.sort_by(fn {thread_key, _thread_state} -> thread_key end)
@@ -871,11 +911,13 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def review_feedback_summary(_review_threads), do: nil
 
+  @spec default_review_feedback_summary(map(), list()) :: String.t() | nil
   def default_review_feedback_summary(state, []),
     do: review_feedback_summary(Map.get(state, :review_threads, %{}))
 
   def default_review_feedback_summary(_state, _focused_claims), do: nil
 
+  @spec default_review_claim_summary(map(), list()) :: String.t() | nil
   def default_review_claim_summary(state, []),
     do: ReviewEvidenceCollector.summary(Map.get(state, :review_claims, %{}))
 
@@ -883,6 +925,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     actionable_review_claim_summary_from_entries(focused_claims)
   end
 
+  @spec default_next_objective(map(), list()) :: String.t()
   def default_next_objective(_state, []),
     do: "Advance the diff so it is ready for runtime validation without running the repo contract yourself."
 
@@ -890,6 +933,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     focused_review_next_objective(focused_claims, Map.get(state, :review_claims, %{}))
   end
 
+  @spec actionable_review_claim_summary(map()) :: String.t() | nil
   def actionable_review_claim_summary(review_claims) when is_map(review_claims) do
     entries = focused_review_claims(review_claims, 6)
 
@@ -899,6 +943,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     end
   end
 
+  @spec actionable_review_claim_summary_from_entries(list()) :: String.t() | nil
   def actionable_review_claim_summary_from_entries(entries) when is_list(entries) do
     entries
     |> Enum.map(fn {_thread_key, claim} ->
@@ -921,10 +966,12 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     end
   end
 
+  @spec accepted_review_next_objective(map()) :: String.t()
   def accepted_review_next_objective(review_claims) when is_map(review_claims) do
     focused_review_next_objective(focused_review_claims(review_claims), review_claims)
   end
 
+  @spec focused_review_next_objective(list(), map()) :: String.t()
   def focused_review_next_objective(focused_claims, all_review_claims)
       when is_list(focused_claims) and is_map(all_review_claims) do
     files =
