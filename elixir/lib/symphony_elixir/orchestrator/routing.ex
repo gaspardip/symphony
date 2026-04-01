@@ -14,21 +14,25 @@ defmodule SymphonyElixir.Orchestrator.Routing do
   # Label gate cluster
   # ---------------------------------------------------------------------------
 
+  @spec issue_routable_to_worker?(term()) :: boolean()
   def issue_routable_to_worker?(%Issue{assigned_to_worker: assigned_to_worker})
       when is_boolean(assigned_to_worker),
       do: assigned_to_worker
 
   def issue_routable_to_worker?(_issue), do: true
 
+  @spec issue_labels(term()) :: list(String.t())
   def issue_labels(%Issue{} = issue), do: Issue.label_names(issue)
   def issue_labels(_issue), do: []
 
+  @spec issue_matches_required_labels?(term()) :: boolean()
   def issue_matches_required_labels?(%Issue{} = issue) do
     label_gate_status(issue).eligible?
   end
 
   def issue_matches_required_labels?(_issue), do: true
 
+  @spec label_gate_status(term()) :: map()
   def label_gate_status(%Issue{source: :manual}) do
     %{eligible?: true, required_labels: [], reason: nil}
   end
@@ -58,6 +62,7 @@ defmodule SymphonyElixir.Orchestrator.Routing do
   def label_gate_status(_issue),
     do: %{eligible?: true, required_labels: routing_required_labels(), reason: nil}
 
+  @spec todo_issue_blocked_by_non_terminal?(term(), MapSet.t()) :: boolean()
   def todo_issue_blocked_by_non_terminal?(
         %Issue{state: issue_state, blocked_by: blockers},
         terminal_states
@@ -75,16 +80,19 @@ defmodule SymphonyElixir.Orchestrator.Routing do
 
   def todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
 
+  @spec terminal_issue_state?(term(), MapSet.t()) :: boolean()
   def terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, SymphonyElixir.Util.normalize_state(state_name))
   end
 
   def terminal_issue_state?(_state_name, _terminal_states), do: false
 
+  @spec active_issue_state?(term(), MapSet.t()) :: boolean()
   def active_issue_state?(state_name, active_states) when is_binary(state_name) do
     MapSet.member?(active_states, SymphonyElixir.Util.normalize_state(state_name))
   end
 
+  @spec terminal_state_set() :: MapSet.t()
   def terminal_state_set do
     Config.linear_terminal_states()
     |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
@@ -92,6 +100,7 @@ defmodule SymphonyElixir.Orchestrator.Routing do
     |> MapSet.new()
   end
 
+  @spec active_state_set() :: MapSet.t()
   def active_state_set do
     Config.linear_active_states()
     |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
@@ -104,6 +113,7 @@ defmodule SymphonyElixir.Orchestrator.Routing do
   # Dispatch skip cluster
   # ---------------------------------------------------------------------------
 
+  @spec dispatch_skip_reason(Issue.t(), SymphonyElixir.Orchestrator.State.t()) :: String.t() | nil
   def dispatch_skip_reason(%Issue{} = issue, %SymphonyElixir.Orchestrator.State{} = state) do
     label_gate = label_gate_status(issue)
     policy_result = SymphonyElixir.Orchestrator.resolve_policy(issue, state)
@@ -124,6 +134,8 @@ defmodule SymphonyElixir.Orchestrator.Routing do
     end
   end
 
+  @spec queue_policy_reason(Issue.t(), SymphonyElixir.Orchestrator.State.t(), map() | nil) ::
+          {term(), term(), term(), term()}
   def queue_policy_reason(
         %Issue{} = issue,
         %SymphonyElixir.Orchestrator.State{} = state,
@@ -167,10 +179,12 @@ defmodule SymphonyElixir.Orchestrator.Routing do
     end
   end
 
+  @spec issue_routed_to_current_runner_channel?(Issue.t()) :: boolean()
   def issue_routed_to_current_runner_channel?(%Issue{} = issue) do
     issue_target_runner_channel(issue) == Config.runner_channel()
   end
 
+  @spec issue_target_runner_channel(Issue.t()) :: String.t()
   def issue_target_runner_channel(%Issue{} = issue) do
     canary_labels =
       RunnerRuntime.canary_required_labels(%{})
@@ -188,6 +202,7 @@ defmodule SymphonyElixir.Orchestrator.Routing do
     end
   end
 
+  @spec next_human_action_for_skip(term()) :: String.t() | nil
   def next_human_action_for_skip("missing required labels"),
     do: "Add the required routing labels before Symphony can dispatch this issue."
 
@@ -209,10 +224,12 @@ defmodule SymphonyElixir.Orchestrator.Routing do
 
   def next_human_action_for_skip(_reason), do: nil
 
+  @spec routing_required_labels() :: list(String.t())
   def routing_required_labels do
     RunnerRuntime.effective_required_labels(Config.linear_required_labels())
   end
 
+  @spec missing_canary_labels?(term(), term()) :: boolean()
   def missing_canary_labels?(issue_label_set, required_label_set)
       when is_struct(issue_label_set, MapSet) and is_struct(required_label_set, MapSet) do
     workflow_required = normalize_labels(Config.linear_required_labels())
@@ -227,6 +244,7 @@ defmodule SymphonyElixir.Orchestrator.Routing do
   # Shared helpers
   # ---------------------------------------------------------------------------
 
+  @spec normalize_labels(term()) :: MapSet.t()
   def normalize_labels(labels) do
     labels
     |> List.wrap()

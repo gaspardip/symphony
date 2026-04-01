@@ -125,6 +125,8 @@ defmodule SymphonyElixir.Orchestrator do
       github_last_assignment: nil,
       first_poll_completed: false
     ]
+
+    @type t :: %__MODULE__{}
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -6834,6 +6836,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_run_state(_identifier, _issue), do: %{}
 
   @doc false
+  @spec resolve_policy(Issue.t(), State.t()) :: {:ok, map()} | {:error, map()}
   def resolve_policy(%Issue{} = issue, %State{} = state) do
     pack = PolicyPack.resolve(policy_pack_name(issue, state))
 
