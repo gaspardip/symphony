@@ -25,6 +25,7 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
   # -------------------------------------------------------------------
 
   # credo:disable-for-next-line
+  @spec running_snapshot_entry(String.t(), map(), DateTime.t(), State.t()) :: map()
   def running_snapshot_entry(issue_id, metadata, now, state) do
     workspace_path = Workspace.path_for_issue(metadata.identifier || issue_id)
     inspection = RunInspector.inspect(workspace_path, include_pr_details: false)
@@ -140,6 +141,7 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
     }
   end
 
+  @spec paused_snapshot_entries(term()) :: list(map())
   def paused_snapshot_entries(paused_issue_states) when is_map(paused_issue_states) do
     paused_issue_states
     |> Enum.map(fn {issue_id, paused_entry} ->
@@ -163,6 +165,7 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
 
   def paused_snapshot_entries(_paused_issue_states), do: []
 
+  @spec skipped_snapshot_entries(term()) :: list(map())
   def skipped_snapshot_entries(skipped_issues) when is_list(skipped_issues) do
     Enum.map(skipped_issues, fn entry ->
       %{
@@ -198,6 +201,7 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
 
   def skipped_snapshot_entries(_skipped_issues), do: []
 
+  @spec queue_snapshot(State.t()) :: list(map())
   def queue_snapshot(%State{} = state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()

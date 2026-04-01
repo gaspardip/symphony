@@ -125,6 +125,8 @@ defmodule SymphonyElixir.Orchestrator do
       github_last_assignment: nil,
       first_poll_completed: false
     ]
+
+    @type t :: %__MODULE__{}
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -2837,6 +2839,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp terminate_task(_pid), do: :ok
 
   @doc false
+  @spec partition_issues_by_label_gate(list(), State.t()) :: {list(), list()}
   def partition_issues_by_label_gate(issues, %State{} = state) when is_list(issues) do
     Enum.reduce(issues, {[], []}, fn issue, {eligible, skipped} ->
       case dispatch_skip_reason(issue, state) do
@@ -2995,6 +2998,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec candidate_issue?(Issue.t(), MapSet.t(), MapSet.t()) :: boolean()
   def candidate_issue?(
         %Issue{
           id: id,
@@ -3026,6 +3030,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_labels(_issue), do: []
 
   @doc false
+  @spec issue_matches_required_labels?(term()) :: boolean()
   def issue_matches_required_labels?(%Issue{} = issue) do
     label_gate_status(issue).eligible?
   end
@@ -6659,6 +6664,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp retry_run_state(_identifier, _issue), do: %{}
 
   @doc false
+  @spec resolve_policy(Issue.t(), State.t()) :: {:ok, map()} | {:error, map()}
   def resolve_policy(%Issue{} = issue, %State{} = state) do
     pack = PolicyPack.resolve(policy_pack_name(issue, state))
 
@@ -6673,6 +6679,7 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   def policy_snapshot_values(issue, state, run_state \\ %{})
 
+  @spec policy_snapshot_values(term(), term(), map()) :: {term(), term(), term()}
   def policy_snapshot_values(%Issue{} = issue, %State{} = state, run_state)
       when is_map(run_state) do
     override =
@@ -6732,6 +6739,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec issue_target_runner_channel(Issue.t()) :: String.t()
   def issue_target_runner_channel(%Issue{} = issue) do
     canary_labels =
       RunnerRuntime.canary_required_labels(%{})
