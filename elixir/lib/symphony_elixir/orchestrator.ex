@@ -34,7 +34,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.TrackerEvent
   alias SymphonyElixir.TrackerEventInbox
   alias SymphonyElixir.WorkflowProfile
-  alias SymphonyElixir.Orchestrator.Routing
+  alias SymphonyElixir.Orchestrator.TokenTracking
   alias SymphonyElixir.Workspace
 
   @continuation_retry_delay_ms 1_000
@@ -125,8 +125,6 @@ defmodule SymphonyElixir.Orchestrator do
       github_last_assignment: nil,
       first_poll_completed: false
     ]
-
-    @type t :: %__MODULE__{}
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -388,13 +386,13 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
-        {updated_running_entry, token_delta} = integrate_agent_update(running_entry, update)
+        {updated_running_entry, token_delta} = TokenTracking.integrate_agent_update(running_entry, update)
         Observability.emit_token_delta(updated_running_entry, token_delta, update)
 
         state =
           state
-          |> apply_agent_token_delta(token_delta)
-          |> apply_agent_rate_limits(update)
+          |> TokenTracking.apply_agent_token_delta(token_delta)
+          |> TokenTracking.apply_agent_rate_limits(update)
           |> Map.put(:running, Map.put(running, issue_id, updated_running_entry))
           |> maybe_stop_issue_for_token_budget(issue_id, updated_running_entry)
 
@@ -581,13 +579,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_candidate_policy_conflicts(%State{} = state, issues) when is_list(issues) do
-    active_states = Routing.active_state_set()
-    terminal_states = Routing.terminal_state_set()
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
 
     Enum.reduce(issues, {state, []}, fn
       %Issue{} = issue, {%State{} = state_acc, remaining} ->
-        if Routing.active_issue_state?(issue.state, active_states) and
-             !Routing.terminal_issue_state?(issue.state, terminal_states) and
+        if active_issue_state?(issue.state, active_states) and
+             !terminal_issue_state?(issue.state, terminal_states) and
              match?({:error, _}, resolve_policy(issue, state_acc)) do
           {block_issue_for_policy_conflict(state_acc, issue), remaining}
         else
@@ -1505,7 +1503,7 @@ defmodule SymphonyElixir.Orchestrator do
     if seeded_manual_issue_target_runner_channel(run_state) == "canary" do
       labels
       |> Kernel.++(RunnerRuntime.canary_required_labels(%{}))
-      |> Routing.normalize_labels()
+      |> normalize_labels()
       |> MapSet.to_list()
     else
       labels
@@ -1781,7 +1779,7 @@ defmodule SymphonyElixir.Orchestrator do
       Map.has_key?(state.running, issue.id) ->
         state
 
-      retry_candidate_issue?(issue, Routing.terminal_state_set()) and
+      retry_candidate_issue?(issue, terminal_state_set()) and
           dispatch_slots_available?(issue, state) ->
         dispatch_runtime_issue(state, issue, nil)
 
@@ -1912,9 +1910,9 @@ defmodule SymphonyElixir.Orchestrator do
         next_state =
           cond do
             Map.has_key?(next_state.running, issue.id) ->
-              reconcile_issue_state(issue, next_state, Routing.active_state_set(), Routing.terminal_state_set())
+              reconcile_issue_state(issue, next_state, active_state_set(), terminal_state_set())
 
-            retry_candidate_issue?(issue, Routing.terminal_state_set()) and
+            retry_candidate_issue?(issue, terminal_state_set()) and
                 dispatch_slots_available?(issue, next_state) ->
               dispatch_runtime_issue(next_state, issue, nil)
 
@@ -2240,8 +2238,8 @@ defmodule SymphonyElixir.Orchestrator do
           reconcile_running_issue_states(
             issues,
             next_state,
-            Routing.active_state_set(),
-            Routing.terminal_state_set()
+            active_state_set(),
+            terminal_state_set()
           )
 
         {%State{} = next_state, {:error, reason}} ->
@@ -2255,11 +2253,11 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
   def reconcile_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
-    reconcile_running_issue_states(issues, state, Routing.active_state_set(), Routing.terminal_state_set())
+    reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
   end
 
   def reconcile_issue_states_for_test(issues, state) when is_list(issues) do
-    reconcile_running_issue_states(issues, state, Routing.active_state_set(), Routing.terminal_state_set())
+    reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
   end
 
   @doc false
@@ -2316,7 +2314,7 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, state) do
-    should_dispatch_issue?(issue, state, Routing.active_state_set(), Routing.terminal_state_set())
+    should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
   end
 
   @doc false
@@ -2333,20 +2331,20 @@ defmodule SymphonyElixir.Orchestrator do
 
   @doc false
   @spec issue_routable_to_worker_for_test(term()) :: boolean()
-  def issue_routable_to_worker_for_test(issue), do: Routing.issue_routable_to_worker?(issue)
+  def issue_routable_to_worker_for_test(issue), do: issue_routable_to_worker?(issue)
 
   @doc false
   @spec issue_labels_for_test(term()) :: [String.t()]
-  def issue_labels_for_test(issue), do: Routing.issue_labels(issue)
+  def issue_labels_for_test(issue), do: issue_labels(issue)
 
   @doc false
   @spec issue_matches_required_labels_for_test(term()) :: boolean()
-  def issue_matches_required_labels_for_test(issue), do: Routing.issue_matches_required_labels?(issue)
+  def issue_matches_required_labels_for_test(issue), do: issue_matches_required_labels?(issue)
 
   @doc false
   @spec issue_target_runner_channel_for_test(Issue.t()) :: String.t()
   def issue_target_runner_channel_for_test(%Issue{} = issue),
-    do: Routing.issue_target_runner_channel(issue)
+    do: issue_target_runner_channel(issue)
 
   @doc false
   @spec seeded_manual_issue_from_run_state_for_test(map()) :: Issue.t() | nil
@@ -2363,32 +2361,32 @@ defmodule SymphonyElixir.Orchestrator do
 
   @doc false
   @spec label_gate_status_for_test(term()) :: atom()
-  def label_gate_status_for_test(issue), do: Routing.label_gate_status(issue)
+  def label_gate_status_for_test(issue), do: label_gate_status(issue)
 
   @doc false
   @spec terminal_issue_state_for_test(term(), MapSet.t(String.t()) | [String.t()]) :: boolean()
   def terminal_issue_state_for_test(state_name, terminal_states),
-    do: Routing.terminal_issue_state?(state_name, terminal_states)
+    do: terminal_issue_state?(state_name, terminal_states)
 
   @doc false
   @spec todo_issue_blocked_by_non_terminal_for_test(term(), MapSet.t(String.t()) | [String.t()]) ::
           boolean()
   def todo_issue_blocked_by_non_terminal_for_test(issue, terminal_states),
-    do: Routing.todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+    do: todo_issue_blocked_by_non_terminal?(issue, terminal_states)
 
   @doc false
   @spec revalidate_issue_for_dispatch_for_test(Issue.t(), ([String.t()] -> term())) ::
           {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
   def revalidate_issue_for_dispatch_for_test(%Issue{} = issue, issue_fetcher)
       when is_function(issue_fetcher, 1) do
-    revalidate_issue_for_dispatch(issue, issue_fetcher, Routing.terminal_state_set())
+    revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set())
   end
 
   @doc false
   @spec revalidate_issue_passthrough_for_test(Issue.t()) ::
           {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
   def revalidate_issue_passthrough_for_test(issue) do
-    revalidate_issue_for_dispatch(issue, fn _issue_ids -> :unused end, Routing.terminal_state_set())
+    revalidate_issue_for_dispatch(issue, fn _issue_ids -> :unused end, terminal_state_set())
   end
 
   @doc false
@@ -2678,7 +2676,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
     cond do
-      Routing.terminal_issue_state?(issue.state, terminal_states) ->
+      terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{SymphonyElixir.Util.issue_log_context(issue)} state=#{issue.state}; stopping active agent")
 
         terminate_running_issue(state, issue.id, true)
@@ -2688,24 +2686,24 @@ defmodule SymphonyElixir.Orchestrator do
 
         block_issue_for_policy_conflict(state, issue)
 
-      !Routing.issue_routable_to_worker?(issue) ->
+      !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{SymphonyElixir.Util.issue_log_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
 
-      !Routing.issue_routed_to_current_runner_channel?(issue) ->
+      !issue_routed_to_current_runner_channel?(issue) ->
         Logger.info(
-          "Issue no longer matches the current runner channel: #{SymphonyElixir.Util.issue_log_context(issue)} target_channel=#{Routing.issue_target_runner_channel(issue)} current_channel=#{Config.runner_channel()}; stopping active agent"
+          "Issue no longer matches the current runner channel: #{SymphonyElixir.Util.issue_log_context(issue)} target_channel=#{issue_target_runner_channel(issue)} current_channel=#{Config.runner_channel()}; stopping active agent"
         )
 
         terminate_running_issue(state, issue.id, false)
 
-      !Routing.issue_matches_required_labels?(issue) ->
+      !issue_matches_required_labels?(issue) ->
         Logger.info("Issue no longer matches the configured label gate: #{SymphonyElixir.Util.issue_log_context(issue)} labels=#{inspect(Issue.label_names(issue))}; stopping active agent")
 
         terminate_running_issue(state, issue.id, false)
 
-      Routing.active_issue_state?(issue.state, active_states) ->
+      active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
 
       true ->
@@ -2841,7 +2839,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp partition_issues_by_label_gate(issues, %State{} = state) when is_list(issues) do
     Enum.reduce(issues, {[], []}, fn issue, {eligible, skipped} ->
-      case Routing.dispatch_skip_reason(issue, state) do
+      case dispatch_skip_reason(issue, state) do
         nil ->
           {[issue | eligible], skipped}
 
@@ -2872,13 +2870,13 @@ defmodule SymphonyElixir.Orchestrator do
       state: issue.state,
       labels: Issue.label_names(issue),
       runner_channel: Config.runner_channel(),
-      target_runner_channel: Routing.issue_target_runner_channel(issue),
-      required_labels: Routing.routing_required_labels(),
+      target_runner_channel: issue_target_runner_channel(issue),
+      required_labels: routing_required_labels(),
       reason: reason,
       policy_class: policy_class,
       policy_source: policy_source,
       policy_override: policy_override,
-      next_human_action: Map.get(run_state, :next_human_action) || Routing.next_human_action_for_skip(reason),
+      next_human_action: Map.get(run_state, :next_human_action) || next_human_action_for_skip(reason),
       last_rule_id: Map.get(run_state, :last_rule_id),
       last_failure_class: Map.get(run_state, :last_failure_class),
       last_decision_summary: Map.get(run_state, :last_decision_summary),
@@ -2891,8 +2889,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(issues, state, dispatch_fun \\ &dispatch_issue/2)
 
   defp choose_issues(issues, state, dispatch_fun) do
-    active_states = Routing.active_state_set()
-    terminal_states = Routing.terminal_state_set()
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
 
     issues
     |> sort_issues_for_dispatch(state)
@@ -2928,7 +2926,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("[dispatch] reject #{id} check=candidate_issue")
         false
 
-      Routing.todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
+      todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
         Logger.info("[dispatch] reject #{id} check=blocked_by_non_terminal")
         false
 
@@ -3007,15 +3005,111 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
-    Routing.issue_routable_to_worker?(issue) and
-      Routing.issue_routed_to_current_runner_channel?(issue) and
-      Routing.issue_matches_required_labels?(issue) and
+    issue_routable_to_worker?(issue) and
+      issue_routed_to_current_runner_channel?(issue) and
+      issue_matches_required_labels?(issue) and
       match?({:ok, _}, resolve_policy(issue, %State{})) and
-      Routing.active_issue_state?(state_name, active_states) and
-      !Routing.terminal_issue_state?(state_name, terminal_states)
+      active_issue_state?(state_name, active_states) and
+      !terminal_issue_state?(state_name, terminal_states)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
+
+  defp issue_routable_to_worker?(%Issue{assigned_to_worker: assigned_to_worker})
+       when is_boolean(assigned_to_worker),
+       do: assigned_to_worker
+
+  defp issue_routable_to_worker?(_issue), do: true
+
+  defp issue_labels(%Issue{} = issue), do: Issue.label_names(issue)
+  defp issue_labels(_issue), do: []
+
+  defp issue_matches_required_labels?(%Issue{} = issue) do
+    label_gate_status(issue).eligible?
+  end
+
+  defp issue_matches_required_labels?(_issue), do: true
+
+  defp label_gate_status(%Issue{source: :manual}) do
+    %{eligible?: true, required_labels: [], reason: nil}
+  end
+
+  defp label_gate_status(%Issue{} = issue) do
+    required_labels = routing_required_labels()
+    required_label_set = normalize_labels(required_labels)
+
+    if MapSet.size(required_label_set) == 0 do
+      %{eligible?: true, required_labels: required_labels, reason: nil}
+    else
+      issue_label_set = issue |> Issue.label_names() |> normalize_labels()
+
+      cond do
+        MapSet.subset?(required_label_set, issue_label_set) ->
+          %{eligible?: true, required_labels: required_labels, reason: nil}
+
+        missing_canary_labels?(issue_label_set, required_label_set) ->
+          %{eligible?: false, required_labels: required_labels, reason: "missing canary labels"}
+
+        true ->
+          %{eligible?: false, required_labels: required_labels, reason: "missing required labels"}
+      end
+    end
+  end
+
+  defp label_gate_status(_issue),
+    do: %{eligible?: true, required_labels: routing_required_labels(), reason: nil}
+
+  defp todo_issue_blocked_by_non_terminal?(
+         %Issue{state: issue_state, blocked_by: blockers},
+         terminal_states
+       )
+       when is_binary(issue_state) and is_list(blockers) do
+    SymphonyElixir.Util.normalize_state(issue_state) == "todo" and
+      Enum.any?(blockers, fn
+        %{state: blocker_state} when is_binary(blocker_state) ->
+          !terminal_issue_state?(blocker_state, terminal_states)
+
+        _ ->
+          true
+      end)
+  end
+
+  defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+
+  defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
+    MapSet.member?(terminal_states, SymphonyElixir.Util.normalize_state(state_name))
+  end
+
+  defp terminal_issue_state?(_state_name, _terminal_states), do: false
+
+  defp active_issue_state?(state_name, active_states) when is_binary(state_name) do
+    MapSet.member?(active_states, SymphonyElixir.Util.normalize_state(state_name))
+  end
+
+  defp terminal_state_set do
+    Config.linear_terminal_states()
+    |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
+    |> Enum.filter(&(&1 != ""))
+    |> MapSet.new()
+  end
+
+  defp active_state_set do
+    Config.linear_active_states()
+    |> Enum.map(&SymphonyElixir.Util.normalize_state/1)
+    |> Enum.filter(&(&1 != ""))
+    |> MapSet.new()
+    |> MapSet.put(SymphonyElixir.Util.normalize_state(@merging_state))
+  end
+
+  defp normalize_labels(labels) do
+    labels
+    |> List.wrap()
+    |> Enum.map(&to_string/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&String.downcase/1)
+    |> MapSet.new()
+  end
 
   defp dispatch_issue(%State{} = state, issue) do
     dispatch_runtime_issue(state, issue, nil)
@@ -3037,7 +3131,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dispatch_active_issue(%State{} = state, issue, attempt, issue_fetcher, dispatch_fun)
        when is_function(issue_fetcher, 1) and is_function(dispatch_fun, 3) do
-    case revalidate_issue_for_dispatch(issue, issue_fetcher, Routing.terminal_state_set()) do
+    case revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
         dispatch_fun.(state, refreshed_issue, attempt)
 
@@ -3411,7 +3505,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_binary(issue_state) and is_binary(refreshed_state) do
     issue.identifier == refreshed_issue.identifier and
-      Routing.active_issue_state?(issue_state, Routing.active_state_set()) and
+      active_issue_state?(issue_state, active_state_set()) and
       retry_candidate_issue?(issue, terminal_states) and
       refreshed_state == @blocked_state and
       not retry_candidate_issue?(refreshed_issue, terminal_states)
@@ -3547,10 +3641,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
-    terminal_states = Routing.terminal_state_set()
+    terminal_states = terminal_state_set()
 
     cond do
-      Routing.terminal_issue_state?(issue.state, terminal_states) ->
+      terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
         cleanup_issue_workspace(issue.identifier)
@@ -3610,7 +3704,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_active_retry(state, issue, attempt, metadata) do
     {state, issue} = maybe_resume_blocked_issue(state, issue)
 
-    if retry_candidate_issue?(issue, Routing.terminal_state_set()) and
+    if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) do
       dispatch_fun =
         case metadata[:delay_type] do
@@ -4443,7 +4537,7 @@ defmodule SymphonyElixir.Orchestrator do
       last_agent_timestamp: metadata.last_agent_timestamp,
       last_agent_message: metadata.last_agent_message,
       last_agent_event: metadata.last_agent_event,
-      runtime_seconds: running_seconds(metadata.started_at, now),
+      runtime_seconds: TokenTracking.running_seconds(metadata.started_at, now),
       workspace: workspace_path,
       checkout?: inspection.checkout?,
       git?: inspection.git?,
@@ -4468,9 +4562,9 @@ defmodule SymphonyElixir.Orchestrator do
       required_checks: (inspection.harness && inspection.harness.required_checks) || [],
       publish_required_checks: (inspection.harness && inspection.harness.publish_required_checks) || [],
       ci_required_checks: (inspection.harness && inspection.harness.ci_required_checks) || [],
-      required_labels: Routing.routing_required_labels(),
-      labels: Routing.issue_labels(metadata.issue),
-      label_gate_eligible: Routing.issue_matches_required_labels?(metadata.issue),
+      required_labels: routing_required_labels(),
+      labels: issue_labels(metadata.issue),
+      label_gate_eligible: issue_matches_required_labels?(metadata.issue),
       policy_class: policy_class,
       policy_source: policy_source,
       policy_override: policy_override,
@@ -4609,8 +4703,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp skipped_snapshot_entries(_skipped_issues), do: []
 
   defp queue_snapshot(%State{} = state) do
-    active_states = Routing.active_state_set()
-    terminal_states = Routing.terminal_state_set()
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
 
     {eligible_issues, _skipped_issues} =
       partition_issues_by_label_gate(Map.get(state, :last_candidate_issues, []), state)
@@ -4632,7 +4726,7 @@ defmodule SymphonyElixir.Orchestrator do
         {policy_class, policy_source, policy_override} = policy_snapshot_values(entry.issue, state, run_state)
 
         {last_rule_id, last_failure_class, last_decision_summary, next_human_action} =
-          Routing.queue_policy_reason(entry.issue, state, run_state)
+          queue_policy_reason(entry.issue, state, run_state)
 
         lease = stateful_lease_details(entry.issue_id, run_state)
 
@@ -4647,9 +4741,9 @@ defmodule SymphonyElixir.Orchestrator do
           rank: entry.rank,
           labels: Issue.label_names(entry.issue),
           runner_channel: Config.runner_channel(),
-          target_runner_channel: Routing.issue_target_runner_channel(entry.issue),
-          required_labels: Routing.routing_required_labels(),
-          label_gate_eligible: Routing.issue_matches_required_labels?(entry.issue),
+          target_runner_channel: issue_target_runner_channel(entry.issue),
+          required_labels: routing_required_labels(),
+          label_gate_eligible: issue_matches_required_labels?(entry.issue),
           policy_class: policy_class,
           policy_source: policy_source,
           policy_override: policy_override,
@@ -5002,7 +5096,7 @@ defmodule SymphonyElixir.Orchestrator do
            summary: "Immediate retry skipped because the issue is already running."
          }, state}
 
-      retry_candidate_issue?(issue, Routing.terminal_state_set()) and dispatch_slots_available?(issue, state) ->
+      retry_candidate_issue?(issue, terminal_state_set()) and dispatch_slots_available?(issue, state) ->
         next_state = dispatch_runtime_issue(state, issue, 1)
 
         cond do
@@ -5049,7 +5143,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_issue_control_envelope(%Issue{source: :tracker} = issue) do
-    case revalidate_issue_for_dispatch(issue, &IssueSource.fetch_issue_states_by_ids/1, Routing.terminal_state_set()) do
+    case revalidate_issue_for_dispatch(issue, &IssueSource.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} -> refreshed_issue
       {:skip, %Issue{} = refreshed_issue} -> refreshed_issue
       _ -> issue
@@ -5075,11 +5169,11 @@ defmodule SymphonyElixir.Orchestrator do
           %{issue_state: issue.state, running_count: map_size(state.running)}
         )
 
-      not retry_candidate_issue?(issue, Routing.terminal_state_set()) ->
+      not retry_candidate_issue?(issue, terminal_state_set()) ->
         retry_issue_now_ineligible_diagnostic(issue, state)
 
       true ->
-        case revalidate_issue_for_dispatch(issue, &IssueSource.fetch_issue_states_by_ids/1, Routing.terminal_state_set()) do
+        case revalidate_issue_for_dispatch(issue, &IssueSource.fetch_issue_states_by_ids/1, terminal_state_set()) do
           {:skip, :missing} ->
             retry_issue_now_rule(
               :retry_dispatch_deferred,
@@ -5088,7 +5182,7 @@ defmodule SymphonyElixir.Orchestrator do
             )
 
           {:skip, %Issue{} = refreshed_issue} ->
-            reason = Routing.dispatch_skip_reason(refreshed_issue, state)
+            reason = dispatch_skip_reason(refreshed_issue, state)
 
             retry_issue_now_rule(
               :retry_dispatch_deferred,
@@ -5098,7 +5192,7 @@ defmodule SymphonyElixir.Orchestrator do
                 blocked_by: Map.get(refreshed_issue, :blocked_by, []),
                 skip_reason: reason
               },
-              Routing.next_human_action_for_skip(reason)
+              next_human_action_for_skip(reason)
             )
 
           {:error, reason} ->
@@ -5119,7 +5213,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_issue_now_ineligible_diagnostic(%Issue{} = issue, %State{} = state) do
-    reason = Routing.dispatch_skip_reason(issue, state)
+    reason = dispatch_skip_reason(issue, state)
 
     retry_issue_now_rule(
       :retry_dispatch_deferred,
@@ -5133,10 +5227,10 @@ defmodule SymphonyElixir.Orchestrator do
         identifier_present: is_binary(issue.identifier) and String.trim(issue.identifier) != "",
         id_present: is_binary(issue.id) and String.trim(issue.id) != "",
         assigned_to_worker: Map.get(issue, :assigned_to_worker),
-        target_runner_channel: Routing.issue_target_runner_channel(issue),
-        label_gate: Routing.label_gate_status(issue)
+        target_runner_channel: issue_target_runner_channel(issue),
+        label_gate: label_gate_status(issue)
       },
-      Routing.next_human_action_for_skip(reason)
+      next_human_action_for_skip(reason)
     )
   end
 
@@ -5594,7 +5688,7 @@ defmodule SymphonyElixir.Orchestrator do
           Map.has_key?(state.running, issue.id) ->
             state
 
-          retry_candidate_issue?(refreshed_issue, Routing.terminal_state_set()) and
+          retry_candidate_issue?(refreshed_issue, terminal_state_set()) and
               dispatch_slots_available?(refreshed_issue, state) ->
             dispatch_runtime_issue(state, refreshed_issue, nil)
 
@@ -5674,7 +5768,7 @@ defmodule SymphonyElixir.Orchestrator do
           Map.has_key?(state.running, issue.id) ->
             state
 
-          retry_candidate_issue?(refreshed_issue, Routing.terminal_state_set()) and
+          retry_candidate_issue?(refreshed_issue, terminal_state_set()) and
               dispatch_slots_available?(refreshed_issue, state) ->
             dispatch_runtime_issue(state, refreshed_issue, nil)
 
@@ -6240,7 +6334,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     case resolve_policy(issue, state) do
       {:ok, %{class: :fully_autonomous}} ->
-        if Routing.issue_routable_to_worker?(issue) and Routing.issue_matches_required_labels?(issue) and
+        if issue_routable_to_worker?(issue) and issue_matches_required_labels?(issue) and
              RunInspector.ready_for_merge?(inspection) do
           case IssueSource.update_issue_state(issue, @merging_state) do
             :ok ->
@@ -6431,118 +6525,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp integrate_agent_update(running_entry, %{event: event, timestamp: timestamp} = update) do
-    token_delta = extract_token_delta(running_entry, update)
-    agent_input_tokens = Map.get(running_entry, :agent_input_tokens, 0)
-    agent_output_tokens = Map.get(running_entry, :agent_output_tokens, 0)
-    agent_total_tokens = Map.get(running_entry, :agent_total_tokens, 0)
-    agent_process_id = Map.get(running_entry, :agent_process_id)
-    last_reported_input = Map.get(running_entry, :agent_last_reported_input_tokens, 0)
-    last_reported_output = Map.get(running_entry, :agent_last_reported_output_tokens, 0)
-    last_reported_total = Map.get(running_entry, :agent_last_reported_total_tokens, 0)
-    turn_count = Map.get(running_entry, :turn_count, 0)
-
-    {
-      Map.merge(running_entry, %{
-        last_agent_timestamp: timestamp,
-        last_agent_message: summarize_agent_update(update),
-        session_id: session_id_for_update(running_entry.session_id, update),
-        last_agent_event: event,
-        agent_process_id: agent_process_id_for_update(agent_process_id, update),
-        agent_input_tokens: agent_input_tokens + token_delta.input_tokens,
-        agent_output_tokens: agent_output_tokens + token_delta.output_tokens,
-        agent_total_tokens: agent_total_tokens + token_delta.total_tokens,
-        agent_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
-        agent_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
-        agent_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_started_input_tokens:
-          turn_started_input_for_update(
-            Map.get(running_entry, :turn_started_input_tokens, 0),
-            agent_input_tokens + token_delta.input_tokens,
-            running_entry.session_id,
-            update
-          ),
-        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
-        recent_agent_updates:
-          append_recent_agent_update(
-            Map.get(running_entry, :recent_agent_updates, []),
-            summarize_agent_update(update)
-          )
-      }),
-      token_delta
-    }
-  end
-
-  defp append_recent_agent_update(existing, summarized_update) when is_list(existing) do
-    (existing ++ [summarized_update])
-    |> Enum.take(-12)
-  end
-
-  defp append_recent_agent_update(_existing, summarized_update), do: [summarized_update]
-
-  defp agent_process_id_for_update(_existing, %{agent_process_id: pid})
-       when is_binary(pid),
-       do: pid
-
-  defp agent_process_id_for_update(_existing, %{agent_process_id: pid})
-       when is_integer(pid),
-       do: Integer.to_string(pid)
-
-  defp agent_process_id_for_update(_existing, %{agent_process_id: pid}) when is_list(pid),
-    do: to_string(pid)
-
-  defp agent_process_id_for_update(existing, _update), do: existing
-
-  defp session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
-    do: session_id
-
-  defp session_id_for_update(existing, _update), do: existing
-
-  defp turn_count_for_update(existing_count, existing_session_id, %{
-         event: :session_started,
-         session_id: session_id
-       })
-       when is_integer(existing_count) and is_binary(session_id) do
-    if session_id == existing_session_id do
-      existing_count
-    else
-      existing_count + 1
-    end
-  end
-
-  defp turn_count_for_update(existing_count, _existing_session_id, _update)
-       when is_integer(existing_count),
-       do: existing_count
-
-  defp turn_count_for_update(_existing_count, _existing_session_id, _update), do: 0
-
-  defp turn_started_input_for_update(_existing, current_total, existing_session_id, %{
-         event: :session_started,
-         session_id: session_id
-       })
-       when is_integer(current_total) and is_binary(session_id) do
-    if session_id == existing_session_id do
-      current_total
-    else
-      current_total
-    end
-  end
-
-  defp turn_started_input_for_update(existing, _current_total, _existing_session_id, _update)
-       when is_integer(existing),
-       do: existing
-
-  defp turn_started_input_for_update(_existing, _current_total, _existing_session_id, _update),
-    do: 0
-
-  defp summarize_agent_update(update) do
-    %{
-      event: update[:event],
-      message: update[:payload] || update[:raw],
-      timestamp: update[:timestamp]
-    }
-  end
-
   defp schedule_tick(delay_ms) do
     :timer.send_after(delay_ms, self(), :tick)
     :ok
@@ -6668,10 +6650,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
-    runtime_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
+    runtime_seconds = TokenTracking.running_seconds(running_entry.started_at, DateTime.utc_now())
 
     agent_totals =
-      apply_token_delta(
+      TokenTracking.apply_token_delta(
         state.agent_totals,
         %{
           input_tokens: 0,
@@ -6734,35 +6716,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
-    candidate_issue?(issue, Routing.active_state_set(), terminal_states) and
-      !Routing.todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+    candidate_issue?(issue, active_state_set(), terminal_states) and
+      !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)
   end
-
-  defp apply_agent_token_delta(
-         %{agent_totals: agent_totals} = state,
-         %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
-       )
-       when is_integer(input) and is_integer(output) and is_integer(total) do
-    %{state | agent_totals: apply_token_delta(agent_totals, token_delta)}
-  end
-
-  defp apply_agent_token_delta(state, _token_delta), do: state
-
-  defp apply_agent_rate_limits(%State{} = state, update) when is_map(update) do
-    case extract_rate_limits(update) do
-      %{} = rate_limits ->
-        %{state | agent_rate_limits: rate_limits}
-
-      _ ->
-        state
-    end
-  end
-
-  defp apply_agent_rate_limits(state, _update), do: state
 
   defp maybe_stop_issue_for_token_budget(%State{} = state, issue_id, running_entry) do
     issue = Map.get(running_entry, :issue, %{})
@@ -6835,9 +6795,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_run_state(_identifier, _issue), do: %{}
 
-  @doc false
-  @spec resolve_policy(Issue.t(), State.t()) :: {:ok, map()} | {:error, map()}
-  def resolve_policy(%Issue{} = issue, %State{} = state) do
+  defp resolve_policy(%Issue{} = issue, %State{} = state) do
     pack = PolicyPack.resolve(policy_pack_name(issue, state))
 
     IssuePolicy.resolve(issue,
@@ -6883,6 +6841,121 @@ defmodule SymphonyElixir.Orchestrator do
       Map.get(state.running[issue.id] || %{}, :policy_pack) ||
       Config.policy_pack_name()
   end
+
+  defp dispatch_skip_reason(%Issue{} = issue, %State{} = state) do
+    label_gate = label_gate_status(issue)
+    policy_result = resolve_policy(issue, state)
+
+    cond do
+      not issue_routed_to_current_runner_channel?(issue) ->
+        "wrong runner channel"
+
+      match?(%{eligible?: false}, label_gate) ->
+        label_gate.reason
+
+      match?({:error, _}, policy_result) ->
+        {:error, conflict} = policy_result
+        Map.get(conflict, :rule_id) || RuleCatalog.rule_id(:policy_invalid_labels)
+
+      true ->
+        nil
+    end
+  end
+
+  defp queue_policy_reason(%Issue{} = issue, %State{} = state, run_state) do
+    run_state = run_state || %{}
+
+    last_decision =
+      case Map.get(run_state, :last_decision) do
+        %{} = decision -> decision
+        _ -> %{}
+      end
+
+    case resolve_policy(issue, state) do
+      {:error, conflict} ->
+        {conflict.rule_id, conflict.failure_class, conflict.summary, conflict.human_action}
+
+      {:ok, %{class: :review_required}} ->
+        {
+          RuleCatalog.rule_id(:policy_review_required),
+          RuleCatalog.failure_class(:policy_review_required),
+          "Policy requires human review before merge.",
+          RuleCatalog.human_action(:policy_review_required)
+        }
+
+      {:ok, %{class: :never_automerge}} ->
+        {
+          RuleCatalog.rule_id(:policy_never_automerge),
+          RuleCatalog.failure_class(:policy_never_automerge),
+          "Policy forbids automerge for this issue.",
+          RuleCatalog.human_action(:policy_never_automerge)
+        }
+
+      _ ->
+        {
+          Map.get(run_state, :last_rule_id) || Map.get(last_decision, :rule_id),
+          Map.get(run_state, :last_failure_class) || Map.get(last_decision, :failure_class),
+          Map.get(run_state, :last_decision_summary) || Map.get(last_decision, :summary),
+          Map.get(run_state, :next_human_action) || Map.get(last_decision, :human_action)
+        }
+    end
+  end
+
+  defp issue_routed_to_current_runner_channel?(%Issue{} = issue) do
+    issue_target_runner_channel(issue) == Config.runner_channel()
+  end
+
+  defp issue_target_runner_channel(%Issue{} = issue) do
+    canary_labels =
+      RunnerRuntime.canary_required_labels(%{})
+      |> normalize_labels()
+
+    issue_labels =
+      issue
+      |> Issue.label_names()
+      |> normalize_labels()
+
+    if MapSet.size(canary_labels) > 0 and MapSet.subset?(canary_labels, issue_labels) do
+      "canary"
+    else
+      "stable"
+    end
+  end
+
+  defp next_human_action_for_skip("missing required labels"),
+    do: "Add the required routing labels before Symphony can dispatch this issue."
+
+  defp next_human_action_for_skip("missing canary labels"),
+    do: "Add the canary routing labels before Symphony can dispatch this issue during canary mode."
+
+  defp next_human_action_for_skip("wrong runner channel"),
+    do: "Route this issue to a runner on the matching channel before Symphony can dispatch it."
+
+  defp next_human_action_for_skip(reason) when is_binary(reason) do
+    cond do
+      reason == RuleCatalog.rule_id(:policy_invalid_labels) ->
+        RuleCatalog.human_action(:policy_invalid_labels)
+
+      true ->
+        nil
+    end
+  end
+
+  defp next_human_action_for_skip(_reason), do: nil
+
+  defp routing_required_labels do
+    RunnerRuntime.effective_required_labels(Config.linear_required_labels())
+  end
+
+  defp missing_canary_labels?(issue_label_set, required_label_set)
+       when is_struct(issue_label_set, MapSet) and is_struct(required_label_set, MapSet) do
+    workflow_required = normalize_labels(Config.linear_required_labels())
+    canary_required = MapSet.difference(required_label_set, workflow_required)
+
+    MapSet.size(canary_required) > 0 and not MapSet.subset?(canary_required, issue_label_set)
+  end
+
+  defp missing_canary_labels?(_issue_label_set, _required_label_set), do: false
 
   defp block_issue_for_policy_conflict(%State{} = state, %Issue{} = issue) do
     {:error, conflict} = resolve_policy(issue, state)
@@ -7369,330 +7442,4 @@ defmodule SymphonyElixir.Orchestrator do
       Map.get(run_state, :lease_owner_instance_id) == RunnerRuntime.instance_id() and
       Map.get(run_state, :lease_owner_channel) == Config.runner_channel()
   end
-
-  defp apply_token_delta(agent_totals, token_delta) do
-    input_tokens = Map.get(agent_totals, :input_tokens, 0) + token_delta.input_tokens
-    output_tokens = Map.get(agent_totals, :output_tokens, 0) + token_delta.output_tokens
-    total_tokens = Map.get(agent_totals, :total_tokens, 0) + token_delta.total_tokens
-
-    seconds_running =
-      Map.get(agent_totals, :seconds_running, 0) + Map.get(token_delta, :seconds_running, 0)
-
-    %{
-      input_tokens: max(0, input_tokens),
-      output_tokens: max(0, output_tokens),
-      total_tokens: max(0, total_tokens),
-      seconds_running: max(0, seconds_running)
-    }
-  end
-
-  defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
-    running_entry = running_entry || %{}
-    usage = extract_token_usage(update)
-
-    {
-      compute_token_delta(
-        running_entry,
-        :input,
-        usage,
-        :agent_last_reported_input_tokens
-      ),
-      compute_token_delta(
-        running_entry,
-        :output,
-        usage,
-        :agent_last_reported_output_tokens
-      ),
-      compute_token_delta(
-        running_entry,
-        :total,
-        usage,
-        :agent_last_reported_total_tokens
-      )
-    }
-    |> Tuple.to_list()
-    |> then(fn [input, output, total] ->
-      %{
-        input_tokens: input.delta,
-        output_tokens: output.delta,
-        total_tokens: total.delta,
-        input_reported: input.reported,
-        output_reported: output.reported,
-        total_reported: total.reported
-      }
-    end)
-  end
-
-  defp compute_token_delta(running_entry, token_key, usage, reported_key) do
-    next_total = get_token_usage(usage, token_key)
-    prev_reported = Map.get(running_entry, reported_key, 0)
-
-    delta =
-      if is_integer(next_total) and next_total >= prev_reported do
-        next_total - prev_reported
-      else
-        0
-      end
-
-    %{
-      delta: max(delta, 0),
-      reported: if(is_integer(next_total), do: next_total, else: prev_reported)
-    }
-  end
-
-  defp extract_token_usage(update) do
-    payloads = [
-      update[:usage],
-      Map.get(update, "usage"),
-      Map.get(update, :usage),
-      update[:payload],
-      Map.get(update, "payload"),
-      update
-    ]
-
-    Enum.find_value(payloads, &absolute_token_usage_from_payload/1) ||
-      Enum.find_value(payloads, &turn_completed_usage_from_payload/1) ||
-      Enum.find_value(payloads, &direct_token_usage_from_payload/1) ||
-      %{}
-  end
-
-  defp extract_rate_limits(update) do
-    rate_limits_from_payload(update[:rate_limits]) ||
-      rate_limits_from_payload(Map.get(update, "rate_limits")) ||
-      rate_limits_from_payload(Map.get(update, :rate_limits)) ||
-      rate_limits_from_payload(update[:payload]) ||
-      rate_limits_from_payload(Map.get(update, "payload")) ||
-      rate_limits_from_payload(update)
-  end
-
-  defp absolute_token_usage_from_payload(payload) when is_map(payload) do
-    absolute_paths = [
-      ["params", "msg", "payload", "info", "total_token_usage"],
-      [:params, :msg, :payload, :info, :total_token_usage],
-      ["params", "msg", "info", "total_token_usage"],
-      [:params, :msg, :info, :total_token_usage],
-      ["params", "tokenUsage", "total"],
-      [:params, :tokenUsage, :total],
-      ["tokenUsage", "total"],
-      [:tokenUsage, :total]
-    ]
-
-    explicit_map_at_paths(payload, absolute_paths)
-  end
-
-  defp absolute_token_usage_from_payload(_payload), do: nil
-
-  defp turn_completed_usage_from_payload(payload) when is_map(payload) do
-    method = Map.get(payload, "method") || Map.get(payload, :method)
-
-    if method in ["turn/completed", :turn_completed] do
-      direct =
-        Map.get(payload, "usage") ||
-          Map.get(payload, :usage) ||
-          map_at_path(payload, ["params", "usage"]) ||
-          map_at_path(payload, [:params, :usage])
-
-      if is_map(direct) and integer_token_map?(direct), do: direct
-    end
-  end
-
-  defp turn_completed_usage_from_payload(_payload), do: nil
-
-  defp direct_token_usage_from_payload(payload) when is_map(payload) do
-    if integer_token_map?(payload), do: payload
-  end
-
-  defp direct_token_usage_from_payload(_payload), do: nil
-
-  defp rate_limits_from_payload(payload) when is_map(payload) do
-    direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
-
-    cond do
-      rate_limits_map?(direct) ->
-        direct
-
-      rate_limits_map?(payload) ->
-        payload
-
-      true ->
-        rate_limit_payloads(payload)
-    end
-  end
-
-  defp rate_limits_from_payload(payload) when is_list(payload) do
-    rate_limit_payloads(payload)
-  end
-
-  defp rate_limits_from_payload(_payload), do: nil
-
-  defp rate_limit_payloads(payload) when is_map(payload) do
-    Map.values(payload)
-    |> Enum.reduce_while(nil, fn
-      value, nil ->
-        case rate_limits_from_payload(value) do
-          nil -> {:cont, nil}
-          rate_limits -> {:halt, rate_limits}
-        end
-
-      _value, result ->
-        {:halt, result}
-    end)
-  end
-
-  defp rate_limit_payloads(payload) when is_list(payload) do
-    payload
-    |> Enum.reduce_while(nil, fn
-      value, nil ->
-        case rate_limits_from_payload(value) do
-          nil -> {:cont, nil}
-          rate_limits -> {:halt, rate_limits}
-        end
-
-      _value, result ->
-        {:halt, result}
-    end)
-  end
-
-  defp rate_limits_map?(payload) when is_map(payload) do
-    limit_id =
-      Map.get(payload, "limit_id") ||
-        Map.get(payload, :limit_id) ||
-        Map.get(payload, "limit_name") ||
-        Map.get(payload, :limit_name)
-
-    has_buckets =
-      Enum.any?(
-        ["primary", :primary, "secondary", :secondary, "credits", :credits],
-        &Map.has_key?(payload, &1)
-      )
-
-    !is_nil(limit_id) and has_buckets
-  end
-
-  defp rate_limits_map?(_payload), do: false
-
-  defp explicit_map_at_paths(payload, paths) when is_map(payload) and is_list(paths) do
-    Enum.find_value(paths, fn path ->
-      value = map_at_path(payload, path)
-
-      if is_map(value) and integer_token_map?(value), do: value
-    end)
-  end
-
-  defp explicit_map_at_paths(_payload, _paths), do: nil
-
-  defp map_at_path(payload, path) when is_map(payload) and is_list(path) do
-    Enum.reduce_while(path, payload, fn key, acc ->
-      if is_map(acc) and Map.has_key?(acc, key) do
-        {:cont, Map.get(acc, key)}
-      else
-        {:halt, nil}
-      end
-    end)
-  end
-
-  defp map_at_path(_payload, _path), do: nil
-
-  defp integer_token_map?(payload) do
-    token_fields = [
-      :input_tokens,
-      :output_tokens,
-      :total_tokens,
-      :prompt_tokens,
-      :completion_tokens,
-      :inputTokens,
-      :outputTokens,
-      :totalTokens,
-      :promptTokens,
-      :completionTokens,
-      "input_tokens",
-      "output_tokens",
-      "total_tokens",
-      "prompt_tokens",
-      "completion_tokens",
-      "inputTokens",
-      "outputTokens",
-      "totalTokens",
-      "promptTokens",
-      "completionTokens"
-    ]
-
-    token_fields
-    |> Enum.any?(fn field ->
-      value = payload_get(payload, field)
-      !is_nil(integer_like(value))
-    end)
-  end
-
-  defp get_token_usage(usage, :input),
-    do:
-      payload_get(usage, [
-        "input_tokens",
-        "prompt_tokens",
-        :input_tokens,
-        :prompt_tokens,
-        :input,
-        "promptTokens",
-        :promptTokens,
-        "inputTokens",
-        :inputTokens
-      ])
-
-  defp get_token_usage(usage, :output),
-    do:
-      payload_get(usage, [
-        "output_tokens",
-        "completion_tokens",
-        :output_tokens,
-        :completion_tokens,
-        :output,
-        :completion,
-        "outputTokens",
-        :outputTokens,
-        "completionTokens",
-        :completionTokens
-      ])
-
-  defp get_token_usage(usage, :total),
-    do:
-      payload_get(usage, [
-        "total_tokens",
-        "total",
-        :total_tokens,
-        :total,
-        "totalTokens",
-        :totalTokens
-      ])
-
-  defp payload_get(payload, fields) when is_list(fields) do
-    Enum.find_value(fields, fn field -> map_integer_value(payload, field) end)
-  end
-
-  defp payload_get(payload, field), do: map_integer_value(payload, field)
-
-  defp map_integer_value(payload, field) do
-    if is_map(payload) do
-      value = Map.get(payload, field)
-      integer_like(value)
-    else
-      nil
-    end
-  end
-
-  defp running_seconds(%DateTime{} = started_at, %DateTime{} = now) do
-    max(0, DateTime.diff(now, started_at, :second))
-  end
-
-  defp running_seconds(_started_at, _now), do: 0
-
-  defp integer_like(value) when is_integer(value) and value >= 0, do: value
-
-  defp integer_like(value) when is_binary(value) do
-    case Integer.parse(String.trim(value)) do
-      {num, _} when num >= 0 -> num
-      _ -> nil
-    end
-  end
-
-  defp integer_like(_value), do: nil
 end
