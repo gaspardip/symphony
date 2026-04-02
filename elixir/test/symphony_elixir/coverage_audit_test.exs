@@ -19,9 +19,9 @@ defmodule SymphonyElixir.CoverageAuditTest do
   test "evaluate_reports fails below overall threshold and on core module drift" do
     result =
       CoverageAudit.evaluate_reports([
-        report(SymphonyElixir.DeliveryEngine, 70.0, [10, 11, 15]),
-        report(SymphonyElixir.RunPolicy, 88.0, []),
-        report(SymphonyElixir.AgentRunner, 80.0, [44, 45, 46, 47, 48])
+        report(SymphonyElixir.DeliveryEngine, 55.0, [10, 11, 15]),
+        report(SymphonyElixir.RunPolicy, 68.0, []),
+        report(SymphonyElixir.AgentRunner, 60.0, [44, 45, 46, 47, 48])
       ])
 
     assert Enum.sort(result.failed_reasons) == [
@@ -88,10 +88,10 @@ defmodule SymphonyElixir.CoverageAuditTest do
       output = """
       | Percentage | Module                        |
       |------------|-------------------------------|
-      |     70.00% | SymphonyElixir.DeliveryEngine |
+      |     55.00% | SymphonyElixir.DeliveryEngine |
       |     96.00% | SymphonyElixir.AgentRunner    |
       |------------|-------------------------------|
-      |     89.50% | Total                         |
+      |     75.50% | Total                         |
       """
 
       result = CoverageAudit.audit_from_mix_output(output, cover_dir)
@@ -101,7 +101,7 @@ defmodule SymphonyElixir.CoverageAuditTest do
       assert [%{module: SymphonyElixir.DeliveryEngine, uncovered_ranges: ["10-11", "15"]}] =
                result.core_failures
 
-      assert result.overall_percentage == 89.5
+      assert result.overall_percentage == 75.5
     after
       File.rm_rf(cover_dir)
     end

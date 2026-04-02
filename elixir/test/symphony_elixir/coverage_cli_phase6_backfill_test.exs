@@ -168,7 +168,7 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
         coverage_output: """
         | Percentage | Module                        |
         |------------|-------------------------------|
-        |     70.00% | SymphonyElixir.DeliveryEngine |
+        |     55.00% | SymphonyElixir.DeliveryEngine |
         |    100.00% | Total                         |
         """
       },
