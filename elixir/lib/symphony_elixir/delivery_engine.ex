@@ -10,6 +10,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.AgentProvider
   alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.AgentHarness
+  alias SymphonyElixir.DeliveryEngine.ErrorHandler
   alias SymphonyElixir.Config
   alias SymphonyElixir.GitManager
   alias SymphonyElixir.IssueAcceptance
@@ -117,20 +118,20 @@ defmodule SymphonyElixir.DeliveryEngine do
   @doc false
   @spec implementation_turn_error_summary_for_test(term()) :: term()
   def implementation_turn_error_summary_for_test(reason),
-    do: implementation_turn_error_summary(reason)
+    do: ErrorHandler.implementation_turn_error_summary(reason)
 
   @doc false
   @spec retryable_implementation_error_for_test(term()) :: boolean()
-  def retryable_implementation_error_for_test(reason), do: retryable_implementation_error?(reason)
+  def retryable_implementation_error_for_test(reason), do: ErrorHandler.retryable_implementation_error?(reason)
 
   @doc false
   @spec non_retryable_implementation_error_for_test(term()) :: boolean()
   def non_retryable_implementation_error_for_test(reason),
-    do: non_retryable_implementation_error?(reason)
+    do: ErrorHandler.non_retryable_implementation_error?(reason)
 
   @doc false
   @spec implementation_error_code_for_test(term()) :: term()
-  def implementation_error_code_for_test(reason), do: implementation_error_code(reason)
+  def implementation_error_code_for_test(reason), do: ErrorHandler.implementation_error_code(reason)
 
   @doc false
   @spec maybe_move_issue_for_test(term(), term()) :: term()
@@ -675,8 +676,8 @@ defmodule SymphonyElixir.DeliveryEngine do
     model = Config.agent_model_for_stage("plan") || Config.agent_model()
 
     if plan_already_exists?(workspace, issue) do
-      log_agent_turn_lifecycle(
-        agent_turn_log_context("plan", provider, model, issue, 0, default_turn_tokens()),
+      ErrorHandler.log_agent_turn_lifecycle(
+        ErrorHandler.agent_turn_log_context("plan", provider, model, issue, 0, ErrorHandler.default_turn_tokens()),
         "provider=skipped,turn=skipped,plan_completed=false"
       )
 
@@ -723,14 +724,14 @@ defmodule SymphonyElixir.DeliveryEngine do
       )
 
     {provider_turn_result, turn_log_context} =
-      run_logged_agent_turn(provider, app_session, prompt, issue, turn_opts)
+      ErrorHandler.run_logged_agent_turn(provider, app_session, prompt, issue, turn_opts)
 
     reported_turn_result = fetch_turn_result(issue)
     plan_completed = match?({:ok, _}, provider_turn_result) and match?({:ok, _}, reported_turn_result)
 
-    log_agent_turn_lifecycle(
+    ErrorHandler.log_agent_turn_lifecycle(
       turn_log_context,
-      plan_turn_log_result(provider_turn_result, reported_turn_result, plan_completed)
+      ErrorHandler.plan_turn_log_result(provider_turn_result, reported_turn_result, plan_completed)
     )
 
     progress_path = progress_path_for_issue(workspace, issue)
@@ -931,13 +932,13 @@ defmodule SymphonyElixir.DeliveryEngine do
             )
 
           {provider_turn_result, turn_log_context} =
-            run_logged_agent_turn(provider, app_session, prompt, issue, turn_opts)
+            ErrorHandler.run_logged_agent_turn(provider, app_session, prompt, issue, turn_opts)
 
           with {:ok, _turn_session} <- provider_turn_result,
                {:ok, turn_result} <- fetch_turn_result(issue) do
-            log_agent_turn_lifecycle(
+            ErrorHandler.log_agent_turn_lifecycle(
               turn_log_context,
-              implement_turn_log_result(provider_turn_result, {:ok, turn_result})
+              ErrorHandler.implement_turn_log_result(provider_turn_result, {:ok, turn_result})
             )
 
             with after_snapshot <- RunInspector.inspect(workspace, opts),
@@ -1021,7 +1022,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
               {:error, reason} ->
                 cond do
-                  retryable_implementation_error?(reason) ->
+                  ErrorHandler.retryable_implementation_error?(reason) ->
                     handle_implementation_turn_error(
                       app_session,
                       workspace,
@@ -1034,12 +1035,12 @@ defmodule SymphonyElixir.DeliveryEngine do
                       reason
                     )
 
-                  non_retryable_implementation_error?(reason) ->
+                  ErrorHandler.non_retryable_implementation_error?(reason) ->
                     block_issue(
                       workspace,
                       issue,
-                      implementation_error_code(reason),
-                      implementation_turn_error_summary(reason),
+                      ErrorHandler.implementation_error_code(reason),
+                      ErrorHandler.implementation_turn_error_summary(reason),
                       @blocked_state
                     )
 
@@ -1049,9 +1050,9 @@ defmodule SymphonyElixir.DeliveryEngine do
             end
           else
             error ->
-              log_agent_turn_lifecycle(
+              ErrorHandler.log_agent_turn_lifecycle(
                 turn_log_context,
-                implement_turn_log_result(provider_turn_result, error)
+                ErrorHandler.implement_turn_log_result(provider_turn_result, error)
               )
 
               case error do
@@ -1106,7 +1107,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
                 {:error, reason} ->
                   cond do
-                    retryable_implementation_error?(reason) ->
+                    ErrorHandler.retryable_implementation_error?(reason) ->
                       handle_implementation_turn_error(
                         app_session,
                         workspace,
@@ -1119,12 +1120,12 @@ defmodule SymphonyElixir.DeliveryEngine do
                         reason
                       )
 
-                    non_retryable_implementation_error?(reason) ->
+                    ErrorHandler.non_retryable_implementation_error?(reason) ->
                       block_issue(
                         workspace,
                         issue,
-                        implementation_error_code(reason),
-                        implementation_turn_error_summary(reason),
+                        ErrorHandler.implementation_error_code(reason),
+                        ErrorHandler.implementation_turn_error_summary(reason),
                         @blocked_state
                       )
 
@@ -4189,151 +4190,7 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp run_logged_agent_turn(provider, app_session, prompt, issue, opts) do
-    started_at = System.monotonic_time()
-    turn_result = provider.run_turn(app_session, prompt, issue, opts)
-
-    duration_ms =
-      System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
-
-    log_context =
-      agent_turn_log_context(
-        Keyword.get(opts, :stage),
-        provider,
-        Keyword.get(opts, :model),
-        issue,
-        duration_ms,
-        normalize_turn_tokens(turn_result)
-      )
-
-    {turn_result, log_context}
-  end
-
-  defp log_agent_turn_lifecycle(log_context, result) do
-    Logger.info(
-      "event=delivery_engine.agent_turn stage=#{log_context.stage} provider=#{log_context.provider} model=#{inspect(log_context.model)} issue=#{log_context.issue} duration_ms=#{log_context.duration_ms} tokens=#{inspect(log_context.tokens)} result=#{result}",
-      event: "delivery_engine.agent_turn",
-      stage: log_context.stage,
-      provider: log_context.provider,
-      model: log_context.model,
-      issue: log_context.issue,
-      issue_identifier: log_context.issue_identifier,
-      duration_ms: log_context.duration_ms,
-      tokens: log_context.tokens,
-      result: result
-    )
-  end
-
-  defp agent_turn_log_context(stage, provider, model, issue, duration_ms, tokens) do
-    %{
-      stage: stage,
-      provider: normalize_turn_provider(provider),
-      model: model,
-      issue: normalize_issue_log_value(issue),
-      issue_identifier: Map.get(issue, :identifier),
-      duration_ms: duration_ms,
-      tokens: tokens
-    }
-  end
-
-  defp plan_turn_log_result(provider_turn_result, reported_turn_result, plan_completed) do
-    "provider=#{normalize_provider_turn_outcome(provider_turn_result)},turn=#{normalize_reported_turn_outcome(reported_turn_result)},plan_completed=#{plan_completed}"
-  end
-
-  defp implement_turn_log_result(provider_turn_result, reported_turn_result) do
-    "provider=#{normalize_provider_turn_outcome(provider_turn_result)},turn=#{normalize_reported_turn_outcome(reported_turn_result)}"
-  end
-
-  defp normalize_turn_provider(SymphonyElixir.AgentProvider.Codex), do: "codex"
-  defp normalize_turn_provider(SymphonyElixir.AgentProvider.CodexCLI), do: "codex-cli"
-  defp normalize_turn_provider(SymphonyElixir.AgentProvider.Claude), do: "claude"
-  defp normalize_turn_provider(provider) when is_binary(provider), do: provider
-  defp normalize_turn_provider(provider) when is_atom(provider), do: Atom.to_string(provider)
-  defp normalize_turn_provider(provider), do: inspect(provider)
-
-  defp normalize_issue_log_value(%Issue{identifier: identifier, id: issue_id}) do
-    identifier || issue_id || "unknown"
-  end
-
-  defp normalize_issue_log_value(issue) when is_map(issue) do
-    Map.get(issue, :identifier) || Map.get(issue, :id) || "unknown"
-  end
-
-  defp normalize_issue_log_value(_issue), do: "unknown"
-
-  defp normalize_turn_tokens({:ok, response}) when is_map(response) do
-    usage = Map.get(response, :usage) || Map.get(response, "usage")
-
-    case usage do
-      usage when is_map(usage) ->
-        input_tokens = normalize_token_count(Map.get(usage, :input_tokens) || Map.get(usage, "input_tokens"))
-        output_tokens = normalize_token_count(Map.get(usage, :output_tokens) || Map.get(usage, "output_tokens"))
-        total_tokens = normalize_token_count(Map.get(usage, :total_tokens) || Map.get(usage, "total_tokens"))
-
-        %{
-          input_tokens: input_tokens,
-          output_tokens: output_tokens,
-          total_tokens: if(total_tokens > 0, do: total_tokens, else: input_tokens + output_tokens)
-        }
-
-      _ ->
-        default_turn_tokens()
-    end
-  end
-
-  defp normalize_turn_tokens(_turn_result), do: default_turn_tokens()
-
-  defp default_turn_tokens do
-    %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
-  end
-
-  defp normalize_token_count(nil), do: 0
-  defp normalize_token_count(value) when is_integer(value), do: max(value, 0)
-
-  defp normalize_token_count(value) when is_binary(value) do
-    case Integer.parse(String.trim(value)) do
-      {parsed, _rest} -> max(parsed, 0)
-      :error -> 0
-    end
-  end
-
-  defp normalize_token_count(_value), do: 0
-
-  defp normalize_provider_turn_outcome({:ok, response}) when is_map(response) do
-    response
-    |> Map.get(:result, Map.get(response, "result"))
-    |> normalize_turn_outcome_value("completed")
-  end
-
-  defp normalize_provider_turn_outcome({:error, reason}) do
-    normalize_turn_outcome_value(reason, "error")
-  end
-
-  defp normalize_provider_turn_outcome(_result), do: "unknown"
-
-  defp normalize_reported_turn_outcome({:ok, %TurnResult{blocked: true, blocker_type: blocker_type}}) do
-    "blocked:#{blocker_type || "unknown"}"
-  end
-
-  defp normalize_reported_turn_outcome({:ok, %TurnResult{needs_another_turn: true}}),
-    do: "needs_another_turn"
-
-  defp normalize_reported_turn_outcome({:ok, %TurnResult{}}), do: "completed"
-
-  defp normalize_reported_turn_outcome({:error, reason}) do
-    normalize_turn_outcome_value(reason, "missing")
-  end
-
-  defp normalize_reported_turn_outcome({:done, _issue}), do: "done"
-  defp normalize_reported_turn_outcome({:skip, _issue}), do: "skip"
-  defp normalize_reported_turn_outcome(_result), do: "unknown"
-
-  defp normalize_turn_outcome_value({tag, _details}, _default) when is_atom(tag),
-    do: Atom.to_string(tag)
-
-  defp normalize_turn_outcome_value(value, _default) when is_atom(value), do: Atom.to_string(value)
-  defp normalize_turn_outcome_value(value, _default) when is_binary(value), do: value
-  defp normalize_turn_outcome_value(_value, default), do: default
+  # Turn logging and normalization helpers moved to ErrorHandler
 
   defp tool_executor(issue, opts) do
     fn tool, arguments ->
@@ -4416,7 +4273,7 @@ defmodule SymphonyElixir.DeliveryEngine do
        ) do
     attempts = effective_implementation_turns(state) + 1
     total_implementation_turns = Map.get(state, :implementation_turns, 0) + 1
-    summary = implementation_turn_error_summary(reason)
+    summary = ErrorHandler.implementation_turn_error_summary(reason)
 
     with {:ok, refreshed_issue} <- refresh_issue(issue, fetcher),
          :ok <- ensure_issue_still_active(refreshed_issue) do
@@ -4424,7 +4281,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         block_issue(
           workspace,
           refreshed_issue,
-          implementation_error_code(reason),
+          ErrorHandler.implementation_error_code(reason),
           summary,
           @blocked_state
         )
@@ -4434,7 +4291,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             implementation_turns: total_implementation_turns,
             last_implementation_error: %{
               summary: summary,
-              reason: implementation_error_to_map(reason)
+              reason: ErrorHandler.implementation_error_to_map(reason)
             },
             reason: "Retrying implementation after agent turn error: #{summary}"
           })
@@ -4453,189 +4310,11 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp implementation_turn_error_summary(reasons) when is_list(reasons) do
-    reasons
-    |> Enum.map(&implementation_turn_error_summary/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.uniq()
-    |> Enum.join(" | ")
-  end
+  # Error classification functions moved to ErrorHandler
 
-  defp implementation_turn_error_summary({:turn_failed, details}) do
-    case turn_failed_reason_code(details) do
-      "implementation.command_output_budget_exceeded" ->
-        "Implement turn exceeded the command output budget: #{safe_detail_text(details)}"
-
-      "implementation.command_count_exceeded" ->
-        "Implement turn issued too many shell commands: #{safe_detail_text(details)}"
-
-      "implementation.broad_read_violation" ->
-        "Implement turn attempted a broad repository read instead of targeted inspection: #{safe_detail_text(details)}"
-
-      "implementation.stage_command_violation" ->
-        "Implement turn attempted a runtime-owned validation command: #{safe_detail_text(details)}"
-
-      _ ->
-        "Agent turn failed: #{safe_detail_text(details)}"
-    end
-  end
-
-  defp implementation_turn_error_summary({:port_exit, status}),
-    do: "Agent process exited during the turn with status #{status}."
-
-  defp implementation_turn_error_summary(:turn_timeout),
-    do: "Agent turn timed out before completing."
-
-  defp implementation_turn_error_summary({:agent_notification_error, method, details}),
-    do: "Agent reported #{method}: #{safe_detail_text(details)}"
-
-  defp implementation_turn_error_summary({:turn_cancelled, details}),
-    do: "Agent turn was cancelled: #{safe_detail_text(details)}"
-
-  defp implementation_turn_error_summary({:approval_required, details}),
-    do: "Agent requested approval unexpectedly: #{safe_detail_text(details)}"
-
-  defp implementation_turn_error_summary({:turn_input_required, details}),
-    do: "Agent requested operator input unexpectedly: #{safe_detail_text(details)}"
-
-  defp implementation_turn_error_summary(reason), do: safe_detail_text(reason)
-
-  defp implementation_error_to_map(reasons) when is_list(reasons),
-    do: Enum.map(reasons, &implementation_error_to_map/1)
-
-  defp implementation_error_to_map({:agent_notification_error, method, details}),
-    do: %{type: "agent_notification_error", method: method, details: safe_detail_text(details)}
-
-  defp implementation_error_to_map({tag, details}) when is_atom(tag),
-    do: %{type: Atom.to_string(tag), details: safe_detail_text(details)}
-
-  defp implementation_error_to_map(reason),
-    do: %{type: "unknown", details: safe_detail_text(reason)}
-
-  defp retryable_implementation_error?({:turn_failed, details}) do
-    case turn_failed_reason_code(details) do
-      "implementation.command_output_budget_exceeded" -> false
-      "implementation.command_count_exceeded" -> false
-      "implementation.broad_read_violation" -> false
-      "implementation.stage_command_violation" -> false
-      _ -> true
-    end
-  end
-
-  defp retryable_implementation_error?({:port_exit, _status}), do: true
-  defp retryable_implementation_error?(:turn_timeout), do: true
-  defp retryable_implementation_error?(_reason), do: false
-
-  defp non_retryable_implementation_error?({:turn_failed, details}) do
-    case turn_failed_reason_code(details) do
-      "implementation.command_output_budget_exceeded" -> true
-      "implementation.command_count_exceeded" -> true
-      "implementation.broad_read_violation" -> true
-      "implementation.stage_command_violation" -> true
-      _ -> false
-    end
-  end
-
-  defp non_retryable_implementation_error?({:turn_cancelled, _details}), do: true
-  defp non_retryable_implementation_error?({:approval_required, _details}), do: true
-  defp non_retryable_implementation_error?({:turn_input_required, _details}), do: true
-  defp non_retryable_implementation_error?(_reason), do: false
-
-  defp implementation_error_code({:turn_failed, details}) do
-    case turn_failed_reason_code(details) do
-      "implementation.command_output_budget_exceeded" -> :command_output_budget_exceeded
-      "implementation.command_count_exceeded" -> :command_count_exceeded
-      "implementation.broad_read_violation" -> :broad_read_violation
-      "implementation.stage_command_violation" -> :stage_command_violation
-      _ -> :turn_failed
-    end
-  end
-
-  defp implementation_error_code(_reason), do: :turn_failed
-
-  defp turn_failed_reason_code(details) when is_map(details) do
-    Map.get(details, :reason) || Map.get(details, "reason")
-  end
-
-  defp turn_failed_reason_code(_details), do: nil
-
-  defp handle_checkout_error(workspace, issue, {:error, reason})
-       when reason in [:missing_harness_version, :missing_required_checks] do
-    block_issue(
-      workspace,
-      issue,
-      reason,
-      "The repo harness contract is incomplete.",
-      @blocked_state
-    )
-  end
-
-  defp handle_checkout_error(workspace, issue, {:error, {:missing_harness_command, stage}}) do
-    block_issue(
-      workspace,
-      issue,
-      :missing_harness_command,
-      "The repo harness is missing the required `#{stage}.command` entry.",
-      @blocked_state
-    )
-  end
-
-  defp handle_checkout_error(workspace, issue, {:error, {:unknown_harness_keys, path, keys}}) do
-    block_issue(
-      workspace,
-      issue,
-      :invalid_harness,
-      "Unknown harness keys under #{Enum.join(path, ".")}: #{Enum.join(keys, ", ")}",
-      @blocked_state
-    )
-  end
-
-  defp handle_checkout_error(workspace, issue, {:error, :missing}) do
-    block_issue(
-      workspace,
-      issue,
-      :missing_harness,
-      "The repo harness contract is missing after checkout.",
-      @blocked_state
-    )
-  end
-
-  defp handle_checkout_error(workspace, issue, {:error, :invalid_harness_root}) do
-    block_issue(
-      workspace,
-      issue,
-      :invalid_harness,
-      inspect(:invalid_harness_root),
-      @blocked_state
-    )
-  end
-
-  defp handle_checkout_error(
-         workspace,
-         issue,
-         {:error, %{code: :policy_pack_disallows_class} = conflict}
-       ) do
-    block_issue(
-      workspace,
-      issue,
-      :policy_pack_disallows_class,
-      Map.get(conflict, :details) || Map.get(conflict, :summary) || inspect(conflict),
-      @blocked_state
-    )
-  end
-
-  defp handle_checkout_error(workspace, issue, {:error, %{code: :invalid_labels} = conflict}) do
-    block_issue(
-      workspace,
-      issue,
-      :policy_invalid_labels,
-      Map.get(conflict, :details) || Map.get(conflict, :summary) || inspect(conflict),
-      @blocked_state
-    )
-  end
-
-  defp handle_checkout_error(workspace, issue, {:error, reason}) do
-    block_issue(workspace, issue, :checkout_failed, reason, @blocked_state)
+  defp handle_checkout_error(workspace, issue, error) do
+    {code, message} = ErrorHandler.classify_checkout_error(error)
+    block_issue(workspace, issue, code, message, @blocked_state)
   end
 
   defp refresh_issue(%Issue{id: issue_id} = issue, issue_state_fetcher)
@@ -4727,18 +4406,7 @@ defmodule SymphonyElixir.DeliveryEngine do
     {:stop, code}
   end
 
-  defp safe_detail_text(details) when is_binary(details) do
-    details
-    |> String.trim()
-    |> String.slice(0, 2_000)
-  end
-
-  defp safe_detail_text(details) do
-    details
-    |> inspect()
-    |> String.trim()
-    |> String.slice(0, 2_000)
-  end
+  defp safe_detail_text(details), do: ErrorHandler.safe_detail_text(details)
 
   defp command_result_to_map(result) do
     %{
