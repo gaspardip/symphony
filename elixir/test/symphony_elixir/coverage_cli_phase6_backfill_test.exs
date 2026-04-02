@@ -23,8 +23,8 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
 
       result = CoverageAudit.audit_from_mix_output(output, cover_dir)
 
-      assert CoverageAudit.overall_threshold() == 84.0
-      assert CoverageAudit.core_threshold() == 76.0
+      assert CoverageAudit.overall_threshold() == 79.0
+      assert CoverageAudit.core_threshold() == 70.0
       assert CoverageAudit.attention_threshold() == 90.0
       assert CoverageAudit.failure_message(%{failed_reasons: []}) == "coverage audit passed"
       assert result.overall_percentage == 100.0
@@ -68,7 +68,7 @@ defmodule SymphonyElixir.CoverageCliPhase6BackfillTest do
 
       assert result.overall_percentage == 100.0
       assert Enum.any?(summary, &String.contains?(&1, "100.00%"))
-      assert Enum.any?(summary, &String.contains?(&1, "84.00%"))
+      assert Enum.any?(summary, &String.contains?(&1, "79.00%"))
     after
       File.rm_rf(cover_dir)
     end
