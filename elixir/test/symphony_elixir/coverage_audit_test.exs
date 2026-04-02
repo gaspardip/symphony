@@ -20,7 +20,7 @@ defmodule SymphonyElixir.CoverageAuditTest do
     result =
       CoverageAudit.evaluate_reports([
         report(SymphonyElixir.DeliveryEngine, 55.0, [10, 11, 15]),
-        report(SymphonyElixir.RunPolicy, 68.0, []),
+        report(SymphonyElixir.RunPolicy, 75.0, []),
         report(SymphonyElixir.AgentRunner, 60.0, [44, 45, 46, 47, 48])
       ])
 
@@ -96,7 +96,7 @@ defmodule SymphonyElixir.CoverageAuditTest do
 
       result = CoverageAudit.audit_from_mix_output(output, cover_dir)
 
-      assert result.failed_reasons == ["core_module_below_threshold"]
+      assert Enum.sort(result.failed_reasons) == ["core_module_below_threshold", "overall_coverage_below_threshold"]
 
       assert [%{module: SymphonyElixir.DeliveryEngine, uncovered_ranges: ["10-11", "15"]}] =
                result.core_failures
