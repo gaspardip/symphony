@@ -2841,7 +2841,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp terminate_task(_pid), do: :ok
 
-  defp partition_issues_by_label_gate(issues, %State{} = state) when is_list(issues) do
+  @doc false
+  @spec partition_issues_by_label_gate([Issue.t()], State.t()) :: {[Issue.t()], [map()]}
+  def partition_issues_by_label_gate(issues, %State{} = state) when is_list(issues) do
     Enum.reduce(issues, {[], []}, fn issue, {eligible, skipped} ->
       case dispatch_skip_reason(issue, state) do
         nil ->
@@ -2858,7 +2860,7 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp partition_issues_by_label_gate(_issues, _state), do: {[], []}
+  def partition_issues_by_label_gate(_issues, _state), do: {[], []}
 
   defp skipped_issue_entry(%Issue{} = issue, reason, %State{} = state) do
     workspace_path = Workspace.path_for_issue(issue.identifier || issue.id)
@@ -3000,17 +3002,19 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  defp candidate_issue?(
-         %Issue{
-           id: id,
-           identifier: identifier,
-           title: title,
-           state: state_name
-         } = issue,
-         active_states,
-         terminal_states
-       )
-       when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
+  @doc false
+  @spec candidate_issue?(term(), term(), term()) :: boolean()
+  def candidate_issue?(
+        %Issue{
+          id: id,
+          identifier: identifier,
+          title: title,
+          state: state_name
+        } = issue,
+        active_states,
+        terminal_states
+      )
+      when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
       issue_routed_to_current_runner_channel?(issue) and
       issue_matches_required_labels?(issue) and
@@ -3019,7 +3023,7 @@ defmodule SymphonyElixir.Orchestrator do
       !terminal_issue_state?(state_name, terminal_states)
   end
 
-  defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
+  def candidate_issue?(_issue, _active_states, _terminal_states), do: false
 
   defp issue_routable_to_worker?(%Issue{assigned_to_worker: assigned_to_worker})
        when is_boolean(assigned_to_worker),
@@ -3030,11 +3034,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_labels(%Issue{} = issue), do: Issue.label_names(issue)
   defp issue_labels(_issue), do: []
 
-  defp issue_matches_required_labels?(%Issue{} = issue) do
+  @doc false
+  @spec issue_matches_required_labels?(term()) :: boolean()
+  def issue_matches_required_labels?(%Issue{} = issue) do
     label_gate_status(issue).eligible?
   end
 
-  defp issue_matches_required_labels?(_issue), do: true
+  def issue_matches_required_labels?(_issue), do: true
 
   @doc false
   @spec label_gate_status(term()) :: map()
@@ -5467,7 +5473,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_run_state(_identifier, _issue), do: %{}
 
-  defp resolve_policy(%Issue{} = issue, %State{} = state) do
+  @doc false
+  @spec resolve_policy(Issue.t(), State.t()) :: {:ok, term()} | {:error, term()}
+  def resolve_policy(%Issue{} = issue, %State{} = state) do
     pack = PolicyPack.resolve(policy_pack_name(issue, state))
 
     IssuePolicy.resolve(issue,

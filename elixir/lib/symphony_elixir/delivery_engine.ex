@@ -3074,12 +3074,44 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp focused_review_claim_limit(state) do
+  @doc false
+  @spec focused_review_claim_limit(map()) :: non_neg_integer()
+  def focused_review_claim_limit(state) do
     case get_in(state, [:resume_context, :token_pressure]) do
       "high" -> 1
       _ -> 2
     end
   end
+
+  # -- Delegations to ReviewClaims (called cross-module after extraction) ------
+
+  @doc false
+  @spec focused_review_claims(map(), non_neg_integer()) :: list()
+  defdelegate focused_review_claims(review_claims, limit \\ 2), to: SymphonyElixir.DeliveryEngine.ReviewClaims
+
+  @doc false
+  @spec focused_review_claim_block(list(), map()) :: String.t()
+  defdelegate focused_review_claim_block(focused_claims, all_review_claims), to: SymphonyElixir.DeliveryEngine.ReviewClaims
+
+  @doc false
+  @spec focused_review_next_objective(list(), map()) :: String.t()
+  defdelegate focused_review_next_objective(focused_claims, all_review_claims), to: SymphonyElixir.DeliveryEngine.ReviewClaims
+
+  @doc false
+  @spec default_review_feedback_summary(map(), list()) :: String.t() | nil
+  defdelegate default_review_feedback_summary(state, focused_claims), to: SymphonyElixir.DeliveryEngine.ReviewClaims
+
+  @doc false
+  @spec default_review_claim_summary(map(), list()) :: String.t() | nil
+  defdelegate default_review_claim_summary(state, focused_claims), to: SymphonyElixir.DeliveryEngine.ReviewClaims
+
+  @doc false
+  @spec default_next_objective(map(), list()) :: String.t()
+  defdelegate default_next_objective(state, focused_claims), to: SymphonyElixir.DeliveryEngine.ReviewClaims
+
+  @doc false
+  @spec claim_pending_review_fix?(map()) :: boolean()
+  defdelegate claim_pending_review_fix?(claim), to: SymphonyElixir.DeliveryEngine.ReviewClaims
 
   defp effective_implementation_turns(state) when is_map(state) do
     implementation_turns = Map.get(state, :implementation_turns, 0)
