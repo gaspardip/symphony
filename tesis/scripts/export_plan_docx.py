@@ -401,7 +401,7 @@ def add_cover(doc: Document) -> None:
     add_metadata_table(doc)
     add_para(
         doc,
-        "Documento preparado para la entrega de Blackboard del Plan de Tesis - Proyecto Final Integrador.",
+        "Documento de presentación del Plan de Tesis - Proyecto Final Integrador.",
         alignment=WD_ALIGN_PARAGRAPH.CENTER,
         size=9.5,
         color=MUTED,

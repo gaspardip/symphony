@@ -1,6 +1,6 @@
 # Plan de Tesis - Proyecto Final Integrador
 
-Documento preliminar para presentar el tema, alcance, solución propuesta, validación y planificación del trabajo final integrador.
+Propuesta de trabajo para presentar el tema, alcance, solución, validación y planificación del trabajo final integrador.
 
 ## Arquitectura de runtime con *proof gates* para delivery autónomo de software basado en *issues*
 
@@ -38,7 +38,7 @@ La sección presenta el título principal y una formulación alternativa de trab
 | Asesor profesional, si corresponde | No corresponde                | No aplica   | No corresponde | No corresponde                 |
 
 **Tabla 1. Integrantes del proyecto.**
-La tabla identifica al alumno, director, codirector y asesor profesional si correspondiera. En esta versión se consigna que no se declara codirector ni asesor profesional.
+La tabla identifica al alumno, director, codirector y asesor profesional si correspondiera. No se declara codirector ni asesor profesional.
 
 ---
 
@@ -126,7 +126,7 @@ Esta categoría es relevante para la tesis porque muchos sistemas issue-to-PR of
 
 ### 8.5. *Harness engineering* y conocimiento versionado en el repositorio
 
-El enfoque de *harness engineering* publicado por OpenAI propone tratar el conocimiento del repositorio como fuente de verdad estructurada, versionada y verificable. El artículo describe cómo un repositorio puede organizar documentación, planes, especificaciones, reglas de calidad y validaciones para que los agentes operen con mayor legibilidad y menor dependencia de instrucciones extensas o desactualizadas (Lopopolo, 2026).
+El enfoque de *harness engineering* publicado por OpenAI propone tratar el conocimiento del repositorio como una base estructurada, versionada y verificable. El artículo describe cómo un repositorio puede organizar documentación, planes, especificaciones, reglas de calidad y validaciones para que los agentes operen con mayor legibilidad y menor dependencia de instrucciones extensas o desactualizadas (Lopopolo, 2026).
 
 Symphony se vincula con esta línea mediante artefactos como `WORKFLOW.md`, `.symphony/harness.yml`, documentación de conocimiento en `.symphony/knowledge` y validaciones asociadas al harness (Dip, 2026e, 2026f). Esta aproximación es relevante porque el control del sistema no se delega únicamente al prompt ni al proveedor del agente, sino que se desplaza hacia contratos versionados dentro del repositorio.
 
@@ -521,7 +521,7 @@ La planificación se realizará por etapas, con entregables parciales revisables
 | CI inestable                          |   Medio |        Media | Definir checks locales reproducibles.                                  |
 | Scope demasiado amplio                |    Alto |        Media | Acotar a un tracker, un repositorio y un proveedor inicial.            |
 | Resultados variables del agente       |    Alto |         Alta | No medir calidad absoluta del código como objetivo principal.          |
-| Gráficos poco legibles en exportación |    Bajo |        Media | Mantener diagramas simples, tablas y documentación versionada.         |
+| Gráficos poco legibles en documentos finales |    Bajo |        Media | Mantener diagramas simples, tablas y documentación versionada.         |
 | Ambigüedad entre fork y aporte        |    Alto |        Media | Mantener tabla de diferenciación Symphony existente vs aporte tesis.   |
 | Manejo inseguro de secretos           |    Alto |        Media | Minimizar credenciales, documentar permisos y usar entorno controlado. |
 | Falta de datos reales                 |   Medio |         Baja | Diseñar escenarios reproducibles con issues de prueba.                 |
@@ -535,7 +535,7 @@ La calidad se verificará mediante:
 
 * pruebas automatizadas;
 * criterios de aceptación cuantitativos;
-* documentación técnica en Markdown;
+* documentación técnica versionada;
 * revisión periódica con director;
 * trazabilidad entre requisito y prueba;
 * registro de decisiones de diseño;
@@ -558,7 +558,7 @@ Las minutas de reunión podrán versionarse en el repositorio de documentación 
 
 ### 12.9. Documentación
 
-La documentación se organizará en Markdown dentro del repositorio, separando propuesta, estado del arte, problema, solución, validación, gestión y anexos. Esto permitirá trazabilidad entre comentarios del profesor, cambios de diseño, implementación y resultados.
+La documentación se organizará en archivos versionados dentro del repositorio, separando propuesta, estado del arte, problema, solución, validación, gestión y anexos. Esto permitirá trazabilidad entre comentarios del profesor, cambios de diseño, implementación y resultados.
 
 ### 12.10. Disponibilidad de datos, infraestructura, servidumbres y dependencias
 
@@ -683,7 +683,7 @@ Prometheus. (2026). *Overview*. Recuperado el 8 de mayo de 2026, de [https://pro
 
 ## 14. Anexos
 
-Los anexos reúnen material de apoyo para lectura, trazabilidad y futura exportación del documento.
+Los anexos reúnen material de apoyo para lectura y trazabilidad.
 
 ### Anexo A. Glosario de siglas y términos
 
