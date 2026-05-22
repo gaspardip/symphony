@@ -714,6 +714,14 @@ Los anexos reúnen material de apoyo para lectura y trazabilidad.
 | Bridge          | Adaptador que desacopla el runtime del agente o proveedor concreto.                                                                                      |
 | Orchestrator    | Componente que coordina elegibilidad, planificación, ejecución, concurrencia y estado de las corridas.                                                   |
 | Scheduler       | Componente o función responsable de planificar cuándo y cómo se ejecutan tareas.                                                                          |
+| Agentic         | Característica de una corrida en la que un agente de software toma decisiones operativas acotadas dentro de reglas y objetivos definidos.                 |
+| Control plane   | Superficie de control que permite observar, coordinar o gobernar la operación del sistema.                                                                |
+| Backoff         | Estrategia de espera progresiva entre reintentos para evitar repetición inmediata de fallas transitorias.                                                 |
+| Preflight       | Validación previa que confirma condiciones mínimas antes de iniciar una corrida o avanzar a una etapa posterior.                                         |
+| Smoke test      | Prueba rápida de funcionamiento básico que busca detectar fallas evidentes antes de una validación más extensa.                                          |
+| Post-merge      | Etapa posterior a la integración de cambios en la rama principal o rama objetivo.                                                                         |
+| Dispatch        | Acción de despachar o iniciar una corrida, tarea o unidad de trabajo dentro del runtime.                                                                  |
+| Polling         | Consulta periódica de una fuente externa para detectar cambios, nuevas tareas o cambios de elegibilidad.                                                  |
 | Runtime         | Capa de ejecución y coordinación responsable de controlar el flujo operativo.                                                                            |
 | Runtime-owned   | Enfoque en el cual el runtime controla las invariantes del proceso, en lugar de depender sólo de prompts o supervisión humana informal.                  |
 | Proof gate      | Punto de control que exige evidencia verificable antes de avanzar.                                                                                       |
