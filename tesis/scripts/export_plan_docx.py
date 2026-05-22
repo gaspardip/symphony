@@ -174,6 +174,73 @@ def add_page_number(paragraph) -> None:
     run._r.append(fld_char3)
 
 
+def next_numbering_id(numbering, tag: str, attr: str) -> int:
+    values = []
+    for element in numbering.findall(qn(tag)):
+        raw = element.get(qn(attr))
+        if raw and raw.isdigit():
+            values.append(int(raw))
+    return max(values, default=0) + 1
+
+
+def add_numbering_definition(doc: Document) -> int:
+    numbering = doc.part.numbering_part.numbering_definitions._numbering
+    abstract_id = next_numbering_id(numbering, "w:abstractNum", "w:abstractNumId")
+    num_id = next_numbering_id(numbering, "w:num", "w:numId")
+
+    abstract = OxmlElement("w:abstractNum")
+    abstract.set(qn("w:abstractNumId"), str(abstract_id))
+
+    lvl = OxmlElement("w:lvl")
+    lvl.set(qn("w:ilvl"), "0")
+    for tag, value in [
+        ("w:start", "1"),
+        ("w:numFmt", "decimal"),
+        ("w:lvlText", "%1."),
+        ("w:lvlJc", "left"),
+    ]:
+        elem = OxmlElement(tag)
+        elem.set(qn("w:val"), value)
+        lvl.append(elem)
+
+    p_pr = OxmlElement("w:pPr")
+    ind = OxmlElement("w:ind")
+    ind.set(qn("w:left"), "720")
+    ind.set(qn("w:hanging"), "360")
+    p_pr.append(ind)
+    lvl.append(p_pr)
+    abstract.append(lvl)
+    numbering.append(abstract)
+
+    num = OxmlElement("w:num")
+    num.set(qn("w:numId"), str(num_id))
+    abstract_ref = OxmlElement("w:abstractNumId")
+    abstract_ref.set(qn("w:val"), str(abstract_id))
+    num.append(abstract_ref)
+    numbering.append(num)
+    return num_id
+
+
+def apply_numbering(paragraph, num_id: int) -> None:
+    p_pr = paragraph._p.get_or_add_pPr()
+    num_pr = p_pr.find(qn("w:numPr"))
+    if num_pr is None:
+        num_pr = OxmlElement("w:numPr")
+        p_pr.append(num_pr)
+
+    ilvl = num_pr.find(qn("w:ilvl"))
+    if ilvl is None:
+        ilvl = OxmlElement("w:ilvl")
+        num_pr.append(ilvl)
+    ilvl.set(qn("w:val"), "0")
+
+    num_id_element = num_pr.find(qn("w:numId"))
+    if num_id_element is None:
+        num_id_element = OxmlElement("w:numId")
+        num_pr.append(num_id_element)
+    num_id_element.set(qn("w:val"), str(num_id))
+
+
 def configure_section(section) -> None:
     section.page_height = Cm(29.7)
     section.page_width = Cm(21.0)
@@ -239,7 +306,7 @@ def configure_document(doc: Document) -> None:
             style.font.size = Pt(size)
             style.font.bold = True
             style.font.color.rgb = color
-            style.paragraph_format.line_spacing = 1.2
+            style.paragraph_format.line_spacing = 1.5
             style.paragraph_format.space_before = Pt(before)
             style.paragraph_format.space_after = Pt(after)
             style.paragraph_format.keep_with_next = True
@@ -255,6 +322,15 @@ def add_inline(
     italic_all: bool = False,
 ) -> None:
     text = text.replace("\\|", "|")
+
+    def clean_link(match: re.Match[str]) -> str:
+        label = match.group(1)
+        url = match.group(2)
+        if label == url:
+            return url
+        return f"{label} ({url})"
+
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", clean_link, text)
     buf: list[str] = []
     bold = bold_all
     italic = italic_all
@@ -491,7 +567,7 @@ def add_caption(doc: Document, text: str) -> None:
     if clean.startswith("**") and clean.endswith("**"):
         clean = clean[2:-2]
     p = doc.add_paragraph()
-    set_paragraph_format(p, line_spacing=1.15, before=2, after=5, keep_with_next=True)
+    set_paragraph_format(p, line_spacing=1.5, before=2, after=5, keep_with_next=True)
     paragraph_border(p, bottom="D9E2F3")
     add_inline(p, clean, default_size=9.5, default_color=NAVY, bold_all=True)
 
@@ -556,7 +632,7 @@ def add_markdown_body(doc: Document, text: str, *, start_on_new_page: bool = Fal
             mark_body_start(p)
             set_paragraph_format(
                 p,
-                line_spacing=1.15,
+                line_spacing=1.5,
                 before=10 if level <= 2 else 6,
                 after=5 if level <= 2 else 3,
                 keep_with_next=True,
@@ -582,18 +658,25 @@ def add_markdown_body(doc: Document, text: str, *, start_on_new_page: bool = Fal
         if unordered:
             p = doc.add_paragraph(style="List Bullet")
             mark_body_start(p)
-            set_paragraph_format(p, line_spacing=1.3, before=0, after=3)
+            set_paragraph_format(p, line_spacing=1.5, before=0, after=3)
             add_inline(p, unordered.group(1), default_size=10.8)
             i += 1
             continue
 
         ordered = re.match(r"^\d+\.\s+(.*)$", stripped)
         if ordered:
-            p = doc.add_paragraph(style="List Number")
-            mark_body_start(p)
-            set_paragraph_format(p, line_spacing=1.3, before=0, after=3)
-            add_inline(p, ordered.group(1), default_size=10.8)
-            i += 1
+            num_id = add_numbering_definition(doc)
+            while i < len(lines):
+                current = lines[i].strip()
+                item = re.match(r"^\d+\.\s+(.*)$", current)
+                if not item:
+                    break
+                p = doc.add_paragraph()
+                mark_body_start(p)
+                apply_numbering(p, num_id)
+                set_paragraph_format(p, line_spacing=1.5, before=0, after=3)
+                add_inline(p, item.group(1), default_size=10.8)
+                i += 1
             continue
 
         paragraph_parts = [stripped]
@@ -618,7 +701,7 @@ def add_markdown_body(doc: Document, text: str, *, start_on_new_page: bool = Fal
             i += 1
         p = doc.add_paragraph()
         mark_body_start(p)
-        set_paragraph_format(p, line_spacing=1.35, after=5)
+        set_paragraph_format(p, line_spacing=1.5, after=5)
         add_inline(p, " ".join(paragraph_parts), default_size=11, default_color=INK)
 
 

@@ -2,7 +2,7 @@
 
 Fecha: 21/05/2026
 
-Interfaz utilizada: ChatGPT Pro en Chrome. El modelo visible en la corrida final fue `Medium`; dos intentos previos con el adjunto completo en modo `Pro` quedaron en `Stopped thinking` sin respuesta evaluable. Para evitar el bloqueo, la evaluación final se pidió con un resumen estructural fiel de la consigna de Blackboard y del plan actual.
+Interfaz utilizada: ChatGPT en Chrome. Primero se pidió una evaluación con la consigna resumida de Blackboard; luego se realizó una nueva revisión con el selector visible en `Pro` sobre el DOCX final adjunto.
 
 ## Resultado
 
@@ -52,3 +52,56 @@ Como plan de tesis está **bien acotado, técnicamente defendible, consistente c
 - Se regeneró `tesis/entrega/plan-tesis-proyecto-final-integrador.docx`.
 - Se verificó estructuralmente el DOCX: hoja A4, encabezado, pie de página, tablas, email actualizado y ausencia del correo anterior.
 - Se generó una previsualización con Quick Look en `/tmp/symphony_tesis_preview/plan-tesis-proyecto-final-integrador.docx.png`.
+
+## Nueva revisión ChatGPT Pro sobre DOCX final adjunto
+
+Modelo visible: `Pro`
+
+Archivo revisado: `tesis/entrega/plan-tesis-proyecto-final-integrador.docx`
+
+1. **Puntaje total sobre 100: 89/100**
+
+2. **Tabla breve por sección/rubro**
+
+| Sección / rubro                                            | Puntaje parcial | Justificación corta                                                                                                                                                                                                                  |
+| ---------------------------------------------------------- | --------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Formato y presentación DOCX                                |            8/12 | Carátula correcta, A4, Times, encabezado centrado, pie con apellido y página, tablas numeradas y descriptas. Penaliza: interlineado no plenamente 1,5, listas numeradas que no reinician y enlaces Markdown visibles en referencias. |
+| Secciones obligatorias                                     |             8/8 | Están las 14 secciones requeridas y el orden general respeta la guía.                                                                                                                                                                |
+| Resumen, palabras clave, abstract, keywords e introducción |            9/10 | Muy claro el foco: runtime, proof gates, trazabilidad, recuperación y Symphony como base experimental. Buen encuadre bilingüe.                                                                                                       |
+| Estado del Arte                                            |           13/15 | Mapea bien antecedentes, herramientas, vacancias y oportunidad de tesis. Penaliza que depende mucho de documentación técnica/repositorios y poco de literatura académica formal.                                                     |
+| Problema detectado/faltante                                |           10/10 | Excelente: claro, conciso, evaluable en primera lectura y conectado con un caso basal concreto.                                                                                                                                      |
+| Solución propuesta                                         |           13/15 | Arquitectura defendible, componentes bien separados, alcance/fuera de alcance correcto, requisitos RF/RNF sólidos y buena diferenciación respecto de Symphony.                                                                       |
+| Experimentación y validación                               |           11/12 | Buenas pruebas basales, casos reales, matriz de trazabilidad y métricas cuantitativas. Falta precisar un poco más cómo se capturará y auditará la evidencia en cada corrida.                                                         |
+| Plan de actividades                                        |           10/10 | Completo: metodología, entregables, hitos, cronograma, riesgos, calidad, reuniones, documentación, dependencias y seguridad.                                                                                                         |
+| Referencias y anexos                                       |             7/8 | Glosario y anexos útiles. Referencias pertinentes, pero deben limpiarse a APA 6 real y corregir los enlaces visibles tipo Markdown.                                                                                                  |
+
+3. **Bloqueantes para entregar hoy, si hay**
+
+* **No hay bloqueante conceptual.** El plan es sólido, acotado y defendible.
+* **Sí hay bloqueantes formales para una entrega Blackboard prolija:**
+  * Corregir la numeración de listas que continúa indebidamente: módulos de solución empiezan en 8, objetivos en 16, metodología en 24 y resultados esperados en 33.
+  * Ajustar interlineado a **1,5 real y consistente** si la cátedra lo exige estrictamente.
+  * Corregir referencias: los enlaces aparecen como Markdown visible `[url](url)`; debe quedar formato APA/Word limpio.
+* El riesgo del correo quedó resuelto: ahora figura `dip.gaspar@gmail.com`.
+
+4. **Mejoras no bloqueantes**
+
+* Sumar algunas fuentes académicas/papers además de documentación técnica.
+* Convertir referencias a APA 6 consistente.
+* Agregar, si queda tiempo, un diagrama simple de arquitectura o flujo.
+* Precisar por cada prueba qué evidencia queda: log, métrica, artefacto, estado, razón de bloqueo o reporte.
+* Reforzar una frase final sobre originalidad: el aporte no es Symphony como repo, sino la formalización, validación reproducible y matriz vacancia-requisito-prueba.
+
+5. **Veredicto final**
+
+**Al director: sí, lo entregaría hoy.**
+
+**A Blackboard: lo entregaría hoy sólo después de corregir numeración, interlineado y referencias.** Sin esos ajustes, el contenido aprueba con margen, pero la versión final queda expuesta a descuentos formales evitables.
+
+## Acciones posteriores a la revisión Pro del DOCX
+
+- Se ajustó `tesis/scripts/export_plan_docx.py` para que cada bloque de lista numerada use una definición propia y reinicie en 1.
+- Se normalizó el interlineado del cuerpo exportado a 1,5.
+- Se limpiaron los enlaces Markdown visibles en la exportación DOCX; las referencias ahora muestran la URL sin sintaxis `[url](url)`.
+- Se regeneró `tesis/entrega/plan-tesis-proyecto-final-integrador.docx`.
+- Se verificó estructuralmente el DOCX final: sin links Markdown visibles, sin correo incorrecto, con `dip.gaspar@gmail.com`, sin anexos internos removidos y con listas numeradas separadas por `numId`.
