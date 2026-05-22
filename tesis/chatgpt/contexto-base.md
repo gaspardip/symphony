@@ -16,6 +16,8 @@ Título alternativo:
 
 - Autor: Gaspar Dip
 - Matrícula: 49012185
+- Correo: dip.gaspar@gmaill.com
+- Pendiente formal: confirmar si el dominio correcto del correo es `gmaill.com` o `gmail.com` antes de subir a Blackboard.
 - Carrera: Ingeniería en Informática
 - Asignatura: Tesis de Grado - Proyecto Final Integrador
 - Director de tesis: Dr. Jorge Salvador Ierache

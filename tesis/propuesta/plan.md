@@ -1,10 +1,14 @@
 # Plan de Tesis - Proyecto Final Integrador
 
+Documento preliminar para presentar el tema, alcance, solución propuesta, validación y planificación del trabajo final integrador.
+
 ## Arquitectura de runtime con *proof gates* para delivery autónomo de software basado en *issues*
 
 ---
 
 ## 1. Títulos
+
+La sección presenta el título principal y una formulación alternativa de trabajo para orientar el alcance académico y técnico de la tesis.
 
 ### 1.1. Título principal
 
@@ -28,7 +32,7 @@
 
 | Rol                                | Nombre                        | Matrícula   | Correo      | Observaciones                  |
 | ---------------------------------- | ----------------------------- | ----------- | ----------- | ------------------------------ |
-| Alumno                             | Gaspar Dip                    | 49012185    | gaspar@fasteditor.com | Ingeniería en Informática      |
+| Alumno                             | Gaspar Dip                    | 49012185    | dip.gaspar@gmaill.com | Ingeniería en Informática      |
 | Director de tesis                  | Dr. Jorge Salvador Ierache    | No aplica   | jierache@fi.uba.ar | Director de tesis              |
 | Codirector, si corresponde         | No corresponde                | No aplica   | No corresponde | No corresponde                 |
 | Asesor profesional, si corresponde | No corresponde                | No aplica   | No corresponde | No corresponde                 |
@@ -222,6 +226,8 @@ Diseñar, implementar y validar una arquitectura preliminar de runtime para deli
 
 ### 10.3. Alcance
 
+El alcance delimita qué partes del runtime serán abordadas en la tesis y qué extensiones quedarán fuera para mantener el trabajo acotado y verificable.
+
 #### 10.3.1. Incluido
 
 * Modelo de runtime basado en *issues*.
@@ -338,6 +344,8 @@ La tabla enumera las funciones principales que debe cumplir el prototipo o adapt
 La tabla define propiedades de calidad, operación y seguridad esperadas para el sistema propuesto.
 
 ### 10.8. Tecnologías previstas
+
+Las tecnologías previstas se agrupan según su rol en la implementación del prototipo y en la validación de los escenarios definidos.
 
 #### 10.8.1. Tecnologías de implementación
 
@@ -554,6 +562,8 @@ La documentación se organizará en Markdown dentro del repositorio, separando p
 
 ### 12.10. Disponibilidad de datos, infraestructura, servidumbres y dependencias
 
+Esta sección identifica los insumos y dependencias necesarios para ejecutar la validación sin depender de datos masivos ni de infraestructura productiva.
+
 #### Datos
 
 No se requieren datasets masivos. La validación puede realizarse con:
@@ -672,6 +682,8 @@ Prometheus. (2026). *Overview*. Recuperado el 8 de mayo de 2026, de [https://pro
 ---
 
 ## 14. Anexos
+
+Los anexos reúnen material de apoyo para lectura, trazabilidad y futura exportación del documento.
 
 ### Anexo A. Glosario de siglas y términos
 
