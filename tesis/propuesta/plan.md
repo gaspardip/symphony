@@ -725,59 +725,7 @@ OpenAI. (2026c). *An open-source spec for Codex orchestration: Symphony*. Recupe
 
 OpenAI Developers. (2026). *OpenAI developers documentation*. Recuperado el 8 de mayo de 2026, de [https://developers.openai.com/](https://developers.openai.com/)
 
-### Anexo C. Organización propuesta del repositorio de tesis
-
-Se propone mantener la documentación de tesis dentro del fork de Symphony, en una carpeta separada, para facilitar trazabilidad entre investigación, diseño, implementación y validación.
-
-```text
-tesis/
-  README.md
-  propuesta/
-    plan.md
-    resumen.md
-  estado-del-arte/
-    taxonomia.md
-    matriz-comparativa.md
-    referencias.md
-  problema/
-    vacancias.md
-    requisitos.md
-    matriz-trazabilidad.md
-  solucion/
-    arquitectura.md
-    tecnologias.md
-  validacion/
-    pruebas-basales.md
-    casos-reales.md
-    metricas.md
-    resultados.md
-  gestion/
-    cronograma.md
-    riesgos.md
-    reuniones.md
-  anexos/
-    glosario.md
-    exportacion.md
-```
-
-Esta organización permite versionar cambios, vincular documentación con código, revisar avances desde GitHub y exportar el contenido a PDF o DOCX con herramientas como Pandoc, Quarto u otros conversores de Markdown.
-
-### Anexo D. Formato sugerido para exportación
-
-Para adaptar el documento a la guía de Blackboard se recomienda:
-
-* hoja A4;
-* fuente Times New Roman 11 para cuerpo de texto;
-* fuente 14 para títulos intermedios;
-* fuente 16 para títulos principales;
-* interlineado 1,5;
-* encabezado con el nombre del trabajo;
-* pie de página con apellidos de integrantes y número de página;
-* tablas numeradas con título y breve descripción;
-* carátula y acta según modelos de la cátedra;
-* conversión a DOCX/PDF para entrega formal.
-
-### Anexo E. Cierre preliminar
+### Anexo C. Cierre preliminar
 
 La propuesta se orienta a estudiar y construir una arquitectura de runtime para delivery autónomo de software donde el foco no está en reemplazar al desarrollador ni en demostrar que un agente escribe mejor código, sino en controlar el proceso mediante límites explícitos, aislamiento, *proof gates*, políticas versionadas y observabilidad.
 
