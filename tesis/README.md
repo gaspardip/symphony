@@ -15,4 +15,10 @@ Mantener versionada la documentación de tesis dentro del fork, separada del pro
 
 ## Exportación sugerida
 
-El contenido fuente se mantiene en Markdown y puede exportarse a PDF o DOCX con herramientas como Pandoc, Quarto o un pipeline propio de Markdown. Para esta entrega se generó un DOCX con hoja A4, Times New Roman, interlineado 1,5, encabezado y pie de página.
+El contenido fuente se mantiene en Markdown. Para regenerar el DOCX de entrega:
+
+```bash
+/Users/gaspar/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 tesis/scripts/export_plan_docx.py
+```
+
+La plantilla exporta un DOCX con hoja A4, tipografía Times New Roman, carátula profesional, encabezado, pie de página, secciones jerarquizadas y tablas estilizadas.

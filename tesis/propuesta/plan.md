@@ -32,7 +32,7 @@ La sección presenta el título principal y una formulación alternativa de trab
 
 | Rol                                | Nombre                        | Matrícula   | Correo      | Observaciones                  |
 | ---------------------------------- | ----------------------------- | ----------- | ----------- | ------------------------------ |
-| Alumno                             | Gaspar Dip                    | 49012185    | dip.gaspar@gmaill.com | Ingeniería en Informática      |
+| Alumno                             | Gaspar Dip                    | 49012185    | dip.gaspar@gmail.com | Ingeniería en Informática      |
 | Director de tesis                  | Dr. Jorge Salvador Ierache    | No aplica   | jierache@fi.uba.ar | Director de tesis              |
 | Codirector, si corresponde         | No corresponde                | No aplica   | No corresponde | No corresponde                 |
 | Asesor profesional, si corresponde | No corresponde                | No aplica   | No corresponde | No corresponde                 |

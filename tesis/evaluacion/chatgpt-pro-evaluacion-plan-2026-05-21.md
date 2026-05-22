@@ -12,9 +12,9 @@ Interfaz utilizada: ChatGPT Pro en Chrome. El modelo visible en la corrida final
 
 | Sección / rubro                                  | Puntaje | Justificación corta                                                                                                                                                          |
 | ------------------------------------------------ | ------: | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Formato, carátula y presentación                 |    8/10 | DOCX exportado con carátula/formato presentable. Riesgo: el Markdown no garantiza por sí mismo A4, Times, encabezado, pie y numeración. Email mal escrito en carátula/datos. |
+| Formato, carátula y presentación                 |    8/10 | DOCX exportado con carátula/formato presentable. Riesgo original: el Markdown no garantizaba por sí mismo A4, Times, encabezado, pie y numeración.                         |
 | 1. Títulos                                       |     5/5 | Tema claro, específico, acotado y alineado con Symphony. Buen título principal y alternativo.                                                                                |
-| 2. Integrantes                                   |     3/5 | Incluye alumno, matrícula, director y correos. Penalización fuerte por `dip.gaspar@gmaill.com`: riesgo formal evitable.                                                      |
+| 2. Integrantes                                   |     3/5 | Incluye alumno, matrícula, director y correos. Penalización inicial por dominio de correo incorrecto, ya corregido a `dip.gaspar@gmail.com`.                                  |
 | 3-6. Resumen, palabras clave, abstract, keywords |    8/10 | Cumple estructura bilingüe. Resumen sólido y orientado a contribución. Faltaría verificar calidad del abstract completo y consistencia terminológica.                        |
 | 7. Introducción                                  |     8/9 | Bien planteada: contexto, motivación, brecha y encuadre de Symphony como base/prototipo, no como entrega acrítica.                                                           |
 | 8. Estado del Arte                               |   13/15 | Muy buen mapa de herramientas, vacancias y dimensiones técnicas. Penaliza que parece más apoyado en documentación/repositorios que en literatura académica formal.           |
@@ -27,7 +27,7 @@ Interfaz utilizada: ChatGPT Pro en Chrome. El modelo visible en la corrida final
 
 3. **Bloqueantes para entregar hoy**
 
-* **Corregir el email `dip.gaspar@gmaill.com`**. Es un error formal visible en una sección sensible; no entregaría sin corregirlo.
+* **Corregir el dominio del email del alumno**. Era un error formal visible en una sección sensible; no entregaría sin corregirlo.
 * **Verificar el DOCX final**, no sólo el Markdown: A4, Times New Roman 11, títulos 14/16, interlineado 1,5, encabezado, pie con apellido y página, numeración de tablas/gráficos.
 * **Revisar que no haya títulos consecutivos sin breve descripción**, porque la guía lo menciona explícitamente.
 
@@ -48,7 +48,7 @@ Como plan de tesis está **bien acotado, técnicamente defendible, consistente c
 ## Acciones posteriores a la evaluación
 
 - Se agregaron frases breves entre encabezados consecutivos en `tesis/propuesta/plan.md`.
+- Se corrigió el correo del alumno a `dip.gaspar@gmail.com`.
 - Se regeneró `tesis/entrega/plan-tesis-proyecto-final-integrador.docx`.
 - Se verificó estructuralmente el DOCX: hoja A4, encabezado, pie de página, tablas, email actualizado y ausencia del correo anterior.
 - Se generó una previsualización con Quick Look en `/tmp/symphony_tesis_preview/plan-tesis-proyecto-final-integrador.docx.png`.
-- Queda pendiente confirmar si el correo correcto es `dip.gaspar@gmaill.com` o `dip.gaspar@gmail.com`.
