@@ -46,7 +46,7 @@ La tabla identifica al alumno, director, codirector y asesor profesional si corr
 
 El presente plan de tesis propone el diseño, implementación y validación de una arquitectura de runtime para delivery autónomo de software basado en *issues*, entendidas como tareas o tickets de trabajo gestionados en un sistema de seguimiento. El problema abordado surge de la brecha existente entre la capacidad actual de los agentes de inteligencia artificial (IA) para generar cambios de código y la necesidad de ejecutar esos cambios dentro de un proceso de ingeniería de software controlable, auditable, recuperable y validado por evidencia.
 
-La propuesta toma como base experimental el proyecto Symphony, en particular el repositorio `gaspardip/symphony`, y lo estudia como un marco integrador para orquestar agentes de software. El foco no está en desarrollar un nuevo agente de programación, sino en formalizar y validar una capa de control que convierta trabajo proveniente de *issues* en corridas aisladas por tarea, con políticas versionadas en el repositorio, *proof gates* —puntos de control basados en evidencia—, observabilidad operativa y recuperación ante fallas.
+La propuesta toma como base experimental el proyecto Symphony, en particular el repositorio `gaspardip/symphony`, y lo estudia como un marco integrador para orquestar agentes de software. El foco no está en desarrollar un nuevo agente de programación, sino en formalizar y validar una capa de control que convierta trabajo proveniente de *issues* en corridas aisladas por tarea, con políticas versionadas en el repositorio, *proof gates* (puntos de control basados en evidencia), observabilidad operativa y recuperación ante fallas.
 
 La validación se realizará mediante pruebas basales del software, escenarios reales reproducibles y métricas asociadas a trazabilidad, recuperabilidad, bloqueo correcto por gates, completitud de evidencia, observabilidad y diagnóstico operacional. El resultado esperado es un prototipo funcional o adaptación verificable sobre Symphony, una arquitectura documentada, una matriz de trazabilidad entre vacancias, requisitos y pruebas, y una evaluación técnica del enfoque propuesto.
 
@@ -60,17 +60,17 @@ Agentes de software; ingeniería de software; delivery autónomo; integración c
 
 ## 5. Abstract
 
-This thesis plan proposes the design, implementation, and validation of a runtime architecture for issue-based autonomous software delivery. The problem addressed is the gap between the current ability of artificial intelligence agents to generate code changes and the need to execute those changes within a software engineering process that is controllable, auditable, recoverable, and validated through evidence.
+Este plan de tesis propone el diseño, implementación y validación de una arquitectura de runtime para delivery autónomo de software basado en issues. El problema abordado es la brecha entre la capacidad actual de los agentes de inteligencia artificial para generar cambios de código y la necesidad de ejecutar esos cambios dentro de un proceso de ingeniería de software controlable, auditable, recuperable y validado por evidencia.
 
-The proposal uses Symphony, particularly the `gaspardip/symphony` repository, as an experimental basis. The goal is not to build a new programming agent, but to formalize and validate a control layer that transforms issue-based work intake into isolated task executions with repository-versioned policies, proof gates, operational observability, and failure recovery mechanisms.
+La propuesta utiliza Symphony, en particular el repositorio `gaspardip/symphony`, como base experimental. El objetivo no es construir un nuevo agente de programación, sino formalizar y validar una capa de control que transforme trabajo basado en issues en ejecuciones aisladas por tarea, con políticas versionadas en el repositorio, proof gates, observabilidad operativa y mecanismos de recuperación ante fallas.
 
-Validation will be performed through baseline software tests, reproducible real-world scenarios, and metrics related to traceability, recoverability, correct gate blocking, evidence completeness, observability, and operational diagnosis. The expected result is a functional prototype or verifiable adaptation over Symphony, a documented architecture, a traceability matrix connecting gaps, requirements, components, tests, and metrics, and a technical evaluation of the proposed approach.
+La validación se realizará mediante pruebas basales del software, escenarios reales reproducibles y métricas vinculadas con trazabilidad, recuperabilidad, bloqueo correcto por gates, completitud de evidencia, observabilidad y diagnóstico operacional. El resultado esperado es un prototipo funcional o adaptación verificable sobre Symphony, una arquitectura documentada, una matriz de trazabilidad que conecte vacancias, requisitos, componentes, pruebas y métricas, y una evaluación técnica del enfoque propuesto.
 
 ---
 
 ## 6. Keywords
 
-Software agents; software engineering; autonomous delivery; continuous integration; observability; proof gates; policy-as-code; runtime; issues; Symphony.
+Agentes de software; ingeniería de software; delivery autónomo; integración continua; observabilidad; proof gates; policy-as-code; runtime; issues; Symphony.
 
 ---
 
@@ -84,7 +84,7 @@ GitHub Copilot cloud agent permite iniciar tareas de desarrollo desde GitHub Iss
 
 La oportunidad de tesis se encuentra en otro punto: formalizar una capa de control que integre intake de trabajo, ejecución aislada por unidad de trabajo, políticas versionadas en el repositorio, *proof gates*, recuperación ante fallas y observabilidad operacional. En esta propuesta, un *proof gate* se define como un punto de control que exige evidencia verificable antes de permitir que una corrida avance en el flujo. Esa evidencia puede incluir pruebas automatizadas, checks de integración continua, actualización de artefactos de progreso, metadatos de funcionalidad o estado final de corrida.
 
-La propuesta toma como base experimental el proyecto Symphony, particularmente el repositorio `gaspardip/symphony` (Dip, 2026a). Symphony se presenta como un motor de delivery autónomo donde el runtime es dueño del flujo operativo. En el proyecto se documentan componentes como un servicio de orquestación en Elixir/OTP —donde OTP significa *Open Telecom Platform*, conjunto de bibliotecas y patrones de Erlang/Elixir para construir sistemas concurrentes y tolerantes a fallas—, intake desde Linear y carga manual, webhooks de GitHub, workspaces aislados por issue, API JSON —interfaz de programación de aplicaciones que intercambia datos en formato JavaScript Object Notation—, métricas Prometheus y un harness versionado en el repositorio (Dip, 2026a, 2026b, 2026e, 2026f).
+La propuesta toma como base experimental el proyecto Symphony, particularmente el repositorio `gaspardip/symphony` (Dip, 2026a). Symphony se presenta como un motor de delivery autónomo donde el runtime es dueño del flujo operativo. En el proyecto se documentan componentes como un servicio de orquestación en Elixir/OTP (OTP significa *Open Telecom Platform*, conjunto de bibliotecas y patrones de Erlang/Elixir para construir sistemas concurrentes y tolerantes a fallas), intake desde Linear y carga manual, webhooks de GitHub, workspaces aislados por issue, API JSON (interfaz de programación de aplicaciones que intercambia datos en formato JavaScript Object Notation), métricas Prometheus y un harness versionado en el repositorio (Dip, 2026a, 2026b, 2026e, 2026f).
 
 El objetivo de la tesis no es construir “otro agente que programa”, sino estudiar, formalizar y validar una arquitectura de runtime para delivery autónomo de software basado en *issues*, donde el runtime controle las invariantes operativas: elegibilidad de tareas, aislamiento, límites de ejecución, pruebas, evidencia, observabilidad, recuperación y handoff hacia revisión humana o integración continua.
 
@@ -194,7 +194,7 @@ Este caso sintetiza el problema: el valor no está únicamente en generar códig
 
 ## 10. Solución propuesta
 
-La solución preliminar consiste en un marco integrador —framework— de runtime que actúe como capa de control entre el intake de trabajo y la ejecución de agentes de software.
+La solución preliminar consiste en un marco integrador (framework) de runtime que actúe como capa de control entre el intake de trabajo y la ejecución de agentes de software.
 
 El runtime se organizará en los siguientes módulos conceptuales:
 
@@ -659,7 +659,7 @@ GitHub Docs. (2026c). *GitHub Actions documentation*. Recuperado el 8 de mayo de
 
 IEEE Standards Association. (1998). *IEEE 830-1998: IEEE recommended practice for software requirements specifications*. Recuperado el 8 de mayo de 2026, de [https://standards.ieee.org/standard/830-1998.html](https://standards.ieee.org/standard/830-1998.html)
 
-ISO. (2018). *ISO/IEC/IEEE 29148:2018 Systems and software engineering — Life cycle processes — Requirements engineering*. Recuperado el 8 de mayo de 2026, de [https://www.iso.org/standard/72089.html](https://www.iso.org/standard/72089.html)
+ISO. (2018). *ISO/IEC/IEEE 29148:2018 Systems and software engineering - Life cycle processes - Requirements engineering*. Recuperado el 8 de mayo de 2026, de [https://www.iso.org/standard/72089.html](https://www.iso.org/standard/72089.html)
 
 LangChain Docs. (2026a). *LangGraph durable execution*. Recuperado el 8 de mayo de 2026, de [https://docs.langchain.com/oss/python/langgraph/durable-execution](https://docs.langchain.com/oss/python/langgraph/durable-execution)
 
@@ -700,6 +700,20 @@ Los anexos reúnen material de apoyo para lectura y trazabilidad.
 | YAML            | Formato legible de serialización usado frecuentemente para configuración.                                                                                |
 | OTP             | Open Telecom Platform, conjunto de bibliotecas y patrones del ecosistema Erlang/Elixir.                                                                  |
 | HITL            | Human in the Loop: intervención humana dentro de un proceso automatizado.                                                                                |
+| Delivery        | Proceso por el cual una tarea de software pasa desde su definición hasta una salida revisable, integrable o desplegable.                                 |
+| Issue-driven    | Enfoque en el cual la ejecución del trabajo se origina desde issues o tickets del sistema de seguimiento.                                                 |
+| Cloud agent     | Agente ejecutado en infraestructura administrada por una plataforma externa.                                                                              |
+| Workspace       | Espacio de trabajo aislado asociado a una tarea o issue.                                                                                                 |
+| Worktree        | Copia de trabajo separada de un repositorio Git, usada para aislar cambios por tarea.                                                                     |
+| Workflow        | Secuencia definida de pasos, reglas y estados para ejecutar una tarea.                                                                                    |
+| Intake          | Entrada o recepción inicial de trabajo desde issues, carga manual o eventos de revisión.                                                                 |
+| Gate            | Punto de control que permite o bloquea el avance de una corrida.                                                                                         |
+| Dashboard       | Vista de consulta para estado, métricas, reportes o evidencia operacional.                                                                                |
+| Log             | Registro cronológico de eventos relevantes de una corrida o componente.                                                                                  |
+| Stub            | Implementación simplificada usada para probar integración o comportamiento sin depender del componente real.                                              |
+| Bridge          | Adaptador que desacopla el runtime del agente o proveedor concreto.                                                                                      |
+| Orchestrator    | Componente que coordina elegibilidad, planificación, ejecución, concurrencia y estado de las corridas.                                                   |
+| Scheduler       | Componente o función responsable de planificar cuándo y cómo se ejecutan tareas.                                                                          |
 | Runtime         | Capa de ejecución y coordinación responsable de controlar el flujo operativo.                                                                            |
 | Runtime-owned   | Enfoque en el cual el runtime controla las invariantes del proceso, en lugar de depender sólo de prompts o supervisión humana informal.                  |
 | Proof gate      | Punto de control que exige evidencia verificable antes de avanzar.                                                                                       |
