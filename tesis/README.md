@@ -6,6 +6,7 @@ Esta carpeta contiene documentación académica y técnica vinculada al plan de 
 
 - [`propuesta/plan.md`](propuesta/plan.md): plan de tesis para Proyecto Final Integrador, estructurado según la guía de Blackboard.
 - [`entrega/plan-tesis-proyecto-final-integrador.docx`](entrega/plan-tesis-proyecto-final-integrador.docx): exportación editable para la entrega formal.
+- [`chatgpt/README.md`](chatgpt/README.md): workflow para usar ChatGPT Pro sin perder trazabilidad del documento.
 
 ## Objetivo de la carpeta
 

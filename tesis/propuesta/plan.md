@@ -28,13 +28,13 @@
 
 | Rol                                | Nombre                        | Matrícula   | Correo      | Observaciones                  |
 | ---------------------------------- | ----------------------------- | ----------- | ----------- | ------------------------------ |
-| Alumno                             | [Completar apellido y nombre] | [Completar] | [Completar] | [Completar]                    |
-| Director de tesis                  | [Completar apellido y nombre] | No aplica   | [Completar] | [Completar institución/cargo]  |
-| Codirector, si corresponde         | [Completar apellido y nombre] | No aplica   | [Completar] | [Completar]                    |
-| Asesor profesional, si corresponde | [Completar apellido y nombre] | No aplica   | [Completar] | [Completar organización/cargo] |
+| Alumno                             | Gaspar Dip                    | 49012185    | gaspar@fasteditor.com | Ingeniería en Informática      |
+| Director de tesis                  | Dr. Jorge Salvador Ierache    | No aplica   | jierache@fi.uba.ar | Director de tesis              |
+| Codirector, si corresponde         | No corresponde                | No aplica   | No corresponde | No corresponde                 |
+| Asesor profesional, si corresponde | No corresponde                | No aplica   | No corresponde | No corresponde                 |
 
 **Tabla 1. Integrantes del proyecto.**
-La tabla identifica al alumno, director, codirector y asesor profesional si correspondiera. Los datos personales y académicos se dejan como placeholders para ser completados en la versión formal.
+La tabla identifica al alumno, director, codirector y asesor profesional si correspondiera. En esta versión se consigna que no se declara codirector ni asesor profesional.
 
 ---
 
