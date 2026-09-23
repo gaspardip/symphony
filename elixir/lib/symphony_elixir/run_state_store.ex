@@ -161,19 +161,21 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec save(Path.t(), map()) :: :ok | {:error, term()}
   def save(workspace, state) when is_binary(workspace) and is_map(state) do
+    with_state_lock(workspace, fn -> save_unlocked(workspace, state) end)
+  end
+
+  defp with_state_lock(workspace, fun) do
+    :global.trans({{__MODULE__, Path.expand(workspace)}, self()}, fun, [node()])
+  end
+
+  defp save_unlocked(workspace, state) do
     path = state_path(workspace)
 
-    :global.trans(
-      {{__MODULE__, Path.expand(workspace)}, self()},
-      fn ->
-        with {:ok, previous_state} <- load_for_update(workspace, %{}),
-             :ok <- File.mkdir_p(Path.dirname(path)) do
-          state = preserve_token_usage(state, previous_state)
-          write_json_atomically(path, ensure_runner_metadata(state))
-        end
-      end,
-      [node()]
-    )
+    with {:ok, previous_state} <- load_for_update(workspace, %{}),
+         :ok <- File.mkdir_p(Path.dirname(path)) do
+      state = preserve_token_usage(state, previous_state)
+      write_json_atomically(path, ensure_runner_metadata(state))
+    end
   end
 
   defp preserve_token_usage(state, previous_state) do
@@ -196,22 +198,26 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec record_token_usage(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def record_token_usage(workspace, issue, usage) do
-    with {:ok, state} <- load_for_update(workspace, issue) do
-      state = Map.put(state, :token_usage, usage)
+    with_state_lock(workspace, fn ->
+      with {:ok, state} <- load_for_update(workspace, issue) do
+        state = Map.put(state, :token_usage, usage)
 
-      case save(workspace, state) do
-        :ok -> {:ok, state}
-        {:error, reason} -> {:error, reason}
+        case save_unlocked(workspace, state) do
+          :ok -> {:ok, state}
+          {:error, reason} -> {:error, reason}
+        end
       end
-    end
+    end)
   end
 
   @spec transition(Path.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def transition(workspace, stage, attrs \\ %{})
       when is_binary(workspace) and is_binary(stage) and is_map(attrs) do
-    with {:ok, previous_state} <- load_for_update(workspace, %{}) do
-      transition_from_state(workspace, stage, attrs, previous_state)
-    end
+    with_state_lock(workspace, fn ->
+      with {:ok, previous_state} <- load_for_update(workspace, %{}) do
+        transition_from_state(workspace, stage, attrs, previous_state)
+      end
+    end)
   end
 
   defp transition_from_state(workspace, stage, attrs, previous_state) do
@@ -223,7 +229,7 @@ defmodule SymphonyElixir.RunStateStore do
       |> Map.put(:stage, stage)
       |> maybe_record_stage_transition(stage, Map.get(attrs, :reason), same_stage?)
 
-    case save(workspace, state) do
+    case save_unlocked(workspace, state) do
       :ok ->
         if same_stage? do
           {:ok, state}
@@ -259,7 +265,7 @@ defmodule SymphonyElixir.RunStateStore do
           )
 
           persisted_state = Map.put(state, :last_ledger_event_id, Map.get(ledger_event, :event_id))
-          :ok = save(workspace, persisted_state)
+          :ok = save_unlocked(workspace, persisted_state)
           {:ok, persisted_state}
         end
 
@@ -270,27 +276,31 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec update(Path.t(), (map() -> map())) :: {:ok, map()} | {:error, term()}
   def update(workspace, fun) when is_binary(workspace) and is_function(fun, 1) do
-    with {:ok, previous_state} <- load_for_update(workspace, %{}) do
-      state = fun.(previous_state)
+    with_state_lock(workspace, fn ->
+      with {:ok, previous_state} <- load_for_update(workspace, %{}) do
+        state = fun.(previous_state)
 
-      case save(workspace, state) do
-        :ok -> {:ok, state}
-        {:error, reason} -> {:error, reason}
+        case save_unlocked(workspace, state) do
+          :ok -> {:ok, state}
+          {:error, reason} -> {:error, reason}
+        end
       end
-    end
+    end)
   end
 
   @spec sync_lease(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def sync_lease(workspace, issue, lease_attrs)
       when is_binary(workspace) and is_map(issue) and is_map(lease_attrs) do
-    with {:ok, previous_state} <- load_for_update(workspace, issue) do
-      state = apply_lease_attrs(previous_state, lease_attrs)
+    with_state_lock(workspace, fn ->
+      with {:ok, previous_state} <- load_for_update(workspace, issue) do
+        state = apply_lease_attrs(previous_state, lease_attrs)
 
-      case save(workspace, state) do
-        :ok -> {:ok, state}
-        {:error, reason} -> {:error, reason}
+        case save_unlocked(workspace, state) do
+          :ok -> {:ok, state}
+          {:error, reason} -> {:error, reason}
+        end
       end
-    end
+    end)
   end
 
   @spec clear_lease(Path.t()) :: {:ok, map()} | {:error, term()}
