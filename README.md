@@ -34,6 +34,9 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+New worker dispatch validates the current workflow and workspace root. Invalid configuration
+blocks the worker and records a `config_invalid` event for diagnosis.
+
 ---
 
 ## License

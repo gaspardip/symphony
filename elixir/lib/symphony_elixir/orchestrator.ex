@@ -31,6 +31,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.StatusDashboard
   alias SymphonyElixir.TrackerEvent
   alias SymphonyElixir.TrackerEventInbox
+  alias SymphonyElixir.Workflow
   alias SymphonyElixir.WorkflowStore
   alias SymphonyElixir.WorkflowProfile
   alias SymphonyElixir.Orchestrator.Controls
@@ -440,6 +441,11 @@ defmodule SymphonyElixir.Orchestrator do
           )
         else
           {:error, reason} ->
+            record_invalid_dispatch_configuration(reason, %{
+              actor_id: state.lease_owner,
+              metadata: %{dispatch_mode: mode}
+            })
+
             Logger.error("Failed to run GitHub webhook dispatch cycle: #{inspect(reason)}")
             %{state | skipped_issues: [], candidate_fetch_error: reason}
         end
@@ -465,6 +471,11 @@ defmodule SymphonyElixir.Orchestrator do
           )
         else
           {:error, reason} ->
+            record_invalid_dispatch_configuration(reason, %{
+              actor_id: state.lease_owner,
+              metadata: %{dispatch_mode: mode}
+            })
+
             Logger.error("Failed to run degraded tracker dispatch cycle: #{inspect(reason)}")
 
             %{
@@ -482,6 +493,11 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_dispatch_mode(mode)
         else
           {:error, reason} ->
+            record_invalid_dispatch_configuration(reason, %{
+              actor_id: state.lease_owner,
+              metadata: %{dispatch_mode: mode}
+            })
+
             Logger.error("Dispatch blocked by config validation: #{inspect(reason)}")
             %{state | skipped_issues: [], candidate_fetch_error: reason}
         end
@@ -4844,8 +4860,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_function(active_dispatch_fun, 3) and is_function(passive_dispatch_fun, 3) do
     with :ok <- token_usage_dispatch_guard(state, issue.id),
-         :ok <- WorkflowStore.force_reload(),
-         :ok <- Config.validate!(),
+         :ok <- validate_dispatch_configuration(issue),
          :ok <- RunStateStore.ensure_readable(Workspace.path_for_issue(issue)),
          :ok <- persisted_issue_token_budget_guard(issue) do
       case normalize_dispatch_stage(issue) do
@@ -4860,6 +4875,37 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Dispatch blocked by runtime validation issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
         %{state | candidate_fetch_error: reason}
     end
+  end
+
+  defp validate_dispatch_configuration(issue) do
+    with :ok <- WorkflowStore.force_reload(),
+         :ok <- Config.validate!() do
+      :ok
+    else
+      {:error, reason} = error ->
+        record_invalid_dispatch_configuration(reason, %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          actor_id: "orchestrator",
+          metadata: %{}
+        })
+
+        error
+    end
+  end
+
+  defp record_invalid_dispatch_configuration(reason, context) do
+    RunLedger.record(
+      "config_invalid",
+      Map.merge(context, %{
+        actor_type: "runtime",
+        rule_id: "config.invalid",
+        failure_class: "configuration",
+        summary: "New dispatch blocked by invalid workflow configuration.",
+        details: inspect(reason),
+        metadata: Map.put(context.metadata, :workflow_path, Workflow.workflow_file_path())
+      })
+    )
   end
 
   defp persisted_issue_token_budget_guard(issue) do

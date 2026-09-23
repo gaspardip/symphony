@@ -148,6 +148,9 @@ codex:
   After a failed hot reload, reads and reconciliation can still use the last valid configuration;
   each new dispatch checks the current file before starting a worker. Restoring a valid file
   re-enables dispatch.
+- An existing `workspace.root` must be a directory. A missing root may be created during
+  workspace bootstrap; a file or an inaccessible path blocks configuration validation.
+  Configuration rejected at dispatch records a `config_invalid` ledger event with the cause.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 

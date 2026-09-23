@@ -1338,9 +1338,21 @@ defmodule SymphonyElixir.Config do
          :ok <- require_valid_policy_defaults(),
          :ok <- require_valid_policy_pack(),
          :ok <- require_valid_codex_runtime_settings(),
+         :ok <- require_valid_workspace_root(),
          :ok <- require_valid_runner_harness() do
       warn_likely_misconfigurations()
       :ok
+    end
+  end
+
+  defp require_valid_workspace_root do
+    root = workspace_root()
+
+    case File.stat(root) do
+      {:ok, %File.Stat{type: :directory}} -> :ok
+      {:ok, _stat} -> {:error, {:invalid_workspace_root, root, :enotdir}}
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:invalid_workspace_root, root, reason}}
     end
   end
 
