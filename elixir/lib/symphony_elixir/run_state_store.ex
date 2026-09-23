@@ -532,8 +532,9 @@ defmodule SymphonyElixir.RunStateStore do
         {key, preserve_string_keys_value(value)}
       end)
     else
-      Map.new(map, fn {key, value} ->
-        {atom_key(key), atomize_value(value)}
+      Map.new(map, fn
+        {"stage_transition_counts", counts} -> {:stage_transition_counts, counts}
+        {key, value} -> {atom_key(key), atomize_value(value)}
       end)
     end
   end

@@ -201,7 +201,7 @@ defmodule SymphonyElixir.Phase6RuntimeCoverageBackfillTest do
                RunStateStore.transition(workspace, "verify", %{last_decision_summary: "polled"})
 
       assert same_stage_state.last_decision_summary == "polled"
-      assert same_stage_state.stage_transition_counts == %{verify: 1}
+      assert same_stage_state.stage_transition_counts == state.stage_transition_counts
       assert length(same_stage_state.stage_history) == 1
       assert same_stage_state.last_ledger_event_id == state.last_ledger_event_id
 
