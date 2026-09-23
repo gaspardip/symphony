@@ -1353,7 +1353,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert_eventually(
       fn ->
-        {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, run_state} = RunStateStore.load(workspace)
         assert {:ok, lease} = LeaseManager.read(issue.id)
 
         assert Map.get(run_state, :stage) == "review_verification"
