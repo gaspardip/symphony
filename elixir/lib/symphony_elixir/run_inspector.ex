@@ -293,7 +293,8 @@ defmodule SymphonyElixir.RunInspector do
 
   defp run_harness_command(workspace, command, opts) when is_binary(command) do
     shell_runner = Keyword.get(opts, :shell_runner, &default_shell_runner/3)
-    {output, status} = shell_runner.(workspace, command, stderr_to_stdout: true)
+    env = workspace_runtime_env(workspace)
+    {output, status} = shell_runner.(workspace, command, stderr_to_stdout: true, env: env)
 
     %CommandResult{
       status: if(status == 0, do: :passed, else: :failed),
@@ -522,7 +523,75 @@ defmodule SymphonyElixir.RunInspector do
   end
 
   defp default_shell_runner(workspace, command, opts) do
+    if env = Keyword.get(opts, :env), do: prepare_workspace_runtime_env(workspace, env)
     System.cmd("sh", ["-lc", command], Keyword.merge([cd: workspace], opts))
+  end
+
+  # Apply these values only to the child process; never mutate the daemon's environment.
+  defp workspace_runtime_env(workspace) do
+    runtime_home = Path.join(Path.expand(workspace), ".symphony/runtime")
+    inherited_mix_home = System.get_env("MIX_HOME")
+    inherited_archives = System.get_env("MIX_ARCHIVES")
+    mix_home = inherited_mix_home || Path.join(runtime_home, "mix_home")
+
+    archives =
+      inherited_archives ||
+        if(inherited_mix_home, do: Path.join(mix_home, "archives"), else: Path.join(runtime_home, "mix_archives"))
+
+    [
+      {"MIX_HOME", mix_home},
+      {"HEX_HOME", System.get_env("HEX_HOME") || Path.join(runtime_home, "hex_home")},
+      {"MIX_ARCHIVES", archives}
+    ]
+  end
+
+  defp prepare_workspace_runtime_env(workspace, env) do
+    case File.stat(workspace) do
+      {:ok, %File.Stat{type: :directory}} -> :ok
+      {:ok, _stat} -> raise File.Error, reason: :enotdir, action: "open workspace", path: workspace
+      {:error, reason} -> raise File.Error, reason: reason, action: "open workspace", path: workspace
+    end
+
+    Enum.each(env, fn {_key, path} -> File.mkdir_p!(Path.expand(path, workspace)) end)
+
+    if is_nil(System.get_env("MIX_HOME")) do
+      source_home = default_mix_home()
+      mix_home = List.keyfind(env, "MIX_HOME", 0) |> elem(1)
+      seed_runtime_path(Path.join(source_home, rebar_relative_path()), Path.join(mix_home, rebar_relative_path()))
+
+      if is_nil(System.get_env("MIX_ARCHIVES")) do
+        archives = List.keyfind(env, "MIX_ARCHIVES", 0) |> elem(1)
+        seed_runtime_path(Path.join(source_home, "archives"), archives)
+      end
+    end
+  end
+
+  defp default_mix_home do
+    if System.get_env("MIX_XDG") in ["1", "true"] do
+      :filename.basedir(:user_data, "mix", %{os: :linux})
+    else
+      Path.join(System.user_home!(), ".mix")
+    end
+  end
+
+  defp rebar_relative_path do
+    [major, minor | _] = String.split(System.version(), ".")
+    Path.join(["elixir", "#{major}-#{minor}-otp-#{System.otp_release()}", "rebar3"])
+  end
+
+  # Preserve workspace installs and copy only installed tools, never global config or credentials.
+  defp seed_runtime_path(source, destination) do
+    case File.stat(source) do
+      {:ok, _stat} ->
+        File.mkdir_p!(Path.dirname(destination))
+        File.cp_r!(source, destination, on_conflict: fn _source, _destination -> false end, dereference_symlinks: true)
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        raise File.Error, reason: reason, action: "read runtime seed", path: source
+    end
   end
 
   defp runtime_artifact_path?(nil), do: false
