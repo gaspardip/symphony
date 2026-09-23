@@ -98,7 +98,7 @@ defmodule SymphonyElixir.LeaseConcurrencyTest do
              LeaseManager.acquire("unwritable-lock", "LOCK-2", "owner-a")
   end
 
-  test "invalid JSON and non-map leases cannot be acquired or refreshed" do
+  test "invalid JSON and non-map leases cannot be acquired, refreshed or released" do
     issue_id = "invalid-lease"
     path = LeaseManager.lease_path(issue_id)
     File.mkdir_p!(Path.dirname(path))
@@ -107,7 +107,14 @@ defmodule SymphonyElixir.LeaseConcurrencyTest do
       File.write!(path, payload)
       assert {:error, _reason} = LeaseManager.acquire(issue_id, "LOCK-3", "owner-a")
       assert {:error, _reason} = LeaseManager.refresh(issue_id, "owner-a")
-      assert :ok = LeaseManager.release(issue_id, "owner-a")
+      assert {:error, release_reason} = LeaseManager.release(issue_id, "owner-a")
+
+      if payload == "{invalid-json" do
+        assert %Jason.DecodeError{} = release_reason
+      else
+        assert release_reason == :invalid_lease
+      end
+
       assert File.read!(path) == payload
       refute File.exists?(path <> ".lock")
     end

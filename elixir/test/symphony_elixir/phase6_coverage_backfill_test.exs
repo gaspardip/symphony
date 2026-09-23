@@ -609,9 +609,13 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
       assert match?({:error, _reason}, LeaseManager.read(issue_id))
       assert match?({:error, _reason}, LeaseManager.acquire(issue_id, "MT-2", "owner-c", ttl_ms: 1))
       assert match?({:error, _reason}, LeaseManager.refresh(issue_id, "owner-c"))
-      assert :ok = LeaseManager.release(issue_id, "owner-c")
-      assert File.exists?(path)
+      assert {:error, %Jason.DecodeError{}} = LeaseManager.release(issue_id, "owner-c")
+      assert File.read!(path) == "{not-json"
+      assert {:error, %Jason.DecodeError{}} = LeaseManager.release(issue_id)
+      assert File.read!(path) == "{not-json"
+      refute File.exists?(path <> ".lock")
 
+      File.write!(path, Jason.encode!(taken_over_lease))
       assert :ok = LeaseManager.release(issue_id)
       refute File.exists?(path)
       assert :ok = LeaseManager.release(unique_issue_id("lease-release-missing"))

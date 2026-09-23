@@ -340,6 +340,11 @@ defmodule SymphonyElixir.Orchestrator do
 
         state =
           case finish_running_dispatch(running_entry, reason) do
+            {:ownership_uncertain, ownership_reason} ->
+              state
+              |> cancel_dispatch_retry(issue_id)
+              |> Map.put(:candidate_fetch_error, {:lease_ownership_uncertain, issue_id, ownership_reason})
+
             :ok ->
               case {reason, RunPolicy.maybe_stop_for_token_budget(issue, running_entry)} do
                 {:normal, {:retry, metadata}} ->
@@ -2790,6 +2795,9 @@ defmodule SymphonyElixir.Orchestrator do
   @spec terminate_running_issue(State.t(), String.t(), boolean()) :: State.t()
   def terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
     case Map.get(state.running, issue_id) do
+      %{lease_ownership_uncertain: reason} ->
+        stop_for_uncertain_lease(state, issue_id, reason)
+
       nil ->
         release_issue_claim(state, issue_id)
 
@@ -3589,6 +3597,9 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} -> {:error, {:dispatch_audit_failed, reason}}
     end
   end
+
+  defp finish_running_dispatch(%{lease_ownership_uncertain: reason}, _exit_reason),
+    do: {:ownership_uncertain, reason}
 
   defp finish_running_dispatch(%{dispatch_ticket: _ticket}, {:dispatch_authorization_failed, _reason} = failure),
     do: {:error, failure}
@@ -5763,7 +5774,13 @@ defmodule SymphonyElixir.Orchestrator do
   def refresh_runtime_config(%State{} = state) do
     state =
       Enum.reduce(Map.keys(state.running), state, fn issue_id, state_acc ->
-        case LeaseManager.refresh(issue_id, state.lease_owner) do
+        refresh_result =
+          case Map.fetch!(state_acc.running, issue_id) do
+            %{lease_ownership_uncertain: reason} -> {:error, reason}
+            _entry -> LeaseManager.refresh(issue_id, state.lease_owner)
+          end
+
+        case refresh_result do
           :ok ->
             maybe_sync_running_issue_lease(state_acc, issue_id)
             state_acc
@@ -5789,8 +5806,12 @@ defmodule SymphonyElixir.Orchestrator do
             terminate_running_issue(state_acc, issue_id, false)
 
           {:error, reason} ->
-            Logger.warning("Lease refresh failed for issue_id=#{issue_id}: #{inspect(reason)}")
-            state_acc
+            if uncertain_lease_refresh?(reason) do
+              stop_for_uncertain_lease(state_acc, issue_id, reason)
+            else
+              Logger.warning("Lease refresh failed for issue_id=#{issue_id}: #{inspect(reason)}")
+              state_acc
+            end
         end
       end)
 
@@ -5804,6 +5825,34 @@ defmodule SymphonyElixir.Orchestrator do
     catch
       :exit, _reason ->
         state
+    end
+  end
+
+  defp uncertain_lease_refresh?({:lease_audit_pending, _operation_id}), do: true
+  defp uncertain_lease_refresh?(:invalid_lease_audit_pending), do: true
+  defp uncertain_lease_refresh?(:invalid_lease), do: true
+  defp uncertain_lease_refresh?(%Jason.DecodeError{}), do: true
+  defp uncertain_lease_refresh?(_reason), do: false
+
+  defp stop_for_uncertain_lease(state, issue_id, reason) do
+    Logger.error("Lease ownership uncertain for issue_id=#{issue_id}; terminating worker and preserving its audit: #{inspect(reason)}")
+    running_entry = state.running |> Map.fetch!(issue_id) |> Map.put(:lease_ownership_uncertain, reason)
+    state = %{state | running: Map.put(state.running, issue_id, running_entry)}
+    state = cancel_dispatch_retry(state, issue_id)
+
+    case terminate_task(running_entry.pid) do
+      :ok ->
+        if is_reference(running_entry.ref), do: Process.demonitor(running_entry.ref, [:flush])
+        state = record_session_completion_totals(state, running_entry)
+
+        %{
+          state
+          | running: Map.delete(state.running, issue_id),
+            candidate_fetch_error: {:lease_ownership_uncertain, issue_id, reason}
+        }
+
+      {:error, termination_reason} ->
+        %{state | candidate_fetch_error: {:lease_ownership_uncertain, issue_id, reason, termination_reason}}
     end
   end
 

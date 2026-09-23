@@ -47,11 +47,15 @@ defmodule SymphonyElixir.LeaseManager do
 
   @spec reclaimable?(map(), DateTime.t(), keyword()) :: boolean()
   def reclaimable?(lease, %DateTime{} = now, opts) when is_map(lease) and is_list(opts) do
-    ttl_ms = Keyword.get(opts, :ttl_ms, ttl_ms())
+    if Map.has_key?(lease, "audit_pending") or Map.has_key?(lease, :audit_pending) do
+      false
+    else
+      ttl_ms = Keyword.get(opts, :ttl_ms, ttl_ms())
 
-    lease
-    |> updated_at_value()
-    |> stale_lease?(now, ttl_ms)
+      lease
+      |> updated_at_value()
+      |> stale_lease?(now, ttl_ms)
+    end
   end
 
   def reclaimable?(_lease, _now, _opts), do: false
@@ -63,9 +67,14 @@ defmodule SymphonyElixir.LeaseManager do
     case File.read(path) do
       {:ok, payload} ->
         case Jason.decode(payload) do
-          {:ok, %{} = lease} -> {:ok, lease}
-          {:ok, _other} -> {:error, :invalid_lease}
-          {:error, _reason} = error -> error
+          {:ok, %{} = lease} ->
+            with :ok <- ensure_audit_complete(lease), do: {:ok, lease}
+
+          {:ok, _other} ->
+            {:error, :invalid_lease}
+
+          {:error, _reason} = error ->
+            error
         end
 
       {:error, :enoent} ->
@@ -105,6 +114,18 @@ defmodule SymphonyElixir.LeaseManager do
         case acquire_decision(existing, owner, now, ttl_ms) do
           {:ok, epoch, acquired_at} ->
             write_lease(path, issue_id, issue_identifier, owner, now, epoch, acquired_at)
+
+          {:takeover, epoch, acquired_at} ->
+            commit_takeover(
+              path,
+              issue_id,
+              issue_identifier,
+              owner,
+              now,
+              epoch,
+              acquired_at,
+              existing
+            )
 
           {:error, :claimed} ->
             {:error, :claimed}
@@ -163,19 +184,48 @@ defmodule SymphonyElixir.LeaseManager do
     path = lease_path(issue_id)
 
     case File.read(path) do
-      {:ok, payload} when is_binary(owner) ->
-        with {:ok, %{} = existing} <- Jason.decode(payload),
-             true <- (existing["owner"] || existing[:owner]) == owner do
-          File.rm(path)
-          :ok
-        else
-          _ -> :ok
+      {:ok, payload} ->
+        with {:ok, decoded} <- Jason.decode(payload),
+             true <- is_map(decoded) or {:error, :invalid_lease},
+             :ok <- ensure_audit_complete(decoded) do
+          if is_nil(owner) or decoded["owner"] == owner do
+            case File.rm(path) do
+              :ok -> :ok
+              {:error, :enoent} -> :ok
+              {:error, reason} -> {:error, reason}
+            end
+          else
+            :ok
+          end
         end
 
-      _ ->
-        File.rm(path)
+      {:error, :enoent} ->
         :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
+  end
+
+  @doc "Finalizes only an already-confirmed takeover. Never retries a ledger write or removes a pending lease."
+  @spec reconcile_pending_takeover(String.t()) :: :ok | {:error, term()}
+  def reconcile_pending_takeover(issue_id) when is_binary(issue_id) do
+    with_lease_lock(issue_id, fn ->
+      path = lease_path(issue_id)
+
+      with {:ok, bytes} <- File.read(path),
+           {:ok, decoded} <- Jason.decode(bytes),
+           {:ok, candidate, pending} <- validate_pending_takeover(decoded, issue_id),
+           {:ok, ledger_path} <- RunLedger.ledger_file_path_checked(),
+           true <- ledger_path == pending["ledger_path"] or {:error, :lease_audit_ledger_changed},
+           {:ok, intent} <- RunLedger.fetch_entry_checked(pending["intent_event_id"]),
+           :ok <- validate_takeover_intent(intent, pending["confirmation"]),
+           {:ok, recorded} <- RunLedger.fetch_entry_checked(pending["confirmation"]["event_id"]),
+           true <-
+             recorded == pending["confirmation"] or {:error, :lease_audit_confirmation_mismatch} do
+        write_json_atomically(path, candidate)
+      end
+    end)
   end
 
   @spec lease_path(String.t()) :: Path.t()
@@ -236,7 +286,14 @@ defmodule SymphonyElixir.LeaseManager do
   defp write_lease(path, issue_id, issue_identifier, owner, now, epoch, acquired_at) do
     :ok = File.mkdir_p(Path.dirname(path))
 
-    payload = %{
+    write_json_atomically(
+      path,
+      lease_payload(issue_id, issue_identifier, owner, now, epoch, acquired_at)
+    )
+  end
+
+  defp lease_payload(issue_id, issue_identifier, owner, now, epoch, acquired_at) do
+    %{
       issue_id: issue_id,
       issue_identifier: issue_identifier,
       owner: owner,
@@ -245,8 +302,150 @@ defmodule SymphonyElixir.LeaseManager do
       acquired_at: normalize_timestamp(acquired_at, now),
       updated_at: DateTime.to_iso8601(now)
     }
+  end
 
-    write_json_atomically(path, payload)
+  defp commit_takeover(path, issue_id, issue_identifier, owner, now, epoch, acquired_at, previous) do
+    candidate = lease_payload(issue_id, issue_identifier, owner, now, epoch, acquired_at)
+    operation_id = SymphonyElixir.Util.generate_id("lease_op_")
+    previous_owner = previous["owner"] || previous[:owner]
+
+    attrs = %{
+      issue_id: issue_id,
+      issue_identifier: issue_identifier,
+      actor_type: "system",
+      actor_id: owner,
+      failure_class: "coordination",
+      rule_id: "coordination.lease_taken_over",
+      summary: "Lease was taken over after the previous holder went stale.",
+      details: "Previous owner #{inspect(previous_owner)} replaced by #{inspect(owner)}.",
+      metadata: %{
+        operation_id: operation_id,
+        epoch: epoch,
+        previous_owner: previous_owner,
+        previous_epoch: previous["epoch"] || previous[:epoch] || 1,
+        candidate_digest: lease_digest(candidate),
+        previous_lease_digest: lease_digest(previous)
+      }
+    }
+
+    intent_attrs =
+      Map.put(attrs, :summary, "Requested lease takeover after the previous holder went stale.")
+
+    with {:ok, ledger_path} <- RunLedger.ledger_file_path_checked(),
+         {:ok, intent} <- RunLedger.prepare_entry("lease.takeover.requested", intent_attrs),
+         {:ok, confirmation} <- RunLedger.prepare_entry("lease.taken_over", attrs),
+         :ok <- audit_step(:intent, operation_id, RunLedger.persist_prepared(intent)) do
+      pending = %{
+        operation_id: operation_id,
+        ledger_path: ledger_path,
+        intent_event_id: intent.event_id,
+        confirmation: confirmation,
+        previous_lease: previous
+      }
+
+      with :ok <-
+             audit_step(
+               :lease_write,
+               operation_id,
+               write_json_atomically(path, Map.put(candidate, :audit_pending, pending))
+             ),
+           :ok <-
+             audit_step(:confirmation, operation_id, RunLedger.persist_prepared(confirmation)),
+           :ok <- audit_step(:finalize, operation_id, write_json_atomically(path, candidate)) do
+        :ok
+      end
+    end
+  end
+
+  defp audit_step(_phase, _operation_id, :ok), do: :ok
+  defp audit_step(_phase, _operation_id, {:ok, _entry}), do: :ok
+
+  defp audit_step(phase, operation_id, {:error, reason}),
+    do: {:error, {:lease_takeover_failed, phase, operation_id, reason}}
+
+  defp ensure_audit_complete(%{"audit_pending" => %{"operation_id" => operation_id}})
+       when is_binary(operation_id) and operation_id != "",
+       do: {:error, {:lease_audit_pending, operation_id}}
+
+  defp ensure_audit_complete(%{"audit_pending" => _}), do: {:error, :invalid_lease_audit_pending}
+  defp ensure_audit_complete(_lease), do: :ok
+
+  defp validate_pending_takeover(%{"audit_pending" => pending} = decoded, issue_id)
+       when is_map(pending) do
+    candidate = Map.delete(decoded, "audit_pending")
+
+    with %{
+           "operation_id" => operation_id,
+           "ledger_path" => ledger_path,
+           "intent_event_id" => intent_id,
+           "previous_lease" => %{} = previous,
+           "confirmation" => %{
+             "event_id" => confirmation_id,
+             "event_type" => "lease.taken_over",
+             "issue_id" => ^issue_id,
+             "actor_id" => owner,
+             "metadata" => %{
+               "operation_id" => operation_id,
+               "epoch" => epoch,
+               "previous_epoch" => previous_epoch,
+               "previous_owner" => previous_owner,
+               "candidate_digest" => candidate_digest,
+               "previous_lease_digest" => previous_digest
+             }
+           }
+         } <- pending,
+         true <-
+           Enum.all?(
+             [operation_id, ledger_path, intent_id, confirmation_id, owner],
+             &(is_binary(&1) and &1 != "")
+           ),
+         true <-
+           confirmation_id != intent_id and candidate["issue_id"] == issue_id and
+             candidate["owner"] == owner,
+         true <-
+           is_integer(epoch) and is_integer(previous_epoch) and epoch == previous_epoch + 1 and
+             candidate["epoch"] == epoch,
+         true <-
+           previous_owner == previous["owner"] and previous_epoch == (previous["epoch"] || 1),
+         true <-
+           previous_owner != owner and lease_digest(candidate) == candidate_digest and
+             lease_digest(previous) == previous_digest do
+      {:ok, candidate, pending}
+    else
+      _ -> {:error, :invalid_lease_audit_pending}
+    end
+  end
+
+  defp validate_pending_takeover(%{"audit_pending" => _}, _issue_id),
+    do: {:error, :invalid_lease_audit_pending}
+
+  defp validate_pending_takeover(%{}, _issue_id), do: {:error, :no_lease_audit_pending}
+  defp validate_pending_takeover(_other, _issue_id), do: {:error, :invalid_lease}
+
+  defp validate_takeover_intent(
+         %{"event_type" => "lease.takeover.requested"} = intent,
+         confirmation
+       ) do
+    ignored = ["event", "event_type", "event_id", "at", "summary"]
+
+    if Map.drop(intent, ignored) == Map.drop(confirmation, ignored),
+      do: :ok,
+      else: {:error, :lease_audit_intent_mismatch}
+  end
+
+  defp validate_takeover_intent(_intent, _confirmation),
+    do: {:error, :lease_audit_intent_mismatch}
+
+  defp lease_digest(payload) do
+    canonical =
+      payload
+      |> Jason.encode!()
+      |> Jason.decode!()
+      |> Enum.sort()
+      |> Enum.map(fn {key, value} -> [key, value] end)
+      |> Jason.encode!()
+
+    :crypto.hash(:sha256, canonical) |> Base.encode16(case: :lower)
   end
 
   defp acquire_decision(existing, owner, now, ttl_ms) do
@@ -260,21 +459,7 @@ defmodule SymphonyElixir.LeaseManager do
         {:ok, epoch, acquired_at}
 
       stale_lease?(updated_at, now, ttl_ms) ->
-        takeover_epoch = epoch + 1
-
-        RunLedger.record("lease.taken_over", %{
-          issue_id: existing["issue_id"] || existing[:issue_id],
-          issue_identifier: existing["issue_identifier"] || existing[:issue_identifier],
-          actor_type: "system",
-          actor_id: owner,
-          failure_class: "coordination",
-          rule_id: "coordination.lease_taken_over",
-          summary: "Lease was taken over after the previous holder went stale.",
-          details: "Previous owner #{inspect(existing_owner)} replaced by #{inspect(owner)}.",
-          metadata: %{epoch: takeover_epoch, previous_owner: existing_owner}
-        })
-
-        {:ok, takeover_epoch, now}
+        {:takeover, epoch + 1, now}
 
       true ->
         {:error, :claimed}
