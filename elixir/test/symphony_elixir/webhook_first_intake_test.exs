@@ -813,6 +813,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     manual_store_root = Path.join(workspace_root, "manual-store")
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       workspace_root: workspace_root,
       manual_store_root: manual_store_root,
       max_concurrent_agents: 0
@@ -1253,6 +1254,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     manual_store_root = Path.join(workspace_root, "manual-store")
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       workspace_root: workspace_root,
       manual_store_root: manual_store_root,
       max_concurrent_agents: 0,
