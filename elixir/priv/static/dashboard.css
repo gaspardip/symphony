@@ -26,6 +26,14 @@
   --radius-xl: 28px;
   --radius-lg: 22px;
   --radius-md: 16px;
+  --panel-ink: var(--ink);
+  --panel-muted: var(--muted);
+  --panel-fill: rgba(43, 56, 72, 0.025);
+  --panel-line: var(--line);
+  --badge-good: var(--accent-ink);
+  --badge-warn: var(--amber);
+  --badge-danger: var(--danger);
+  --badge-info: var(--info);
 }
 
 * {
@@ -334,6 +342,19 @@ pre,
     linear-gradient(135deg, rgba(0, 127, 115, 0.03), rgba(39, 87, 165, 0.03));
 }
 
+/* Shared panels and badges inherit the palette of their actual surface. */
+.section-card-dark,
+.run-card {
+  --panel-ink: #f3f1ec;
+  --panel-muted: rgba(243, 241, 236, 0.72);
+  --panel-fill: rgba(255, 255, 255, 0.04);
+  --panel-line: rgba(255, 255, 255, 0.08);
+  --badge-good: #86f1df;
+  --badge-warn: #ffd18a;
+  --badge-danger: #ffb8ae;
+  --badge-info: #b6d2ff;
+}
+
 .section-card-dark {
   background:
     linear-gradient(180deg, rgba(19, 24, 31, 0.98), rgba(27, 33, 42, 0.98));
@@ -485,32 +506,32 @@ pre,
 .tone-badge-good {
   background: rgba(0, 127, 115, 0.14);
   border-color: rgba(0, 127, 115, 0.28);
-  color: #86f1df;
+  color: var(--badge-good);
 }
 
 .tone-badge-warn {
   background: rgba(255, 183, 59, 0.14);
   border-color: rgba(255, 183, 59, 0.26);
-  color: #ffd18a;
+  color: var(--badge-warn);
 }
 
 .tone-badge-danger {
   background: rgba(210, 82, 67, 0.16);
   border-color: rgba(210, 82, 67, 0.3);
-  color: #ffb8ae;
+  color: var(--badge-danger);
 }
 
 .tone-badge-info,
 .state-badge-info {
   background: rgba(39, 87, 165, 0.14);
   border-color: rgba(39, 87, 165, 0.26);
-  color: #b6d2ff;
+  color: var(--badge-info);
 }
 
 .tone-badge-muted {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.12);
-  color: rgba(243, 241, 236, 0.72);
+  background: var(--panel-fill);
+  border-color: var(--panel-line);
+  color: var(--panel-muted);
 }
 
 .run-glance-grid {
@@ -575,8 +596,8 @@ pre,
 .run-panel {
   border-radius: var(--radius-md);
   padding: 0.9rem;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--panel-fill);
+  border: 1px solid var(--panel-line);
   min-width: 0;
 }
 
@@ -593,7 +614,7 @@ pre,
 
 .panel-label {
   margin: 0;
-  color: rgba(243, 241, 236, 0.6);
+  color: var(--panel-muted);
   font-size: 0.78rem;
   font-weight: 800;
   letter-spacing: 0.05em;
@@ -602,7 +623,7 @@ pre,
 
 .panel-copy {
   margin: 0.65rem 0 0;
-  color: rgba(243, 241, 236, 0.72);
+  color: var(--panel-muted);
   font-size: 0.9rem;
 }
 
@@ -639,7 +660,7 @@ pre,
 }
 
 .data-key {
-  color: rgba(243, 241, 236, 0.6);
+  color: var(--panel-muted);
   font-size: 0.82rem;
   font-weight: 700;
 }
@@ -647,7 +668,7 @@ pre,
 .data-value,
 .check-name {
   min-width: 0;
-  color: #ffffff;
+  color: var(--panel-ink);
   font-size: 0.9rem;
   line-height: 1.45;
   overflow-wrap: anywhere;
@@ -656,7 +677,7 @@ pre,
 .activity-copy p,
 .activity-feed-copy {
   margin: 0;
-  color: #ffffff;
+  color: var(--panel-ink);
   font-size: 0.92rem;
   line-height: 1.5;
 }
@@ -747,9 +768,9 @@ pre,
   min-height: 1.85rem;
   padding: 0.3rem 0.68rem;
   border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.08);
-  color: #f3f1ec;
+  border: 1px solid var(--panel-line);
+  background: var(--panel-fill);
+  color: var(--panel-ink);
   font-size: 0.8rem;
   font-weight: 700;
   line-height: 1;
@@ -758,19 +779,19 @@ pre,
 .state-badge-active {
   background: rgba(0, 127, 115, 0.18);
   border-color: rgba(0, 127, 115, 0.28);
-  color: #8cf4e3;
+  color: var(--badge-good);
 }
 
 .state-badge-warning {
   background: rgba(255, 183, 59, 0.18);
   border-color: rgba(255, 183, 59, 0.28);
-  color: #ffd18a;
+  color: var(--badge-warn);
 }
 
 .state-badge-danger {
   background: rgba(210, 82, 67, 0.18);
   border-color: rgba(210, 82, 67, 0.3);
-  color: #ffc0b9;
+  color: var(--badge-danger);
 }
 
 .issue-id {
