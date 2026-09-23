@@ -43,16 +43,20 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
     model = Keyword.get(opts, :model, session.model)
     executable = codex_executable()
 
-    args = [
-      "exec",
-      "--json",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "-m",
-      model,
-      "-C",
-      session.workspace,
-      prompt
-    ]
+    effort = Keyword.get(opts, :effort)
+
+    args =
+      [
+        "exec",
+        "--json",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "-m",
+        model,
+        "-C",
+        session.workspace
+      ]
+      |> maybe_add_effort(effort)
+      |> Kernel.++([prompt])
 
     Logger.info("Codex CLI turn starting issue=#{issue_identifier(issue)} model=#{model} workspace=#{session.workspace}")
 
@@ -324,6 +328,12 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
   end
 
   # -- Helpers --
+
+  defp maybe_add_effort(args, effort) when is_binary(effort) and effort != "" do
+    args ++ ["-c", "model_reasoning_effort=" <> Jason.encode!(effort)]
+  end
+
+  defp maybe_add_effort(args, _effort), do: args
 
   defp codex_executable, do: System.find_executable("codex") || "codex"
 
