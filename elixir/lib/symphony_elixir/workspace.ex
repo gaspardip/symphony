@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.Config
+  alias SymphonyElixir.RunStateStore
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
   @bootstrap_metadata_entries MapSet.new([".symphony"])
@@ -18,17 +19,20 @@ defmodule SymphonyElixir.Workspace do
 
       workspace = workspace_path_for_issue(safe_id)
 
-      with :ok <- validate_workspace_path(workspace),
-           {:ok, lifecycle} <- ensure_workspace(workspace) do
-        case maybe_run_after_create_hook(workspace, issue_context, lifecycle) do
-          :ok ->
-            :ok = restore_preserved_workspace_state(workspace, lifecycle)
-            {:ok, workspace}
+      with :ok <- validate_workspace_path(workspace) do
+        RunStateStore.with_readable_snapshot(workspace, fn ->
+          with {:ok, lifecycle} <- ensure_workspace(workspace) do
+            case maybe_run_after_create_hook(workspace, issue_context, lifecycle) do
+              :ok ->
+                :ok = restore_preserved_workspace_state(workspace, lifecycle)
+                {:ok, workspace}
 
-          {:error, _reason} = error ->
-            :ok = restore_preserved_workspace_state(workspace, lifecycle)
-            error
-        end
+              {:error, _reason} = error ->
+                :ok = restore_preserved_workspace_state(workspace, lifecycle)
+                error
+            end
+          end
+        end)
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
@@ -75,6 +79,13 @@ defmodule SymphonyElixir.Workspace do
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace) do
+    case RunStateStore.with_readable_snapshot(workspace, fn -> remove_readable_workspace(workspace) end) do
+      {:error, reason} -> {:error, reason, ""}
+      result -> result
+    end
+  end
+
+  defp remove_readable_workspace(workspace) do
     case File.exists?(workspace) do
       true ->
         case validate_workspace_path(workspace) do
@@ -91,13 +102,19 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  @spec remove_issue_workspaces(term()) :: :ok
+  @spec remove_issue_workspaces(term()) :: :ok | {:error, term(), String.t()}
   def remove_issue_workspaces(identifier) when is_binary(identifier) do
     safe_id = safe_identifier(identifier)
     workspace = Path.join(Config.workspace_root(), safe_id)
 
-    remove(workspace)
-    :ok
+    case remove(workspace) do
+      {:ok, _paths} ->
+        :ok
+
+      {:error, reason, path} = error ->
+        Logger.error("Workspace removal refused workspace=#{path} reason=#{inspect(reason)}")
+        error
+    end
   end
 
   def remove_issue_workspaces(_identifier) do

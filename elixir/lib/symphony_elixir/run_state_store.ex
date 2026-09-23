@@ -22,12 +22,19 @@ defmodule SymphonyElixir.RunStateStore do
     with {:ok, path} <- load_path(workspace),
          {:ok, payload} <- File.read(path),
          {:ok, decoded} <- Jason.decode(payload),
-         true <- is_map(decoded) or {:error, :invalid_state} do
+         true <- is_map(decoded) or {:error, :invalid_state},
+         :ok <- ensure_audit_complete(decoded) do
       {:ok, atomize(decoded)}
     else
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp ensure_audit_complete(%{"audit_pending" => pending}) when is_map(pending),
+    do: {:error, {:audit_pending, Map.get(pending, "operation_id")}}
+
+  defp ensure_audit_complete(%{"audit_pending" => _}), do: {:error, :invalid_audit_pending}
+  defp ensure_audit_complete(_state), do: :ok
 
   defp load_path(workspace) when is_binary(workspace) do
     path = state_path(workspace)
@@ -120,6 +127,14 @@ defmodule SymphonyElixir.RunStateStore do
     end
   end
 
+  @doc "Runs a workspace lifecycle operation while its readable snapshot is protected from local mutations."
+  @spec with_readable_snapshot(Path.t(), (-> result)) :: result | {:error, term()} when result: var
+  def with_readable_snapshot(workspace, fun) when is_binary(workspace) and is_function(fun, 0) do
+    with_state_lock(workspace, fn ->
+      with :ok <- ensure_readable(workspace), do: fun.()
+    end)
+  end
+
   defp load_for_update(workspace, issue) do
     case load_checked(workspace, issue) do
       {:ok, state} -> {:ok, state}
@@ -136,6 +151,28 @@ defmodule SymphonyElixir.RunStateStore do
     do: {:run_state_unreadable, {:invalid_json, position}}
 
   defp unreadable_error(reason), do: {:run_state_unreadable, reason}
+
+  defp unreadable_state(issue, {:audit_pending, operation_id}) do
+    summary = "The persisted transition has an unconfirmed audit result; execution is blocked."
+    action = "Reconcile the recorded operation before retrying. Preserve the snapshot and its ledger."
+
+    default_state(issue)
+    |> Map.merge(%{
+      stage: "blocked",
+      last_rule_id: "runtime.audit_pending",
+      last_failure_class: "recovery",
+      last_decision_summary: summary,
+      next_human_action: action,
+      stop_reason: %{
+        code: "audit_pending",
+        rule_id: "runtime.audit_pending",
+        failure_class: "recovery",
+        summary: summary,
+        details: operation_id,
+        human_action: action
+      }
+    })
+  end
 
   defp unreadable_state(issue, reason) do
     summary = "The persisted run snapshot cannot be read; execution is blocked."
@@ -226,53 +263,157 @@ defmodule SymphonyElixir.RunStateStore do
     state =
       previous_state
       |> Map.merge(attrs)
+      |> preserve_token_usage(previous_state)
       |> Map.put(:stage, stage)
       |> maybe_record_stage_transition(stage, Map.get(attrs, :reason), same_stage?)
 
-    case save_unlocked(workspace, state) do
-      :ok ->
-        if same_stage? do
-          {:ok, state}
-        else
-          ledger_event =
-            RunLedger.record("stage.transition", %{
-              issue_id: Map.get(state, :issue_id),
-              issue_identifier: Map.get(state, :issue_identifier),
-              stage: stage,
-              actor_type: "runtime",
-              actor_id: "run_state_store",
-              policy_class: Map.get(state, :effective_policy_class),
-              summary: "Transitioned to #{stage}",
-              details: Map.get(attrs, :reason),
-              metadata: %{
-                stage_transition_count: get_in(state, [:stage_transition_counts, stage]),
-                stage_history_size: length(Map.get(state, :stage_history, []))
-              }
-            })
-
-          Observability.emit(
-            [:symphony, :stage, :transition],
-            %{count: 1},
-            %{
-              issue_id: Map.get(state, :issue_id),
-              issue_identifier: Map.get(state, :issue_identifier),
-              issue_source: Map.get(state, :issue_source),
-              stage: stage,
-              policy_class: Map.get(state, :effective_policy_class),
-              stage_transition_count: get_in(state, [:stage_transition_counts, stage]),
-              stage_history_size: length(Map.get(state, :stage_history, []))
-            }
-          )
-
-          persisted_state = Map.put(state, :last_ledger_event_id, Map.get(ledger_event, :event_id))
-          :ok = save_unlocked(workspace, persisted_state)
-          {:ok, persisted_state}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    if same_stage? do
+      with :ok <- save_unlocked(workspace, state), do: {:ok, state}
+    else
+      commit_audited_transition(workspace, state, attrs, Map.get(previous_state, :stage))
     end
   end
+
+  defp commit_audited_transition(workspace, state, attrs, previous_stage) do
+    state = ensure_runner_metadata(state)
+    operation_id = SymphonyElixir.Util.generate_id("op_")
+
+    event_attrs = %{
+      issue_id: Map.get(state, :issue_id),
+      issue_identifier: Map.get(state, :issue_identifier),
+      stage: state.stage,
+      actor_type: "runtime",
+      actor_id: "run_state_store",
+      policy_class: Map.get(state, :effective_policy_class),
+      summary: "Transitioned to #{state.stage}",
+      details: Map.get(attrs, :reason),
+      metadata: %{
+        operation_id: operation_id,
+        previous_stage: previous_stage,
+        snapshot_digest: snapshot_digest(state),
+        stage_transition_count: get_in(state, [:stage_transition_counts, state.stage]),
+        stage_history_size: length(Map.get(state, :stage_history, []))
+      }
+    }
+
+    intent_attrs = Map.put(event_attrs, :summary, "Requested transition to #{state.stage}")
+
+    with {:ok, ledger_path} <- RunLedger.ledger_file_path_checked(),
+         {:ok, intent} <- RunLedger.prepare_entry("stage.transition.requested", intent_attrs),
+         {:ok, confirmation} <- RunLedger.prepare_entry("stage.transition", event_attrs),
+         {:ok, _} <- RunLedger.persist_prepared(intent) do
+      pending = %{
+        operation_id: operation_id,
+        ledger_path: ledger_path,
+        intent_event_id: intent.event_id,
+        confirmation: confirmation
+      }
+
+      with :ok <- save_unlocked(workspace, Map.put(state, :audit_pending, pending)),
+           {:ok, _} <- RunLedger.persist_prepared(confirmation),
+           {:ok, persisted} <- finalize_audited_transition(workspace, state, confirmation.event_id) do
+        emit_transition(persisted)
+        {:ok, persisted}
+      end
+    end
+  end
+
+  defp finalize_audited_transition(workspace, state, event_id) do
+    persisted = state |> Map.delete(:audit_pending) |> Map.put(:last_ledger_event_id, event_id)
+    with :ok <- write_json_atomically(state_path(workspace), persisted), do: {:ok, persisted}
+  end
+
+  defp emit_transition(state) do
+    Observability.emit(
+      [:symphony, :stage, :transition],
+      %{count: 1},
+      %{
+        issue_id: Map.get(state, :issue_id),
+        issue_identifier: Map.get(state, :issue_identifier),
+        issue_source: Map.get(state, :issue_source),
+        stage: state.stage,
+        policy_class: Map.get(state, :effective_policy_class),
+        stage_transition_count: get_in(state, [:stage_transition_counts, state.stage]),
+        stage_history_size: length(Map.get(state, :stage_history, []))
+      }
+    )
+  end
+
+  @doc """
+  Finalizes an interrupted transition only when both its intent and exact
+  confirmation already exist in its original ledger. Missing or ambiguous
+  evidence leaves the snapshot untouched; this never retries an audit write.
+  """
+  @spec reconcile_pending_transition(Path.t()) :: {:ok, map()} | {:error, term()}
+  def reconcile_pending_transition(workspace) when is_binary(workspace) do
+    with_state_lock(workspace, fn ->
+      with {:ok, payload} <- File.read(state_path(workspace)),
+           {:ok, decoded} <- Jason.decode(payload),
+           {:ok, state, pending, confirmation} <- validate_pending_transition(decoded),
+           {:ok, path} <- RunLedger.ledger_file_path_checked(),
+           true <- path == pending["ledger_path"] or {:error, :audit_ledger_changed},
+           {:ok, intent} <- RunLedger.fetch_entry_checked(pending["intent_event_id"]),
+           :ok <- validate_transition_intent(intent, confirmation, pending),
+           {:ok, recorded} <- RunLedger.fetch_entry_checked(confirmation["event_id"]),
+           true <- recorded == confirmation or {:error, :audit_confirmation_mismatch} do
+        finalize_audited_transition(workspace, atomize(state), confirmation["event_id"])
+      end
+    end)
+  end
+
+  defp validate_pending_transition(%{"audit_pending" => pending} = decoded) when is_map(pending) do
+    state = Map.delete(decoded, "audit_pending")
+
+    with %{
+           "operation_id" => operation_id,
+           "ledger_path" => ledger_path,
+           "intent_event_id" => intent_id,
+           "confirmation" =>
+             %{
+               "event_id" => event_id,
+               "event_type" => "stage.transition",
+               "stage" => stage,
+               "metadata" => %{"operation_id" => operation_id, "snapshot_digest" => digest}
+             } = confirmation
+         } <- pending,
+         true <- Enum.all?([operation_id, ledger_path, intent_id, event_id], &(is_binary(&1) and &1 != "")),
+         true <- stage == state["stage"] and digest == snapshot_digest(state) do
+      {:ok, state, pending, confirmation}
+    else
+      _ -> {:error, :invalid_audit_pending}
+    end
+  end
+
+  defp validate_pending_transition(%{}), do: {:error, :no_audit_pending}
+  defp validate_pending_transition(_), do: {:error, :invalid_state}
+
+  defp validate_transition_intent(intent, confirmation, pending) do
+    valid? =
+      intent["event_type"] == "stage.transition.requested" and
+        intent["event_id"] == pending["intent_event_id"] and
+        intent["issue_id"] == confirmation["issue_id"] and
+        intent["issue_identifier"] == confirmation["issue_identifier"] and
+        intent["stage"] == confirmation["stage"] and
+        intent["metadata"] == confirmation["metadata"]
+
+    if valid?, do: :ok, else: {:error, :audit_intent_mismatch}
+  end
+
+  defp snapshot_digest(state) do
+    state
+    |> Jason.encode!()
+    |> Jason.decode!()
+    |> canonical_snapshot()
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp canonical_snapshot(value) when is_map(value),
+    do: {:map, value |> Enum.map(fn {key, item} -> {key, canonical_snapshot(item)} end) |> Enum.sort()}
+
+  defp canonical_snapshot(value) when is_list(value), do: Enum.map(value, &canonical_snapshot/1)
+  defp canonical_snapshot(value), do: value
 
   @spec update(Path.t(), (map() -> map())) :: {:ok, map()} | {:error, term()}
   def update(workspace, fun) when is_binary(workspace) and is_function(fun, 1) do

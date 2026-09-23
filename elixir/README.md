@@ -245,6 +245,32 @@ and ownership before resuming. Passive continuations reacquire their lease even
 when the local claim remains cached, and an already running issue is not spawned
 a second time. A failed lease release remains visible and does not authorize work.
 
+## Audited stage transitions
+
+A stage change records its intent before writing the candidate snapshot. The
+candidate carries `audit_pending` until the exact `stage.transition` confirmation
+has been persisted and synchronized. A failed intent leaves the previous snapshot
+unchanged. An interruption after writing the candidate blocks normal reads,
+mutations, worker bootstrap and workspace cleanup with `runtime.audit_pending`.
+Workspace creation and removal retain the local snapshot lock throughout hooks
+and cleanup, including when the workspace did not initially exist.
+
+`RunStateStore.reconcile_pending_transition(workspace)` is an explicit local
+reconciliation operation. It only finalizes a pending snapshot whose digest,
+intent and exact confirmation match the original, fully readable ledger. It does
+not append a missing confirmation, retry an uncertain write or increment counters.
+An absent confirmation, changed ledger path, corrupt ledger or altered snapshot
+keeps the evidence blocked for investigation. Preserve both files; clearing the
+marker manually is not reconciliation.
+
+The checked ledger API preserves event identity and reports persistence errors.
+It validates the complete JSONL ledger before append, so each append costs O(n)
+in the current ledger size. Cooperating checked operations serialize locally and
+use a filesystem lock across processes; abandoned locks require investigation.
+Legacy `record`/`append` callers remain outside this contract. This change covers
+stage transitions, not atomicity of worker dispatch, publication, merge or deploy.
+Snapshot coordination is within one BEAM node; power-loss durability is not claimed.
+
 ## Web dashboard
 
 The observability UI now runs on a minimal Phoenix stack:
