@@ -49,6 +49,9 @@ policy:
   token_budget:
     per_turn_input: 150000
     per_issue_total: 500000
+    broad_implement:
+      enabled: true
+      auto_retry_limit: 2
 codex:
   command: codex --model gpt-5.4 app-server
   reasoning:

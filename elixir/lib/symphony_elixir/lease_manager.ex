@@ -7,6 +7,8 @@ defmodule SymphonyElixir.LeaseManager do
 
   @lease_dir "leases"
   @lease_version 1
+  @lock_timeout_ms 1_000
+  @lock_retry_ms 10
 
   @spec ttl_ms() :: pos_integer()
   def ttl_ms do
@@ -60,7 +62,11 @@ defmodule SymphonyElixir.LeaseManager do
 
     case File.read(path) do
       {:ok, payload} ->
-        Jason.decode(payload)
+        case Jason.decode(payload) do
+          {:ok, %{} = lease} -> {:ok, lease}
+          {:ok, _other} -> {:error, :invalid_lease}
+          {:error, _reason} = error -> error
+        end
 
       {:error, :enoent} ->
         {:error, :missing}
@@ -86,6 +92,10 @@ defmodule SymphonyElixir.LeaseManager do
   @spec acquire(String.t(), String.t() | nil, String.t(), keyword()) :: :ok | {:error, term()}
   def acquire(issue_id, issue_identifier, owner, opts \\ [])
       when is_binary(issue_id) and is_binary(owner) do
+    with_lease_lock(issue_id, fn -> acquire_locked(issue_id, issue_identifier, owner, opts) end)
+  end
+
+  defp acquire_locked(issue_id, issue_identifier, owner, opts) do
     ttl_ms = Keyword.get(opts, :ttl_ms, default_ttl_ms())
     now = DateTime.utc_now()
     path = lease_path(issue_id)
@@ -111,6 +121,10 @@ defmodule SymphonyElixir.LeaseManager do
   @spec refresh(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
   def refresh(issue_id, owner, _opts \\ [])
       when is_binary(issue_id) and is_binary(owner) do
+    with_lease_lock(issue_id, fn -> refresh_locked(issue_id, owner) end)
+  end
+
+  defp refresh_locked(issue_id, owner) do
     now = DateTime.utc_now()
     path = lease_path(issue_id)
 
@@ -140,13 +154,17 @@ defmodule SymphonyElixir.LeaseManager do
     end
   end
 
-  @spec release(String.t(), String.t() | nil) :: :ok
+  @spec release(String.t(), String.t() | nil) :: :ok | {:error, term()}
   def release(issue_id, owner \\ nil) when is_binary(issue_id) do
+    with_lease_lock(issue_id, fn -> release_locked(issue_id, owner) end)
+  end
+
+  defp release_locked(issue_id, owner) do
     path = lease_path(issue_id)
 
     case File.read(path) do
       {:ok, payload} when is_binary(owner) ->
-        with {:ok, existing} <- Jason.decode(payload),
+        with {:ok, %{} = existing} <- Jason.decode(payload),
              true <- (existing["owner"] || existing[:owner]) == owner do
           File.rm(path)
           :ok
@@ -163,6 +181,56 @@ defmodule SymphonyElixir.LeaseManager do
   @spec lease_path(String.t()) :: Path.t()
   def lease_path(issue_id) when is_binary(issue_id) do
     Path.join([Path.dirname(RunLedger.ledger_file_path()), @lease_dir, "#{issue_id}.json"])
+  end
+
+  # mkdir provides exclusion between independent OS processes sharing this store.
+  # Only the creator removes this directory. A crashed holder leaves an explicit
+  # blocking condition; lease TTL must never be used to steal a critical-section lock.
+  defp with_lease_lock(issue_id, operation) do
+    lock_path = lease_path(issue_id) <> ".lock"
+    deadline = System.monotonic_time(:millisecond) + @lock_timeout_ms
+
+    with :ok <- ensure_lock_parent(lock_path),
+         :ok <- acquire_lock(lock_path, deadline) do
+      try do
+        operation.()
+      after
+        case File.rmdir(lock_path) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            raise File.Error, reason: reason, action: "release lease lock", path: lock_path
+        end
+      end
+    end
+  end
+
+  defp ensure_lock_parent(lock_path) do
+    case File.mkdir_p(Path.dirname(lock_path)) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:lease_lock_failed, lock_path, reason}}
+    end
+  end
+
+  defp acquire_lock(lock_path, deadline) do
+    case File.mkdir(lock_path) do
+      :ok ->
+        :ok
+
+      {:error, :eexist} ->
+        remaining_ms = deadline - System.monotonic_time(:millisecond)
+
+        if remaining_ms > 0 do
+          Process.sleep(min(@lock_retry_ms, remaining_ms))
+          acquire_lock(lock_path, deadline)
+        else
+          {:error, {:lease_lock_timeout, lock_path}}
+        end
+
+      {:error, reason} ->
+        {:error, {:lease_lock_failed, lock_path, reason}}
+    end
   end
 
   defp write_lease(path, issue_id, issue_identifier, owner, now, epoch, acquired_at) do

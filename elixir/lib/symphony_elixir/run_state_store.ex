@@ -103,23 +103,118 @@ defmodule SymphonyElixir.RunStateStore do
           default_state(issue)
         end
 
-      {:error, _reason} ->
+      {:error, :missing} ->
         default_state(issue)
+
+      {:error, reason} ->
+        unreadable_state(issue, reason)
     end
+  end
+
+  @spec ensure_readable(Path.t()) :: :ok | {:error, term()}
+  def ensure_readable(workspace) when is_binary(workspace) do
+    case load(workspace) do
+      {:ok, _state} -> :ok
+      {:error, :missing} -> :ok
+      {:error, reason} -> {:error, unreadable_error(reason)}
+    end
+  end
+
+  defp load_for_update(workspace, issue) do
+    case load_checked(workspace, issue) do
+      {:ok, state} -> {:ok, state}
+      {:mismatch, _state} -> {:ok, default_state(issue)}
+      {:error, :missing} -> {:ok, default_state(issue)}
+      {:error, reason} -> {:error, write_error(reason)}
+    end
+  end
+
+  defp write_error(reason) when is_atom(reason) and reason != :invalid_state, do: reason
+  defp write_error(reason), do: unreadable_error(reason)
+
+  defp unreadable_error(%Jason.DecodeError{position: position}),
+    do: {:run_state_unreadable, {:invalid_json, position}}
+
+  defp unreadable_error(reason), do: {:run_state_unreadable, reason}
+
+  defp unreadable_state(issue, reason) do
+    summary = "The persisted run snapshot cannot be read; execution is blocked."
+    action = "Restore a valid run_state.json from a trusted backup before retrying. The unreadable snapshot has been preserved."
+
+    default_state(issue)
+    |> Map.merge(%{
+      stage: "blocked",
+      last_rule_id: "runtime.snapshot_unreadable",
+      last_failure_class: "recovery",
+      last_decision_summary: summary,
+      next_human_action: action,
+      stop_reason: %{
+        code: "snapshot_unreadable",
+        rule_id: "runtime.snapshot_unreadable",
+        failure_class: "recovery",
+        summary: summary,
+        details: inspect(unreadable_error(reason)),
+        human_action: action
+      }
+    })
   end
 
   @spec save(Path.t(), map()) :: :ok | {:error, term()}
   def save(workspace, state) when is_binary(workspace) and is_map(state) do
     path = state_path(workspace)
-    state = ensure_runner_metadata(state)
-    :ok = File.mkdir_p(Path.dirname(path))
-    write_json_atomically(path, state)
+
+    :global.trans(
+      {{__MODULE__, Path.expand(workspace)}, self()},
+      fn ->
+        with {:ok, previous_state} <- load_for_update(workspace, %{}),
+             :ok <- File.mkdir_p(Path.dirname(path)) do
+          state = preserve_token_usage(state, previous_state)
+          write_json_atomically(path, ensure_runner_metadata(state))
+        end
+      end,
+      [node()]
+    )
+  end
+
+  defp preserve_token_usage(state, previous_state) do
+    issue = %{id: Map.get(state, :issue_id), identifier: Map.get(state, :issue_identifier)}
+
+    if run_state_matches_issue?(previous_state, issue) and Map.has_key?(previous_state, :token_usage) do
+      usage = Map.get(state, :token_usage, %{})
+      previous_usage = Map.fetch!(previous_state, :token_usage)
+
+      preserved =
+        Map.new([:input_tokens, :output_tokens, :total_tokens], fn key ->
+          {key, max(Map.get(usage, key, 0), Map.get(previous_usage, key, 0))}
+        end)
+
+      Map.put(state, :token_usage, preserved)
+    else
+      state
+    end
+  end
+
+  @spec record_token_usage(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def record_token_usage(workspace, issue, usage) do
+    with {:ok, state} <- load_for_update(workspace, issue) do
+      state = Map.put(state, :token_usage, usage)
+
+      case save(workspace, state) do
+        :ok -> {:ok, state}
+        {:error, reason} -> {:error, reason}
+      end
+    end
   end
 
   @spec transition(Path.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def transition(workspace, stage, attrs \\ %{})
       when is_binary(workspace) and is_binary(stage) and is_map(attrs) do
-    previous_state = load_or_default(workspace, %{})
+    with {:ok, previous_state} <- load_for_update(workspace, %{}) do
+      transition_from_state(workspace, stage, attrs, previous_state)
+    end
+  end
+
+  defp transition_from_state(workspace, stage, attrs, previous_state) do
     same_stage? = Map.get(previous_state, :stage) == stage
 
     state =
@@ -175,28 +270,26 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec update(Path.t(), (map() -> map())) :: {:ok, map()} | {:error, term()}
   def update(workspace, fun) when is_binary(workspace) and is_function(fun, 1) do
-    state =
-      workspace
-      |> load_or_default(%{})
-      |> fun.()
+    with {:ok, previous_state} <- load_for_update(workspace, %{}) do
+      state = fun.(previous_state)
 
-    case save(workspace, state) do
-      :ok -> {:ok, state}
-      {:error, reason} -> {:error, reason}
+      case save(workspace, state) do
+        :ok -> {:ok, state}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
   @spec sync_lease(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def sync_lease(workspace, issue, lease_attrs)
       when is_binary(workspace) and is_map(issue) and is_map(lease_attrs) do
-    state =
-      workspace
-      |> load_or_default(issue)
-      |> apply_lease_attrs(lease_attrs)
+    with {:ok, previous_state} <- load_for_update(workspace, issue) do
+      state = apply_lease_attrs(previous_state, lease_attrs)
 
-    case save(workspace, state) do
-      :ok -> {:ok, state}
-      {:error, reason} -> {:error, reason}
+      case save(workspace, state) do
+        :ok -> {:ok, state}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 

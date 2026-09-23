@@ -22,9 +22,7 @@ defmodule SymphonyElixir.PullRequestManager do
       Observability.emit([:symphony, :pr, :start], %{count: 1}, metadata)
 
       result =
-        with :ok <- ensure_pr_posting_allowed(opts),
-             :ok <- ensure_credential_scope("github", "pr_write", opts),
-             {:ok, validation} <- validate_pr_body(workspace, body, metadata, opts),
+        with {:ok, validation} <- validate_publication_body(workspace, body, metadata, opts),
              {:ok, pr} <-
                create_or_update_pull_request(
                  workspace,
@@ -55,6 +53,22 @@ defmodule SymphonyElixir.PullRequestManager do
           other
       end
     end)
+  end
+
+  @doc "Validate publication policy, credentials and PR body before committing or pushing."
+  @spec validate_publication(Path.t(), Issue.t() | map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def validate_publication(workspace, issue, run_state, opts \\ []) when is_binary(workspace) do
+    summary = get_in(run_state, [:last_turn_result, :summary]) || "Automated delivery update"
+    body = pr_body(workspace, issue, run_state, summary)
+    validate_publication_body(workspace, body, pr_metadata(issue, run_state), opts)
+  end
+
+  defp validate_publication_body(workspace, body, metadata, opts) do
+    with :ok <- ensure_pr_posting_allowed(opts),
+         :ok <- ensure_credential_scope("github", "pr_write", opts) do
+      validate_pr_body(workspace, body, metadata, opts)
+    end
   end
 
   @spec merge_pull_request(Path.t(), keyword()) ::

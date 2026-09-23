@@ -975,6 +975,964 @@ defmodule SymphonyElixir.PolicyPrVerifierPhase6BackfillTest do
     refute_receive {:memory_tracker_state_update, "issue-budget-malformed", _state}
   end
 
+  test "broad implement budget retries with one focused file, then one explicit expansion file" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 2
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-retry-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-broad-budget", identifier: "MT-914BROAD", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 185_018,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 185_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   last_turn_summary: "The operator payload parity bug is concentrated in elixir/lib/symphony_elixir_web/presenter.ex and adjacent presenter helpers.",
+                   next_objective: "Continue in elixir/lib/symphony_elixir_web/presenter.ex and elixir/lib/symphony_elixir_web/router.ex without rediscovering the whole repo."
+                 }
+               })
+
+      assert %{
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_last_stop_code: "budget.per_turn_input_exceeded",
+                 budget_auto_narrowed: true,
+                 token_pressure: "high",
+                 target_paths: ["elixir/lib/symphony_elixir_web/presenter.ex"],
+                 next_required_path: nil,
+                 budget_expansion_used: false,
+                 already_learned: already_learned
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+
+      assert already_learned =~ "presenter.ex"
+
+      assert {:retry, %{kind: :broad_implement_budget_expansion_retry, retry_count: 2}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 2,
+                 agent_input_tokens: 170_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 355_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   budget_mode: "broad_implement",
+                   budget_retry_count: 1,
+                   budget_pressure_level: "high",
+                   budget_auto_narrowed: true,
+                   target_paths: ["elixir/lib/symphony_elixir_web/presenter.ex"],
+                   already_learned: already_learned
+                 },
+                 recent_agent_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text: "The focused presenter retry is not enough on its own. The one exact next file needed is `elixir/lib/symphony_elixir_web/router.ex`."
+                       }
+                     }
+                   }
+                 ]
+               })
+
+      assert %{
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 2,
+                 target_paths: [
+                   "elixir/lib/symphony_elixir_web/presenter.ex",
+                   "elixir/lib/symphony_elixir_web/router.ex"
+                 ],
+                 next_required_path: "elixir/lib/symphony_elixir_web/router.ex",
+                 budget_expansion_used: true
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+
+      assert {:stop, %RunPolicy.Violation{code: :broad_implement_expansion_exhausted}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 3,
+                 agent_input_tokens: 165_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 520_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   budget_mode: "broad_implement",
+                   budget_retry_count: 2,
+                   budget_pressure_level: "high",
+                   budget_auto_narrowed: true,
+                   budget_expansion_used: true,
+                   target_paths: [
+                     "elixir/lib/symphony_elixir_web/presenter.ex",
+                     "elixir/lib/symphony_elixir_web/router.ex"
+                   ],
+                   next_required_path: "elixir/lib/symphony_elixir_web/router.ex",
+                   already_learned: "Stay inside elixir/lib/symphony_elixir_web/presenter.ex, elixir/lib/symphony_elixir_web/router.ex and avoid unrelated reads or repo-wide rediscovery."
+                 }
+               })
+
+      assert %{
+               stage: "blocked",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 2,
+                 budget_expansion_used: true,
+                 target_paths: [
+                   "elixir/lib/symphony_elixir_web/presenter.ex",
+                   "elixir/lib/symphony_elixir_web/router.ex"
+                 ],
+                 next_required_path: "elixir/lib/symphony_elixir_web/router.ex"
+               },
+               stop_reason: %{rule_id: "budget.broad_implement_expansion_exhausted"}
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget still expands when an exact next file is already known from a prior blocked retry" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 2
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-known-expansion-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-known-expansion",
+      identifier: "MT-914BROADKNOWN",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "blocked", %{
+                 resume_context: %{
+                   budget_mode: "broad_implement",
+                   budget_retry_count: 10,
+                   budget_pressure_level: "critical",
+                   budget_auto_narrowed: true,
+                   target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                   next_required_path: ".github/pull_request_template.md",
+                   budget_expansion_used: false,
+                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 }
+               })
+
+      assert {:retry, %{kind: :broad_implement_budget_expansion_retry, retry_count: 11}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace_path: workspace,
+                 dispatch_stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 124_190,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 124_190,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   budget_mode: "broad_implement",
+                   budget_retry_count: 10,
+                   budget_pressure_level: "critical",
+                   budget_auto_narrowed: true,
+                   target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                   next_required_path: ".github/pull_request_template.md",
+                   budget_expansion_used: false,
+                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 }
+               })
+
+      assert %{
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 11,
+                 budget_expansion_used: true,
+                 target_paths: [
+                   "elixir/lib/symphony_elixir/delivery_engine.ex",
+                   ".github/pull_request_template.md"
+                 ],
+                 next_required_path: ".github/pull_request_template.md"
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget retry mines target paths from structured codex updates" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-codex-paths-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-codex",
+      identifier: "MT-914BROADLOG",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 150_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 last_agent_message: %{
+                   event: :commentary,
+                   message: %{
+                     payload: %{
+                       text:
+                         "I have the insertion points now: `elixir/lib/symphony_elixir/run_policy.ex` still hard-stops broad mode, and `elixir/lib/symphony_elixir/delivery_engine.ex` still emits the full broad context block."
+                     }
+                   }
+                 }
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: ["elixir/lib/symphony_elixir/run_policy.ex"],
+                 next_required_path: nil,
+                 budget_expansion_used: false,
+                 already_learned: already_learned
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+
+      assert already_learned ==
+               "Stay inside elixir/lib/symphony_elixir/run_policy.ex and avoid unrelated reads or repo-wide rediscovery."
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget retry mines target paths from recent codex updates when the last update is noisy" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-recent-updates-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-recent",
+      identifier: "MT-914BROADRECENT",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 150_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 last_agent_message: %{event: :tool_call, message: %{payload: %{text: ""}}},
+                 recent_agent_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text:
+                           "I have the insertion points now: `elixir/lib/symphony_elixir/run_policy.ex` still hard-stops broad mode, and `elixir/lib/symphony_elixir/delivery_engine.ex` still emits the full broad context block."
+                       }
+                     }
+                   }
+                 ]
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: ["elixir/lib/symphony_elixir/run_policy.ex"],
+                 next_required_path: nil,
+                 budget_expansion_used: false,
+                 already_learned: already_learned
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+
+      assert already_learned ==
+               "Stay inside elixir/lib/symphony_elixir/run_policy.ex and avoid unrelated reads or repo-wide rediscovery."
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement target paths drop basename duplicates when full paths are present" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-path-dedupe-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-dedupe",
+      identifier: "MT-914BROADDEDUPE",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 150_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 recent_agent_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text: "The live stop is in `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the only file worth touching next."
+                       }
+                     }
+                   }
+                 ]
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"]
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement target paths override stale learned summaries with compact execution guidance" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-learned-override-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-learned",
+      identifier: "MT-914BROADLEARNED",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 150_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   already_learned:
+                     "The retry should stay inside elixir/lib/symphony_elixir/delivery_engine.ex, delivery_engine.ex. thread/tokenUsage/updated 019d01e7-5d01-7b71-ab9f-68da4b895a71 019d01e7-5ea7-7cc3-a093-146afbe3007f"
+                 },
+                 recent_agent_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text: "Focus the next retry inside `elixir/lib/symphony_elixir/delivery_engine.ex`; delivery_engine.ex is the same path and should not be duplicated."
+                       }
+                     }
+                   }
+                 ]
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement target paths normalize diff-style a and b prefixes out of retry focus" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-diff-paths-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-diff-paths",
+      identifier: "MT-914BROADDIFF",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 150_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 recent_agent_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text: """
+                         diff --git a/elixir/lib/symphony_elixir/delivery_engine.ex b/elixir/lib/symphony_elixir/delivery_engine.ex
+                         --- a/elixir/lib/symphony_elixir/delivery_engine.ex
+                         +++ b/elixir/lib/symphony_elixir/delivery_engine.ex
+                         The retry should stay inside elixir/lib/symphony_elixir/delivery_engine.ex.
+                         """
+                       }
+                     }
+                   }
+                 ]
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget stop falls back to scope exhausted when no focus path can be derived" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 2
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-no-focus-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-no-focus",
+      identifier: "MT-914BROADNOFOCUS",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:stop, %RunPolicy.Violation{code: :broad_implement_scope_exhausted}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 150_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 last_agent_message: %{event: :commentary, message: %{payload: %{text: "Still exploring."}}}
+               })
+
+      assert %{
+               stage: "blocked",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_last_stop_code: "budget.broad_implement_scope_exhausted",
+                 budget_pressure_level: "critical",
+                 budget_last_observed_input_tokens: 150_000
+               },
+               stop_reason: %{rule_id: "budget.broad_implement_scope_exhausted"}
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget retry mines focus paths from last turn summaries when codex updates are absent" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-summary-path-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-summary-path",
+      identifier: "MT-914BROADSUMMARY",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 150_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   last_turn_summary: "The next focused edit belongs in elixir/lib/symphony_elixir/delivery_engine.ex before we touch anything else."
+                 }
+               })
+
+      assert %{
+               resume_context: %{
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement file-only retry stops with focus insufficient when no exact expansion path is surfaced" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 2
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-focus-insufficient-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-focus-insufficient",
+      identifier: "MT-914BROADFOCUS",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+      assert {:ok, _state} = RunStateStore.transition(workspace, "implement", %{})
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 150_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 150_000,
+                 turn_started_input_tokens: 0,
+                 recent_agent_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text: "The broad retry should stay inside `elixir/lib/symphony_elixir/delivery_engine.ex`."
+                       }
+                     }
+                   }
+                 ],
+                 resume_context: %{}
+               })
+
+      assert {:stop, %RunPolicy.Violation{code: :broad_implement_focus_insufficient, details: details}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 2,
+                 agent_input_tokens: 145_000,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 295_000,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{
+                   budget_mode: "broad_implement",
+                   budget_retry_count: 1,
+                   budget_pressure_level: "high",
+                   budget_auto_narrowed: true,
+                   target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                   already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+                 }
+               })
+
+      assert details =~ "no exact next file was surfaced"
+
+      assert %{
+               stage: "blocked",
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_auto_narrowed: true,
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"],
+                 already_learned: "Stay inside elixir/lib/symphony_elixir/delivery_engine.ex and avoid unrelated reads or repo-wide rediscovery."
+               },
+               stop_reason: %{rule_id: "budget.broad_implement_focus_insufficient"}
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget does not intercept explicit ci-failure recovery" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 1_000_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-ci-recovery-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{id: "issue-broad-budget-ci", identifier: "MT-914BROADCI", state: "In Progress"}
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "implement", %{
+                 last_ci_failure: %{check_name: "make-all", conclusion: "failure"}
+               })
+
+      assert {:stop, %RunPolicy.Violation{code: :per_turn_input_budget_exceeded}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace: workspace,
+                 stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 185_018,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 185_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{}
+               })
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "broad implement budget trusts live implement dispatch when persisted stage is stale" do
+    configure_memory_tracker!(
+      policy_token_budget: %{
+        per_turn_input: 500_000,
+        per_issue_total: 500_000,
+        per_issue_total_output: 500_000,
+        stages: %{
+          implement: %{
+            per_turn_input_soft: 60_000,
+            per_turn_input_hard: 120_000
+          }
+        },
+        broad_implement: %{
+          enabled: true,
+          auto_retry_limit: 1
+        }
+      }
+    )
+
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-broad-budget-stale-stage-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-broad-budget-stale-stage",
+      identifier: "MT-914BROADSTALE",
+      state: "In Progress"
+    }
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      workspace = Workspace.path_for_issue(issue.identifier)
+      File.mkdir_p!(workspace)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, "blocked", %{
+                 stop_reason: %{rule_id: "budget.per_turn_input_exceeded"}
+               })
+
+      assert {:retry, %{kind: :broad_implement_budget_retry, retry_count: 1}} =
+               RunPolicy.maybe_stop_for_token_budget(issue, %{
+                 workspace_path: workspace,
+                 dispatch_stage: "implement",
+                 turn_count: 1,
+                 agent_input_tokens: 185_018,
+                 agent_output_tokens: 0,
+                 agent_total_tokens: 185_018,
+                 turn_started_input_tokens: 0,
+                 resume_context: %{},
+                 recent_agent_updates: [
+                   %{
+                     event: :commentary,
+                     message: %{
+                       payload: %{
+                         text: "The stale-stage live retry should focus immediately on `elixir/lib/symphony_elixir/delivery_engine.ex`."
+                       }
+                     }
+                   }
+                 ]
+               })
+
+      assert %{
+               resume_context: %{
+                 budget_mode: "broad_implement",
+                 budget_retry_count: 1,
+                 budget_last_stop_code: "budget.per_turn_input_exceeded",
+                 budget_auto_narrowed: true,
+                 target_paths: ["elixir/lib/symphony_elixir/delivery_engine.ex"]
+               }
+             } = RunStateStore.load_or_default(workspace, issue)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "review-fix budget retries narrow scope and persist retry state" do
     configure_memory_tracker!(
       policy_token_budget: %{

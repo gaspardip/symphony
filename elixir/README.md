@@ -144,9 +144,65 @@ codex:
   command: "$CODEX_BIN app-server --model gpt-5.3-codex"
 ```
 
-- If `WORKFLOW.md` is missing or has invalid YAML, startup and scheduling are halted until fixed.
+- If `WORKFLOW.md` is missing or has invalid YAML, startup and new worker dispatch are halted until fixed.
+  After a failed hot reload, reads and reconciliation can still use the last valid configuration;
+  each new dispatch checks the current file before starting a worker. Restoring a valid file
+  re-enables dispatch.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+
+## Bounded retries during implementation
+
+`policy.token_budget.broad_implement` lets the runtime retry an implementation turn
+that exceeded its input budget using a smaller prompt and explicit file paths:
+
+```yaml
+policy:
+  token_budget:
+    per_turn_input: 150000
+    per_issue_total: 500000
+    broad_implement:
+      enabled: true
+      auto_retry_limit: 2
+```
+
+The defaults are `enabled: true` and `auto_retry_limit: 2`. Set `enabled: false`
+to retain a hard stop when the per-turn budget is exceeded. Admission requires the
+active execution's workspace and the `implement` stage. Review fixes and CI
+repair retain their separate budget behavior.
+
+The first retry focuses on one exact file found in the issue, agent updates, or
+persisted progress. A subsequent retry can add one exact required file, once;
+it cannot keep expanding the scope. The runtime persists the focused paths,
+retry count, pressure and stop reason so redispatch can resume the same scope.
+Without a usable path or after the bounded scope is exhausted, the issue becomes
+blocked with a budget rule explaining the next action. The total issue and output
+budgets still apply, including when the workspace contains pending changes.
+
+Issue token totals survive worker retries and runtime restarts. Each worker keeps an
+immutable baseline from the persisted snapshot and adds only its own provider usage.
+Usage updates checkpoint absolute totals, so repeated cumulative provider reports
+are not counted twice. Snapshot writes preserve the highest totals for the same
+issue, including when a stage writes an older snapshot. A new issue identity starts
+at zero. This adds one snapshot write per update that reports additional tokens.
+If checkpointing fails, the worker stops, the tracker is asked to block the issue,
+and new dispatch for that issue remains blocked in the current runtime with an
+explicit persistence error; repair storage and reconcile the unrecorded usage before
+restarting. Usage the provider has not reported cannot be checkpointed.
+
+## Unreadable run snapshots
+
+A missing `.symphony/run_state.json` starts a new run at `checkout`. Invalid JSON
+or a non-object snapshot instead produces a blocked state with rule
+`runtime.snapshot_unreadable`. New worker dispatch and delivery bootstrap stop
+before starting an agent. Normal save, transition, update and lease synchronization
+operations return an error and preserve the unreadable bytes, including snapshots
+staged during workspace bootstrap.
+
+Restore a valid snapshot from a trusted backup to resume. The runtime does not
+replace a corrupt snapshot with a fresh checkout automatically. Older valid
+snapshots still receive new default fields, and the existing handling of snapshots
+belonging to another issue is unchanged.
 
 ## Web dashboard
 

@@ -31,6 +31,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.StatusDashboard
   alias SymphonyElixir.TrackerEvent
   alias SymphonyElixir.TrackerEventInbox
+  alias SymphonyElixir.WorkflowStore
   alias SymphonyElixir.WorkflowProfile
   alias SymphonyElixir.Orchestrator.Controls
   alias SymphonyElixir.Workspace
@@ -90,6 +91,7 @@ defmodule SymphonyElixir.Orchestrator do
       completed: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
+      token_usage_errors: %{},
       paused_issue_states: %{},
       skipped_issues: [],
       last_candidate_issues: [],
@@ -317,15 +319,15 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           case {reason, RunPolicy.maybe_stop_for_token_budget(issue, running_entry)} do
             {:normal, {:retry, metadata}} ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive review-fix retry")
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive #{Map.get(metadata, :budget_mode, "budget")} retry")
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
                 delay_type: :continuation,
                 issue: running_entry.issue,
-                error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+                error: Map.get(metadata, :summary, "adaptive token retry"),
                 budget_retry: true,
-                budget_mode: "review_fix",
+                budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
                 budget_retry_count: Map.get(metadata, :retry_count),
                 budget_resume_context: Map.get(metadata, :resume_context)
               })
@@ -393,7 +395,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> apply_agent_token_delta(token_delta)
           |> apply_agent_rate_limits(update)
           |> Map.put(:running, Map.put(running, issue_id, updated_running_entry))
-          |> maybe_stop_issue_for_token_budget(issue_id, updated_running_entry)
+          |> checkpoint_and_check_token_budget(issue_id, updated_running_entry, token_delta)
 
         notify_dashboard()
         {:noreply, state}
@@ -2638,7 +2640,7 @@ defmodule SymphonyElixir.Orchestrator do
     ensure_review_follow_up_lease(state, run_state)
   end
 
-  @spec release_review_follow_up_lease_for_test(State.t(), map(), Path.t()) :: :ok
+  @spec release_review_follow_up_lease_for_test(State.t(), map(), Path.t()) :: :ok | {:error, term()}
   def release_review_follow_up_lease_for_test(%State{} = state, run_state, workspace)
       when is_map(run_state) and is_binary(workspace) do
     release_review_follow_up_lease(state, run_state, workspace)
@@ -2988,8 +2990,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp company_slots_available?(_state, _pack), do: true
-
   defp running_issue_count_for_state(running, issue_state) when is_map(running) do
     normalized_state = SymphonyElixir.Util.normalize_state(issue_state)
 
@@ -3197,7 +3197,7 @@ defmodule SymphonyElixir.Orchestrator do
           {:error, reason} ->
             Logger.warning("Skipping dispatch; failed to persist lease state for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
-            LeaseManager.release(issue.id, state.lease_owner)
+            release_persisted_issue_lease(issue.id, state.lease_owner, nil)
             state
         end
 
@@ -3222,9 +3222,15 @@ defmodule SymphonyElixir.Orchestrator do
     workspace = Workspace.path_for_issue(issue.identifier)
     dispatch_stage = normalize_dispatch_stage(issue)
 
-    run_state = RunStateStore.load_or_default(workspace, issue)
+    retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
 
-    with stage <- Map.get(run_state, :stage),
+    run_state =
+      workspace
+      |> RunStateStore.load_or_default(issue)
+      |> merge_retry_budget_resume_context(retry_metadata)
+
+    with :ok <- RunStateStore.ensure_readable(workspace),
+         stage <- Map.get(run_state, :stage),
          {:ok, pid} <-
            start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
              AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
@@ -3263,6 +3269,7 @@ defmodule SymphonyElixir.Orchestrator do
           agent_input_tokens: 0,
           agent_output_tokens: 0,
           agent_total_tokens: 0,
+          issue_token_usage_base: Map.get(run_state, :token_usage, %{}),
           agent_last_reported_input_tokens: 0,
           agent_last_reported_output_tokens: 0,
           agent_last_reported_total_tokens: 0,
@@ -3291,8 +3298,7 @@ defmodule SymphonyElixir.Orchestrator do
     else
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
-        LeaseManager.release(issue.id, state.lease_owner)
-        maybe_clear_persisted_lease(Workspace.path_for_issue(issue))
+        release_persisted_issue_lease(issue.id, state.lease_owner, Workspace.path_for_issue(issue))
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
@@ -3332,7 +3338,10 @@ defmodule SymphonyElixir.Orchestrator do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
     workspace = Workspace.path_for_issue(issue.identifier)
 
+    retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
+
     with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
+         run_state <- merge_retry_budget_resume_context(run_state, retry_metadata),
          stage <- Map.get(run_state, :stage),
          {:ok, pid} <-
            start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
@@ -3395,6 +3404,7 @@ defmodule SymphonyElixir.Orchestrator do
           agent_input_tokens: 0,
           agent_output_tokens: 0,
           agent_total_tokens: 0,
+          issue_token_usage_base: Map.get(run_state, :token_usage, %{}),
           agent_last_reported_input_tokens: 0,
           agent_last_reported_output_tokens: 0,
           agent_last_reported_total_tokens: 0,
@@ -3426,8 +3436,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Unable to spawn passive runtime worker for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
         unless MapSet.member?(state.claimed, issue.id) do
-          LeaseManager.release(issue.id, state.lease_owner)
-          maybe_clear_persisted_lease(Workspace.path_for_issue(issue))
+          release_persisted_issue_lease(issue.id, state.lease_owner, Workspace.path_for_issue(issue))
         end
 
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
@@ -3568,6 +3577,8 @@ defmodule SymphonyElixir.Orchestrator do
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+
+    persist_retry_budget_resume_context(identifier, metadata)
 
     %{
       state
@@ -3749,17 +3760,39 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp release_issue_claim(%State{} = state, issue_id) do
     workspace = workspace_for_issue_id(state, issue_id)
-    LeaseManager.release(issue_id, state.lease_owner)
-    maybe_clear_persisted_lease(workspace)
 
-    RunLedger.record("lease.released", %{
-      issue_id: issue_id,
-      actor_type: "system",
-      actor_id: state.lease_owner,
-      summary: "Lease released."
-    })
+    case release_persisted_issue_lease(issue_id, state.lease_owner, workspace) do
+      :ok ->
+        RunLedger.record("lease.released", %{
+          issue_id: issue_id,
+          actor_type: "system",
+          actor_id: state.lease_owner,
+          summary: "Lease released."
+        })
 
-    %{state | claimed: MapSet.delete(state.claimed, issue_id)}
+        fetch_error =
+          case state.candidate_fetch_error do
+            {:lease_release_failed, ^issue_id, _reason} -> nil
+            other -> other
+          end
+
+        %{state | claimed: MapSet.delete(state.claimed, issue_id), candidate_fetch_error: fetch_error}
+
+      {:error, reason} ->
+        %{state | claimed: MapSet.put(state.claimed, issue_id), candidate_fetch_error: {:lease_release_failed, issue_id, reason}}
+    end
+  end
+
+  defp release_persisted_issue_lease(issue_id, owner, workspace) do
+    case LeaseManager.release(issue_id, owner) do
+      :ok ->
+        maybe_clear_persisted_lease(workspace)
+        :ok
+
+      {:error, reason} = error ->
+        Logger.error("Lease release failed issue_id=#{issue_id}; persisted ownership was preserved: #{inspect(reason)}")
+        error
+    end
   end
 
   defp retry_delay(attempt, metadata)
@@ -4655,8 +4688,6 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.put(:cancelled_required_checks, persisted_check_list(run_state, :last_cancelled_required_checks, inspection.cancelled_required_checks))
   end
 
-  defp apply_persisted_review_state(%RunInspector.Snapshot{} = inspection, _run_state), do: inspection
-
   defp persisted_check_list(run_state, key, fallback) when is_map(run_state) do
     case Map.get(run_state, key) do
       values when is_list(values) and values != [] -> values
@@ -4812,12 +4843,44 @@ defmodule SymphonyElixir.Orchestrator do
          passive_dispatch_fun
        )
        when is_function(active_dispatch_fun, 3) and is_function(passive_dispatch_fun, 3) do
-    case normalize_dispatch_stage(issue) do
-      stage when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
-        passive_dispatch_fun.(state, issue, attempt)
+    with :ok <- token_usage_dispatch_guard(state, issue.id),
+         :ok <- WorkflowStore.force_reload(),
+         :ok <- Config.validate!(),
+         :ok <- RunStateStore.ensure_readable(Workspace.path_for_issue(issue)),
+         :ok <- persisted_issue_token_budget_guard(issue) do
+      case normalize_dispatch_stage(issue) do
+        stage when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
+          passive_dispatch_fun.(state, issue, attempt)
 
-      _ ->
-        active_dispatch_fun.(state, issue, attempt)
+        _ ->
+          active_dispatch_fun.(state, issue, attempt)
+      end
+    else
+      {:error, reason} ->
+        Logger.error("Dispatch blocked by runtime validation issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+        %{state | candidate_fetch_error: reason}
+    end
+  end
+
+  defp persisted_issue_token_budget_guard(issue) do
+    workspace = Workspace.path_for_issue(issue)
+    run_state = RunStateStore.load_or_default(workspace, issue)
+
+    case RunPolicy.maybe_stop_for_token_budget(issue, %{
+           workspace_path: workspace,
+           stage: Map.get(run_state, :stage),
+           resume_context: Map.get(run_state, :resume_context, %{}),
+           issue_token_usage_base: Map.get(run_state, :token_usage, %{})
+         }) do
+      :ok -> :ok
+      {:stop, violation} -> {:error, {:token_budget_exhausted, violation.rule_id}}
+    end
+  end
+
+  defp token_usage_dispatch_guard(state, issue_id) do
+    case Map.fetch(state.token_usage_errors, issue_id) do
+      {:ok, reason} -> {:error, {:token_usage_persistence_failed, reason}}
+      :error -> :ok
     end
   end
 
@@ -4895,8 +4958,12 @@ defmodule SymphonyElixir.Orchestrator do
             stage
         end
 
-      {:error, _reason} ->
+      {:error, :missing} ->
         "checkout"
+
+      {:error, _reason} ->
+        Logger.error("Dispatch blocked by unreadable snapshot issue_identifier=#{issue.identifier} workspace=#{workspace}")
+        "blocked"
     end
   end
 
@@ -5402,6 +5469,34 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp apply_agent_rate_limits(state, _update), do: state
 
+  defp checkpoint_and_check_token_budget(state, issue_id, running_entry, token_delta) do
+    changed? = Enum.any?([:input_tokens, :output_tokens, :total_tokens], &(Map.get(token_delta, &1, 0) > 0))
+
+    if changed? and Map.has_key?(running_entry, :issue_token_usage_base) do
+      case RunStateStore.record_token_usage(
+             running_entry.workspace_path,
+             running_entry.issue,
+             RunPolicy.issue_token_usage(running_entry)
+           ) do
+        {:ok, _persisted} ->
+          maybe_stop_issue_for_token_budget(state, issue_id, running_entry)
+
+        {:error, reason} ->
+          Logger.error("Stopping issue_id=#{issue_id}: token usage could not be persisted: #{inspect(reason)}")
+          state = terminate_running_issue(state, issue_id, false)
+
+          case IssueSource.update_issue_state(running_entry.issue, @blocked_state) do
+            :ok -> :ok
+            {:error, tracker_reason} -> Logger.error("Unable to block issue_id=#{issue_id} after token usage persistence failure: #{inspect(tracker_reason)}")
+          end
+
+          %{state | token_usage_errors: Map.put(state.token_usage_errors, issue_id, reason), candidate_fetch_error: {:token_usage_persistence_failed, reason}}
+      end
+    else
+      maybe_stop_issue_for_token_budget(state, issue_id, running_entry)
+    end
+  end
+
   defp maybe_stop_issue_for_token_budget(%State{} = state, issue_id, running_entry) do
     issue = Map.get(running_entry, :issue, %{})
 
@@ -5417,9 +5512,10 @@ defmodule SymphonyElixir.Orchestrator do
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: Map.get(running_entry, :identifier) || issue_id,
           delay_type: :continuation,
-          error: Map.get(metadata, :summary, "adaptive review-fix token retry"),
+          issue: issue,
+          error: Map.get(metadata, :summary, "adaptive token retry"),
           budget_retry: true,
-          budget_mode: "review_fix",
+          budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
           budget_retry_count: Map.get(metadata, :retry_count),
           budget_resume_context: Map.get(metadata, :resume_context)
         })
@@ -5465,13 +5561,65 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp retry_run_state(identifier, issue) when is_binary(identifier) and identifier != "" do
+  defp retry_run_state(identifier, issue, retry_metadata \\ %{})
+
+  defp retry_run_state(identifier, issue, retry_metadata)
+       when is_binary(identifier) and identifier != "" do
     identifier
     |> Workspace.path_for_issue()
     |> load_run_state(issue)
+    |> merge_retry_budget_resume_context(retry_metadata)
   end
 
-  defp retry_run_state(_identifier, _issue), do: %{}
+  defp retry_run_state(_identifier, _issue, _retry_metadata), do: %{}
+
+  defp persist_retry_budget_resume_context(identifier, metadata)
+       when is_binary(identifier) and is_map(metadata) do
+    case Map.get(metadata, :budget_resume_context) do
+      resume_context when is_map(resume_context) ->
+        workspace = Workspace.path_for_issue(identifier)
+
+        if File.dir?(workspace) do
+          case RunStateStore.update(workspace, fn persisted ->
+                 merge_retry_budget_resume_context(persisted, %{budget_resume_context: resume_context})
+               end) do
+            {:ok, _state} ->
+              :ok
+
+            {:error, reason} ->
+              Logger.error("Unable to persist budget retry context issue_identifier=#{identifier} error=#{inspect(reason)}")
+          end
+        end
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp persist_retry_budget_resume_context(_identifier, _metadata), do: :ok
+
+  defp merge_retry_budget_resume_context(run_state, retry_metadata)
+       when is_map(run_state) and is_map(retry_metadata) do
+    case Map.get(retry_metadata, :budget_resume_context) do
+      resume_context when is_map(resume_context) ->
+        Map.update(run_state, :resume_context, resume_context, fn existing ->
+          existing_map =
+            case existing do
+              context when is_map(context) -> context
+              _ -> %{}
+            end
+
+          Map.merge(existing_map, resume_context)
+        end)
+
+      _ ->
+        run_state
+    end
+  end
+
+  defp merge_retry_budget_resume_context(run_state, _retry_metadata), do: run_state
 
   @doc false
   @spec resolve_policy(Issue.t(), State.t()) :: {:ok, term()} | {:error, term()}
@@ -6004,8 +6152,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_map(run_state) and is_binary(workspace) do
     case Map.get(run_state, :issue_id) do
       issue_id when is_binary(issue_id) and issue_id != "" ->
-        LeaseManager.release(issue_id, state.lease_owner)
-        maybe_clear_persisted_lease(workspace)
+        release_persisted_issue_lease(issue_id, state.lease_owner, workspace)
 
       _ ->
         :ok

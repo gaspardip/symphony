@@ -1,0 +1,107 @@
+defmodule SymphonyElixir.PublishPreflightTest do
+  use SymphonyElixir.TestSupport
+
+  alias SymphonyElixir.{DeliveryEngine, PullRequestManager, RunStateStore}
+
+  setup do
+    root = Path.join(System.tmp_dir!(), "publish-preflight-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "PB-13")
+    File.mkdir_p!(Path.join(workspace, ".git"))
+
+    issue = %Issue{id: "publication-preflight", identifier: "PB-13", title: "Publication gate", state: "In Progress"}
+
+    {:ok, _state} =
+      RunStateStore.transition(workspace, "publish", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        branch: "publication-fixture"
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: root, policy_publish_required: true)
+
+    path = Workflow.workflow_file_path()
+    File.write!(path, String.replace(File.read!(path), "---\n", "---\nagent:\n  provider: codex-cli\n", global: false))
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
+    on_exit(fn -> File.rm_rf!(root) end)
+    %{workspace: workspace, issue: issue}
+  end
+
+  test "forbidden publication blocks before any Git mutation", context do
+    assert_blocked_before_mutation(context, :client_safe_shadow, "pr_posting_forbidden")
+  end
+
+  test "missing credential scope blocks before any Git mutation", context do
+    assert_blocked_before_mutation(context, :client_safe_pr_active, "credential_scope_forbidden")
+  end
+
+  test "invalid PR body contract blocks before any Git mutation", context do
+    File.mkdir_p!(Path.join(context.workspace, ".github"))
+    File.write!(Path.join(context.workspace, ".github/pull_request_template.md"), "required contract\n")
+    File.mkdir_p!(Path.join([context.workspace, "elixir", "lib", "mix", "tasks"]))
+    File.write!(Path.join([context.workspace, "elixir", "lib", "mix", "tasks", "pr_body.check.ex"]), "# contract marker\n")
+    assert_blocked_before_mutation(context, :private_autopilot, "pr_body_invalid")
+  end
+
+  test "allowed generic publication returns validation without publishing", context do
+    assert {:ok, %{status: "skipped"}} =
+             PullRequestManager.validate_publication(context.workspace, context.issue, %{branch: "publication-fixture"})
+  end
+
+  test "snapshot corruption during inspection blocks before publication", context do
+    path = RunStateStore.state_path(context.workspace)
+    payload = "{corrupt-during-inspection"
+    runner = command_recorder(fn -> File.write!(path, payload) end)
+
+    assert {:stop, {:run_state_unreadable, _reason}} =
+             DeliveryEngine.run(context.workspace, context.issue, nil, command_runner: runner)
+
+    refute_received {:forbidden_git_mutation, _}
+    assert File.read!(path) == payload
+  end
+
+  defp assert_blocked_before_mutation(context, policy_pack, expected_reason) do
+    runner = command_recorder()
+
+    assert {:stop, :publish_failed} = DeliveryEngine.run(context.workspace, context.issue, nil, command_runner: runner, policy_pack: policy_pack)
+    refute_received {:forbidden_git_mutation, _}
+    assert {:ok, state} = RunStateStore.load(context.workspace)
+    assert state.stage == "blocked"
+    assert inspect(state.stop_reason) =~ expected_reason
+    refute Map.get(state, :last_commit_sha)
+  end
+
+  defp command_recorder(on_inspect \\ fn -> :ok end) do
+    owner = self()
+
+    fn
+      "git", [operation | _] = args, _opts when operation in ["add", "commit", "push"] ->
+        send(owner, {:forbidden_git_mutation, args})
+        {"unexpected mutation", 1}
+
+      "git", ["status", "--porcelain"], _opts ->
+        on_inspect.()
+        {" M source.ex\n", 0}
+
+      "git", ["rev-parse", "--abbrev-ref", "HEAD"], _opts ->
+        {"publication-fixture\n", 0}
+
+      "git", ["rev-parse", "HEAD"], _opts ->
+        {String.duplicate("a", 40), 0}
+
+      "git", ["diff", "--stat", "--no-ext-diff", "HEAD"], _opts ->
+        {"source.ex | 1 +\n", 0}
+
+      "git", ["diff", "--numstat", "--no-ext-diff", "HEAD"], _opts ->
+        {"1\t0\tsource.ex\n", 0}
+
+      "git", _args, _opts ->
+        {"", 0}
+
+      "gh", ["pr", "view" | _], _opts ->
+        {"No pull request\n", 1}
+
+      command, args, _opts ->
+        raise "unexpected command #{inspect({command, args})}"
+    end
+  end
+end
