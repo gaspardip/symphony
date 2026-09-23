@@ -10,6 +10,14 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
+## This fork
+
+This checkout extends Symphony with a runtime-owned delivery loop. The runtime
+manages branches, commits, pull requests, checks and tracker transitions under the
+configured policy. See [the current runtime contract](docs/RUNTIME_CONTRACT.md) and
+[the Elixir guide](elixir/README.md) for this implementation. The upstream demo and
+specification below describe its starting point, not acceptance evidence for this fork.
+
 ## Running Symphony
 
 ### Requirements
@@ -32,7 +40,7 @@ and run the Elixir-based Symphony implementation. You can also ask your favorite
 help with the setup:
 
 > Set up Symphony for my repository based on
-> https://github.com/openai/symphony/blob/main/elixir/README.md
+> https://github.com/gaspardip/symphony/blob/main/elixir/README.md
 
 New worker dispatch validates the current workflow and workspace root. Invalid configuration
 blocks the worker and records a `config_invalid` event for diagnosis.

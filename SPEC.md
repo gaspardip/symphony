@@ -2,6 +2,11 @@
 
 Status: Draft v1 (language-agnostic)
 
+This document retains the upstream service specification. The Elixir fork extends the
+tracker-reader boundary and owns delivery side effects; see the
+[current runtime contract](docs/RUNTIME_CONTRACT.md) for those differences and the
+repository-specific sources used to validate a run.
+
 Purpose: Define a service that orchestrates coding agents to get project work done.
 
 ## 1. Problem Statement

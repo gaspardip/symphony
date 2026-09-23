@@ -14,7 +14,7 @@ mix test                      # all tests
 mix test path/to/test.exs:42  # single test by line
 mix format --check-formatted  # format check
 mix credo --strict            # lint
-mix coverage.audit            # tests + 84% overall / 76% core threshold
+mix coverage.audit            # tests + 79% overall / 70% core threshold
 mix dialyzer --format short   # type check
 mix build                     # escript → bin/symphony
 ```
@@ -50,8 +50,8 @@ When your changes shift line numbers in orchestrator.ex or delivery_engine.ex, u
 ## Coverage
 
 Thresholds in `elixir/lib/symphony_elixir/coverage_audit.ex`:
-- Overall: 84%
-- Core modules: 76% (DeliveryEngine, Orchestrator, RunPolicy, etc.)
+- Overall: 79%
+- Core modules: 70% (DeliveryEngine, Orchestrator, RunPolicy, etc.)
 
 If you add code to a core module without proportional tests, coverage audit will fail.
 

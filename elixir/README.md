@@ -1,7 +1,8 @@
 # Symphony Elixir
 
 This directory contains the current Elixir/OTP implementation of Symphony, based on
-[`SPEC.md`](../SPEC.md) at the repository root.
+[`SPEC.md`](../SPEC.md) at the repository root, with the delivery responsibilities
+defined in the [current runtime contract](../docs/RUNTIME_CONTRACT.md).
 
 > [!WARNING]
 > Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
@@ -56,7 +57,7 @@ mise exec -- elixir --version
 ## Run
 
 ```bash
-git clone https://github.com/openai/symphony
+git clone https://github.com/gaspardip/symphony.git
 cd symphony/elixir
 mise trust
 mise install
@@ -64,6 +65,11 @@ mise exec -- mix setup
 mise exec -- mix build
 mise exec -- ./bin/symphony ./WORKFLOW.md
 ```
+
+Use the exact Git revision associated with your validation evidence. Cloning the
+default branch does not include local recovery work that has not been published.
+Select and review a workflow for the target repository before starting the service;
+the checked-in workflow is configured for Symphony self-host operation.
 
 ## Configuration
 
@@ -213,6 +219,11 @@ Within one BEAM node, snapshot updates, stage transitions, token checkpoints and
 lease changes serialize their complete read-modify-write operation per workspace.
 Lease refreshes therefore preserve a concurrently recorded stage and diagnostic.
 This lock does not coordinate independent BEAM nodes or separate checkouts.
+
+Stage transition counters retain string stage keys across snapshot reloads. Returning
+to a stage increments its stored count; updating the current stage does not increment
+it or append a history entry. Existing stored counts are preserved, but counts lost
+before this correction cannot be reconstructed automatically.
 
 Restore a valid snapshot from a trusted backup to resume. The runtime does not
 replace a corrupt snapshot with a fresh checkout automatically. Older valid
