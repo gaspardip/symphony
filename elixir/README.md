@@ -67,6 +67,13 @@ mise exec -- ./bin/symphony ./WORKFLOW.md
 
 ## Configuration
 
+The read-only verifier receives changed source and test content selected by the harness's
+`verification.behavioral_proof.source_paths` and `test_paths` (or the existing behavioral-proof defaults),
+before documentation content. Evidence is limited to four files and 2,400 characters per file, redacts
+identified secrets, and explicitly marks binary, unreadable or unsafe paths as omitted. Symlinks are not
+followed. The verifier still cannot use tools other than its result-reporting tool, and must block when
+the supplied evidence is insufficient.
+
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
 
 ```bash
@@ -201,6 +208,11 @@ or a non-object snapshot instead produces a blocked state with rule
 before starting an agent. Normal save, transition, update and lease synchronization
 operations return an error and preserve the unreadable bytes, including snapshots
 staged during workspace bootstrap.
+
+Within one BEAM node, snapshot updates, stage transitions, token checkpoints and
+lease changes serialize their complete read-modify-write operation per workspace.
+Lease refreshes therefore preserve a concurrently recorded stage and diagnostic.
+This lock does not coordinate independent BEAM nodes or separate checkouts.
 
 Restore a valid snapshot from a trusted backup to resume. The runtime does not
 replace a corrupt snapshot with a fresh checkout automatically. Older valid
