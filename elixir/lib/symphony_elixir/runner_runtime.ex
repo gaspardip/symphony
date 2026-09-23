@@ -45,6 +45,7 @@ defmodule SymphonyElixir.RunnerRuntime do
       install_root: install_root,
       workspace_root: Config.workspace_root(),
       current_checkout_root: current_root,
+      selected_release_root: current_link_target,
       current_link_target: current_link_target,
       current_version_sha: current_version_sha(current_root) || Map.get(metadata, "current_version_sha"),
       runtime_version: current_version_sha(current_root) || Map.get(metadata, "current_version_sha"),
@@ -244,9 +245,15 @@ defmodule SymphonyElixir.RunnerRuntime do
     end
   end
 
+  @doc "Returns the configured current symlink target, not proof of the code loaded by this process."
+  @spec selected_release_root() :: Path.t() | nil
+  def selected_release_root do
+    current_link_target(Config.runner_install_root())
+  end
+
   @spec protected_paths() :: [Path.t()]
   def protected_paths do
-    [Config.runner_install_root(), current_checkout_root()]
+    [Config.runner_install_root(), current_checkout_root(), selected_release_root()]
     |> Enum.filter(&is_binary/1)
     |> Enum.map(&Path.expand/1)
     |> Enum.uniq()

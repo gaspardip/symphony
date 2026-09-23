@@ -18,6 +18,9 @@ configured policy. See [the current runtime contract](docs/RUNTIME_CONTRACT.md) 
 [the Elixir guide](elixir/README.md) for this implementation. The upstream demo and
 specification below describe its starting point, not acceptance evidence for this fork.
 
+The [selected runner release contract](docs/selected-runner-release.md) distinguishes
+the configured release from execution identity and defines its pre-run path protection.
+
 ## Running Symphony
 
 ### Requirements
