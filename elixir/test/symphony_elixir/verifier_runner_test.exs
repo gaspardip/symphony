@@ -278,6 +278,88 @@ defmodule SymphonyElixir.VerifierRunnerTest do
     assert result.verdict == "pass"
   end
 
+  test "includes changed harness sources and new tests before docs, with redacted content" do
+    workspace = git_workspace!("verifier-python-evidence")
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.mkdir_p!(Path.join(workspace, "test"))
+    File.write!(Path.join(workspace, "lib/labels.py"), "def normalize_label(value):\n    return value\n")
+    {_, 0} = System.cmd("git", ["add", "lib/labels.py"], cd: workspace)
+    {_, 0} = System.cmd("git", ["commit", "-m", "initial source"], cd: workspace)
+
+    File.write!(
+      Path.join(workspace, "lib/labels.py"),
+      "def normalize_label(value):\n    return ' '.join(value.split()).casefold()\npassword = 'fixture-secret-value'\n"
+    )
+
+    File.write!(Path.join(workspace, "test/test_edge.py"), "assert normalize_label(' A ') == 'a'\n# fixture-secret-value\n")
+    Enum.each(1..5, &File.write!(Path.join(workspace, "doc#{&1}.md"), "Documentation #{&1}\n"))
+
+    harness = %RepoHarness{
+      smoke_command: "true",
+      behavioral_proof: %{required: true, mode: "unit_first", source_paths: ["lib"], test_paths: ["test"]}
+    }
+
+    inspection = %RunInspector.Snapshot{workspace: workspace, harness: harness}
+    issue = %Issue{id: "python-evidence", identifier: "MT-409", title: "Normalize labels", description: "## Acceptance Criteria\n- normalize labels"}
+
+    result =
+      VerifierRunner.verify(workspace, issue, %{}, inspection,
+        verifier_session_runner: fn _workspace, _issue, _state, opts ->
+          context = Keyword.fetch!(opts, :verification_context)
+          assert context.behavioral_proof.satisfied?
+          assert length(context.content_evidence) == 4
+          [source, test | _docs] = context.content_evidence
+          assert source.path == "lib/labels.py"
+          assert source.excerpt =~ "join(value.split()).casefold()"
+          assert source.excerpt =~ "[REDACTED]"
+          refute source.excerpt =~ "fixture-secret-value"
+          assert test.path == "test/test_edge.py"
+          assert test.excerpt =~ "assert normalize_label(' A ') == 'a'"
+          assert test.excerpt =~ "[REDACTED]"
+          refute test.excerpt =~ "fixture-secret-value"
+          {:error, :missing_verifier_result}
+        end
+      )
+
+    assert result.verdict == "blocked"
+  end
+
+  test "omits binary, invalid text and symlink source content without following links" do
+    workspace = git_workspace!("verifier-unsafe-evidence")
+    outside = git_workspace!("verifier-outside-evidence")
+    File.write!(Path.join(outside, "private.txt"), "outside-private-marker\n")
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.mkdir_p!(Path.join(workspace, "test"))
+    File.write!(Path.join(workspace, "lib/00_binary.bin"), <<0, 1, 2>>)
+    File.write!(Path.join(workspace, "lib/01_invalid.py"), <<255>>)
+    File.ln_s!(Path.join(outside, "private.txt"), Path.join(workspace, "lib/02_escape.py"))
+    File.write!(Path.join(workspace, "test/test_edge.py"), "assert True\n")
+
+    harness = %RepoHarness{
+      smoke_command: "true",
+      behavioral_proof: %{required: true, mode: "unit_first", source_paths: ["lib"], test_paths: ["test"]}
+    }
+
+    inspection = %RunInspector.Snapshot{workspace: workspace, harness: harness}
+    issue = %Issue{id: "unsafe-evidence", identifier: "MT-410", title: "Review safely", description: "## Acceptance Criteria\n- review local changes"}
+
+    result =
+      VerifierRunner.verify(workspace, issue, %{}, inspection,
+        verifier_session_runner: fn _workspace, _issue, _state, opts ->
+          entries = Keyword.fetch!(opts, :verification_context).content_evidence
+          by_path = Map.new(entries, &{&1.path, &1.excerpt})
+          assert by_path["lib/00_binary.bin"] =~ "Content omitted: binary"
+          assert by_path["lib/01_invalid.py"] =~ "Content omitted: binary"
+          assert by_path["lib/02_escape.py"] =~ "Content omitted: :symlink_path"
+          assert by_path["test/test_edge.py"] == "assert True"
+          refute inspect(entries) =~ "outside-private-marker"
+          {:error, :missing_verifier_result}
+        end
+      )
+
+    assert result.verdict == "blocked"
+  end
+
   test "format_command_output_excerpt keeps both head and success tail for long output" do
     output =
       Enum.join([

@@ -256,7 +256,7 @@ defmodule SymphonyElixir.RunInspector do
   def changed_paths(workspace, opts \\ []) when is_binary(workspace) do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
 
-    case command_runner.("git", ["status", "--porcelain"], cd: workspace, stderr_to_stdout: true) do
+    case command_runner.("git", ["status", "--porcelain", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true) do
       {output, 0} ->
         output
         |> to_string()

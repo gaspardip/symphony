@@ -4,6 +4,28 @@ defmodule SymphonyElixir.RunInspectorTest do
   alias SymphonyElixir.RepoHarness
   alias SymphonyElixir.RunInspector
 
+  test "changed paths expands new nested directories and respects ignored files" do
+    workspace = Path.join(System.tmp_dir!(), "changed-paths-nested-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+    {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace)
+    File.write!(Path.join(workspace, ".git/info/exclude"), "*.cache\n")
+
+    for directory <- ["lib/nested", "test/nested", ".symphony"] do
+      File.mkdir_p!(Path.join(workspace, directory))
+    end
+
+    File.write!(Path.join(workspace, "lib/nested/labels.py"), "def label(): return 'example'\n")
+    File.write!(Path.join(workspace, "test/nested/test_labels.py"), "assert label() == 'example'\n")
+    File.write!(Path.join(workspace, "lib/nested/ignored.cache"), "ignored\n")
+    File.write!(Path.join(workspace, ".symphony/run_state.json"), "{}\n")
+
+    assert Enum.sort(RunInspector.changed_paths(workspace)) == [
+             "lib/nested/labels.py",
+             "test/nested/test_labels.py"
+           ]
+  end
+
   test "required checks rollup classifies missing, pending, failed, and cancelled checks" do
     harness = %RepoHarness{required_checks: ["ci / validate", "ci / ui-tests", "ci / smoke", "ci / docs"]}
 

@@ -366,7 +366,7 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
              RunInspector.run_post_merge("/tmp", harness, shell_runner: shell_runner)
 
     changed_paths_runner = fn
-      "git", ["status", "--porcelain"], _opts ->
+      "git", ["status", "--porcelain", "--untracked-files=all"], _opts ->
         {" M lib/a.ex\nR  old/name.txt -> new/name.txt\n?? lib/a.ex\n", 0}
     end
 

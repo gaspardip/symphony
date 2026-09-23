@@ -12,6 +12,7 @@ defmodule SymphonyElixir.VerifierRunner do
   alias SymphonyElixir.Observability
   alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.RunInspector
+  alias SymphonyElixir.SecretRedactor
   alias SymphonyElixir.UiProof
   alias SymphonyElixir.VerifierResult
 
@@ -208,15 +209,16 @@ defmodule SymphonyElixir.VerifierRunner do
 
   defp verification_context(workspace, inspection, state, acceptance, smoke_result, opts) do
     changed_files = RunInspector.changed_paths(workspace, opts)
+    behavioral_proof = BehavioralProof.evaluate(workspace, inspection.harness, changed_files)
 
     %{
       acceptance: IssueAcceptance.to_prompt_map(acceptance),
       changed_files: changed_files,
       diff_summary: RunInspector.diff_summary(workspace, opts),
-      content_evidence: changed_file_content_evidence(workspace, changed_files),
+      content_evidence: changed_file_content_evidence(workspace, changed_files, behavioral_proof),
       smoke_result: smoke_result,
       validation_output: get_in(state, [:last_validation, :output]),
-      behavioral_proof: BehavioralProof.evaluate(workspace, inspection.harness, changed_files),
+      behavioral_proof: behavioral_proof,
       ui_proof: UiProof.evaluate(workspace, inspection.harness, changed_files, inspection, opts)
     }
   end
@@ -462,35 +464,42 @@ defmodule SymphonyElixir.VerifierRunner do
     "Changed file content evidence:\n#{rendered}"
   end
 
-  defp changed_file_content_evidence(workspace, changed_files) do
-    changed_files
-    |> Enum.filter(&doc_like_path?/1)
+  defp changed_file_content_evidence(workspace, changed_files, behavioral_proof) do
+    (behavioral_proof.behavior_paths ++ behavioral_proof.proof_paths ++ Enum.filter(changed_files, &doc_like_path?/1))
+    |> Enum.uniq()
     |> Enum.take(4)
     |> Enum.map(&content_evidence_entry(workspace, &1))
-    |> Enum.reject(&is_nil/1)
+    |> SecretRedactor.redact()
+    |> Enum.map(&Map.update!(&1, :excerpt, fn contents -> doc_content_excerpt(contents) end))
   end
 
   defp content_evidence_entry(workspace, path) do
-    file = Path.join(workspace, path)
+    with {:ok, file} <- confined_content_file(workspace, path),
+         {:ok, contents} <- File.read(file),
+         true <- String.valid?(contents) and not String.contains?(contents, <<0>>) do
+      %{path: path, excerpt: contents}
+    else
+      false -> %{path: path, excerpt: "[Content omitted: binary or invalid UTF-8 text]"}
+      {:error, reason} -> %{path: path, excerpt: "[Content omitted: #{inspect(reason)}]"}
+    end
+  end
 
-    cond do
-      not File.regular?(file) ->
-        nil
+  defp confined_content_file(workspace, path) do
+    segments = Path.split(path)
 
-      true ->
-        case File.read(file) do
-          {:ok, contents} ->
-            excerpt = doc_content_excerpt(contents)
+    if Path.type(path) != :relative or segments == [] or Enum.any?(segments, &(&1 in [".", ".."])) do
+      {:error, :unsafe_path}
+    else
+      Enum.reduce_while(segments, {:ok, Path.expand(workspace)}, fn segment, {:ok, current} ->
+        next = Path.join(current, segment)
 
-            if excerpt == "" do
-              nil
-            else
-              %{path: path, excerpt: excerpt}
-            end
-
-          _ ->
-            nil
+        case File.lstat(next) do
+          {:ok, %File.Stat{type: :symlink}} -> {:halt, {:error, :symlink_path}}
+          {:ok, %File.Stat{type: type}} when type in [:regular, :directory] -> {:cont, {:ok, next}}
+          {:ok, _stat} -> {:halt, {:error, :unsupported_file_type}}
+          {:error, reason} -> {:halt, {:error, reason}}
         end
+      end)
     end
   end
 
