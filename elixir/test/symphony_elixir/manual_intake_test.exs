@@ -120,7 +120,19 @@ defmodule SymphonyElixir.ManualIntakeTest do
            }
   end
 
-  test "manual issues are persisted, exposed through issue source, and support source-aware controls" do
+  test "manual issues are persisted, exposed through issue source, and support source-aware controls", context do
+    workspace_root = Path.join(System.tmp_dir!(), "manual-control-only-#{System.unique_integer([:positive])}")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      manual_store_root: context.store_root,
+      workspace_root: workspace_root,
+      max_concurrent_agents: 0,
+      tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"],
+      tracker_terminal_states: ["Done", "Blocked", "Closed", "Canceled", "Duplicate"]
+    )
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
     orchestrator_name = Module.concat(__MODULE__, :ManualSourceOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
