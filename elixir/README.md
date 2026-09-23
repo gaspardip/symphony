@@ -230,6 +230,21 @@ replace a corrupt snapshot with a fresh checkout automatically. Older valid
 snapshots still receive new default fields, and the existing handling of snapshots
 belonging to another issue is unchanged.
 
+## Terminal checkpoints and passive continuations
+
+Automatic dispatch does not resume a persisted `blocked` or `done` checkpoint just
+because the tracker still reports the issue as active. Eligibility is checked again
+after acquiring the lease, and checkout repair occurs under that ownership. The
+resulting stage determines whether an active agent or a passive worker is needed.
+A passive checkpoint repaired to an active stage refreshes tracker eligibility and
+uses the normal agent hooks and pre-run checks.
+
+An old retry timer cannot clear a newer blocker. Explicit operator retries remain
+available, and the existing review-fix continuation requires current progress proof
+and ownership before resuming. Passive continuations reacquire their lease even
+when the local claim remains cached, and an already running issue is not spawned
+a second time. A failed lease release remains visible and does not authorize work.
+
 ## Web dashboard
 
 The observability UI now runs on a minimal Phoenix stack:

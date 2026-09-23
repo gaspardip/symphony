@@ -3034,6 +3034,18 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       labels: []
     }
 
+    root = Path.join(System.tmp_dir!(), "passive-existing-claim-#{System.unique_integer([:positive])}")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: root, runner_install_root: Path.join(root, "runner-install"))
+    workspace = Workspace.path_for_issue(issue)
+    init_git_workspace!(workspace, branch: SymphonyElixir.GitManager.issue_branch_name(issue))
+    assert {:ok, _} = RunStateStore.transition(workspace, "await_checks", %{issue_id: issue.id, issue_identifier: issue.identifier})
+    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "passive-owner")
+
+    on_exit(fn ->
+      LeaseManager.release(issue.id, "passive-owner")
+      File.rm_rf(root)
+    end)
+
     worker = spawn(fn -> Process.sleep(:infinity) end)
 
     on_exit(fn ->

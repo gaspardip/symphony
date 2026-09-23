@@ -3197,7 +3197,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     case acquire_fun.(issue.id, issue.identifier, state.lease_owner) do
       :ok ->
-        case persist_live_issue_lease(state, workspace, issue) do
+        case persist_dispatchable_issue_lease(state, workspace, issue) do
           {:ok, _run_state} ->
             RunLedger.record("lease.acquired", %{
               issue_id: issue.id,
@@ -3234,9 +3234,39 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_spawn_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
+    with {:ok, initial_stage} <- persisted_dispatch_stage(issue),
+         _normalized_stage <- normalize_dispatch_stage(issue),
+         {:ok, stage} <- persisted_dispatch_stage(issue) do
+      if stage in ["merge_readiness", "await_checks", "merge", "post_merge"] do
+        start_passive_issue_worker(state, issue, attempt, recipient, start_child_fun, stage)
+      else
+        refresh_result =
+          if initial_stage in ["merge_readiness", "await_checks", "merge", "post_merge"] do
+            revalidate_issue_for_dispatch(issue, &IssueSource.fetch_issue_states_by_ids/1, terminal_state_set())
+          else
+            {:ok, issue}
+          end
+
+        case refresh_result do
+          {:ok, refreshed_issue} ->
+            start_active_issue_worker(state, refreshed_issue, attempt, recipient, start_child_fun, stage)
+
+          {:skip, _reason} ->
+            stop_terminal_dispatch(state, issue, {:dispatch_no_longer_eligible, issue.id})
+
+          {:error, reason} ->
+            stop_terminal_dispatch(state, issue, {:dispatch_refresh_failed, reason})
+        end
+      end
+    else
+      {:error, reason} -> stop_terminal_dispatch(state, issue, reason)
+    end
+  end
+
+  defp start_active_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun, dispatch_stage)
+       when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
     workspace = Workspace.path_for_issue(issue.identifier)
-    dispatch_stage = normalize_dispatch_stage(issue)
 
     retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
 
@@ -3246,6 +3276,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> merge_retry_budget_resume_context(retry_metadata)
 
     with :ok <- RunStateStore.ensure_readable(workspace),
+         {:ok, _stage} <- persisted_dispatch_stage(issue),
          stage <- Map.get(run_state, :stage),
          {:ok, pid} <-
            start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
@@ -3312,6 +3343,9 @@ defmodule SymphonyElixir.Orchestrator do
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
     else
+      {:error, {:persisted_stage_requires_explicit_resume, _stage} = reason} ->
+        stop_terminal_dispatch(state, issue, reason)
+
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
         release_persisted_issue_lease(issue.id, state.lease_owner, Workspace.path_for_issue(issue))
@@ -3337,8 +3371,20 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_passive_issue(%State{} = state, %Issue{} = issue, attempt, acquire_fun, spawn_fun)
        when is_function(acquire_fun, 3) and is_function(spawn_fun, 4) do
     cond do
+      Map.has_key?(state.running, issue.id) ->
+        state
+
       MapSet.member?(state.claimed, issue.id) ->
-        spawn_fun.(state, issue, attempt, self())
+        case persisted_dispatch_stage(issue) do
+          {:ok, _stage} ->
+            do_dispatch_issue(state, issue, attempt, acquire_fun, spawn_fun)
+
+          {:error, {:persisted_stage_requires_explicit_resume, _stage} = reason} ->
+            stop_terminal_dispatch(state, issue, reason)
+
+          {:error, reason} ->
+            %{state | candidate_fetch_error: reason}
+        end
 
       true ->
         do_dispatch_issue(state, issue, attempt, acquire_fun, spawn_fun)
@@ -3351,12 +3397,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_spawn_passive_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
+    do_spawn_issue_worker(state, issue, attempt, recipient, start_child_fun)
+  end
+
+  defp start_passive_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun, dispatch_stage)
+       when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
     workspace = Workspace.path_for_issue(issue.identifier)
 
     retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
 
-    with {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
+    with {:ok, _stage} <- persisted_dispatch_stage(issue),
+         {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
          run_state <- merge_retry_budget_resume_context(run_state, retry_metadata),
          stage <- Map.get(run_state, :stage),
          {:ok, pid} <-
@@ -3386,7 +3438,6 @@ defmodule SymphonyElixir.Orchestrator do
            end) do
       ref = Process.monitor(pid)
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
-      dispatch_stage = normalize_dispatch_stage(issue)
 
       Logger.info("Dispatching issue to passive runtime worker: #{SymphonyElixir.Util.issue_log_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
@@ -3448,6 +3499,9 @@ defmodule SymphonyElixir.Orchestrator do
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
     else
+      {:error, {:persisted_stage_requires_explicit_resume, _stage} = reason} ->
+        stop_terminal_dispatch(state, issue, reason)
+
       {:error, reason} ->
         Logger.error("Unable to spawn passive runtime worker for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
@@ -3747,8 +3801,97 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    {state, issue} = Controls.maybe_resume_blocked_issue(state, issue)
+    case retry_resume_action(issue, metadata) do
+      :dispatch -> do_handle_active_retry(state, issue, attempt, metadata)
+      :resume -> resume_review_retry_under_lease(state, issue, attempt, metadata)
+      {:error, reason} -> {:noreply, stop_terminal_dispatch(state, issue, reason)}
+    end
+  end
 
+  defp retry_resume_action(issue, metadata) do
+    case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
+      {:ok, %{stage: "blocked"} = run_state} ->
+        if metadata[:delay_type] == :continuation and auto_continue_review_fix_budget_stop?(run_state),
+          do: :resume,
+          else: {:error, {:persisted_stage_requires_explicit_resume, "blocked"}}
+
+      {:ok, %{stage: "done"}} ->
+        {:error, {:persisted_stage_requires_explicit_resume, "done"}}
+
+      {:ok, _state} ->
+        :dispatch
+
+      {:mismatch, _state} ->
+        :dispatch
+
+      {:error, :missing} ->
+        :dispatch
+
+      {:error, reason} ->
+        {:error, {:run_state_unreadable, reason}}
+    end
+  end
+
+  defp resume_review_retry_under_lease(state, issue, attempt, metadata) do
+    existing_owner? =
+      case LeaseManager.read(issue.id) do
+        {:ok, %{"owner" => owner}} -> owner == state.lease_owner
+        _ -> false
+      end
+
+    case LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner) do
+      :ok ->
+        resume_result =
+          case retry_resume_action(issue, metadata) do
+            :resume -> {:ok, Controls.maybe_resume_blocked_issue(state, issue)}
+            :dispatch -> {:ok, {state, issue}}
+            {:error, _reason} = error -> error
+          end
+
+        resume_state =
+          case resume_result do
+            {:ok, {next_state, _issue}} -> next_state
+            {:error, _reason} -> state
+          end
+
+        released = release_retry_resume_lease(resume_state, issue, existing_owner?)
+
+        if MapSet.member?(released.claimed, issue.id) do
+          {:noreply, released}
+        else
+          case resume_result do
+            {:ok, {_state, next_issue}} ->
+              do_handle_active_retry(released, next_issue, attempt, metadata)
+
+            {:error, reason} ->
+              {:noreply, stop_terminal_dispatch(released, issue, reason)}
+          end
+        end
+
+      {:error, reason} ->
+        {:noreply,
+         schedule_issue_retry(
+           %{state | candidate_fetch_error: {:retry_resume_lease_failed, issue.id, reason}},
+           issue.id,
+           attempt + 1,
+           Map.merge(metadata, %{identifier: issue.identifier, error: "review continuation lease unavailable: #{inspect(reason)}"})
+         )}
+    end
+  end
+
+  defp release_retry_resume_lease(state, issue, true), do: release_issue_claim(state, issue.id)
+
+  defp release_retry_resume_lease(state, issue, false) do
+    case LeaseManager.release(issue.id, state.lease_owner) do
+      :ok ->
+        %{state | claimed: MapSet.delete(state.claimed, issue.id)}
+
+      {:error, reason} ->
+        %{state | claimed: MapSet.put(state.claimed, issue.id), candidate_fetch_error: {:lease_release_failed, issue.id, reason}}
+    end
+  end
+
+  defp do_handle_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) do
       dispatch_fun =
@@ -4862,8 +5005,9 @@ defmodule SymphonyElixir.Orchestrator do
     with :ok <- token_usage_dispatch_guard(state, issue.id),
          :ok <- validate_dispatch_configuration(issue),
          :ok <- RunStateStore.ensure_readable(Workspace.path_for_issue(issue)),
-         :ok <- persisted_issue_token_budget_guard(issue) do
-      case normalize_dispatch_stage(issue) do
+         :ok <- persisted_issue_token_budget_guard(issue),
+         {:ok, dispatch_stage} <- persisted_dispatch_stage(issue) do
+      case dispatch_stage do
         stage when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
           passive_dispatch_fun.(state, issue, attempt)
 
@@ -4871,9 +5015,57 @@ defmodule SymphonyElixir.Orchestrator do
           active_dispatch_fun.(state, issue, attempt)
       end
     else
+      {:error, {:persisted_stage_requires_explicit_resume, _stage} = reason} ->
+        stop_terminal_dispatch(state, issue, reason)
+
       {:error, reason} ->
         Logger.error("Dispatch blocked by runtime validation issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
         %{state | candidate_fetch_error: reason}
+    end
+  end
+
+  defp persist_dispatchable_issue_lease(state, workspace, issue) do
+    with {:ok, _stage} <- persisted_dispatch_stage(issue) do
+      persist_live_issue_lease(state, workspace, issue)
+    end
+  end
+
+  defp stop_terminal_dispatch(state, issue, reason) do
+    case LeaseManager.read(issue.id) do
+      {:ok, %{"owner" => owner}} when owner == state.lease_owner ->
+        released = release_issue_claim(state, issue.id)
+
+        if MapSet.member?(released.claimed, issue.id),
+          do: released,
+          else: %{released | candidate_fetch_error: reason}
+
+      {:ok, _other_owner} ->
+        %{state | claimed: MapSet.delete(state.claimed, issue.id), candidate_fetch_error: reason}
+
+      {:error, :missing} ->
+        %{state | claimed: MapSet.delete(state.claimed, issue.id), candidate_fetch_error: reason}
+
+      {:error, lease_reason} ->
+        %{state | candidate_fetch_error: {:lease_read_failed, issue.id, lease_reason}}
+    end
+  end
+
+  defp persisted_dispatch_stage(issue) do
+    case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
+      {:ok, %{stage: stage}} when stage in ["blocked", "done"] ->
+        {:error, {:persisted_stage_requires_explicit_resume, stage}}
+
+      {:ok, %{stage: stage}} ->
+        {:ok, stage}
+
+      {:mismatch, _state} ->
+        {:ok, "checkout"}
+
+      {:error, :missing} ->
+        {:ok, "checkout"}
+
+      {:error, reason} ->
+        {:error, {:run_state_unreadable, reason}}
     end
   end
 
