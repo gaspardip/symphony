@@ -59,6 +59,78 @@ defmodule SymphonyElixir.PublishPreflightTest do
     assert File.read!(path) == payload
   end
 
+  test "blocked snapshot is durable before any tracker notification", context do
+    parent = self()
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, parent)
+
+    attach_stop_handler(context.issue.id, fn ->
+      send(parent, {:runtime_stop_recorded, self()})
+
+      receive do
+        :continue_stop -> :ok
+      end
+    end)
+
+    task =
+      Task.async(fn ->
+        DeliveryEngine.run(context.workspace, context.issue, nil, command_runner: command_recorder(), policy_pack: :client_safe_shadow)
+      end)
+
+    assert_receive {:runtime_stop_recorded, emitter}, 1_000
+    lock = {{RunStateStore, Path.expand(context.workspace)}, self()}
+    assert :global.set_lock(lock, [node()], 0)
+
+    try do
+      send(emitter, :continue_stop)
+      refute_receive {:memory_tracker_comment, _, _}, 100
+      refute_receive {:memory_tracker_state_update, _, _}, 100
+    after
+      :global.del_lock(lock, [node()])
+    end
+
+    assert_receive {:memory_tracker_comment, _, _}, 1_000
+    assert {:ok, state} = RunStateStore.load(context.workspace)
+    assert state.stage == "blocked"
+    assert state.last_rule_id == "publish.failed"
+    assert state.stop_reason.code == "publish_failed"
+    assert_receive {:memory_tracker_state_update, _, "Blocked"}
+    assert {:stop, :publish_failed} = Task.await(task)
+  end
+
+  test "failed blocked-state persistence reports an error without tracker writes", context do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    path = RunStateStore.state_path(context.workspace)
+    payload = "{corrupt-during-block-persistence"
+    attach_stop_handler(context.issue.id, fn -> File.write!(path, payload) end)
+
+    log =
+      capture_log(fn ->
+        assert {:error, {:blocked_state_persist_failed, {:run_state_unreadable, _reason}}} =
+                 DeliveryEngine.run(context.workspace, context.issue, nil, command_runner: command_recorder(), policy_pack: :client_safe_shadow)
+      end)
+
+    assert log =~ "Failed to persist blocked state"
+    refute_received {:memory_tracker_comment, _, _}
+    refute_received {:memory_tracker_state_update, _, _}
+    assert File.read!(path) == payload
+  end
+
+  defp attach_stop_handler(issue_id, callback) do
+    id = "publication-stop-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach(
+        id,
+        [:symphony, :ledger, :event],
+        fn _event, _measurements, metadata, _config ->
+          if metadata[:event_type] == "runtime.stopped" and metadata[:issue_id] == issue_id, do: callback.()
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+  end
+
   defp assert_blocked_before_mutation(context, policy_pack, expected_reason) do
     runner = command_recorder()
 

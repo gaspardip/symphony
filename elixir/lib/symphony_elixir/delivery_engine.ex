@@ -4099,49 +4099,57 @@ defmodule SymphonyElixir.DeliveryEngine do
         }
       })
 
-    if is_binary(issue_id) do
-      IssueSource.create_comment(
-        issue,
-        """
-        ## Symphony runtime stop
+    transition_result =
+      RunStateStore.transition(workspace, "blocked", %{
+        stop_reason: %{
+          code: to_string(code),
+          rule_id: rule.rule_id,
+          failure_class: rule.failure_class,
+          details: detail_text
+        },
+        last_decision: %{
+          rule_id: rule.rule_id,
+          failure_class: rule.failure_class,
+          summary: detail_summary(code, detail_text),
+          details: detail_text,
+          human_action: rule.human_action,
+          target_state: target_state,
+          ledger_event_id: Map.get(ledger_event, :event_id)
+        },
+        last_rule_id: rule.rule_id,
+        last_failure_class: rule.failure_class,
+        last_decision_summary: detail_summary(code, detail_text),
+        next_human_action: rule.human_action
+      })
 
-        Issue: #{issue_identifier}
-        Rule ID: #{rule.rule_id}
-        Failure class: #{rule.failure_class}
+    case transition_result do
+      {:ok, _state} ->
+        if is_binary(issue_id) do
+          IssueSource.create_comment(
+            issue,
+            """
+            ## Symphony runtime stop
 
-        #{detail_text}
+            Issue: #{issue_identifier}
+            Rule ID: #{rule.rule_id}
+            Failure class: #{rule.failure_class}
 
-        Unblock action: #{rule.human_action}
-        """
-        |> String.trim()
-      )
+            #{detail_text}
 
-      IssueSource.update_issue_state(issue, target_state)
+            Unblock action: #{rule.human_action}
+            """
+            |> String.trim()
+          )
+
+          IssueSource.update_issue_state(issue, target_state)
+        end
+
+        {:stop, code}
+
+      {:error, reason} ->
+        Logger.error("Failed to persist blocked state issue_identifier=#{issue_identifier} reason=#{inspect(reason)}")
+        {:error, {:blocked_state_persist_failed, reason}}
     end
-
-    RunStateStore.transition(workspace, "blocked", %{
-      stop_reason: %{
-        code: to_string(code),
-        rule_id: rule.rule_id,
-        failure_class: rule.failure_class,
-        details: detail_text
-      },
-      last_decision: %{
-        rule_id: rule.rule_id,
-        failure_class: rule.failure_class,
-        summary: detail_summary(code, detail_text),
-        details: detail_text,
-        human_action: rule.human_action,
-        target_state: target_state,
-        ledger_event_id: Map.get(ledger_event, :event_id)
-      },
-      last_rule_id: rule.rule_id,
-      last_failure_class: rule.failure_class,
-      last_decision_summary: detail_summary(code, detail_text),
-      next_human_action: rule.human_action
-    })
-
-    {:stop, code}
   end
 
   defp safe_detail_text(details) when is_binary(details) do
