@@ -7,6 +7,7 @@ defmodule SymphonyElixir.RunLedger do
   # credo:disable-for-this-file
 
   alias SymphonyElixir.Observability
+  alias SymphonyElixir.SecretRedactor
 
   @default_filename "run_ledger.jsonl"
   @default_recent_limit 50
@@ -37,6 +38,7 @@ defmodule SymphonyElixir.RunLedger do
       attrs
       |> Map.put(:event, to_string(event_type))
       |> Map.put_new(:at, SymphonyElixir.Util.now_iso8601())
+      |> SecretRedactor.redact()
 
     path = ledger_file_path()
     :ok = File.mkdir_p(Path.dirname(path))
@@ -107,6 +109,8 @@ defmodule SymphonyElixir.RunLedger do
   end
 
   defp typed_entry(attrs, event_type) do
+    %{attrs: attrs, event_type: event_type} = SecretRedactor.redact(%{attrs: attrs, event_type: event_type})
+
     metadata =
       attrs
       |> Map.get(:metadata, %{})
@@ -133,6 +137,7 @@ defmodule SymphonyElixir.RunLedger do
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
+    |> SecretRedactor.redact()
   end
 
   defp persist_entry(entry) do

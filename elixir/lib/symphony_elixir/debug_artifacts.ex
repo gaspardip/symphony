@@ -4,6 +4,7 @@ defmodule SymphonyElixir.DebugArtifacts do
   """
 
   alias SymphonyElixir.Config
+  alias SymphonyElixir.SecretRedactor
 
   @type artifact_ref :: %{
           artifact_id: String.t(),
@@ -18,6 +19,8 @@ defmodule SymphonyElixir.DebugArtifacts do
   @spec store(String.t(), iodata() | map(), map()) :: {:ok, artifact_ref()} | {:error, term()}
   def store(kind, payload, metadata \\ %{}) when is_binary(kind) and is_map(metadata) do
     if Config.observability_debug_artifacts_enabled?() do
+      payload = if is_list(payload), do: IO.iodata_to_binary(payload), else: payload
+      %{kind: kind, payload: payload, metadata: metadata} = SecretRedactor.redact(%{kind: kind, payload: payload, metadata: metadata})
       serialized = serialize_payload(payload)
       bounded = bound_content(serialized)
       sha256 = :crypto.hash(:sha256, bounded.data) |> Base.encode16(case: :lower)

@@ -3,6 +3,8 @@ defmodule SymphonyElixir.JsonLogFormatter do
   Formats OTP logger events as newline-delimited JSON.
   """
 
+  alias SymphonyElixir.SecretRedactor
+
   @reserved_metadata [
     :erl_level,
     :domain,
@@ -19,7 +21,9 @@ defmodule SymphonyElixir.JsonLogFormatter do
 
   @spec format(map(), map()) :: iodata()
   def format(%{level: level, msg: message, meta: metadata} = event, _config) do
-    metadata_map = Map.new(metadata)
+    %{rendered_message: rendered_message, metadata: metadata_map} =
+      SecretRedactor.redact(%{message: message, rendered_message: render_message(message), metadata: Map.new(metadata)})
+
     timestamp = Map.get(metadata_map, :time) || Map.get(event, :time)
 
     payload =
@@ -27,7 +31,7 @@ defmodule SymphonyElixir.JsonLogFormatter do
         timestamp: format_timestamp(timestamp),
         level: to_string(level),
         event: metadata_map[:event] || "log",
-        message: render_message(message),
+        message: rendered_message,
         issue_identifier: metadata_map[:issue_identifier],
         source: metadata_map[:source],
         repo: metadata_map[:repo],
@@ -76,6 +80,14 @@ defmodule SymphonyElixir.JsonLogFormatter do
 
   defp normalize_value(value) when is_binary(value) or is_integer(value) or is_float(value) or is_boolean(value), do: value
   defp normalize_value(value) when is_atom(value), do: Atom.to_string(value)
-  defp normalize_value(value) when is_list(value), do: Enum.map(value, &normalize_value/1)
+
+  defp normalize_value(value) when is_list(value) do
+    if proper_list?(value), do: Enum.map(value, &normalize_value/1), else: inspect(value, pretty: false, limit: 20)
+  end
+
   defp normalize_value(value), do: inspect(value, pretty: false, limit: 20)
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(_tail), do: false
 end

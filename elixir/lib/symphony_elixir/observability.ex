@@ -3,6 +3,8 @@ defmodule SymphonyElixir.Observability do
   Central telemetry, span, and metadata helpers for Symphony runtime events.
   """
 
+  alias SymphonyElixir.SecretRedactor
+
   require Logger
   require OpenTelemetry.Tracer
 
@@ -243,6 +245,7 @@ defmodule SymphonyElixir.Observability do
 
   defp sanitize_metadata(metadata) when is_map(metadata) do
     metadata
+    |> SecretRedactor.redact()
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new(fn {key, value} -> {normalize_key(key), normalize_value(value)} end)
   end
