@@ -482,6 +482,8 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     try do
       assert %{dispatch_stage: "checkout", pid: pid, ref: ref} = next.running[issue.id]
       refute Map.has_key?(next.running[issue.id], :passive?)
+      assert_receive {:authorize_dispatch, _, _, ^pid} = authorization
+      assert {:noreply, ^next} = Orchestrator.handle_info(authorization, next)
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal} = down, 2_000
       assert {:noreply, finished} = Orchestrator.handle_info(down, next)

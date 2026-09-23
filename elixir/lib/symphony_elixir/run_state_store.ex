@@ -130,7 +130,7 @@ defmodule SymphonyElixir.RunStateStore do
   @doc "Runs a workspace lifecycle operation while its readable snapshot is protected from local mutations."
   @spec with_readable_snapshot(Path.t(), (-> result)) :: result | {:error, term()} when result: var
   def with_readable_snapshot(workspace, fun) when is_binary(workspace) and is_function(fun, 0) do
-    with_state_lock(workspace, fn ->
+    with_workspace_lock(workspace, fn ->
       with :ok <- ensure_readable(workspace), do: fun.()
     end)
   end
@@ -198,10 +198,12 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec save(Path.t(), map()) :: :ok | {:error, term()}
   def save(workspace, state) when is_binary(workspace) and is_map(state) do
-    with_state_lock(workspace, fn -> save_unlocked(workspace, state) end)
+    with_workspace_lock(workspace, fn -> save_unlocked(workspace, state) end)
   end
 
-  defp with_state_lock(workspace, fun) do
+  @doc "Serializes local snapshot and workspace lifecycle changes, including dispatch admission."
+  @spec with_workspace_lock(Path.t(), (-> result)) :: result when result: var
+  def with_workspace_lock(workspace, fun) when is_binary(workspace) and is_function(fun, 0) do
     :global.trans({{__MODULE__, Path.expand(workspace)}, self()}, fun, [node()])
   end
 
@@ -235,7 +237,7 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec record_token_usage(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def record_token_usage(workspace, issue, usage) do
-    with_state_lock(workspace, fn ->
+    with_workspace_lock(workspace, fn ->
       with {:ok, state} <- load_for_update(workspace, issue) do
         state = Map.put(state, :token_usage, usage)
 
@@ -250,7 +252,7 @@ defmodule SymphonyElixir.RunStateStore do
   @spec transition(Path.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def transition(workspace, stage, attrs \\ %{})
       when is_binary(workspace) and is_binary(stage) and is_map(attrs) do
-    with_state_lock(workspace, fn ->
+    with_workspace_lock(workspace, fn ->
       with {:ok, previous_state} <- load_for_update(workspace, %{}) do
         transition_from_state(workspace, stage, attrs, previous_state)
       end
@@ -346,7 +348,7 @@ defmodule SymphonyElixir.RunStateStore do
   """
   @spec reconcile_pending_transition(Path.t()) :: {:ok, map()} | {:error, term()}
   def reconcile_pending_transition(workspace) when is_binary(workspace) do
-    with_state_lock(workspace, fn ->
+    with_workspace_lock(workspace, fn ->
       with {:ok, payload} <- File.read(state_path(workspace)),
            {:ok, decoded} <- Jason.decode(payload),
            {:ok, state, pending, confirmation} <- validate_pending_transition(decoded),
@@ -417,7 +419,7 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec update(Path.t(), (map() -> map())) :: {:ok, map()} | {:error, term()}
   def update(workspace, fun) when is_binary(workspace) and is_function(fun, 1) do
-    with_state_lock(workspace, fn ->
+    with_workspace_lock(workspace, fn ->
       with {:ok, previous_state} <- load_for_update(workspace, %{}) do
         state = fun.(previous_state)
 
@@ -432,7 +434,7 @@ defmodule SymphonyElixir.RunStateStore do
   @spec sync_lease(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def sync_lease(workspace, issue, lease_attrs)
       when is_binary(workspace) and is_map(issue) and is_map(lease_attrs) do
-    with_state_lock(workspace, fn ->
+    with_workspace_lock(workspace, fn ->
       with {:ok, previous_state} <- load_for_update(workspace, issue) do
         state = apply_lease_attrs(previous_state, lease_attrs)
 

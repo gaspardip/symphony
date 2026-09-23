@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.Config
+  alias SymphonyElixir.DispatchAudit
   alias SymphonyElixir.RunStateStore
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
@@ -21,7 +22,8 @@ defmodule SymphonyElixir.Workspace do
 
       with :ok <- validate_workspace_path(workspace) do
         RunStateStore.with_readable_snapshot(workspace, fn ->
-          with {:ok, lifecycle} <- ensure_workspace(workspace) do
+          with :ok <- DispatchAudit.ensure_workspace_access(workspace),
+               {:ok, lifecycle} <- ensure_workspace(workspace) do
             case maybe_run_after_create_hook(workspace, issue_context, lifecycle) do
               :ok ->
                 :ok = restore_preserved_workspace_state(workspace, lifecycle)
@@ -79,7 +81,9 @@ defmodule SymphonyElixir.Workspace do
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace) do
-    case RunStateStore.with_readable_snapshot(workspace, fn -> remove_readable_workspace(workspace) end) do
+    case RunStateStore.with_readable_snapshot(workspace, fn ->
+           with :ok <- DispatchAudit.ensure_available(workspace), do: remove_readable_workspace(workspace)
+         end) do
       {:error, reason} -> {:error, reason, ""}
       result -> result
     end

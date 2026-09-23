@@ -10,6 +10,8 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.AgentRunner
   alias SymphonyElixir.Config
   alias SymphonyElixir.DeliveryEngine
+  alias SymphonyElixir.DispatchAudit
+  alias SymphonyElixir.DispatchGate
   alias SymphonyElixir.GitHubEvent
   alias SymphonyElixir.GitHubEventInbox
   alias SymphonyElixir.GitManager
@@ -302,6 +304,25 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  def handle_info({:authorize_dispatch, issue_id, dispatch_id, pid}, state) do
+    case Map.get(state.running, issue_id) do
+      %{pid: ^pid, dispatch_ticket: %{dispatch_id: ^dispatch_id} = ticket} ->
+        with {:ok, lease} <- LeaseManager.read(issue_id),
+             true <- (lease["owner"] == ticket.owner and lease["epoch"] == ticket.epoch) or {:error, :dispatch_lease_changed},
+             :ok <- DispatchAudit.with_authorization(ticket, fn -> DispatchAudit.ensure_workspace_access(ticket.workspace) end) do
+          DispatchGate.activate(pid, dispatch_id)
+          {:noreply, state}
+        else
+          {:error, reason} ->
+            stopped = terminate_running_issue(state, issue_id, false)
+            {:noreply, halt_dispatch_audit(stopped, issue_id, reason)}
+        end
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(
         {:DOWN, ref, :process, _pid, reason},
         %{running: running} = state
@@ -318,58 +339,66 @@ defmodule SymphonyElixir.Orchestrator do
         next_attempt = next_retry_attempt_from_running(running_entry) || 1
 
         state =
-          case {reason, RunPolicy.maybe_stop_for_token_budget(issue, running_entry)} do
-            {:normal, {:retry, metadata}} ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive #{Map.get(metadata, :budget_mode, "budget")} retry")
+          case finish_running_dispatch(running_entry, reason) do
+            :ok ->
+              case {reason, RunPolicy.maybe_stop_for_token_budget(issue, running_entry)} do
+                {:normal, {:retry, metadata}} ->
+                  Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling adaptive #{Map.get(metadata, :budget_mode, "budget")} retry")
 
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation,
-                issue: running_entry.issue,
-                error: Map.get(metadata, :summary, "adaptive token retry"),
-                budget_retry: true,
-                budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
-                budget_retry_count: Map.get(metadata, :retry_count),
-                budget_resume_context: Map.get(metadata, :resume_context)
-              })
+                  schedule_issue_retry(state, issue_id, next_attempt, %{
+                    identifier: running_entry.identifier,
+                    delay_type: :continuation,
+                    issue: running_entry.issue,
+                    error: Map.get(metadata, :summary, "adaptive token retry"),
+                    budget_retry: true,
+                    budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
+                    budget_retry_count: Map.get(metadata, :retry_count),
+                    budget_resume_context: Map.get(metadata, :resume_context)
+                  })
 
-            {:normal, {:stop, _violation}} ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; recorded token-budget stop")
-              release_issue_claim(state, issue_id)
-
-            {:normal, :ok} ->
-              continuation = continuation_metadata_for_running_entry(running_entry)
-              continuation_delay_type = Map.get(continuation, :delay_type, :continuation)
-
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling #{continuation_delay_type} continuation check")
-
-              state = complete_issue(state, issue_id)
-
-              case continuation_delay_type do
-                :none ->
+                {:normal, {:stop, _violation}} ->
+                  Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; recorded token-budget stop")
                   release_issue_claim(state, issue_id)
 
-                delay_type ->
-                  schedule_issue_retry(
-                    state,
-                    issue_id,
-                    1,
-                    %{
-                      identifier: running_entry.identifier,
-                      delay_type: delay_type,
-                      issue: running_entry.issue
-                    }
-                    |> Map.merge(Map.drop(continuation, [:delay_type]))
-                  )
+                {:normal, :ok} ->
+                  continuation = continuation_metadata_for_running_entry(running_entry)
+                  continuation_delay_type = Map.get(continuation, :delay_type, :continuation)
+
+                  Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling #{continuation_delay_type} continuation check")
+
+                  state = complete_issue(state, issue_id)
+
+                  case continuation_delay_type do
+                    :none ->
+                      release_issue_claim(state, issue_id)
+
+                    delay_type ->
+                      schedule_issue_retry(
+                        state,
+                        issue_id,
+                        1,
+                        %{
+                          identifier: running_entry.identifier,
+                          delay_type: delay_type,
+                          issue: running_entry.issue
+                        }
+                        |> Map.merge(Map.drop(continuation, [:delay_type]))
+                      )
+                  end
+
+                {_other_reason, _budget_result} ->
+                  Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+                  schedule_issue_retry(state, issue_id, next_attempt, %{
+                    identifier: running_entry.identifier,
+                    error: "agent exited: #{inspect(reason)}"
+                  })
               end
 
-            {_other_reason, _budget_result} ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              schedule_issue_retry(state, issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}"
-              })
+            {:error, audit_reason} ->
+              state
+              |> stop_terminal_dispatch(%{id: issue_id}, audit_reason)
+              |> halt_dispatch_audit(issue_id, audit_reason)
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -407,9 +436,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, issue_id}, state) do
     result =
-      case pop_retry_attempt_state(state, issue_id) do
-        {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
-        :missing -> {:noreply, state}
+      case dispatch_retry_guard(state, issue_id) do
+        :ok ->
+          case pop_retry_attempt_state(state, issue_id) do
+            {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
+            :missing -> {:noreply, state}
+          end
+
+        {:error, reason} ->
+          {:noreply, halt_dispatch_audit(state, issue_id, reason)}
       end
 
     notify_dashboard()
@@ -2759,29 +2794,27 @@ defmodule SymphonyElixir.Orchestrator do
         release_issue_claim(state, issue_id)
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
-        state = record_session_completion_totals(state, running_entry)
+        case terminate_task(pid) do
+          :ok ->
+            if is_reference(ref), do: Process.demonitor(ref, [:flush])
+            state = record_session_completion_totals(state, running_entry)
+            state = %{state | running: Map.delete(state.running, issue_id)}
+            state = cancel_dispatch_retry(state, issue_id)
 
-        if cleanup_workspace do
-          cleanup_issue_workspace(identifier)
+            case finish_running_dispatch(running_entry, :shutdown) do
+              :ok ->
+                if cleanup_workspace, do: cleanup_issue_workspace(identifier)
+                stop_terminal_dispatch(state, %{id: issue_id}, state.candidate_fetch_error)
+
+              {:error, reason} ->
+                state
+                |> stop_terminal_dispatch(%{id: issue_id}, reason)
+                |> halt_dispatch_audit(issue_id, reason)
+            end
+
+          {:error, reason} ->
+            halt_dispatch_audit(state, issue_id, reason)
         end
-
-        if is_pid(pid) do
-          terminate_task(pid)
-        end
-
-        if is_reference(ref) do
-          Process.demonitor(ref, [:flush])
-        end
-
-        state =
-          %{
-            state
-            | running: Map.delete(state.running, issue_id),
-              claimed: MapSet.delete(state.claimed, issue_id),
-              retry_attempts: Map.delete(state.retry_attempts, issue_id)
-          }
-
-        release_issue_claim(state, issue_id)
 
       _ ->
         release_issue_claim(state, issue_id)
@@ -2848,12 +2881,19 @@ defmodule SymphonyElixir.Orchestrator do
   defp last_activity_timestamp(_running_entry), do: nil
 
   defp terminate_task(pid) when is_pid(pid) do
-    case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
-      :ok ->
-        :ok
+    ref = Process.monitor(pid)
 
-      {:error, :not_found} ->
-        Process.exit(pid, :shutdown)
+    case Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) do
+      :ok -> :ok
+      {:error, :not_found} -> Process.exit(pid, :shutdown)
+    end
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+    after
+      5_000 ->
+        Process.demonitor(ref, [:flush])
+        {:error, :worker_termination_unconfirmed}
     end
   end
 
@@ -3199,15 +3239,6 @@ defmodule SymphonyElixir.Orchestrator do
       :ok ->
         case persist_dispatchable_issue_lease(state, workspace, issue) do
           {:ok, _run_state} ->
-            RunLedger.record("lease.acquired", %{
-              issue_id: issue.id,
-              issue_identifier: issue.identifier,
-              actor_type: "system",
-              actor_id: state.lease_owner,
-              summary: "Lease acquired for dispatch.",
-              metadata: %{attempt: attempt}
-            })
-
             spawn_fun.(state, issue, attempt, recipient)
 
           {:error, reason} ->
@@ -3278,29 +3309,22 @@ defmodule SymphonyElixir.Orchestrator do
     with :ok <- RunStateStore.ensure_readable(workspace),
          {:ok, _stage} <- persisted_dispatch_stage(issue),
          stage <- Map.get(run_state, :stage),
-         {:ok, pid} <-
-           start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
-             AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
-           end) do
+         {:ok, pid, ticket} <-
+           start_audited_worker(
+             state,
+             issue,
+             attempt,
+             run_state,
+             start_child_fun,
+             fn ->
+               AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
+             end,
+             false
+           ) do
       ref = Process.monitor(pid)
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
       Logger.info("Dispatching issue to agent: #{SymphonyElixir.Util.issue_log_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
-
-      ledger_event =
-        RunLedger.record("dispatch.started", %{
-          issue_id: issue.id,
-          issue_identifier: issue.identifier,
-          actor_type: "runtime",
-          actor_id: state.lease_owner,
-          policy_class: policy_class,
-          summary: "Dispatching issue to an agent worker.",
-          details: "Attempt #{inspect(attempt || 1)}.",
-          metadata: %{
-            policy_source: policy_source,
-            retry_attempt: normalize_retry_attempt(attempt)
-          }
-        })
 
       running =
         Map.put(state.running, issue.id, %{
@@ -3332,9 +3356,12 @@ defmodule SymphonyElixir.Orchestrator do
           workspace: workspace,
           stage: stage,
           resume_context: Map.get(run_state, :resume_context, %{}),
-          last_ledger_event_id: Map.get(ledger_event, :event_id),
+          last_ledger_event_id: ticket.entry_event_id,
+          dispatch_ticket: ticket,
           started_at: DateTime.utc_now()
         })
+
+      send(self(), {:authorize_dispatch, issue.id, ticket.dispatch_id, pid})
 
       %{
         state
@@ -3343,6 +3370,11 @@ defmodule SymphonyElixir.Orchestrator do
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
     else
+      {:error, {:dispatch_audit_failed, reason}} ->
+        state
+        |> stop_terminal_dispatch(issue, reason)
+        |> halt_dispatch_audit(issue.id, reason)
+
       {:error, {:persisted_stage_requires_explicit_resume, _stage} = reason} ->
         stop_terminal_dispatch(state, issue, reason)
 
@@ -3411,51 +3443,43 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
          run_state <- merge_retry_budget_resume_context(run_state, retry_metadata),
          stage <- Map.get(run_state, :stage),
-         {:ok, pid} <-
-           start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
-             workspace =
-               case Workspace.create_for_issue(issue) do
-                 {:ok, path} ->
-                   path
+         {:ok, pid, ticket} <-
+           start_audited_worker(
+             state,
+             issue,
+             attempt,
+             run_state,
+             start_child_fun,
+             fn ->
+               workspace =
+                 case Workspace.create_for_issue(issue) do
+                   {:ok, path} ->
+                     path
 
-                 {:error, reason} ->
-                   raise RuntimeError, "Passive worker setup failed: #{inspect(reason)}"
+                   {:error, reason} ->
+                     raise RuntimeError, "Passive worker setup failed: #{inspect(reason)}"
+                 end
+
+               case DeliveryEngine.run(
+                      workspace,
+                      issue,
+                      recipient,
+                      attempt: attempt,
+                      policy_override: policy_override,
+                      issue_state_fetcher: &IssueSource.fetch_issue_states_by_ids/1
+                    ) do
+                 :ok -> :ok
+                 {:done, _issue} -> :ok
+                 {:stop, _reason} -> :ok
+                 {:error, reason} -> raise RuntimeError, "Passive worker failed: #{inspect(reason)}"
                end
-
-             case DeliveryEngine.run(
-                    workspace,
-                    issue,
-                    recipient,
-                    attempt: attempt,
-                    policy_override: policy_override,
-                    issue_state_fetcher: &IssueSource.fetch_issue_states_by_ids/1
-                  ) do
-               :ok -> :ok
-               {:done, _issue} -> :ok
-               {:stop, _reason} -> :ok
-               {:error, reason} -> raise RuntimeError, "Passive worker failed: #{inspect(reason)}"
-             end
-           end) do
+             end,
+             true
+           ) do
       ref = Process.monitor(pid)
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
       Logger.info("Dispatching issue to passive runtime worker: #{SymphonyElixir.Util.issue_log_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
-
-      ledger_event =
-        RunLedger.record("dispatch.started", %{
-          issue_id: issue.id,
-          issue_identifier: issue.identifier,
-          actor_type: "runtime",
-          actor_id: state.lease_owner,
-          policy_class: policy_class,
-          summary: "Dispatching issue to a passive runtime worker.",
-          details: "Attempt #{inspect(attempt || 1)}.",
-          metadata: %{
-            passive: true,
-            policy_source: policy_source,
-            retry_attempt: normalize_retry_attempt(attempt)
-          }
-        })
 
       running =
         Map.put(state.running, issue.id, %{
@@ -3487,10 +3511,13 @@ defmodule SymphonyElixir.Orchestrator do
           workspace: workspace,
           stage: stage,
           resume_context: Map.get(run_state, :resume_context, %{}),
-          last_ledger_event_id: Map.get(ledger_event, :event_id),
+          last_ledger_event_id: ticket.entry_event_id,
+          dispatch_ticket: ticket,
           passive?: true,
           started_at: DateTime.utc_now()
         })
+
+      send(self(), {:authorize_dispatch, issue.id, ticket.dispatch_id, pid})
 
       %{
         state
@@ -3499,6 +3526,11 @@ defmodule SymphonyElixir.Orchestrator do
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
     else
+      {:error, {:dispatch_audit_failed, reason}} ->
+        state
+        |> stop_terminal_dispatch(issue, reason)
+        |> halt_dispatch_audit(issue.id, reason)
+
       {:error, {:persisted_stage_requires_explicit_resume, _stage} = reason} ->
         stop_terminal_dispatch(state, issue, reason)
 
@@ -3518,6 +3550,69 @@ defmodule SymphonyElixir.Orchestrator do
           issue: issue
         })
     end
+  end
+
+  defp start_audited_worker(state, issue, attempt, run_state, start_child_fun, worker_fun, passive?) do
+    workspace = Workspace.path_for_issue(issue)
+    owner = self()
+    {policy_class, policy_source, _override} = policy_snapshot_values(issue, state, run_state)
+
+    with {:ok, lease} <- LeaseManager.read(issue.id),
+         true <- lease["owner"] == state.lease_owner or {:error, :claimed},
+         {:ok, ticket} <-
+           DispatchAudit.begin(workspace, %{
+             issue_id: issue.id,
+             issue_identifier: issue.identifier,
+             actor_type: "runtime",
+             actor_id: state.lease_owner,
+             policy_class: policy_class,
+             metadata: %{owner: state.lease_owner, epoch: lease["epoch"], passive: passive?, policy_source: policy_source, retry_attempt: normalize_retry_attempt(attempt)}
+           }) do
+      case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
+             DispatchGate.run(owner, ticket.dispatch_id, fn ->
+               case DispatchAudit.with_authorization(ticket, fn -> {:executed, worker_fun.()} end) do
+                 {:executed, result} -> result
+                 {:error, reason} -> exit({:dispatch_authorization_failed, reason})
+               end
+             end)
+           end) do
+        {:ok, pid} ->
+          {:ok, pid, ticket}
+
+        {:error, reason} ->
+          case DispatchAudit.finish(ticket, :not_started) do
+            :ok -> {:error, reason}
+            {:error, audit_reason} -> {:error, {:dispatch_audit_failed, audit_reason}}
+          end
+      end
+    else
+      {:error, reason} -> {:error, {:dispatch_audit_failed, reason}}
+    end
+  end
+
+  defp finish_running_dispatch(%{dispatch_ticket: _ticket}, {:dispatch_authorization_failed, _reason} = failure),
+    do: {:error, failure}
+
+  defp finish_running_dispatch(%{dispatch_ticket: ticket}, reason) do
+    outcome = if reason == :normal, do: :normal, else: {:exit, reason}
+    DispatchAudit.finish(ticket, outcome)
+  end
+
+  defp finish_running_dispatch(_legacy_entry, _reason), do: :ok
+
+  defp cancel_dispatch_retry(state, issue_id) do
+    case get_in(state.retry_attempts, [issue_id, :timer_ref]) do
+      timer when is_reference(timer) -> Process.cancel_timer(timer)
+      _ -> :ok
+    end
+
+    %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}
+  end
+
+  defp halt_dispatch_audit(state, issue_id, reason) do
+    Logger.error("Dispatch audit blocked issue_id=#{issue_id}; preserve its journal: #{inspect(reason)}")
+    state = cancel_dispatch_retry(state, issue_id)
+    %{state | candidate_fetch_error: {:dispatch_audit_failed, issue_id, reason}}
   end
 
   defp ensure_dispatch_run_state(%State{} = state, workspace, issue)
@@ -3630,6 +3725,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
+    identifier = Map.get(metadata, :identifier) || get_in(state.retry_attempts, [issue_id, :identifier])
+    workspace = if is_binary(identifier), do: Workspace.path_for_issue(identifier), else: workspace_for_issue_id(state, issue_id)
+
+    case if(is_binary(workspace), do: DispatchAudit.ensure_available(workspace), else: :ok) do
+      :ok -> do_schedule_issue_retry(state, issue_id, attempt, metadata)
+      {:error, reason} -> halt_dispatch_audit(state, issue_id, reason)
+    end
+  end
+
+  defp do_schedule_issue_retry(state, issue_id, attempt, metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
     delay_ms = retry_delay(next_attempt, metadata)
@@ -3666,6 +3771,13 @@ defmodule SymphonyElixir.Orchestrator do
             |> Map.merge(Map.drop(metadata, [:identifier, :error]))
           )
     }
+  end
+
+  defp dispatch_retry_guard(state, issue_id) do
+    case get_in(state.retry_attempts, [issue_id, :identifier]) do
+      identifier when is_binary(identifier) -> DispatchAudit.ensure_available(Workspace.path_for_issue(identifier))
+      _ -> :ok
+    end
   end
 
   defp pop_retry_attempt_state(%State{} = state, issue_id) do
@@ -3802,13 +3914,27 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_active_retry(state, issue, attempt, metadata) do
     case retry_resume_action(issue, metadata) do
-      :dispatch -> do_handle_active_retry(state, issue, attempt, metadata)
-      :resume -> resume_review_retry_under_lease(state, issue, attempt, metadata)
-      {:error, reason} -> {:noreply, stop_terminal_dispatch(state, issue, reason)}
+      :dispatch ->
+        do_handle_active_retry(state, issue, attempt, metadata)
+
+      :resume ->
+        resume_review_retry_under_lease(state, issue, attempt, metadata)
+
+      {:error, {tag, _} = reason} when tag in [:dispatch_audit_pending, :dispatch_audit_read_failed] ->
+        {:noreply, halt_dispatch_audit(state, issue.id, reason)}
+
+      {:error, reason} ->
+        {:noreply, stop_terminal_dispatch(state, issue, reason)}
     end
   end
 
   defp retry_resume_action(issue, metadata) do
+    with :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)) do
+      retry_resume_action_from_snapshot(issue, metadata)
+    end
+  end
+
+  defp retry_resume_action_from_snapshot(issue, metadata) do
     case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
       {:ok, %{stage: "blocked"} = run_state} ->
         if metadata[:delay_type] == :continuation and auto_continue_review_fix_budget_stop?(run_state),
@@ -3848,24 +3974,30 @@ defmodule SymphonyElixir.Orchestrator do
             {:error, _reason} = error -> error
           end
 
-        resume_state =
-          case resume_result do
-            {:ok, {next_state, _issue}} -> next_state
-            {:error, _reason} -> state
-          end
+        case resume_result do
+          {:error, {tag, _} = reason} when tag in [:dispatch_audit_pending, :dispatch_audit_read_failed] ->
+            {:noreply, halt_dispatch_audit(state, issue.id, reason)}
 
-        released = release_retry_resume_lease(resume_state, issue, existing_owner?)
+          _ ->
+            resume_state =
+              case resume_result do
+                {:ok, {next_state, _issue}} -> next_state
+                {:error, _reason} -> state
+              end
 
-        if MapSet.member?(released.claimed, issue.id) do
-          {:noreply, released}
-        else
-          case resume_result do
-            {:ok, {_state, next_issue}} ->
-              do_handle_active_retry(released, next_issue, attempt, metadata)
+            released = release_retry_resume_lease(resume_state, issue, existing_owner?)
 
-            {:error, reason} ->
-              {:noreply, stop_terminal_dispatch(released, issue, reason)}
-          end
+            if MapSet.member?(released.claimed, issue.id) do
+              {:noreply, released}
+            else
+              case resume_result do
+                {:ok, {_state, next_issue}} ->
+                  do_handle_active_retry(released, next_issue, attempt, metadata)
+
+                {:error, reason} ->
+                  {:noreply, stop_terminal_dispatch(released, issue, reason)}
+              end
+            end
         end
 
       {:error, reason} ->
@@ -5004,6 +5136,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_function(active_dispatch_fun, 3) and is_function(passive_dispatch_fun, 3) do
     with :ok <- token_usage_dispatch_guard(state, issue.id),
          :ok <- validate_dispatch_configuration(issue),
+         :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)),
          :ok <- RunStateStore.ensure_readable(Workspace.path_for_issue(issue)),
          :ok <- persisted_issue_token_budget_guard(issue),
          {:ok, dispatch_stage} <- persisted_dispatch_stage(issue) do
@@ -5051,21 +5184,23 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp persisted_dispatch_stage(issue) do
-    case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
-      {:ok, %{stage: stage}} when stage in ["blocked", "done"] ->
-        {:error, {:persisted_stage_requires_explicit_resume, stage}}
+    with :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)) do
+      case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
+        {:ok, %{stage: stage}} when stage in ["blocked", "done"] ->
+          {:error, {:persisted_stage_requires_explicit_resume, stage}}
 
-      {:ok, %{stage: stage}} ->
-        {:ok, stage}
+        {:ok, %{stage: stage}} ->
+          {:ok, stage}
 
-      {:mismatch, _state} ->
-        {:ok, "checkout"}
+        {:mismatch, _state} ->
+          {:ok, "checkout"}
 
-      {:error, :missing} ->
-        {:ok, "checkout"}
+        {:error, :missing} ->
+          {:ok, "checkout"}
 
-      {:error, reason} ->
-        {:error, {:run_state_unreadable, reason}}
+        {:error, reason} ->
+          {:error, {:run_state_unreadable, reason}}
+      end
     end
   end
 

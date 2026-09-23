@@ -2098,6 +2098,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert lease_log =~
              "Skipping dispatch; failed to acquire lease for issue_id=issue-dispatch-errors issue_identifier=MT-DISPATCH-ERRORS: :disk_full"
 
+    assert :ok = LeaseManager.acquire("issue-spawn-errors", "MT-SPAWN-ERRORS", owner)
+
     spawned_state =
       Orchestrator.do_spawn_issue_worker_for_test(
         %State{lease_owner: owner},
@@ -2230,6 +2232,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
              "Skipping dispatch; lease already held for issue_id=issue-wrapper-dispatch issue_identifier=MT-WRAPPER-DISPATCH"
 
     spawned_issue = %{issue | id: "issue-wrapper-spawn", identifier: "MT-WRAPPER-SPAWN"}
+    assert :ok = LeaseManager.acquire(spawned_issue.id, spawned_issue.identifier, "wrapper-owner-3")
 
     state =
       Orchestrator.do_spawn_issue_worker_default_for_test(
@@ -2295,6 +2298,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
              )
 
     spawned_issue = %{issue | id: "issue-wrapper-default-spawn", identifier: "MT-WRAPPER-DEFAULT-SPAWN"}
+    assert :ok = LeaseManager.acquire(spawned_issue.id, spawned_issue.identifier, "wrapper-owner-5")
 
     state =
       Orchestrator.do_spawn_issue_worker_for_test(
@@ -2475,6 +2479,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
       File.rm_rf(workspace_root)
     end)
+
+    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "retry-focus-owner")
 
     state =
       Orchestrator.do_spawn_issue_worker_for_test(

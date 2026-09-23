@@ -58,3 +58,7 @@ scopes and do not establish general confinement or all external outcomes.
 Changing a model or provider is a separate change to validate against these contracts.
 It does not change the repository's acceptance criteria, permissions or required
 proof unless those contracts are explicitly revised.
+
+Worker admission and recovery follow [the audited dispatch contract](dispatch-audit.md).
+A recorded authorization is distinct from execution, and a closed worker process is
+distinct from acceptance of its task. Pending journals block retries and cleanup.
