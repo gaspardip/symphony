@@ -347,7 +347,7 @@ defmodule SymphonyElixir.Orchestrator do
 
               case continuation_delay_type do
                 :none ->
-                  state
+                  release_issue_claim(state, issue_id)
 
                 delay_type ->
                   schedule_issue_retry(
