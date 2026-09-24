@@ -434,6 +434,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:EXIT, ^port, reason} ->
         {:error, {:port_exit, reason}}
+
+      {:EXIT, sender, :shutdown} when is_pid(sender) ->
+        stop_port(port)
+        exit(:shutdown)
     after
       timeout_ms ->
         {:error, :turn_timeout}
@@ -987,6 +991,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:EXIT, ^port, reason} ->
         {:error, {:port_exit, reason}}
+
+      {:EXIT, sender, :shutdown} when is_pid(sender) ->
+        stop_port(port)
+        exit(:shutdown)
     after
       timeout_ms ->
         {:error, :response_timeout}

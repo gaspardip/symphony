@@ -54,6 +54,9 @@ current checkout, or selected release before creation, reset, cleanup, or hooks.
 Symbolic links are resolved, and existing directory identities are compared
 before this check.
 
+Codex app-server workers honor cooperative shutdown during startup and streaming.
+They close their protocol port before propagating shutdown to the caller.
+
 GitHub review and CI follow-up use only the canonical workspace for an issue.
 Archived copies with the same pull request URL are left unchanged.
 

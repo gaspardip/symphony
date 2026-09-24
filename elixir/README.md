@@ -216,6 +216,19 @@ and new dispatch for that issue remains blocked in the current runtime with an
 explicit persistence error; repair storage and reconcile the unrecorded usage before
 restarting. Usage the provider has not reported cannot be checkpointed.
 
+## Codex app-server shutdown
+
+A PID-origin `:shutdown` received during app-server startup or turn streaming closes
+the protocol port and preserves the worker's `:shutdown` exit reason. AgentRunner's
+`after_run` hook can then run after port closure. This also covers callers that catch
+an exit from `start_session`; the prior `trap_exit` flag is restored. Port errors and
+read/turn timeouts keep their existing behavior.
+
+This cooperative path does not guarantee cleanup after an abrupt BEAM termination
+or completion of arbitrary operating-system descendants. The regression fixture
+uses a local Python 3 JSONL provider and a local Git repository, with no remote
+provider, tracker, or publication calls.
+
 ## GitHub events and archived workspaces
 
 Review and CI events match a snapshot only when its directory is the canonical
