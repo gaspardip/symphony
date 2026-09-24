@@ -5,6 +5,8 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Config.TrackerReadContext
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Linear.Webhook
 
@@ -50,20 +52,39 @@ defmodule SymphonyElixir.Linear.Adapter do
   """
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
-  def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
+  def fetch_candidate_issues, do: fetch_candidate_issues(Config.tracker_read_context())
+
+  @spec fetch_candidate_issues(TrackerReadContext.t()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_candidate_issues(%TrackerReadContext{} = context),
+    do: read_client(context, :fetch_candidate_issues, [])
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
+  def fetch_issues_by_states(states), do: fetch_issues_by_states(states, Config.tracker_read_context())
+
+  @spec fetch_issues_by_states([String.t()], TrackerReadContext.t()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issues_by_states(states, %TrackerReadContext{} = context),
+    do: read_client(context, :fetch_issues_by_states, [states])
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
+  def fetch_issue_states_by_ids(issue_ids), do: fetch_issue_states_by_ids(issue_ids, Config.tracker_read_context())
+
+  @spec fetch_issue_states_by_ids([String.t()], TrackerReadContext.t()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issue_states_by_ids(issue_ids, %TrackerReadContext{} = context),
+    do: read_client(context, :fetch_issue_states_by_ids, [issue_ids])
 
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, term() | nil} | {:error, term()}
-  def fetch_issue_by_identifier(issue_identifier),
-    do: client_module().fetch_issue_by_identifier(issue_identifier)
+  def fetch_issue_by_identifier(issue_identifier), do: fetch_issue_by_identifier(issue_identifier, Config.tracker_read_context())
+
+  @spec fetch_issue_by_identifier(String.t(), TrackerReadContext.t()) :: {:ok, term() | nil} | {:error, term()}
+  def fetch_issue_by_identifier(issue_identifier, %TrackerReadContext{} = context),
+    do: read_client(context, :fetch_issue_by_identifier, [issue_identifier])
 
   @spec fetch_issue_by_id(String.t()) :: {:ok, term() | nil} | {:error, term()}
-  def fetch_issue_by_id(issue_id), do: client_module().fetch_issue_by_id(issue_id)
+  def fetch_issue_by_id(issue_id), do: fetch_issue_by_id(issue_id, Config.tracker_read_context())
+
+  @spec fetch_issue_by_id(String.t(), TrackerReadContext.t()) :: {:ok, term() | nil} | {:error, term()}
+  def fetch_issue_by_id(issue_id, %TrackerReadContext{} = context),
+    do: read_client(context, :fetch_issue_by_id, [issue_id])
 
   @spec decode_webhook([{binary(), binary()}], binary()) ::
           {:ok, [map()]} | {:ignore, term()} | {:error, term()}
@@ -113,6 +134,12 @@ defmodule SymphonyElixir.Linear.Adapter do
       _ -> {:error, :attachment_create_failed}
     end
   end
+
+  defp read_client(%TrackerReadContext{linear_client_module: Client} = context, function, args),
+    do: apply(Client, function, args ++ [context])
+
+  defp read_client(%TrackerReadContext{linear_client_module: client}, function, args),
+    do: apply(client, function, args)
 
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)

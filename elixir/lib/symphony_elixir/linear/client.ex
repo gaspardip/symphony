@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   require Logger
   alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.Config.TrackerReadContext
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -146,23 +147,28 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
-    project_slug = Config.linear_project_slug()
+    fetch_candidate_issues(Config.tracker_read_context())
+  end
+
+  @spec fetch_candidate_issues(TrackerReadContext.t()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues(%TrackerReadContext{} = context) do
+    project_slug = context.linear_project_slug
 
     cond do
-      is_nil(Config.linear_api_token()) ->
+      is_nil(context.linear_api_token) ->
         {:error, :missing_linear_api_token}
 
       is_nil(project_slug) ->
         {:error, :missing_linear_project_slug}
 
       true ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          state_names = Config.linear_active_states()
+        with {:ok, assignee_filter} <- routing_assignee_filter(context) do
+          state_names = context.linear_active_states
           assignee_desc = format_assignee_filter(assignee_filter)
 
           Logger.info("[dispatch] query project_slug=#{project_slug} states=#{inspect(state_names)} assignee=#{assignee_desc}")
 
-          case do_fetch_by_states(project_slug, state_names, assignee_filter) do
+          case do_fetch_by_states(project_slug, state_names, assignee_filter, context) do
             {:ok, issues} = result ->
               if issues == [] do
                 Logger.warning("[dispatch] 0 candidates returned — project_slug=#{project_slug} states=#{inspect(state_names)} assignee=#{assignee_desc}")
@@ -181,28 +187,38 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
+    fetch_issues_by_states(state_names, Config.tracker_read_context())
+  end
+
+  @spec fetch_issues_by_states([String.t()], TrackerReadContext.t()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(state_names, %TrackerReadContext{} = context) when is_list(state_names) do
     normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
 
     if normalized_states == [] do
       {:ok, []}
     else
-      project_slug = Config.linear_project_slug()
+      project_slug = context.linear_project_slug
 
       cond do
-        is_nil(Config.linear_api_token()) ->
+        is_nil(context.linear_api_token) ->
           {:error, :missing_linear_api_token}
 
         is_nil(project_slug) ->
           {:error, :missing_linear_project_slug}
 
         true ->
-          do_fetch_by_states(project_slug, normalized_states, nil)
+          do_fetch_by_states(project_slug, normalized_states, nil, context)
       end
     end
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+    fetch_issue_states_by_ids(issue_ids, Config.tracker_read_context())
+  end
+
+  @spec fetch_issue_states_by_ids([String.t()], TrackerReadContext.t()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(issue_ids, %TrackerReadContext{} = context) when is_list(issue_ids) do
     ids = Enum.uniq(issue_ids)
 
     case ids do
@@ -210,37 +226,46 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, []}
 
       ids ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_issue_states(ids, assignee_filter)
+        with {:ok, assignee_filter} <- routing_assignee_filter(context) do
+          do_fetch_issue_states(ids, assignee_filter, context)
         end
     end
   end
 
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
   def fetch_issue_by_identifier(issue_identifier) when is_binary(issue_identifier) do
+    fetch_issue_by_identifier(issue_identifier, Config.tracker_read_context())
+  end
+
+  @spec fetch_issue_by_identifier(String.t(), TrackerReadContext.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_identifier(issue_identifier, %TrackerReadContext{} = context) when is_binary(issue_identifier) do
     identifier = String.trim(issue_identifier)
-    project_slug = Config.linear_project_slug()
+    project_slug = context.linear_project_slug
 
     cond do
       identifier == "" ->
         {:ok, nil}
 
-      is_nil(Config.linear_api_token()) ->
+      is_nil(context.linear_api_token) ->
         {:error, :missing_linear_api_token}
 
       is_nil(project_slug) ->
         {:error, :missing_linear_project_slug}
 
       true ->
-        with {:ok, assignee_filter} <- routing_assignee_filter(),
+        with {:ok, assignee_filter} <- routing_assignee_filter(context),
              {:ok, team_key, issue_number} <- parse_issue_identifier(identifier),
              {:ok, body} <-
-               graphql(@query_by_identifier, %{
-                 projectSlug: project_slug,
-                 teamKey: team_key,
-                 number: issue_number,
-                 relationFirst: @issue_page_size
-               }),
+               graphql(
+                 @query_by_identifier,
+                 %{
+                   projectSlug: project_slug,
+                   teamKey: team_key,
+                   number: issue_number,
+                   relationFirst: @issue_page_size
+                 },
+                 read_context: context
+               ),
              {:ok, issues} <- decode_linear_response(body, assignee_filter) do
           {:ok, List.first(issues)}
         end
@@ -249,18 +274,23 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec fetch_issue_by_id(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
   def fetch_issue_by_id(issue_id) when is_binary(issue_id) do
+    fetch_issue_by_id(issue_id, Config.tracker_read_context())
+  end
+
+  @spec fetch_issue_by_id(String.t(), TrackerReadContext.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_id(issue_id, %TrackerReadContext{} = context) when is_binary(issue_id) do
     trimmed_id = String.trim(issue_id)
 
     cond do
       trimmed_id == "" ->
         {:ok, nil}
 
-      is_nil(Config.linear_api_token()) ->
+      is_nil(context.linear_api_token) ->
         {:error, :missing_linear_api_token}
 
       true ->
-        with {:ok, assignee_filter} <- routing_assignee_filter(),
-             {:ok, issues} <- do_fetch_issue_states([trimmed_id], assignee_filter) do
+        with {:ok, assignee_filter} <- routing_assignee_filter(context),
+             {:ok, issues} <- do_fetch_issue_states([trimmed_id], assignee_filter, context) do
           {:ok, List.first(issues)}
         end
     end
@@ -270,9 +300,10 @@ defmodule SymphonyElixir.Linear.Client do
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
-    request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
+    context = Keyword.get_lazy(opts, :read_context, &Config.tracker_read_context/0)
+    request_fun = Keyword.get(opts, :request_fun, fn payload, headers -> post_graphql_request(payload, headers, context) end)
 
-    with {:ok, headers} <- graphql_headers(),
+    with {:ok, headers} <- graphql_headers(context),
          {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
       {:ok, body}
     else
@@ -335,25 +366,29 @@ defmodule SymphonyElixir.Linear.Client do
   def helper_for_test(:graphql_headers, []), do: graphql_headers()
   def helper_for_test(:routing_assignee_filter, []), do: routing_assignee_filter()
 
-  defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
+  defp do_fetch_by_states(project_slug, state_names, assignee_filter, context) do
+    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], context)
   end
 
-  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
+  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues, context) do
     with {:ok, body} <-
-           graphql(@query, %{
-             projectSlug: project_slug,
-             stateNames: state_names,
-             first: @issue_page_size,
-             relationFirst: @issue_page_size,
-             after: after_cursor
-           }),
+           graphql(
+             @query,
+             %{
+               projectSlug: project_slug,
+               stateNames: state_names,
+               first: @issue_page_size,
+               relationFirst: @issue_page_size,
+               after: after_cursor
+             },
+             read_context: context
+           ),
          {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc)
+          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc, context)
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}
@@ -370,12 +405,16 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
 
-  defp do_fetch_issue_states(ids, assignee_filter) do
-    case graphql(@query_by_ids, %{
-           ids: ids,
-           first: Enum.min([length(ids), @issue_page_size]),
-           relationFirst: @issue_page_size
-         }) do
+  defp do_fetch_issue_states(ids, assignee_filter, context) do
+    case graphql(
+           @query_by_ids,
+           %{
+             ids: ids,
+             first: Enum.min([length(ids), @issue_page_size]),
+             relationFirst: @issue_page_size
+           },
+           read_context: context
+         ) do
       {:ok, body} ->
         decode_linear_response(body, assignee_filter)
 
@@ -451,8 +490,10 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp graphql_headers do
-    case Config.linear_api_token() do
+  defp graphql_headers, do: graphql_headers(Config.tracker_read_context())
+
+  defp graphql_headers(%TrackerReadContext{} = context) do
+    case context.linear_api_token do
       nil ->
         {:error, :missing_linear_api_token}
 
@@ -465,8 +506,8 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp post_graphql_request(payload, headers) do
-    Req.post(Config.linear_endpoint(),
+  defp post_graphql_request(payload, headers, context) do
+    Req.post(context.linear_endpoint,
       headers: headers,
       json: payload,
       connect_options: [timeout: 30_000]
@@ -565,41 +606,45 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp assignee_id(%{} = assignee), do: normalize_assignee_match_value(assignee["id"])
 
-  defp routing_assignee_filter do
-    case Config.tracker_handoff_mode() do
+  defp routing_assignee_filter, do: routing_assignee_filter(Config.tracker_read_context())
+
+  defp routing_assignee_filter(context) do
+    case context.tracker_handoff_mode do
       "labels" ->
         {:ok, nil}
 
       _ ->
-        routing_assignee_filter_from_config()
+        routing_assignee_filter_from_context(context)
     end
   end
 
-  defp routing_assignee_filter_from_config do
-    case Config.linear_assignee() do
+  defp routing_assignee_filter_from_context(context) do
+    case context.linear_assignee do
       nil ->
         {:ok, nil}
 
       assignee ->
-        build_assignee_filter(assignee)
+        build_assignee_filter(assignee, context)
     end
   end
 
-  defp build_assignee_filter(assignee) when is_binary(assignee) do
+  defp build_assignee_filter(assignee), do: build_assignee_filter(assignee, Config.tracker_read_context())
+
+  defp build_assignee_filter(assignee, context) when is_binary(assignee) do
     case normalize_assignee_match_value(assignee) do
       nil ->
         {:ok, nil}
 
       "me" ->
-        resolve_viewer_assignee_filter()
+        resolve_viewer_assignee_filter(context)
 
       normalized ->
         {:ok, %{configured_assignee: assignee, match_values: MapSet.new([normalized])}}
     end
   end
 
-  defp resolve_viewer_assignee_filter do
-    case graphql(@viewer_query, %{}) do
+  defp resolve_viewer_assignee_filter(context) do
+    case graphql(@viewer_query, %{}, read_context: context) do
       {:ok, %{"data" => %{"viewer" => viewer}}} when is_map(viewer) ->
         case assignee_id(viewer) do
           nil ->

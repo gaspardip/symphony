@@ -177,6 +177,37 @@ codex:
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
+## Configuration captured for issue reads
+
+Each logical issue read captures the validated workflow once. Linear pagination,
+viewer lookup for `assignee: me`, request headers, endpoint and project use that
+same capture. A manual read uses the store root and enabled flag captured with
+it. A reload applies to the next read, so an in-flight read cannot switch projects,
+credentials or manual stores halfway through.
+
+Callers that need to retain this boundary can use `Config.tracker_read_context/0`
+and pass its result as the last argument to the issue read functions on
+`IssueSource` or `Tracker`. The context also retains the selected Linear client
+module. Injected clients continue to receive their original callback arguments;
+freezing their internal configuration remains the responsibility of that client.
+The context's fingerprint covers all validated workflow options and the resolved
+read settings. Its `Inspect` implementation omits the captured values, including
+credentials. Do not serialize or log its fields.
+
+This capture uses the existing workflow loader policy: after a rejected hot
+reload, it may represent the last valid configuration. A fingerprint compares
+applied configuration, not the validity of an unapplied file. Read context capture
+is synchronous; it does not itself move tracker I/O out of the orchestrator,
+change source error merging, or implement stale-result cancellation.
+
+The `IssueSource.fetch_candidate_outcomes/1`, `fetch_issues_by_states_outcomes/2`
+and `fetch_issue_states_by_ids_outcomes/2` APIs retain each source result in a map
+with `tracker` and `manual` keys. A disabled tracker is `:disabled`; an enabled
+tracker retains its success or error tuple, even when manual issues exist. A
+disabled manual source returns `{:ok, []}`. These APIs let a coordinator handle
+remote rate limits before combining source results; the existing merged APIs
+retain their prior error behavior.
+
 ## Bounded retries during implementation
 
 `policy.token_budget.broad_implement` lets the runtime retry an implementation turn

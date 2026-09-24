@@ -40,18 +40,24 @@ defmodule SymphonyElixir.ManualIssueStore do
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]}
   def fetch_candidate_issues do
-    fetch_issues_by_states(Config.linear_active_states())
+    context = Config.tracker_read_context()
+    fetch_issues_by_states(context.linear_active_states, context.manual_store_root)
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]}
   def fetch_issues_by_states(states) when is_list(states) do
+    fetch_issues_by_states(states, root())
+  end
+
+  @spec fetch_issues_by_states([String.t()], Path.t()) :: {:ok, [Issue.t()]}
+  def fetch_issues_by_states(states, root_path) when is_list(states) and is_binary(root_path) do
     normalized_states =
       states
       |> Enum.map(&(to_string(&1) |> SymphonyElixir.Util.normalize_state()))
       |> MapSet.new()
 
     {:ok,
-     list_issues()
+     list_issues(root_path)
      |> Enum.filter(fn %Issue{state: state} ->
        MapSet.member?(normalized_states, SymphonyElixir.Util.normalize_state(state))
      end)}
@@ -59,14 +65,24 @@ defmodule SymphonyElixir.ManualIssueStore do
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]}
   def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+    fetch_issue_states_by_ids(issue_ids, root())
+  end
+
+  @spec fetch_issue_states_by_ids([String.t()], Path.t()) :: {:ok, [Issue.t()]}
+  def fetch_issue_states_by_ids(issue_ids, root_path) when is_list(issue_ids) and is_binary(root_path) do
     wanted_ids = MapSet.new(issue_ids)
-    {:ok, Enum.filter(list_issues(), &MapSet.member?(wanted_ids, &1.id))}
+    {:ok, Enum.filter(list_issues(root_path), &MapSet.member?(wanted_ids, &1.id))}
   end
 
   @spec fetch_issue_by_id(String.t()) :: {:ok, Issue.t() | nil}
   def fetch_issue_by_id(issue_id) when is_binary(issue_id) do
+    fetch_issue_by_id(issue_id, root())
+  end
+
+  @spec fetch_issue_by_id(String.t(), Path.t()) :: {:ok, Issue.t() | nil}
+  def fetch_issue_by_id(issue_id, root_path) when is_binary(issue_id) and is_binary(root_path) do
     {:ok,
-     Enum.find(list_issues(), fn
+     Enum.find(list_issues(root_path), fn
        %Issue{id: ^issue_id} -> true
        _ -> false
      end)}
@@ -74,8 +90,13 @@ defmodule SymphonyElixir.ManualIssueStore do
 
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, Issue.t() | nil}
   def fetch_issue_by_identifier(issue_identifier) when is_binary(issue_identifier) do
+    fetch_issue_by_identifier(issue_identifier, root())
+  end
+
+  @spec fetch_issue_by_identifier(String.t(), Path.t()) :: {:ok, Issue.t() | nil}
+  def fetch_issue_by_identifier(issue_identifier, root_path) when is_binary(issue_identifier) and is_binary(root_path) do
     {:ok,
-     Enum.find(list_issues(), fn
+     Enum.find(list_issues(root_path), fn
        %Issue{identifier: ^issue_identifier} -> true
        _ -> false
      end)}
@@ -127,8 +148,13 @@ defmodule SymphonyElixir.ManualIssueStore do
 
   @spec load_record_by_identifier(String.t()) :: {:ok, record() | nil}
   def load_record_by_identifier(issue_identifier) when is_binary(issue_identifier) do
+    load_record_by_identifier(issue_identifier, root())
+  end
+
+  @spec load_record_by_identifier(String.t(), Path.t()) :: {:ok, record() | nil}
+  def load_record_by_identifier(issue_identifier, root_path) when is_binary(issue_identifier) and is_binary(root_path) do
     {:ok,
-     Enum.find(list_records(), fn record ->
+     Enum.find(list_records(root_path), fn record ->
        case Map.get(record, :issue) do
          %Issue{identifier: ^issue_identifier} -> true
          _ -> false
@@ -137,16 +163,22 @@ defmodule SymphonyElixir.ManualIssueStore do
   end
 
   @spec list_records() :: [record()]
-  def list_records do
-    root()
+  def list_records, do: list_records(root())
+
+  @spec list_records(Path.t()) :: [record()]
+  def list_records(root_path) when is_binary(root_path) do
+    root_path
     |> record_files()
     |> Enum.map(&read_record/1)
     |> Enum.reject(&is_nil/1)
   end
 
   @spec list_issues() :: [Issue.t()]
-  def list_issues do
-    list_records()
+  def list_issues, do: list_issues(root())
+
+  @spec list_issues(Path.t()) :: [Issue.t()]
+  def list_issues(root_path) when is_binary(root_path) do
+    list_records(root_path)
     |> Enum.map(&Map.get(&1, :issue))
     |> Enum.filter(&match?(%Issue{}, &1))
   end
