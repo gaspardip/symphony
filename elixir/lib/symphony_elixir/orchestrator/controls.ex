@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
   alias SymphonyElixir.BehavioralProof
   alias SymphonyElixir.Config
+  alias SymphonyElixir.DeployAudit
   alias SymphonyElixir.IssuePolicy
   alias SymphonyElixir.IssueSource
   alias SymphonyElixir.LeaseManager
@@ -132,6 +133,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   @spec resume_issue_runtime(State.t(), String.t()) :: {State.t(), map()}
   def resume_issue_runtime(%State{} = state, issue_identifier) do
     with {:ok, paused_entry} <- paused_issue_entry(state, issue_identifier),
+         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(paused_entry.identifier)),
          :ok <-
            IssueSource.update_issue_state(
              paused_issue_ref(paused_entry),
@@ -276,11 +278,13 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
   @spec retry_issue_now_runtime(State.t(), String.t()) :: {State.t(), map()}
   def retry_issue_now_runtime(%State{} = state, issue_identifier) do
-    with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
-         false <- Orchestrator.issue_paused?(state, issue) do
-      state = cancel_retry(state, issue.id)
-      {state, issue} = maybe_resume_blocked_issue(state, issue)
-      issue = retry_issue_control_envelope(issue)
+    with :ok <- ensure_deploy_control_available(issue_identifier),
+         {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
+         false <- Orchestrator.issue_paused?(state, issue),
+         {%State{} = resumed_state, %Issue{} = resumed_issue} <- maybe_resume_blocked_issue(state, issue) do
+      state = cancel_retry(resumed_state, resumed_issue.id)
+      issue = retry_issue_control_envelope(resumed_issue)
 
       if not Map.has_key?(state.running, issue.id) do
         LeaseManager.release(issue.id)
@@ -330,7 +334,9 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
   @spec refresh_merge_readiness_runtime(State.t(), String.t()) :: {State.t(), map()}
   def refresh_merge_readiness_runtime(%State{} = state, issue_identifier) do
-    with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+    with :ok <- ensure_deploy_control_available(issue_identifier),
+         {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
          false <- Orchestrator.issue_paused?(state, issue),
          workspace <- Workspace.path_for_issue(issue.identifier),
          {:ok, run_state} <- RunStateStore.load(workspace),
@@ -468,7 +474,9 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
   @spec approve_issue_for_merge_runtime(State.t(), String.t()) :: {State.t(), map()}
   def approve_issue_for_merge_runtime(%State{} = state, issue_identifier) do
-    with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+    with :ok <- ensure_deploy_control_available(issue_identifier),
+         {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
          {policy_class, policy_source, _policy_override} <- Orchestrator.policy_snapshot_values(issue, state),
          false <- policy_class == "never_automerge",
          :ok <- IssueSource.update_issue_state(issue, @merging_state) do
@@ -549,7 +557,9 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
   @spec approve_issue_for_deploy_runtime(State.t(), String.t()) :: {State.t(), map()}
   def approve_issue_for_deploy_runtime(%State{} = state, issue_identifier) do
-    with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+    with :ok <- ensure_deploy_control_available(issue_identifier),
+         {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
          {policy_class, policy_source, _policy_override} <- Orchestrator.policy_snapshot_values(issue, state),
          workspace <- Workspace.path_for_issue(issue.identifier),
          {:ok, _run_state} <-
@@ -622,7 +632,9 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
   @spec review_thread_action_runtime(State.t(), String.t(), map()) :: {State.t(), map()}
   def review_thread_action_runtime(%State{} = state, issue_identifier, action) do
-    with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+    with :ok <- ensure_deploy_control_available(issue_identifier),
+         {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
          workspace <- Workspace.path_for_issue(issue.identifier),
          {:ok, run_state} <- RunStateStore.load(workspace),
          review_threads when is_map(review_threads) and map_size(review_threads) > 0 <-
@@ -685,7 +697,9 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
   @spec post_review_drafts_runtime(State.t(), String.t()) :: {State.t(), map()}
   def post_review_drafts_runtime(%State{} = state, issue_identifier) do
-    with {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+    with :ok <- ensure_deploy_control_available(issue_identifier),
+         {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
+         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
          workspace <- Workspace.path_for_issue(issue.identifier),
          {:ok, run_state} <- RunStateStore.load(workspace),
          review_threads when is_map(review_threads) and map_size(review_threads) > 0 <-
@@ -884,6 +898,15 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
     [issue | filtered]
   end
+
+  defp ensure_deploy_control_available(identifier) when is_binary(identifier) do
+    case String.trim(identifier) do
+      "" -> {:error, :blank_issue_identifier}
+      trimmed -> DeployAudit.ensure_available(Workspace.path_for_issue(trimmed))
+    end
+  end
+
+  defp ensure_deploy_control_available(_identifier), do: {:error, :blank_issue_identifier}
 
   @doc false
   @spec resolve_issue_for_control(State.t(), term()) :: {:ok, Issue.t()} | {:error, atom()}
@@ -1273,10 +1296,16 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   # Resume helpers (retry_issue_now support)
   # -------------------------------------------------------------------
 
-  @spec maybe_resume_blocked_issue(State.t(), Issue.t()) :: {State.t(), Issue.t()}
+  @spec maybe_resume_blocked_issue(State.t(), Issue.t()) :: {State.t(), Issue.t()} | {:error, term()}
   def maybe_resume_blocked_issue(%State{} = state, %Issue{} = issue) do
     workspace = Workspace.path_for_issue(issue.identifier)
 
+    with :ok <- DeployAudit.ensure_available(workspace) do
+      resume_available_blocked_issue(state, issue, workspace)
+    end
+  end
+
+  defp resume_available_blocked_issue(state, issue, workspace) do
     local_resume =
       fn resume_state ->
         cond do

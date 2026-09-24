@@ -229,6 +229,19 @@ or completion of arbitrary operating-system descendants. The regression fixture
 uses a local Python 3 JSONL provider and a local Git repository, with no remote
 provider, tracker, or publication calls.
 
+## Pending deployment results
+
+Preview and production deploy commands require a checked stage-entry event and a
+durable intent before execution. A sibling `.deploy-audit` journal retains the
+operation until the observed successful result and its own continuation are
+confirmed. A failed command can have partial effects and leaves the journal pending.
+
+Pending journals reject new dispatch, retry, approvals, workspace cleanup and hooks.
+Status reads, lease/token updates and stop remain available. There is no automatic
+retry, expiry-based cleanup or recovery command that deletes this evidence. Inspect
+the original ledger and deployment outcome before planning reconciliation. See
+[deployment audit](../docs/deploy-audit.md) for guarantees and limits.
+
 ## GitHub events and archived workspaces
 
 Review and CI events match a snapshot only when its directory is the canonical

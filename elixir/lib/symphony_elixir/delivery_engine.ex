@@ -11,6 +11,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.AgentHarness
   alias SymphonyElixir.Config
+  alias SymphonyElixir.DeployAudit
   alias SymphonyElixir.GitManager
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.IssueSource
@@ -2131,56 +2132,8 @@ defmodule SymphonyElixir.DeliveryEngine do
           @blocked_state
         )
 
-      _command ->
-        result = RunInspector.run_deploy_preview(workspace, inspection.harness, opts)
-
-        case result.status do
-          :passed ->
-            {:ok, _state} =
-              RunStateStore.update(workspace, fn current ->
-                current
-                |> Map.put(:last_deploy_preview, command_result_to_map(result))
-                |> Map.put(:last_decision, nil)
-              end)
-
-            RunLedger.record("deploy.preview.completed", %{
-              issue_id: issue.id,
-              issue_identifier: issue.identifier,
-              stage: "deploy_preview",
-              actor_type: "runtime",
-              actor_id: "delivery_engine",
-              summary: "Preview deploy completed",
-              details: String.slice(to_string(result.output || ""), 0, 500),
-              metadata: %{command: result.command}
-            })
-
-            if post_deploy_verification_required?(
-                 inspection.harness,
-                 WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
-               ) do
-              {:ok, _state} =
-                RunStateStore.transition(workspace, "post_deploy_verify", %{
-                  issue_id: issue.id,
-                  issue_identifier: issue.identifier,
-                  issue_source: issue.source,
-                  current_deploy_target: "preview",
-                  last_decision_summary: "Preview deployment completed. Running post-deploy verification."
-                })
-
-              :ok
-            else
-              finalize_done(workspace, issue, state)
-            end
-
-          _ ->
-            block_issue(
-              workspace,
-              issue,
-              :deploy_preview_failed,
-              to_string(result.output || ""),
-              @blocked_state
-            )
-        end
+      command ->
+        run_audited_deploy(workspace, issue, state, inspection.harness, "preview", command, opts)
     end
   end
 
@@ -2195,63 +2148,65 @@ defmodule SymphonyElixir.DeliveryEngine do
           @blocked_state
         )
 
-      _command ->
+      command ->
         if production_deploy_window_deferred?(state) do
           defer_for_production_deploy_window(workspace, issue, state)
         else
-          result = RunInspector.run_deploy_production(workspace, inspection.harness, opts)
-
-          case result.status do
-            :passed ->
-              {:ok, _state} =
-                RunStateStore.update(workspace, fn current ->
-                  current
-                  |> Map.put(:last_deploy_production, command_result_to_map(result))
-                  |> Map.put(:current_deploy_target, "production")
-                  |> Map.put(:deploy_window_wait, nil)
-                  |> Map.put(:deploy_approved, false)
-                  |> Map.put(:last_decision, nil)
-                end)
-
-              RunLedger.record("deploy.production.completed", %{
-                issue_id: issue.id,
-                issue_identifier: issue.identifier,
-                stage: "deploy_production",
-                actor_type: "runtime",
-                actor_id: "delivery_engine",
-                summary: "Production deploy completed",
-                details: String.slice(to_string(result.output || ""), 0, 500),
-                metadata: %{command: result.command}
-              })
-
-              if post_deploy_verification_required?(
-                   inspection.harness,
-                   WorkflowProfile.resolve(Map.get(state, :effective_policy_class))
-                 ) do
-                {:ok, _state} =
-                  RunStateStore.transition(workspace, "post_deploy_verify", %{
-                    issue_id: issue.id,
-                    issue_identifier: issue.identifier,
-                    issue_source: issue.source,
-                    current_deploy_target: "production",
-                    last_decision_summary: "Production deployment completed. Running post-deploy verification."
-                  })
-
-                :ok
-              else
-                finalize_done(workspace, issue, state)
-              end
-
-            _ ->
-              block_issue(
-                workspace,
-                issue,
-                :deploy_production_failed,
-                to_string(result.output || ""),
-                @blocked_state
-              )
-          end
+          run_audited_deploy(workspace, issue, state, inspection.harness, "production", command, opts)
         end
+    end
+  end
+
+  defp run_audited_deploy(workspace, issue, state, harness, target, command, opts) do
+    with {:ok, ticket} <-
+           DeployAudit.begin(workspace, %{
+             issue_id: issue.id,
+             issue_identifier: issue.identifier,
+             stage: "deploy_" <> target,
+             command: command
+           }),
+         result <- run_deploy_command(target, workspace, harness, opts),
+         :ok <- DeployAudit.record_result(ticket, command_result_to_map(result)),
+         {:ok, continuation, reply} <- continue_audited_deploy(ticket, issue, state, harness, target),
+         :ok <- DeployAudit.finish(ticket, continuation) do
+      reply
+    else
+      {:error, reason} = error ->
+        Logger.error("Deployment remains unresolved issue_identifier=#{issue.identifier} target=#{target} reason=#{inspect(reason)}")
+
+        error
+    end
+  end
+
+  defp run_deploy_command("preview", workspace, harness, opts),
+    do: RunInspector.run_deploy_preview(workspace, harness, opts)
+
+  defp run_deploy_command("production", workspace, harness, opts),
+    do: RunInspector.run_deploy_production(workspace, harness, opts)
+
+  defp continue_audited_deploy(ticket, issue, state, harness, target) do
+    if post_deploy_verification_required?(harness, WorkflowProfile.resolve(Map.get(state, :effective_policy_class))) do
+      summary = String.capitalize(target) <> " deployment completed. Running post-deploy verification."
+
+      with {:ok, _state, continuation} <-
+             RunStateStore.transition_deploy(ticket, "post_deploy_verify", %{
+               issue_source: issue.source,
+               last_decision_summary: summary
+             }) do
+        {:ok, continuation, :ok}
+      end
+    else
+      with :ok <- RunStateStore.ensure_deploy_current(ticket),
+           :ok <- maybe_move_issue(issue, @done_state),
+           {:ok, _state, continuation} <-
+             RunStateStore.transition_deploy(ticket, "done", %{
+               issue_source: issue.source,
+               last_decision_summary: finalization_summary(state),
+               next_human_action: nil,
+               stop_reason: nil
+             }) do
+        {:ok, continuation, {:done, issue}}
+      end
     end
   end
 

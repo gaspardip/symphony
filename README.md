@@ -57,6 +57,10 @@ before this check.
 Codex app-server workers honor cooperative shutdown during startup and streaming.
 They close their protocol port before propagating shutdown to the caller.
 
+Preview and production deployment reserve an audited operation before running the
+command. Uncertain results block further execution until the evidence is resolved;
+see [deployment audit](docs/deploy-audit.md) for the scope and operational limits.
+
 GitHub review and CI follow-up use only the canonical workspace for an issue.
 Archived copies with the same pull request URL are left unchanged.
 
