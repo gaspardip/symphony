@@ -143,6 +143,10 @@ Notes:
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
+- Delivery operations fetch the harness `base_branch` into `origin/<base_branch>` even
+  when a single-branch clone does not track it. Reset creates or resets that local base
+  explicitly, discards local code changes, and restores `.symphony/run_state.json`.
+  The base must exist on the remote; a failed fetch stops the operation.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.

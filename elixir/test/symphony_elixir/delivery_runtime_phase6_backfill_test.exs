@@ -1427,7 +1427,7 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
        ),
        do: {"", 1}
 
-  defp checkout_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
+  defp checkout_command_runner("git", ["fetch", "origin", "--prune", "refs/heads/main:refs/remotes/origin/main"], _opts), do: {"", 0}
   defp checkout_command_runner("git", ["checkout", "symphony/mt-runtime"], _opts), do: {"", 1}
 
   defp checkout_command_runner(

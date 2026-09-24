@@ -21,6 +21,10 @@ specification below describe its starting point, not acceptance evidence for thi
 The [selected runner release contract](docs/selected-runner-release.md) distinguishes
 the configured release from execution identity and defines its pre-run path protection.
 
+Delivery branch preparation and resets fetch the configured base explicitly, including
+workspaces cloned for a different single branch. Reset selects the local base at its
+remote revision and preserves the runtime snapshot; local code changes are discarded.
+
 ## Running Symphony
 
 ### Requirements
