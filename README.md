@@ -21,6 +21,10 @@ specification below describe its starting point, not acceptance evidence for thi
 The [selected runner release contract](docs/selected-runner-release.md) distinguishes
 the configured release from execution identity and defines its pre-run path protection.
 
+Delivery branch preparation and resets fetch the configured base explicitly, including
+workspaces cloned for a different single branch. Reset selects the local base at its
+remote revision and preserves the runtime snapshot; local code changes are discarded.
+
 ## Running Symphony
 
 ### Requirements
@@ -49,6 +53,13 @@ Workspace lifecycle operations refuse paths that overlap the runner install,
 current checkout, or selected release before creation, reset, cleanup, or hooks.
 Symbolic links are resolved, and existing directory identities are compared
 before this check.
+
+Codex app-server workers honor cooperative shutdown during startup and streaming.
+They close their protocol port before propagating shutdown to the caller.
+
+Preview and production deployment reserve an audited operation before running the
+command. Uncertain results block further execution until the evidence is resolved;
+see [deployment audit](docs/deploy-audit.md) for the scope and operational limits.
 
 GitHub review and CI follow-up use only the canonical workspace for an issue.
 Archived copies with the same pull request URL are left unchanged.

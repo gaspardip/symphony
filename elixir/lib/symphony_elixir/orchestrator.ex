@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.AgentRunner
   alias SymphonyElixir.Config
   alias SymphonyElixir.DeliveryEngine
+  alias SymphonyElixir.DeployAudit
   alias SymphonyElixir.DispatchAudit
   alias SymphonyElixir.DispatchGate
   alias SymphonyElixir.GitHubEvent
@@ -339,7 +340,7 @@ defmodule SymphonyElixir.Orchestrator do
         next_attempt = next_retry_attempt_from_running(running_entry) || 1
 
         state =
-          case finish_running_dispatch(running_entry, reason) do
+          case finish_completed_dispatch(running_entry, reason) do
             {:ownership_uncertain, ownership_reason} ->
               state
               |> cancel_dispatch_retry(issue_id)
@@ -399,6 +400,9 @@ defmodule SymphonyElixir.Orchestrator do
                     error: "agent exited: #{inspect(reason)}"
                   })
               end
+
+            {:error, {tag, _} = audit_reason} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
+              halt_dispatch_audit(state, issue_id, audit_reason)
 
             {:error, audit_reason} ->
               state
@@ -2476,7 +2480,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
-  @spec maybe_resume_blocked_issue_for_test(State.t(), Issue.t()) :: State.t()
+  @spec maybe_resume_blocked_issue_for_test(State.t(), Issue.t()) :: {State.t(), Issue.t()} | {:error, term()}
   def maybe_resume_blocked_issue_for_test(%State{} = state, %Issue{} = issue) do
     Controls.maybe_resume_blocked_issue(state, issue)
   end
@@ -3243,27 +3247,31 @@ defmodule SymphonyElixir.Orchestrator do
     recipient = self()
     workspace = Workspace.path_for_issue(issue)
 
-    case acquire_fun.(issue.id, issue.identifier, state.lease_owner) do
-      :ok ->
-        case persist_dispatchable_issue_lease(state, workspace, issue) do
-          {:ok, _run_state} ->
-            spawn_fun.(state, issue, attempt, recipient)
+    with :ok <- DeployAudit.ensure_available(workspace) do
+      case acquire_fun.(issue.id, issue.identifier, state.lease_owner) do
+        :ok ->
+          case persist_dispatchable_issue_lease(state, workspace, issue) do
+            {:ok, _run_state} ->
+              spawn_fun.(state, issue, attempt, recipient)
 
-          {:error, reason} ->
-            Logger.warning("Skipping dispatch; failed to persist lease state for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
+            {:error, reason} ->
+              Logger.warning("Skipping dispatch; failed to persist lease state for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
-            release_persisted_issue_lease(issue.id, state.lease_owner, nil)
-            state
-        end
+              release_persisted_issue_lease(issue.id, state.lease_owner, nil)
+              state
+          end
 
-      {:error, :claimed} ->
-        Logger.info("Skipping dispatch; lease already held for #{SymphonyElixir.Util.issue_log_context(issue)}")
-        state
+        {:error, :claimed} ->
+          Logger.info("Skipping dispatch; lease already held for #{SymphonyElixir.Util.issue_log_context(issue)}")
+          state
 
-      {:error, reason} ->
-        Logger.warning("Skipping dispatch; failed to acquire lease for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
+        {:error, reason} ->
+          Logger.warning("Skipping dispatch; failed to acquire lease for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
-        state
+          state
+      end
+    else
+      {:error, reason} -> halt_dispatch_audit(state, issue.id, reason)
     end
   end
 
@@ -3298,7 +3306,11 @@ defmodule SymphonyElixir.Orchestrator do
         end
       end
     else
-      {:error, reason} -> stop_terminal_dispatch(state, issue, reason)
+      {:error, {tag, _} = reason} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
+        halt_dispatch_audit(state, issue.id, reason)
+
+      {:error, reason} ->
+        stop_terminal_dispatch(state, issue, reason)
     end
   end
 
@@ -3378,6 +3390,12 @@ defmodule SymphonyElixir.Orchestrator do
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
     else
+      {:error, {tag, _} = reason} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
+        halt_dispatch_audit(state, issue.id, reason)
+
+      {:error, {:dispatch_audit_failed, {tag, _} = reason}} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
+        halt_dispatch_audit(state, issue.id, reason)
+
       {:error, {:dispatch_audit_failed, reason}} ->
         state
         |> stop_terminal_dispatch(issue, reason)
@@ -3534,6 +3552,12 @@ defmodule SymphonyElixir.Orchestrator do
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
     else
+      {:error, {tag, _} = reason} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
+        halt_dispatch_audit(state, issue.id, reason)
+
+      {:error, {:dispatch_audit_failed, {tag, _} = reason}} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
+        halt_dispatch_audit(state, issue.id, reason)
+
       {:error, {:dispatch_audit_failed, reason}} ->
         state
         |> stop_terminal_dispatch(issue, reason)
@@ -3595,6 +3619,27 @@ defmodule SymphonyElixir.Orchestrator do
       end
     else
       {:error, reason} -> {:error, {:dispatch_audit_failed, reason}}
+    end
+  end
+
+  defp finish_completed_dispatch(running_entry, reason) do
+    case finish_running_dispatch(running_entry, reason) do
+      {:ownership_uncertain, _reason} = uncertain ->
+        uncertain
+
+      result ->
+        workspace = Map.get(running_entry, :workspace_path) || Workspace.path_for_issue(running_entry.identifier)
+
+        case {DeployAudit.ensure_available(workspace), result} do
+          {:ok, result} ->
+            result
+
+          {{:error, pending}, :ok} ->
+            {:error, pending}
+
+          {{:error, {tag, detail}}, {:error, finish_error}} ->
+            {:error, {tag, %{journal: detail, dispatch_finish_error: finish_error}}}
+        end
     end
   end
 
@@ -3739,7 +3784,14 @@ defmodule SymphonyElixir.Orchestrator do
     identifier = Map.get(metadata, :identifier) || get_in(state.retry_attempts, [issue_id, :identifier])
     workspace = if is_binary(identifier), do: Workspace.path_for_issue(identifier), else: workspace_for_issue_id(state, issue_id)
 
-    case if(is_binary(workspace), do: DispatchAudit.ensure_available(workspace), else: :ok) do
+    availability =
+      if is_binary(workspace) do
+        with :ok <- DeployAudit.ensure_available(workspace), do: DispatchAudit.ensure_available(workspace)
+      else
+        :ok
+      end
+
+    case availability do
       :ok -> do_schedule_issue_retry(state, issue_id, attempt, metadata)
       {:error, reason} -> halt_dispatch_audit(state, issue_id, reason)
     end
@@ -3786,8 +3838,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dispatch_retry_guard(state, issue_id) do
     case get_in(state.retry_attempts, [issue_id, :identifier]) do
-      identifier when is_binary(identifier) -> DispatchAudit.ensure_available(Workspace.path_for_issue(identifier))
-      _ -> :ok
+      identifier when is_binary(identifier) ->
+        workspace = Workspace.path_for_issue(identifier)
+        with :ok <- DeployAudit.ensure_available(workspace), do: DispatchAudit.ensure_available(workspace)
+
+      _ ->
+        :ok
     end
   end
 
@@ -3931,7 +3987,7 @@ defmodule SymphonyElixir.Orchestrator do
       :resume ->
         resume_review_retry_under_lease(state, issue, attempt, metadata)
 
-      {:error, {tag, _} = reason} when tag in [:dispatch_audit_pending, :dispatch_audit_read_failed] ->
+      {:error, {tag, _} = reason} when tag in [:dispatch_audit_pending, :dispatch_audit_read_failed, :deploy_audit_pending, :deploy_audit_read_failed] ->
         {:noreply, halt_dispatch_audit(state, issue.id, reason)}
 
       {:error, reason} ->
@@ -3940,7 +3996,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_resume_action(issue, metadata) do
-    with :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)) do
+    with :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
+         :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)) do
       retry_resume_action_from_snapshot(issue, metadata)
     end
   end
@@ -3980,13 +4037,21 @@ defmodule SymphonyElixir.Orchestrator do
       :ok ->
         resume_result =
           case retry_resume_action(issue, metadata) do
-            :resume -> {:ok, Controls.maybe_resume_blocked_issue(state, issue)}
-            :dispatch -> {:ok, {state, issue}}
-            {:error, _reason} = error -> error
+            :resume ->
+              case Controls.maybe_resume_blocked_issue(state, issue) do
+                {%State{}, %Issue{}} = resumed -> {:ok, resumed}
+                {:error, _reason} = error -> error
+              end
+
+            :dispatch ->
+              {:ok, {state, issue}}
+
+            {:error, _reason} = error ->
+              error
           end
 
         case resume_result do
-          {:error, {tag, _} = reason} when tag in [:dispatch_audit_pending, :dispatch_audit_read_failed] ->
+          {:error, {tag, _} = reason} when tag in [:dispatch_audit_pending, :dispatch_audit_read_failed, :deploy_audit_pending, :deploy_audit_read_failed] ->
             {:noreply, halt_dispatch_audit(state, issue.id, reason)}
 
           _ ->
@@ -5147,6 +5212,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_function(active_dispatch_fun, 3) and is_function(passive_dispatch_fun, 3) do
     with :ok <- token_usage_dispatch_guard(state, issue.id),
          :ok <- validate_dispatch_configuration(issue),
+         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
          :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)),
          :ok <- RunStateStore.ensure_readable(Workspace.path_for_issue(issue)),
          :ok <- persisted_issue_token_budget_guard(issue),
@@ -5195,7 +5261,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp persisted_dispatch_stage(issue) do
-    with :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)) do
+    with :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
+         :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)) do
       case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
         {:ok, %{stage: stage}} when stage in ["blocked", "done"] ->
           {:error, {:persisted_stage_requires_explicit_resume, stage}}

@@ -3,6 +3,7 @@ defmodule SymphonyElixir.RunStateStore do
   Persists per-workspace runtime state so runs can resume from explicit stages.
   """
 
+  alias SymphonyElixir.DeployAudit
   alias SymphonyElixir.Observability
   alias SymphonyElixir.RunLedger
   alias SymphonyElixir.RunnerRuntime
@@ -120,10 +121,12 @@ defmodule SymphonyElixir.RunStateStore do
 
   @spec ensure_readable(Path.t()) :: :ok | {:error, term()}
   def ensure_readable(workspace) when is_binary(workspace) do
-    case load(workspace) do
-      {:ok, _state} -> :ok
-      {:error, :missing} -> :ok
-      {:error, reason} -> {:error, unreadable_error(reason)}
+    with :ok <- DeployAudit.ensure_available(workspace) do
+      case load(workspace) do
+        {:ok, _state} -> :ok
+        {:error, :missing} -> :ok
+        {:error, reason} -> {:error, unreadable_error(reason)}
+      end
     end
   end
 
@@ -259,7 +262,75 @@ defmodule SymphonyElixir.RunStateStore do
     end)
   end
 
-  defp transition_from_state(workspace, stage, attrs, previous_state) do
+  @doc "Checks a confirmed deploy against the current snapshot without changing it. Network work must remain outside this lock."
+  @spec ensure_deploy_current(DeployAudit.ticket()) :: :ok | {:error, term()}
+  def ensure_deploy_current(%{workspace: workspace} = ticket) do
+    with_workspace_lock(workspace, fn ->
+      with {:ok, context} <- DeployAudit.continuation_context(ticket),
+           {:ok, state} <- load(workspace) do
+        matching_deploy_snapshot(state, context)
+      end
+    end)
+  end
+
+  @doc "Advances a confirmed deploy once, preserving fresh lease and consumption metadata under one snapshot lock."
+  @spec transition_deploy(DeployAudit.ticket(), String.t(), map()) :: {:ok, map(), DeployAudit.continuation()} | {:error, term()}
+  def transition_deploy(%{workspace: workspace} = ticket, stage, attrs) when is_map(attrs) and stage in ["post_deploy_verify", "done"] do
+    with_workspace_lock(workspace, fn ->
+      with {:ok, context} <- DeployAudit.continuation_context(ticket),
+           {:ok, previous_state} <- load(workspace),
+           :ok <- matching_deploy_snapshot(previous_state, context),
+           :ok <- validate_deploy_attrs(attrs),
+           {:ok, state} <- transition_from_state(workspace, stage, deploy_attrs(attrs, context), previous_state, deploy_metadata(context)),
+           :ok <- DeployAudit.ensure_ledger_path(context.ledger_path),
+           {:ok, event} <- RunLedger.fetch_entry_checked(state.last_ledger_event_id) do
+        {:ok, state, %{stage: stage, event: event}}
+      end
+    end)
+  end
+
+  def transition_deploy(_ticket, _stage, _attrs), do: {:error, :invalid_deploy_transition}
+
+  defp matching_deploy_snapshot(state, context) do
+    if state[:issue_id] == context.issue_id and state[:issue_identifier] == context.issue_identifier and state[:stage] == context.stage and
+         state[:last_ledger_event_id] == context.entry_event_id and state[:lease_owner] == context.lease_owner and state[:lease_epoch] == context.lease_epoch and
+         is_nil(state[:stop_reason]),
+       do: :ok,
+       else: {:error, :deploy_audit_snapshot_conflict}
+  end
+
+  defp validate_deploy_attrs(attrs) do
+    allowed = [:issue_source, :last_decision_summary, :completed_at, :reason, :next_human_action, :stop_reason]
+
+    if Enum.all?(Map.keys(attrs), &(&1 in allowed)) and is_nil(Map.get(attrs, :stop_reason)) and is_nil(Map.get(attrs, :next_human_action)),
+      do: :ok,
+      else: {:error, :invalid_deploy_transition_attrs}
+  end
+
+  defp deploy_attrs(attrs, context) do
+    result_key = if context.target == "preview", do: :last_deploy_preview, else: :last_deploy_production
+
+    attrs =
+      attrs
+      |> Map.put(result_key, context.result)
+      |> Map.put(:last_deploy_operation_id, context.operation_id)
+      |> Map.put(:current_deploy_target, context.target)
+      |> Map.put(:last_decision, nil)
+
+    if context.target == "production",
+      do: Map.merge(attrs, %{deploy_window_wait: nil, deploy_approved: false}),
+      else: attrs
+  end
+
+  defp deploy_metadata(context) do
+    %{
+      deploy_operation_id: context.operation_id,
+      deploy_intent_event_id: context.intent_event_id,
+      deploy_result_event_id: context.result_event_id
+    }
+  end
+
+  defp transition_from_state(workspace, stage, attrs, previous_state, transition_metadata \\ %{}) do
     same_stage? = Map.get(previous_state, :stage) == stage
 
     state =
@@ -272,11 +343,11 @@ defmodule SymphonyElixir.RunStateStore do
     if same_stage? do
       with :ok <- save_unlocked(workspace, state), do: {:ok, state}
     else
-      commit_audited_transition(workspace, state, attrs, Map.get(previous_state, :stage))
+      commit_audited_transition(workspace, state, attrs, Map.get(previous_state, :stage), transition_metadata)
     end
   end
 
-  defp commit_audited_transition(workspace, state, attrs, previous_stage) do
+  defp commit_audited_transition(workspace, state, attrs, previous_stage, transition_metadata) do
     state = ensure_runner_metadata(state)
     operation_id = SymphonyElixir.Util.generate_id("op_")
 
@@ -289,13 +360,14 @@ defmodule SymphonyElixir.RunStateStore do
       policy_class: Map.get(state, :effective_policy_class),
       summary: "Transitioned to #{state.stage}",
       details: Map.get(attrs, :reason),
-      metadata: %{
-        operation_id: operation_id,
-        previous_stage: previous_stage,
-        snapshot_digest: snapshot_digest(state),
-        stage_transition_count: get_in(state, [:stage_transition_counts, state.stage]),
-        stage_history_size: length(Map.get(state, :stage_history, []))
-      }
+      metadata:
+        Map.merge(transition_metadata, %{
+          operation_id: operation_id,
+          previous_stage: previous_stage,
+          snapshot_digest: snapshot_digest(state),
+          stage_transition_count: get_in(state, [:stage_transition_counts, state.stage]),
+          stage_history_size: length(Map.get(state, :stage_history, []))
+        })
     }
 
     intent_attrs = Map.put(event_attrs, :summary, "Requested transition to #{state.stage}")

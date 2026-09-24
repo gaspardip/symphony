@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Workspace do
 
   require Logger
   alias SymphonyElixir.Config
+  alias SymphonyElixir.DeployAudit
   alias SymphonyElixir.DispatchAudit
   alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.RunnerRuntime
@@ -301,7 +302,8 @@ defmodule SymphonyElixir.Workspace do
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
   defp run_hook(command, workspace, issue_context, hook_name) do
-    with :ok <- validate_workspace_path(workspace) do
+    with :ok <- validate_workspace_path(workspace),
+         :ok <- DeployAudit.ensure_available(workspace) do
       run_validated_hook(command, workspace, issue_context, hook_name)
     else
       {:error, reason} = error ->

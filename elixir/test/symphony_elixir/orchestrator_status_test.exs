@@ -921,26 +921,39 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
+    wait_for_state(pid, fn initial_state ->
+      assert initial_state.first_poll_completed == true
+      assert initial_state.poll_check_in_progress == false
+      assert initial_state.current_poll_mode == nil
+    end)
+
     state =
-      :sys.get_state(pid)
+      :sys.replace_state(pid, fn current_state ->
+        %{
+          current_state
+          | completed: %{
+              "stale-issue" => System.monotonic_time(:millisecond) - 8 * 24 * 60 * 60 * 1000,
+              "fresh-issue" => System.monotonic_time(:millisecond)
+            }
+        }
+      end)
       |> Map.put(:poll_check_in_progress, false)
       |> Map.put(:current_poll_mode, nil)
-      |> Map.put(:completed, %{
-        "stale-issue" => System.monotonic_time(:millisecond) - 8 * 24 * 60 * 60 * 1000,
-        "fresh-issue" => System.monotonic_time(:millisecond)
-      })
 
     assert {:noreply, healing_state} = Orchestrator.handle_info(:healing_tick, state)
     assert healing_state.poll_check_in_progress == true
     assert healing_state.current_poll_mode == :healing
     assert healing_state.next_healing_poll_due_at_ms == nil
 
-    assert {:noreply, healed_state} = Orchestrator.handle_info(:run_healing_cycle, healing_state)
-    assert healed_state.poll_check_in_progress == false
-    assert healed_state.current_poll_mode == nil
-    assert is_integer(healed_state.next_healing_poll_due_at_ms)
-    refute Map.has_key?(healed_state.completed, "stale-issue")
-    assert Map.has_key?(healed_state.completed, "fresh-issue")
+    send(pid, :run_healing_cycle)
+
+    wait_for_state(pid, fn healed_state ->
+      assert healed_state.poll_check_in_progress == false
+      assert healed_state.current_poll_mode == nil
+      assert is_integer(healed_state.next_healing_poll_due_at_ms)
+      refute Map.has_key?(healed_state.completed, "stale-issue")
+      assert Map.has_key?(healed_state.completed, "fresh-issue")
+    end)
 
     accepted_at = ~U[2026-03-08 05:30:00Z]
 
@@ -973,14 +986,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert rejected_state.webhook_last_rejected_reason == "invalid signature"
     assert rejected_state.webhook_last_rejected_rule_id == "webhook.signature_invalid"
 
-    assert {:noreply, completed_webhook_state} =
-             Orchestrator.handle_info(
-               :run_webhook_cycle,
-               %{state | poll_check_in_progress: true, current_poll_mode: :webhook}
-             )
+    previous_drain = :sys.get_state(pid).inbox_last_drained_at
+    send(pid, :run_webhook_cycle)
 
-    assert completed_webhook_state.poll_check_in_progress == false
-    assert completed_webhook_state.current_poll_mode == nil
+    wait_for_state(pid, fn completed_webhook_state ->
+      assert completed_webhook_state.poll_check_in_progress == false
+      assert completed_webhook_state.current_poll_mode == nil
+      assert match?(%DateTime{}, completed_webhook_state.inbox_last_drained_at)
+      refute completed_webhook_state.inbox_last_drained_at == previous_drain
+    end)
   end
 
   test "orchestrator poll cycle short-circuits for runner health, tracker backoff, and invalid handoff mode" do
@@ -1152,17 +1166,21 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       SymphonyElixir.TrackerEventInbox.reset()
     end)
 
-    state =
-      :sys.get_state(pid)
-      |> Map.put(:poll_check_in_progress, true)
-      |> Map.put(:current_poll_mode, :webhook)
+    wait_for_state(pid, fn initial_state ->
+      assert initial_state.first_poll_completed == true
+      assert initial_state.poll_check_in_progress == false
+      assert initial_state.current_poll_mode == nil
+    end)
 
-    assert {:noreply, next_state} = Orchestrator.handle_info(:run_webhook_cycle, state)
-    assert next_state.poll_check_in_progress == false
-    assert next_state.current_poll_mode == nil
-    assert next_state.issue_routing_cache[issue.id].state == "Todo"
-    assert next_state.issue_routing_cache[issue.id].assignee_id == "worker-1"
-    assert SymphonyElixir.TrackerEventInbox.pending_events(10) == []
+    send(pid, :run_webhook_cycle)
+
+    wait_for_state(pid, fn next_state ->
+      assert next_state.poll_check_in_progress == false
+      assert next_state.current_poll_mode == nil
+      assert next_state.issue_routing_cache[issue.id].state == "Todo"
+      assert next_state.issue_routing_cache[issue.id].assignee_id == "worker-1"
+      assert SymphonyElixir.TrackerEventInbox.pending_events(10) == []
+    end)
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do
@@ -1833,6 +1851,28 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  defp wait_for_state(pid, assertions, timeout_ms \\ 200) when is_function(assertions, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_state(pid, assertions, deadline_ms)
+  end
+
+  defp do_wait_for_state(pid, assertions, deadline_ms) do
+    state = :sys.get_state(pid)
+
+    try do
+      assertions.(state)
+      state
+    rescue
+      error in ExUnit.AssertionError ->
+        if System.monotonic_time(:millisecond) >= deadline_ms do
+          reraise error, __STACKTRACE__
+        else
+          Process.sleep(5)
+          do_wait_for_state(pid, assertions, deadline_ms)
+        end
+    end
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do

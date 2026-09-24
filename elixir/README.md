@@ -143,6 +143,10 @@ Notes:
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
+- Delivery operations fetch the harness `base_branch` into `origin/<base_branch>` even
+  when a single-branch clone does not track it. Reset creates or resets that local base
+  explicitly, discards local code changes, and restores `.symphony/run_state.json`.
+  The base must exist on the remote; a failed fetch stops the operation.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
@@ -211,6 +215,32 @@ If checkpointing fails, the worker stops, the tracker is asked to block the issu
 and new dispatch for that issue remains blocked in the current runtime with an
 explicit persistence error; repair storage and reconcile the unrecorded usage before
 restarting. Usage the provider has not reported cannot be checkpointed.
+
+## Codex app-server shutdown
+
+A PID-origin `:shutdown` received during app-server startup or turn streaming closes
+the protocol port and preserves the worker's `:shutdown` exit reason. AgentRunner's
+`after_run` hook can then run after port closure. This also covers callers that catch
+an exit from `start_session`; the prior `trap_exit` flag is restored. Port errors and
+read/turn timeouts keep their existing behavior.
+
+This cooperative path does not guarantee cleanup after an abrupt BEAM termination
+or completion of arbitrary operating-system descendants. The regression fixture
+uses a local Python 3 JSONL provider and a local Git repository, with no remote
+provider, tracker, or publication calls.
+
+## Pending deployment results
+
+Preview and production deploy commands require a checked stage-entry event and a
+durable intent before execution. A sibling `.deploy-audit` journal retains the
+operation until the observed successful result and its own continuation are
+confirmed. A failed command can have partial effects and leaves the journal pending.
+
+Pending journals reject new dispatch, retry, approvals, workspace cleanup and hooks.
+Status reads, lease/token updates and stop remain available. There is no automatic
+retry, expiry-based cleanup or recovery command that deletes this evidence. Inspect
+the original ledger and deployment outcome before planning reconciliation. See
+[deployment audit](../docs/deploy-audit.md) for guarantees and limits.
 
 ## GitHub events and archived workspaces
 

@@ -755,7 +755,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert result =
              DeliveryEngine.run(workspace, issue, nil,
                command_runner: fn
-                 "git", ["fetch", "origin", "--prune", "main"], _opts -> {"boom", 1}
+                 "git", ["fetch", "origin", "--prune", "refs/heads/main:refs/remotes/origin/main"], _opts -> {"boom", 1}
                  command, args, opts -> checkout_command_runner(command, args, opts)
                end
              )
@@ -1644,7 +1644,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert {:stop, :post_merge_failed} =
              DeliveryEngine.run(workspace, issue, nil,
                command_runner: fn
-                 "git", ["fetch", "origin", "--prune", "main"], _opts -> {"boom", 1}
+                 "git", ["fetch", "origin", "--prune", "refs/heads/main:refs/remotes/origin/main"], _opts -> {"boom", 1}
                  command, args, opts -> post_merge_command_runner(command, args, opts)
                end
              )
@@ -1771,7 +1771,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
        ),
        do: {"", 1}
 
-  defp checkout_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts), do: {"", 0}
+  defp checkout_command_runner("git", ["fetch", "origin", "--prune", "refs/heads/main:refs/remotes/origin/main"], _opts), do: {"", 0}
   defp checkout_command_runner("git", ["checkout", "symphony/mt-phase6"], _opts), do: {"", 1}
 
   defp checkout_command_runner(
@@ -1825,10 +1825,10 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp already_merged_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"def456\n", 0}
   defp already_merged_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
 
-  defp already_merged_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts),
+  defp already_merged_command_runner("git", ["fetch", "origin", "--prune", "refs/heads/main:refs/remotes/origin/main"], _opts),
     do: {"", 0}
 
-  defp already_merged_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
+  defp already_merged_command_runner("git", ["checkout", "-f", "-B", "main", "origin/main"], _opts), do: {"", 0}
 
   defp already_merged_command_runner("git", ["reset", "--hard", "origin/main"], _opts),
     do: {"", 0}
@@ -1861,10 +1861,10 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp post_merge_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"ghi789\n", 0}
   defp post_merge_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
 
-  defp post_merge_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts),
+  defp post_merge_command_runner("git", ["fetch", "origin", "--prune", "refs/heads/main:refs/remotes/origin/main"], _opts),
     do: {"", 0}
 
-  defp post_merge_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
+  defp post_merge_command_runner("git", ["checkout", "-f", "-B", "main", "origin/main"], _opts), do: {"", 0}
   defp post_merge_command_runner("git", ["reset", "--hard", "origin/main"], _opts), do: {"", 0}
   defp post_merge_command_runner(command, args, opts), do: System.cmd(command, args, opts)
 
@@ -1933,10 +1933,10 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   defp ready_merge_command_runner("git", ["rev-parse", "HEAD"], _opts), do: {"stu901\n", 0}
   defp ready_merge_command_runner("git", ["status", "--porcelain"], _opts), do: {"", 0}
 
-  defp ready_merge_command_runner("git", ["fetch", "origin", "--prune", "main"], _opts),
+  defp ready_merge_command_runner("git", ["fetch", "origin", "--prune", "refs/heads/main:refs/remotes/origin/main"], _opts),
     do: {"", 0}
 
-  defp ready_merge_command_runner("git", ["checkout", "-f", "main"], _opts), do: {"", 0}
+  defp ready_merge_command_runner("git", ["checkout", "-f", "-B", "main", "origin/main"], _opts), do: {"", 0}
   defp ready_merge_command_runner("git", ["reset", "--hard", "origin/main"], _opts), do: {"", 0}
 
   defp ready_merge_command_runner(
