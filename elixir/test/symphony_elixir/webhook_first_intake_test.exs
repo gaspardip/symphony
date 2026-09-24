@@ -525,7 +525,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert_eventually(
       fn ->
-        {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, run_state} = RunStateStore.load(workspace)
         assert {:ok, lease} = LeaseManager.read(issue.id)
 
         {:ok, %Issue{} = refreshed_issue} =
@@ -664,7 +664,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert_eventually(
       fn ->
-        {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, run_state} = RunStateStore.load(workspace)
         assert {:ok, lease} = LeaseManager.read(issue.id)
 
         {:ok, %Issue{} = refreshed_issue} =
@@ -1037,7 +1037,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert_eventually(
       fn ->
-        {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, run_state} = RunStateStore.load(workspace)
 
         assert Map.get(run_state, :stage) == "review_verification"
 
@@ -1677,24 +1677,35 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
       end
     end)
 
-    state =
-      :sys.get_state(pid)
-      |> Map.put(:poll_check_in_progress, true)
-      |> Map.put(:current_poll_mode, :webhook)
-      |> Map.put(:issue_routing_cache, %{
-        "issue-stale" => %{
-          state: "Todo",
-          assignee_id: nil,
-          labels: [],
-          updated_at: ~U[2026-03-08 07:10:00Z]
-        }
-      })
+    assert_eventually(fn ->
+      initial_state = :sys.get_state(pid)
+      assert initial_state.first_poll_completed == true
+      assert initial_state.poll_check_in_progress == false
+      assert initial_state.current_poll_mode == nil
+    end)
 
-    assert {:noreply, next_state} = Orchestrator.handle_info(:run_webhook_cycle, state)
-    assert next_state.tracker_backoff_rule_id == "tracker.rate_limited"
+    :sys.replace_state(pid, fn current_state ->
+      %{
+        current_state
+        | issue_routing_cache:
+            Map.put(current_state.issue_routing_cache, "issue-stale", %{
+              state: "Todo",
+              assignee_id: nil,
+              labels: [],
+              updated_at: ~U[2026-03-08 07:10:00Z]
+            })
+      }
+    end)
 
-    assert [%{"event" => payload}] = TrackerEventInbox.pending_events(10)
-    assert payload["issue_identifier"] == "MT-RATE"
+    send(pid, :run_webhook_cycle)
+
+    assert_eventually(fn ->
+      next_state = :sys.get_state(pid)
+      assert next_state.tracker_backoff_rule_id == "tracker.rate_limited"
+
+      assert [%{"event" => payload}] = TrackerEventInbox.pending_events(10)
+      assert payload["issue_identifier"] == "MT-RATE"
+    end)
   end
 
   test "linear client handoff mode controls assignee routing" do
