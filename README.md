@@ -50,6 +50,9 @@ current checkout, or selected release before creation, reset, cleanup, or hooks.
 Symbolic links are resolved, and existing directory identities are compared
 before this check.
 
+GitHub review and CI follow-up use only the canonical workspace for an issue.
+Archived copies with the same pull request URL are left unchanged.
+
 New worker dispatch validates the current workflow and workspace root. Invalid configuration
 blocks the worker and records a `config_invalid` event for diagnosis.
 

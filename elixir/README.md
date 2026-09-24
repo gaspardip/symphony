@@ -212,6 +212,14 @@ and new dispatch for that issue remains blocked in the current runtime with an
 explicit persistence error; repair storage and reconcile the unrecorded usage before
 restarting. Usage the provider has not reported cannot be checkpointed.
 
+## GitHub events and archived workspaces
+
+Review and CI events match a snapshot only when its directory is the canonical
+path derived from `issue_identifier` under `workspace.root`. Copies such as
+`ISSUE-1.base-branch-blocked` are excluded before feedback lookup, lease handling
+or snapshot updates, even if they contain the same pull request URL. Existing
+runner routing and lease checks still apply to the canonical workspace.
+
 ## Unreadable run snapshots
 
 A missing `.symphony/run_state.json` starts a new run at `checkout`. Invalid JSON

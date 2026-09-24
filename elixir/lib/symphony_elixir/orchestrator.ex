@@ -754,7 +754,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> Enum.reduce({state, []}, fn workspace, {state_acc, outcomes_acc} ->
         case RunStateStore.load(workspace) do
           {:ok, run_state} ->
-            if Map.get(run_state, :pr_url) != pr_url do
+            if Map.get(run_state, :pr_url) != pr_url or not canonical_github_workspace?(workspace, run_state) do
               {state_acc, outcomes_acc}
             else
               process_github_workspace_match(
@@ -800,7 +800,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> Enum.reduce({state, []}, fn workspace, {state_acc, outcomes_acc} ->
         case RunStateStore.load(workspace) do
           {:ok, run_state} ->
-            if Map.get(run_state, :pr_url) != pr_url do
+            if Map.get(run_state, :pr_url) != pr_url or not canonical_github_workspace?(workspace, run_state) do
               {state_acc, outcomes_acc}
             else
               process_github_ci_workspace_match(
@@ -7005,4 +7005,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp integer_like(_value), do: nil
+
+  defp canonical_github_workspace?(workspace, %{issue_identifier: identifier})
+       when is_binary(identifier) and identifier != "" do
+    Path.expand(workspace) == Path.expand(Workspace.path_for_issue(identifier))
+  end
+
+  defp canonical_github_workspace?(_workspace, _run_state), do: false
 end
