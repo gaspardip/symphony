@@ -45,6 +45,11 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/gaspardip/symphony/blob/main/elixir/README.md
 
+Workspace lifecycle operations refuse paths that overlap the runner install,
+current checkout, or selected release before creation, reset, cleanup, or hooks.
+Symbolic links are resolved, and existing directory identities are compared
+before this check.
+
 New worker dispatch validates the current workflow and workspace root. Invalid configuration
 blocks the worker and records a `config_invalid` event for diagnosis.
 

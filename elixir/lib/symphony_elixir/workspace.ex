@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Workspace do
   alias SymphonyElixir.Config
   alias SymphonyElixir.DispatchAudit
   alias SymphonyElixir.RunStateStore
+  alias SymphonyElixir.RunnerRuntime
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
   @bootstrap_metadata_entries MapSet.new([".symphony"])
@@ -81,9 +82,14 @@ defmodule SymphonyElixir.Workspace do
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
   def remove(workspace) do
-    case RunStateStore.with_readable_snapshot(workspace, fn ->
-           with :ok <- DispatchAudit.ensure_available(workspace), do: remove_readable_workspace(workspace)
-         end) do
+    result =
+      with :ok <- ensure_unprotected_workspace(workspace) do
+        RunStateStore.with_readable_snapshot(workspace, fn ->
+          with :ok <- DispatchAudit.ensure_available(workspace), do: remove_readable_workspace(workspace)
+        end)
+      end
+
+    case result do
       {:error, reason} -> {:error, reason, ""}
       result -> result
     end
@@ -295,6 +301,16 @@ defmodule SymphonyElixir.Workspace do
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
   defp run_hook(command, workspace, issue_context, hook_name) do
+    with :ok <- validate_workspace_path(workspace) do
+      run_validated_hook(command, workspace, issue_context, hook_name)
+    else
+      {:error, reason} = error ->
+        Logger.error("Workspace hook refused hook=#{hook_name} workspace=#{workspace} reason=#{inspect(reason)}")
+        error
+    end
+  end
+
+  defp run_validated_hook(command, workspace, issue_context, hook_name) do
     timeout_ms = Config.workspace_hooks()[:timeout_ms]
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace}")
@@ -351,10 +367,122 @@ defmodule SymphonyElixir.Workspace do
         {:error, {:workspace_equals_root, expanded_workspace, root}}
 
       String.starts_with?(expanded_workspace <> "/", root_prefix) ->
-        ensure_no_symlink_components(expanded_workspace, root)
+        with :ok <- ensure_no_symlink_components(expanded_workspace, root) do
+          ensure_unprotected_workspace(expanded_workspace)
+        end
 
       true ->
         {:error, {:workspace_outside_root, expanded_workspace, root}}
+    end
+  end
+
+  defp ensure_unprotected_workspace(workspace) do
+    install_root = Config.runner_install_root()
+
+    # Resolve current itself: the informational selected-release path has already
+    # normalized parent segments and is not a physical filesystem boundary.
+    protected_paths = [install_root, RunnerRuntime.current_checkout_root(), Path.join(install_root, "current")]
+
+    with {:ok, physical_workspace} <- physical_path(workspace),
+         {:ok, workspace_ancestors} <- physical_ancestry(physical_workspace) do
+      Enum.reduce_while(protected_paths, :ok, fn protected, :ok ->
+        with {:ok, physical_protected} <- physical_path(protected),
+             {:ok, protected_ancestors} <- physical_ancestry(physical_protected) do
+          if paths_overlap?(workspace_ancestors, protected_ancestors) do
+            {:halt, {:error, {:workspace_runner_overlap, Path.expand(workspace), physical_protected}}}
+          else
+            {:cont, :ok}
+          end
+        else
+          {:error, _reason} = error ->
+            {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp paths_overlap?(left, right) do
+    Enum.any?(left, fn {identity, remaining} ->
+      Enum.any?(right, fn {other_identity, other_remaining} ->
+        identity == other_identity and
+          (Enum.take(remaining, length(other_remaining)) == other_remaining or
+             Enum.take(other_remaining, length(remaining)) == remaining)
+      end)
+    end)
+  end
+
+  defp physical_ancestry(path, remaining \\ [], ancestors \\ []) do
+    case File.stat(path) do
+      {:ok, %File.Stat{major_device: device, inode: inode}}
+      when is_integer(device) and is_integer(inode) and inode > 0 ->
+        parent_ancestry(path, remaining, [{{device, inode}, remaining} | ancestors])
+
+      {:ok, _stat} ->
+        {:error, {:workspace_path_unreadable, path, :identity_unavailable}}
+
+      {:error, :enoent} ->
+        parent_ancestry(path, remaining, ancestors)
+
+      {:error, reason} ->
+        {:error, {:workspace_path_unreadable, path, reason}}
+    end
+  end
+
+  defp parent_ancestry(path, remaining, ancestors) do
+    parent = Path.dirname(path)
+
+    if parent == path do
+      {:ok, ancestors}
+    else
+      physical_ancestry(parent, [Path.basename(path) | remaining], ancestors)
+    end
+  end
+
+  # Resolve existing ancestors too: workspace.root and protected roots may be
+  # aliases, and the workspace itself need not exist before this check.
+  defp physical_path(path, links_remaining \\ 40) do
+    [root | components] = path |> Path.absname() |> Path.split()
+    physical_components(components, root, links_remaining)
+  end
+
+  defp physical_components([], resolved, _links_remaining), do: {:ok, resolved}
+
+  defp physical_components([".." | rest], resolved, links_remaining) do
+    physical_components(rest, Path.dirname(resolved), links_remaining)
+  end
+
+  defp physical_components(["." | rest], resolved, links_remaining) do
+    physical_components(rest, resolved, links_remaining)
+  end
+
+  defp physical_components([component | rest], resolved, links_remaining) do
+    next = Path.join(resolved, component)
+
+    case File.lstat(next) do
+      {:ok, %File.Stat{type: :symlink}} when links_remaining == 0 ->
+        {:error, {:workspace_path_unreadable, next, :eloop}}
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        case File.read_link(next) do
+          {:ok, target} ->
+            physical_path(Path.join([Path.absname(target, Path.dirname(next)) | rest]), links_remaining - 1)
+
+          {:error, reason} ->
+            {:error, {:workspace_path_unreadable, next, reason}}
+        end
+
+      {:ok, _stat} ->
+        physical_components(rest, next, links_remaining)
+
+      {:error, :enoent} ->
+        if ".." in rest do
+          {:error, {:workspace_path_unreadable, next, :unresolved_parent}}
+        else
+          {:ok, Path.join([next | rest])}
+        end
+
+      {:error, reason} ->
+        {:error, {:workspace_path_unreadable, next, reason}}
     end
   end
 

@@ -261,6 +261,19 @@ mutations, worker bootstrap and workspace cleanup with `runtime.audit_pending`.
 Workspace creation and removal retain the local snapshot lock throughout hooks
 and cleanup, including when the workspace did not initially exist.
 
+Workspace lifecycle checks also refuse overlap with the runner install, current
+checkout, or selected release before creation, reset, temporary-file cleanup,
+removal, or a configured hook. The check resolves symbolic links in existing path
+components and compares filesystem identities of existing ancestors, so case
+variants of the same directory are protected even when the workspace is new.
+Unreadable paths, unavailable filesystem identities, symlink loops, and parent
+traversals after a missing path component return explicit errors. A rejected
+hook is logged. The best-effort return contract of `after_run` is unchanged, but
+it cannot run in a protected path. These checks do not make hooks a sandbox or
+protect against concurrent filesystem changes by another operating-system
+process. Case variants of path components that do not yet exist are not
+identified as aliases by this check.
+
 `RunStateStore.reconcile_pending_transition(workspace)` is an explicit local
 reconciliation operation. It only finalizes a pending snapshot whose digest,
 intent and exact confirmation match the original, fully readable ledger. It does
