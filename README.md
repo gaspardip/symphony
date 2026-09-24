@@ -67,6 +67,13 @@ Archived copies with the same pull request URL are left unchanged.
 New worker dispatch validates the current workflow and workspace root. Invalid configuration
 blocks the worker and records a `config_invalid` event for diagnosis.
 
+Issue reads retain one configuration capture across Linear viewer lookup, pagination
+and manual-store access. A reload applies to the next read, preserving the endpoint,
+credentials and source root selected for an in-flight read. See the
+[read context contract](elixir/README.md#configuration-captured-for-issue-reads) for
+explicit context APIs and limits; this consistency boundary does not itself make
+tracker I/O asynchronous.
+
 ---
 
 ## License

@@ -5,6 +5,7 @@ defmodule SymphonyElixir.IssueSource do
 
   alias SymphonyElixir.{Config, CredentialRegistry, ManualIssueSpec, ManualIssueStore, Observability, PolicyPack, Tracker}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Config.TrackerReadContext
 
   @type issue_ref :: %{
           required(:source) => :manual | :tracker | nil,
@@ -14,54 +15,109 @@ defmodule SymphonyElixir.IssueSource do
           optional(:canonical_identifier) => String.t() | nil
         }
 
+  @type read_outcomes :: %{
+          tracker: {:ok, [Issue.t()]} | {:error, term()} | :disabled,
+          manual: {:ok, [Issue.t()]} | {:error, term()}
+        }
+
+  @spec fetch_candidate_outcomes(TrackerReadContext.t()) :: read_outcomes()
+  def fetch_candidate_outcomes(%TrackerReadContext{} = context) do
+    %{
+      tracker: tracker_outcome(context, fn -> Tracker.fetch_candidate_issues(context) end),
+      manual: fetch_manual_candidate_issues(context)
+    }
+  end
+
+  @spec fetch_issues_by_states_outcomes([String.t()], TrackerReadContext.t()) :: read_outcomes()
+  def fetch_issues_by_states_outcomes(states, %TrackerReadContext{} = context) when is_list(states) do
+    %{
+      tracker: tracker_outcome(context, fn -> Tracker.fetch_issues_by_states(states, context) end),
+      manual: fetch_manual_issues_by_states(states, context)
+    }
+  end
+
+  @spec fetch_issue_states_by_ids_outcomes([String.t()], TrackerReadContext.t()) :: read_outcomes()
+  def fetch_issue_states_by_ids_outcomes(issue_ids, %TrackerReadContext{} = context) when is_list(issue_ids) do
+    {manual_ids, tracker_ids} = Enum.split_with(issue_ids, &ManualIssueSpec.runtime_issue_id?/1)
+    manual = manual_fetch(context, fn -> ManualIssueStore.fetch_issue_states_by_ids(manual_ids, context.manual_store_root) end)
+    tracker = tracker_outcome(context, fn -> Tracker.fetch_issue_states_by_ids(tracker_ids, context) end)
+    %{tracker: tracker, manual: manual}
+  end
+
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_candidate_issues do
-    merge_issue_lists(tracker_fetch(&Tracker.fetch_candidate_issues/0), manual_fetch(&ManualIssueStore.fetch_candidate_issues/0))
+  def fetch_candidate_issues, do: fetch_candidate_issues(Config.tracker_read_context())
+
+  @spec fetch_candidate_issues(TrackerReadContext.t()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues(%TrackerReadContext{} = context) do
+    merge_issue_lists(
+      tracker_fetch(context, fn -> Tracker.fetch_candidate_issues(context) end),
+      fetch_manual_candidate_issues(context)
+    )
   end
 
   @spec fetch_manual_candidate_issues() :: {:ok, [Issue.t()]}
-  def fetch_manual_candidate_issues do
-    manual_fetch(&ManualIssueStore.fetch_candidate_issues/0)
+  def fetch_manual_candidate_issues, do: fetch_manual_candidate_issues(Config.tracker_read_context())
+
+  @spec fetch_manual_candidate_issues(TrackerReadContext.t()) :: {:ok, [Issue.t()]}
+  def fetch_manual_candidate_issues(%TrackerReadContext{} = context) do
+    manual_fetch(context, fn -> ManualIssueStore.fetch_issues_by_states(context.linear_active_states, context.manual_store_root) end)
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_states(states) when is_list(states) do
+  def fetch_issues_by_states(states) when is_list(states), do: fetch_issues_by_states(states, Config.tracker_read_context())
+
+  @spec fetch_issues_by_states([String.t()], TrackerReadContext.t()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(states, %TrackerReadContext{} = context) when is_list(states) do
     merge_issue_lists(
-      tracker_fetch(fn -> Tracker.fetch_issues_by_states(states) end),
-      manual_fetch(fn -> ManualIssueStore.fetch_issues_by_states(states) end)
+      tracker_fetch(context, fn -> Tracker.fetch_issues_by_states(states, context) end),
+      fetch_manual_issues_by_states(states, context)
     )
   end
 
   @spec fetch_manual_issues_by_states([String.t()]) :: {:ok, [Issue.t()]}
-  def fetch_manual_issues_by_states(states) when is_list(states) do
-    manual_fetch(fn -> ManualIssueStore.fetch_issues_by_states(states) end)
+  def fetch_manual_issues_by_states(states) when is_list(states), do: fetch_manual_issues_by_states(states, Config.tracker_read_context())
+
+  @spec fetch_manual_issues_by_states([String.t()], TrackerReadContext.t()) :: {:ok, [Issue.t()]}
+  def fetch_manual_issues_by_states(states, %TrackerReadContext{} = context) when is_list(states) do
+    manual_fetch(context, fn -> ManualIssueStore.fetch_issues_by_states(states, context.manual_store_root) end)
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+  def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids), do: fetch_issue_states_by_ids(issue_ids, Config.tracker_read_context())
+
+  @spec fetch_issue_states_by_ids([String.t()], TrackerReadContext.t()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(issue_ids, %TrackerReadContext{} = context) when is_list(issue_ids) do
     {manual_ids, tracker_ids} = Enum.split_with(issue_ids, &ManualIssueSpec.runtime_issue_id?/1)
 
-    with {:ok, manual_issues} <- manual_fetch(fn -> ManualIssueStore.fetch_issue_states_by_ids(manual_ids) end),
-         {:ok, tracker_issues} <- tracker_fetch(fn -> Tracker.fetch_issue_states_by_ids(tracker_ids) end) do
+    with {:ok, manual_issues} <- manual_fetch(context, fn -> ManualIssueStore.fetch_issue_states_by_ids(manual_ids, context.manual_store_root) end),
+         {:ok, tracker_issues} <- tracker_fetch(context, fn -> Tracker.fetch_issue_states_by_ids(tracker_ids, context) end) do
       {:ok, manual_issues ++ tracker_issues}
     end
   end
 
   @spec fetch_manual_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]}
-  def fetch_manual_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
+  def fetch_manual_issue_states_by_ids(issue_ids) when is_list(issue_ids),
+    do: fetch_manual_issue_states_by_ids(issue_ids, Config.tracker_read_context())
+
+  @spec fetch_manual_issue_states_by_ids([String.t()], TrackerReadContext.t()) :: {:ok, [Issue.t()]}
+  def fetch_manual_issue_states_by_ids(issue_ids, %TrackerReadContext{} = context) when is_list(issue_ids) do
     issue_ids
     |> Enum.filter(&ManualIssueSpec.runtime_issue_id?/1)
-    |> ManualIssueStore.fetch_issue_states_by_ids()
+    |> ManualIssueStore.fetch_issue_states_by_ids(context.manual_store_root)
   end
 
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
-  def fetch_issue_by_identifier(issue_identifier) when is_binary(issue_identifier) do
-    case manual_lookup(fn -> ManualIssueStore.fetch_issue_by_identifier(issue_identifier) end) do
+  def fetch_issue_by_identifier(issue_identifier) when is_binary(issue_identifier),
+    do: fetch_issue_by_identifier(issue_identifier, Config.tracker_read_context())
+
+  @spec fetch_issue_by_identifier(String.t(), TrackerReadContext.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_identifier(issue_identifier, %TrackerReadContext{} = context) when is_binary(issue_identifier) do
+    case manual_lookup(context, fn -> ManualIssueStore.fetch_issue_by_identifier(issue_identifier, context.manual_store_root) end) do
       {:ok, %Issue{} = issue} ->
         {:ok, issue}
 
       {:ok, nil} ->
-        tracker_lookup(fn -> Tracker.fetch_issue_by_identifier(issue_identifier) end)
+        tracker_lookup(context, fn -> Tracker.fetch_issue_by_identifier(issue_identifier, context) end)
 
       {:error, reason} ->
         {:error, reason}
@@ -69,38 +125,46 @@ defmodule SymphonyElixir.IssueSource do
   end
 
   @spec fetch_issue_by_id(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
-  def fetch_issue_by_id(issue_id) when is_binary(issue_id) do
+  def fetch_issue_by_id(issue_id) when is_binary(issue_id), do: fetch_issue_by_id(issue_id, Config.tracker_read_context())
+
+  @spec fetch_issue_by_id(String.t(), TrackerReadContext.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_id(issue_id, %TrackerReadContext{} = context) when is_binary(issue_id) do
     if ManualIssueSpec.runtime_issue_id?(issue_id) do
-      manual_lookup(fn -> ManualIssueStore.fetch_issue_by_id(issue_id) end)
+      manual_lookup(context, fn -> ManualIssueStore.fetch_issue_by_id(issue_id, context.manual_store_root) end)
     else
-      tracker_lookup(fn -> Tracker.fetch_issue_by_id(issue_id) end)
+      tracker_lookup(context, fn -> Tracker.fetch_issue_by_id(issue_id, context) end)
     end
   end
 
   @spec refresh_issue(Issue.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
-  def refresh_issue(%Issue{} = issue), do: fetch_issue(issue_ref(issue))
-  def refresh_issue(%{} = issue), do: fetch_issue(issue_ref(issue))
+  def refresh_issue(%Issue{} = issue), do: refresh_issue(issue, Config.tracker_read_context())
+  def refresh_issue(%{} = issue), do: refresh_issue(issue, Config.tracker_read_context())
   def refresh_issue(_issue), do: {:ok, nil}
 
-  @spec fetch_issue(Issue.t() | issue_ref()) :: {:ok, Issue.t() | nil} | {:error, term()}
-  def fetch_issue(%Issue{} = issue), do: fetch_issue(issue_ref(issue))
+  @spec refresh_issue(Issue.t() | map(), TrackerReadContext.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def refresh_issue(%{} = issue, %TrackerReadContext{} = context), do: fetch_issue(issue_ref(issue), context)
+  def refresh_issue(_issue, %TrackerReadContext{}), do: {:ok, nil}
 
-  def fetch_issue(%{} = ref) do
+  @spec fetch_issue(Issue.t() | issue_ref()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue(%{} = ref), do: fetch_issue(ref, Config.tracker_read_context())
+
+  @spec fetch_issue(Issue.t() | issue_ref(), TrackerReadContext.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue(%{} = ref, %TrackerReadContext{} = context) do
     case issue_ref(ref) do
       %{source: :manual, id: issue_id} when is_binary(issue_id) ->
-        manual_lookup(fn -> ManualIssueStore.fetch_issue_by_id(issue_id) end)
+        manual_lookup(context, fn -> ManualIssueStore.fetch_issue_by_id(issue_id, context.manual_store_root) end)
 
       %{source: :tracker, id: issue_id} when is_binary(issue_id) ->
-        tracker_lookup(fn -> Tracker.fetch_issue_by_id(issue_id) end)
+        tracker_lookup(context, fn -> Tracker.fetch_issue_by_id(issue_id, context) end)
 
       %{id: issue_id} when is_binary(issue_id) ->
-        fetch_issue_by_id(issue_id)
+        fetch_issue_by_id(issue_id, context)
 
       %{canonical_identifier: identifier} when is_binary(identifier) ->
-        fetch_issue_by_identifier(identifier)
+        fetch_issue_by_identifier(identifier, context)
 
       %{identifier: identifier} when is_binary(identifier) ->
-        fetch_issue_by_identifier(identifier)
+        fetch_issue_by_identifier(identifier, context)
 
       _ ->
         {:ok, nil}
@@ -166,32 +230,40 @@ defmodule SymphonyElixir.IssueSource do
     }
   end
 
-  defp tracker_fetch(fun) when is_function(fun, 0) do
-    if tracker_enabled?() do
+  defp tracker_outcome(context, fun) when is_function(fun, 0) do
+    if tracker_enabled?(context) do
+      observe_source_operation(:tracker, :fetch, fun)
+    else
+      :disabled
+    end
+  end
+
+  defp tracker_fetch(context, fun) when is_function(fun, 0) do
+    if tracker_enabled?(context) do
       observe_source_operation(:tracker, :fetch, fun)
     else
       {:ok, []}
     end
   end
 
-  defp tracker_lookup(fun) when is_function(fun, 0) do
-    if tracker_enabled?() do
+  defp tracker_lookup(context, fun) when is_function(fun, 0) do
+    if tracker_enabled?(context) do
       observe_source_operation(:tracker, :lookup, fun)
     else
       {:ok, nil}
     end
   end
 
-  defp manual_fetch(fun) when is_function(fun, 0) do
-    if Config.manual_enabled?() do
+  defp manual_fetch(context, fun) when is_function(fun, 0) do
+    if context.manual_enabled do
       observe_source_operation(:manual, :fetch, fun)
     else
       {:ok, []}
     end
   end
 
-  defp manual_lookup(fun) when is_function(fun, 0) do
-    if Config.manual_enabled?() do
+  defp manual_lookup(context, fun) when is_function(fun, 0) do
+    if context.manual_enabled do
       observe_source_operation(:manual, :lookup, fun)
     else
       {:ok, nil}
@@ -206,18 +278,10 @@ defmodule SymphonyElixir.IssueSource do
     {:ok, manual_issues}
   end
 
-  defp merge_issue_lists({:ok, tracker_issues}, {:error, _reason}) do
-    {:ok, tracker_issues}
-  end
-
   defp merge_issue_lists({:error, reason}, {:ok, []}), do: {:error, reason}
-  defp merge_issue_lists({:error, reason}, {:error, _other_reason}), do: {:error, reason}
 
-  defp tracker_enabled? do
-    case Config.tracker_kind() do
-      value when is_binary(value) -> value != ""
-      _ -> false
-    end
+  defp tracker_enabled?(%TrackerReadContext{tracker_kind: kind}) do
+    is_binary(kind) and kind != ""
   end
 
   defp create_comment_ref(%{source: :manual, id: issue_id}, body) when is_binary(issue_id),
@@ -295,7 +359,6 @@ defmodule SymphonyElixir.IssueSource do
         {:ok, _value} -> "ok"
         :ok -> "ok"
         {:error, _reason} -> "error"
-        _other -> "other"
       end
 
     Observability.emit(

@@ -8,6 +8,41 @@ defmodule SymphonyElixir.Config do
   alias NimbleOptions
   alias SymphonyElixir.{IssuePolicy, PolicyPack, RepoHarness, RunnerRuntime, Workflow}
 
+  defmodule TrackerReadContext do
+    @moduledoc "A single configuration capture for one logical issue read."
+    @derive {Inspect, only: []}
+    @enforce_keys [
+      :fingerprint,
+      :tracker_kind,
+      :linear_endpoint,
+      :linear_api_token,
+      :linear_project_slug,
+      :linear_assignee,
+      :tracker_handoff_mode,
+      :linear_active_states,
+      :linear_terminal_states,
+      :linear_client_module,
+      :manual_enabled,
+      :manual_store_root
+    ]
+    defstruct @enforce_keys
+
+    @type t :: %__MODULE__{
+            fingerprint: binary(),
+            tracker_kind: String.t() | nil,
+            linear_endpoint: String.t(),
+            linear_api_token: String.t() | nil,
+            linear_project_slug: String.t() | nil,
+            linear_assignee: String.t() | nil,
+            tracker_handoff_mode: String.t(),
+            linear_active_states: [String.t()],
+            linear_terminal_states: [String.t()],
+            linear_client_module: module(),
+            manual_enabled: boolean(),
+            manual_store_root: Path.t()
+          }
+  end
+
   @default_active_states ["Todo", "In Progress"]
   @default_terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   @default_linear_endpoint "https://api.linear.app/graphql"
@@ -674,6 +709,38 @@ defmodule SymphonyElixir.Config do
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
   def current_workflow do
     Workflow.current()
+  end
+
+  @doc "Captures read settings once; pass this context through every request in the read."
+  @spec tracker_read_context() :: TrackerReadContext.t()
+  def tracker_read_context do
+    options = validated_workflow_options()
+
+    context = %TrackerReadContext{
+      fingerprint: nil,
+      tracker_kind: get_in(options, [:tracker, :kind]),
+      linear_endpoint: get_in(options, [:tracker, :endpoint]),
+      linear_api_token:
+        options
+        |> get_in([:tracker, :api_key])
+        |> resolve_env_value(System.get_env("LINEAR_API_KEY"))
+        |> normalize_secret_value(),
+      linear_project_slug: get_in(options, [:tracker, :project_slug]),
+      linear_assignee:
+        options
+        |> get_in([:tracker, :assignee])
+        |> resolve_env_value(System.get_env("LINEAR_ASSIGNEE"))
+        |> normalize_secret_value(),
+      tracker_handoff_mode: options |> get_in([:tracker, :handoff_mode]) |> normalize_handoff_mode(),
+      linear_active_states: get_in(options, [:tracker, :active_states]),
+      linear_terminal_states: get_in(options, [:tracker, :terminal_states]),
+      linear_client_module: Application.get_env(:symphony_elixir, :linear_client_module, SymphonyElixir.Linear.Client),
+      manual_enabled: get_in(options, [:manual, :enabled]),
+      manual_store_root: options |> get_in([:manual, :store_root]) |> resolve_path_value(default_manual_store_root())
+    }
+
+    fingerprint = :crypto.hash(:sha256, :erlang.term_to_binary({options, context}, [:deterministic]))
+    %{context | fingerprint: fingerprint}
   end
 
   @spec tracker_kind() :: tracker_kind()

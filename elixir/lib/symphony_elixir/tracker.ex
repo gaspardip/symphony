@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Tracker do
   """
 
   alias SymphonyElixir.Config
+  alias SymphonyElixir.Config.TrackerReadContext
 
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
@@ -17,28 +18,58 @@ defmodule SymphonyElixir.Tracker do
   @callback attach_link(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
-  def fetch_candidate_issues do
-    adapter().fetch_candidate_issues()
+  def fetch_candidate_issues, do: fetch_candidate_issues(Config.tracker_read_context())
+
+  @spec fetch_candidate_issues(TrackerReadContext.t()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_candidate_issues(%TrackerReadContext{} = context) do
+    case context.tracker_kind do
+      "memory" -> SymphonyElixir.Tracker.Memory.fetch_candidate_issues()
+      _ -> SymphonyElixir.Linear.Adapter.fetch_candidate_issues(context)
+    end
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issues_by_states(states) do
-    adapter().fetch_issues_by_states(states)
+  def fetch_issues_by_states(states), do: fetch_issues_by_states(states, Config.tracker_read_context())
+
+  @spec fetch_issues_by_states([String.t()], TrackerReadContext.t()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issues_by_states(states, %TrackerReadContext{} = context) do
+    case context.tracker_kind do
+      "memory" -> SymphonyElixir.Tracker.Memory.fetch_issues_by_states(states)
+      _ -> SymphonyElixir.Linear.Adapter.fetch_issues_by_states(states, context)
+    end
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids) do
-    adapter().fetch_issue_states_by_ids(issue_ids)
+  def fetch_issue_states_by_ids(issue_ids), do: fetch_issue_states_by_ids(issue_ids, Config.tracker_read_context())
+
+  @spec fetch_issue_states_by_ids([String.t()], TrackerReadContext.t()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issue_states_by_ids(issue_ids, %TrackerReadContext{} = context) do
+    case context.tracker_kind do
+      "memory" -> SymphonyElixir.Tracker.Memory.fetch_issue_states_by_ids(issue_ids)
+      _ -> SymphonyElixir.Linear.Adapter.fetch_issue_states_by_ids(issue_ids, context)
+    end
   end
 
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, term() | nil} | {:error, term()}
-  def fetch_issue_by_identifier(issue_identifier) do
-    adapter().fetch_issue_by_identifier(issue_identifier)
+  def fetch_issue_by_identifier(issue_identifier), do: fetch_issue_by_identifier(issue_identifier, Config.tracker_read_context())
+
+  @spec fetch_issue_by_identifier(String.t(), TrackerReadContext.t()) :: {:ok, term() | nil} | {:error, term()}
+  def fetch_issue_by_identifier(issue_identifier, %TrackerReadContext{} = context) do
+    case context.tracker_kind do
+      "memory" -> SymphonyElixir.Tracker.Memory.fetch_issue_by_identifier(issue_identifier)
+      _ -> SymphonyElixir.Linear.Adapter.fetch_issue_by_identifier(issue_identifier, context)
+    end
   end
 
   @spec fetch_issue_by_id(String.t()) :: {:ok, term() | nil} | {:error, term()}
-  def fetch_issue_by_id(issue_id) do
-    adapter().fetch_issue_by_id(issue_id)
+  def fetch_issue_by_id(issue_id), do: fetch_issue_by_id(issue_id, Config.tracker_read_context())
+
+  @spec fetch_issue_by_id(String.t(), TrackerReadContext.t()) :: {:ok, term() | nil} | {:error, term()}
+  def fetch_issue_by_id(issue_id, %TrackerReadContext{} = context) do
+    case context.tracker_kind do
+      "memory" -> SymphonyElixir.Tracker.Memory.fetch_issue_by_id(issue_id)
+      _ -> SymphonyElixir.Linear.Adapter.fetch_issue_by_id(issue_id, context)
+    end
   end
 
   @spec decode_webhook([{binary(), binary()}], binary()) ::
