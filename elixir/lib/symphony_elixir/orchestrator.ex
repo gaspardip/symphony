@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.PolicyPack
   alias SymphonyElixir.LeaseManager
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.ManualIssueSpec
   alias SymphonyElixir.Observability
   alias SymphonyElixir.PriorityEngine
   alias SymphonyElixir.PRWatcher
@@ -95,6 +96,8 @@ defmodule SymphonyElixir.Orchestrator do
       tracker_poll_read: nil,
       tracker_poll_cycle: nil,
       tracker_poll_pending: [],
+      admission_read: nil,
+      admission_batch: nil,
       running: %{},
       completed: %{},
       claimed: MapSet.new(),
@@ -267,12 +270,24 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, receive_tracker_poll_result(state, operation, result)}
   end
 
+  def handle_info({:tracker_read_result, ref, result}, %{admission_read: %{ref: expected} = operation} = state) when ref == expected do
+    Process.demonitor(operation.monitor, [:flush])
+    state = %{state | admission_read: nil}
+    {:noreply, receive_admission_result(state, operation, result)}
+  end
+
   def handle_info({:tracker_read_result, _obsolete_ref, _result}, state), do: {:noreply, state}
 
   def handle_info({:DOWN, ref, :process, pid, reason}, %{tracker_poll_read: %{monitor: expected, pid: reader_pid} = operation} = state)
       when ref == expected and pid == reader_pid do
     state = %{state | tracker_poll_read: nil}
     {:noreply, receive_tracker_poll_result(state, operation, {:error, {:tracker_reader_down, reason}})}
+  end
+
+  def handle_info({:DOWN, ref, :process, pid, reason}, %{admission_read: %{monitor: expected, pid: reader_pid} = operation} = state)
+      when ref == expected and pid == reader_pid do
+    state = %{state | admission_read: nil}
+    {:noreply, receive_admission_result(state, operation, {:error, {:tracker_reader_down, reason}})}
   end
 
   def handle_info({:authorize_dispatch, issue_id, dispatch_id, pid}, state) do
@@ -722,10 +737,14 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | candidate_fetch_error: reason}
   end
 
-  defp invalidate_tracker_poll_issue(%{tracker_poll_cycle: nil} = state, _identifier), do: state
-
   defp invalidate_tracker_poll_issue(state, identifier) when is_binary(identifier) do
-    update_in(state.tracker_poll_cycle.invalidated, &MapSet.put(&1, String.trim(identifier)))
+    state = invalidate_admission_issue(state, identifier)
+
+    if state.tracker_poll_cycle do
+      update_in(state.tracker_poll_cycle.invalidated, &MapSet.put(&1, String.trim(identifier)))
+    else
+      state
+    end
   end
 
   defp invalidate_tracker_poll_issue(state, _identifier), do: state
@@ -774,7 +793,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     if available_slots(next_state) > 0 do
       pre_dispatch_running = map_size(next_state.running)
-      result_state = choose_issues(eligible_issues, next_state)
+      result_state = begin_admission_batch(next_state, eligible_issues)
       dispatched_count = map_size(result_state.running) - pre_dispatch_running
 
       skip_reasons =
@@ -789,6 +808,137 @@ defmodule SymphonyElixir.Orchestrator do
 
       next_state
     end
+  end
+
+  # Ordinary poll admission owns one bounded batch and one additional reader.
+  # New polls can refresh diagnostics, but never append to or restart this cursor.
+  defp begin_admission_batch(%{admission_batch: batch} = state, _issues) when not is_nil(batch), do: state
+
+  defp begin_admission_batch(state, issues) do
+    case capture_tracker_poll_context() do
+      {:ok, context} ->
+        batch = %{issues: sort_issues_for_dispatch(issues, state), invalidated: MapSet.new()}
+        advance_admission_batch(%{state | admission_batch: batch}, context)
+
+      {:error, reason} ->
+        %{state | candidate_fetch_error: reason}
+    end
+  end
+
+  defp advance_admission_batch(%{admission_read: operation} = state, _context) when not is_nil(operation), do: state
+  defp advance_admission_batch(%{admission_batch: %{issues: []}} = state, _context), do: %{state | admission_batch: nil}
+
+  defp advance_admission_batch(%{admission_batch: %{issues: [issue | rest]}} = state, context) do
+    state = put_in(state.admission_batch.issues, rest)
+
+    state =
+      if admission_issue_current?(state, issue) do
+        dispatch_runtime_issue(
+          state,
+          issue,
+          nil,
+          fn current, candidate, _attempt -> start_admission_read(current, candidate, context) end,
+          &dispatch_passive_issue/3
+        )
+      else
+        state
+      end
+
+    advance_admission_batch(state, context)
+  end
+
+  defp start_admission_read(state, issue, context) do
+    issue_id = issue.id
+    read = fn -> IssueSource.fetch_issue_states_by_ids([issue_id], context) end
+
+    case TrackerReader.start(read) do
+      {:ok, reader} ->
+        operation = Map.merge(reader, %{issue: issue, fingerprint: context.fingerprint, backoff: tracker_poll_backoff_identity(state)})
+        Logger.info("[admission] pending issue_id=#{issue.id} remaining=#{length(state.admission_batch.issues)}")
+        %{state | admission_read: operation}
+
+      {:error, reason} ->
+        admission_discard(state, issue, {:tracker_reader_start_failed, reason})
+    end
+  end
+
+  defp receive_admission_result(state, operation, result) do
+    state = refresh_runtime_config(state)
+
+    with :ok <- validate_dispatch_configuration(operation.issue),
+         {:ok, context} <- capture_tracker_poll_context(),
+         true <- context.fingerprint == operation.fingerprint or {:error, :admission_context_changed} do
+      state = apply_admission_result(state, operation, result)
+      state = advance_admission_batch(state, context)
+      notify_dashboard()
+      state
+    else
+      {:error, reason} ->
+        state |> admission_discard(operation.issue, reason) |> Map.put(:admission_batch, nil)
+    end
+  end
+
+  defp apply_admission_result(state, operation, result) do
+    issue = operation.issue
+
+    if not ManualIssueSpec.runtime_issue_id?(issue.id) and tracker_poll_backoff_identity(state) != operation.backoff do
+      admission_discard(state, issue, :admission_backoff_changed)
+    else
+      # Throttling belongs to the transport, even when a control or worker made
+      # this issue obsolete. Observe it before deciding whether the issue applies.
+      {state, result} = if ManualIssueSpec.runtime_issue_id?(issue.id), do: {state, result}, else: tracker_read(state, fn -> result end)
+
+      case result do
+        {:error, _reason} ->
+          apply_current_admission_result(state, issue, result)
+
+        {:ok, _issues} ->
+          if admission_issue_current?(state, issue) do
+            apply_current_admission_result(state, issue, result)
+          else
+            admission_discard(state, issue, :admission_no_longer_eligible)
+          end
+      end
+    end
+  end
+
+  defp apply_current_admission_result(state, issue, {:ok, [%Issue{id: id, identifier: identifier} = refreshed]})
+       when id == issue.id and identifier == issue.identifier do
+    refreshed = merge_dispatch_refresh_issue(issue, refreshed)
+
+    if admission_issue_current?(state, refreshed) do
+      # Re-run the ordinary budget, snapshot and audit guards with current State.
+      # Only this continuation skips the already completed pre-lease read.
+      dispatch_runtime_issue(state, refreshed, nil, &do_dispatch_issue/3, &dispatch_passive_issue/3)
+    else
+      admission_discard(state, issue, :admission_refresh_ineligible)
+    end
+  end
+
+  defp apply_current_admission_result(state, issue, {:ok, []}), do: admission_discard(state, issue, :admission_issue_missing)
+  defp apply_current_admission_result(state, issue, {:ok, _issues}), do: admission_discard(state, issue, :admission_identity_mismatch)
+  defp apply_current_admission_result(state, issue, {:error, reason}), do: admission_discard(state, issue, {:admission_read_failed, reason})
+
+  defp admission_issue_current?(state, issue) do
+    invalidated = state.admission_batch.invalidated
+
+    not MapSet.member?(invalidated, issue.id) and not MapSet.member?(invalidated, issue.identifier) and
+      not Map.has_key?(state.retry_attempts, issue.id) and
+      (ManualIssueSpec.runtime_issue_id?(issue.id) or not tracker_backoff_active?(state)) and
+      Map.get(RunnerRuntime.runner_health(), :dispatch_enabled, true) and
+      is_nil(dispatch_skip_reason(issue, state)) and
+      should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
+  end
+
+  defp admission_discard(state, issue, reason) do
+    Logger.info("[admission] discarded issue_id=#{issue.id} reason=#{inspect(reason)}")
+    %{state | candidate_fetch_error: reason}
+  end
+
+  defp invalidate_admission_issue(%{admission_batch: nil} = state, _identifier), do: state
+
+  defp invalidate_admission_issue(state, identifier) do
+    update_in(state.admission_batch.invalidated, &MapSet.put(&1, String.trim(identifier)))
   end
 
   defp maybe_warn_first_poll(%State{first_poll_completed: true} = state, _candidate_count),
@@ -2141,6 +2291,8 @@ defmodule SymphonyElixir.Orchestrator do
            })
          end) do
       {%State{} = next_state, {:ok, %Issue{} = issue}} ->
+        next_state = invalidate_admission_issue(next_state, entity_id)
+
         next_state = %{
           next_state
           | issue_routing_cache: remember_issue_cache_entry(next_state.issue_routing_cache, issue)
@@ -2162,7 +2314,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:ok, next_state}
 
       {%State{} = next_state, {:ok, nil}} ->
-        {:drop, next_state}
+        {:drop, invalidate_admission_issue(next_state, entity_id)}
 
       {%State{} = next_state, {:error, {:linear_rate_limited, _meta}}} ->
         {:rate_limited, next_state}
@@ -3395,7 +3547,8 @@ defmodule SymphonyElixir.Orchestrator do
         :ok ->
           case persist_dispatchable_issue_lease(state, workspace, issue) do
             {:ok, _run_state} ->
-              spawn_fun.(state, issue, attempt, recipient)
+              state = spawn_fun.(state, issue, attempt, recipient)
+              if Map.has_key?(state.running, issue.id), do: invalidate_admission_issue(state, issue.id), else: state
 
             {:error, reason} ->
               Logger.warning("Skipping dispatch; failed to persist lease state for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")

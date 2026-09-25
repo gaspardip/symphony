@@ -19,8 +19,44 @@ Configuration rejection retains the existing `config_invalid` audit event, actor
 
 `TrackerReader` reports data only after its I/O child has terminated. Its guardian monitors the coordinator and terminates its own read child when the coordinator disappears. The closure must not trap exits or detach work; this is not a general guarantee for arbitrary transport descendants.
 
+## Ordinary pre-dispatch admission (C1)
+
+Discovery and healing candidate batches now keep one additional `TrackerReader`
+for active pre-dispatch refresh, before acquiring any lease. This is a global
+limit: one admission read plus the existing polling read, independent of issue
+count. The coordinator retains the sorted remainder of one batch. Later polls
+refresh the dashboard candidates but do not append, replace or restart that
+cursor. Missing, ineligible, failed or obsolete issue A advances to issue B;
+configuration changes discard the entire old batch. Exhausted capacity drops
+remaining candidates until a subsequent poll.
+
+The admission reader receives only the requested ID and fixed configuration
+context. Its response must contain exactly that issue ID and identifier. The
+coordinator checks the operation reference, context fingerprint, controls applied
+during the batch, current worker/claim/retry, runner health, backoff, routing,
+policy and capacity. Stop, pause, hold, resume and policy controls invalidate the
+matching admission even after the polling cycle has completed. A newer successful
+webhook lookup (including a missing issue) invalidates its older pending admission.
+Worker admission
+also invalidates older pending data for that issue. Obsolete replies cannot
+acquire or release a lease, stop a newer worker or clean its workspace.
+
+A current result re-enters the existing runtime admission guards, including
+persisted token consumption, unreadable snapshots and pending dispatch/deploy
+audits. Only then can it acquire a lease and authorize a gated worker. Read
+errors and reader DOWN are diagnosed and advance the cursor; a remote 429 keeps
+the tracker backoff and prevents further remote admission while it applies, even
+if a stop or pause has made the refreshed issue obsolete. A changed backoff
+identity still prevents an older transport response from replacing that decision.
+Pending reads and discard reasons are logged with the issue ID.
+
+`orchestrator_admission_async_test.exs` exercises the real coordinator using
+message barriers, local leases and synthetic tracker callbacks. Availability is
+limited to the held pre-lease read. No LSP tool was available for implementation;
+compilation, specs, tests and Dialyzer remain separate verification gates.
+
 ## Remaining synchronous work
 
-Webhook/GitHub event processing, retries, immediate controls, pre-dispatch revalidation, tracker mutations and local business effects still use their existing paths. Applying read results can call those paths. An injected slow operation there can still occupy the coordinator. Configuration lookup remains a WorkflowStore call; an invalid file that WorkflowStore has not adopted is not a new active configuration. This phase establishes availability during the selected reads only.
+Webhook/GitHub event processing, retries, immediate controls, pre-dispatch revalidation from those entry points, passive-to-active promotion after lease acquisition, tracker mutations and local business effects still use their existing paths. Applying read results can call those paths. An injected slow operation there can still occupy the coordinator. Configuration lookup remains a WorkflowStore call; an invalid file that WorkflowStore has not adopted is not a new active configuration. This phase establishes availability during the selected reads only.
 
 The new tests use closed tracker callbacks, local manual issues, real leases and controlled TaskSupervisor children. No external tracker, provider, Git operation or publication is needed. The backoff status test observes the real coordinator with its existing assertions and deadline. Manual submissions accepted during a held cycle queue discovery so that the accepted task is not delayed until the next polling interval.

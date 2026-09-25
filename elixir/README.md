@@ -226,8 +226,15 @@ coalesced. Manual success does not erase a remote 429 or its diagnostic. Candida
 lists still refresh at zero capacity. Read errors preserve running workers, and
 cleanup respects a lease acquired during the read.
 
+Ordinary discovery/healing admission uses one additional reader before acquiring
+its lease. A single sorted batch advances after missing or ineligible candidates;
+new polls do not accumulate admission batches. Returning results must match the
+issue ID and identifier and pass current configuration, controls, worker,
+capacity, budget and audit checks. Stale data cannot clean newer work.
+
 This is a partial availability boundary. Webhook/GitHub processing, retries,
-immediate controls, pre-dispatch revalidation and tracker writes remain synchronous;
+immediate controls, their pre-dispatch reads, promotion after lease acquisition
+and tracker writes remain synchronous;
 applying a result may still invoke those paths. The next phase must address them
 before claiming general coordinator availability. See [the phase contract and
 regressions](../docs/tracker-poll-async.md).
