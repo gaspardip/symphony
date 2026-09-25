@@ -69,3 +69,19 @@ cycle. Reading historical snapshots does not manufacture identity; their explici
 adoption at admission preserves progress, accumulated consumption and approvals.
 The snapshot and checked identity evidence must agree before opening the worker
 gate. See [durable identity and interruption limits](dispatch-audit.md#durable-logical-run-identity).
+
+## CLI turn effects: mechanical extraction
+
+Claude and CodexCLI share the concrete helpers in `DeliveryEngine.TurnEffects`.
+Each adapter still calls them synchronously inside its existing turn error boundary:
+Git observation, progress-section fallback, format/auto-commit, then result synthesis.
+The executor runs in the caller process and the final event follows synthesis.
+Claude observes HEAD and untracked files; CodexCLI observes status and origin/main.
+Their stream structs, defaults, callback results and command-error behavior remain
+unchanged, including postprocessing after a failed CLI turn.
+
+This is P3a only. These helpers still fill empty progress sections and some command
+failures are still ignored. Their output is not validation evidence. Direct adapter
+calls can still alter the workspace and HEAD. Moving effects behind the engine's
+execution-validity check, removing artificial evidence, protecting verifier calls from these
+local effects and reporting preparation/commit failures remain P3b/I2 work.

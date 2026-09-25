@@ -436,3 +436,10 @@ evidence at admission, preserving their budget usage, stage and approvals.
 A `run_identity_pending` snapshot requires investigation with its original ledger
 and dispatch reservation; restarting does not clear it. See
 [the dispatch identity contract](../docs/dispatch-audit.md#durable-logical-run-identity).
+
+
+Claude/CodexCLI local postprocessing is shared in `DeliveryEngine.TurnEffects`.
+This mechanical extraction preserves the adapters' current order, Git observation
+rules, progress fallbacks, automatic commits and error behavior. It does not yet
+move effects out of `run_turn` or enforce verifier-only behavior; those changes
+belong to P3b. See [the runtime contract](../docs/RUNTIME_CONTRACT.md#cli-turn-effects-mechanical-extraction).
