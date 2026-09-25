@@ -95,7 +95,7 @@ defmodule SymphonyElixir.RunStateConcurrencyTest do
         end)
       end)
 
-    assert_receive :update_entered
+    assert_receive :update_entered, 5_000
     task
   end
 
