@@ -405,7 +405,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
 
     assert_eventually(fn ->
-      {:ok, run_state} = RunStateStore.load(workspace)
+      assert {:ok, run_state} = RunStateStore.load(workspace)
 
       assert Map.get(run_state, :last_review_decision) == "CHANGES_REQUESTED"
 
@@ -528,8 +528,8 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
         assert {:ok, run_state} = RunStateStore.load(workspace)
         assert {:ok, lease} = LeaseManager.read(issue.id)
 
-        {:ok, %Issue{} = refreshed_issue} =
-          ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+        assert {:ok, %Issue{} = refreshed_issue} =
+                 ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
 
         assert Map.get(run_state, :stage) == "review_verification"
         assert Map.get(run_state, :last_review_decision) == "CHANGES_REQUESTED"
@@ -667,8 +667,8 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
         assert {:ok, run_state} = RunStateStore.load(workspace)
         assert {:ok, lease} = LeaseManager.read(issue.id)
 
-        {:ok, %Issue{} = refreshed_issue} =
-          ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
+        assert {:ok, %Issue{} = refreshed_issue} =
+                 ManualIssueStore.fetch_issue_by_identifier(issue.identifier)
 
         assert Map.get(run_state, :stage) == "implement"
         assert Map.get(run_state, :last_decision_summary) =~ "Returning to implement to fix failing checks"
@@ -785,7 +785,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert_eventually(
       fn ->
-        {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, run_state} = RunStateStore.load(workspace)
 
         assert Map.get(run_state, :stage) == "review_verification"
         assert Map.get(run_state, :last_review_decision) == "CHANGES_REQUESTED"
@@ -902,7 +902,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     assert_eventually(
       fn ->
-        {:ok, run_state} = RunStateStore.load(workspace)
+        assert {:ok, run_state} = RunStateStore.load(workspace)
         summary = Map.get(run_state, :last_decision_summary)
 
         assert Map.get(run_state, :stage) == "await_checks"
@@ -1131,7 +1131,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
 
     assert_eventually(fn ->
-      {:ok, run_state} = RunStateStore.load(workspace)
+      assert {:ok, run_state} = RunStateStore.load(workspace)
       assert Map.get(run_state, :stage) == "await_checks"
       assert Map.get(run_state, :last_review_decision) == nil
       assert Map.get(run_state, :review_threads) == %{}
@@ -1228,7 +1228,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     assert json_response(conn, 200) == %{"accepted" => 1, "duplicates" => 0}
 
     assert_eventually(fn ->
-      {:ok, run_state} = RunStateStore.load(workspace)
+      assert {:ok, run_state} = RunStateStore.load(workspace)
       assert Map.get(run_state, :stage) == "await_checks"
       assert Map.get(run_state, :last_review_decision) == nil
       assert Map.get(run_state, :review_threads) == %{}
