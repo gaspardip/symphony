@@ -70,18 +70,42 @@ adoption at admission preserves progress, accumulated consumption and approvals.
 The snapshot and checked identity evidence must agree before opening the worker
 gate. See [durable identity and interruption limits](dispatch-audit.md#durable-logical-run-identity).
 
-## CLI turn effects: mechanical extraction
+## CLI transport and local turn effects
 
-Claude and CodexCLI share the concrete helpers in `DeliveryEngine.TurnEffects`.
-Each adapter still calls them synchronously inside its existing turn error boundary:
-Git observation, progress-section fallback, format/auto-commit, then result synthesis.
-The executor runs in the caller process and the final event follows synthesis.
-Claude observes HEAD and untracked files; CodexCLI observes status and origin/main.
-Their stream structs, defaults, callback results and command-error behavior remain
-unchanged, including postprocessing after a failed CLI turn.
+Claude and CodexCLI return a `cli_observation` built by their Elixir wrapper from
+stream paths, summary and transport error. Direct `run_turn` calls perform no
+runtime Git observation, formatting, staging, commit, progress patch or delivery
+report synthesis. Stream notifications and transport-error callbacks remain in
+transport; its normal final callback moves to the caller's effect boundary.
 
-This is P3a only. These helpers still fill empty progress sections and some command
-failures are still ignored. Their output is not validation evidence. Direct adapter
-calls can still alter the workspace and HEAD. Moving effects behind the engine's
-execution-validity check, removing artificial evidence, protecting verifier calls from these
-local effects and reporting preparation/commit failures remain P3b/I2 work.
+DeliveryEngine passes its explicit workspace and required `:delivery` purpose to
+`DeliveryEngine.TurnEffects.apply_result/6` after transport returns. Successful CLI
+turns retain Claude's HEAD/untracked and CodexCLI's status/origin-main observations,
+then format/stage/commit and synthesize `report_agent_turn_result` in the same
+process. Failed CLI turns skip preparation and synthesize only a blocked report
+from the stream. Both retain the inherited `:turn_completed` terminal notification,
+whose name is not proof that the raw turn result or delivery succeeded.
+
+VerifierRunner supplies `:verifier`: no local Git preparation or delivery synthesis.
+It still requires a real `report_verifier_result`; a CLI without that capability
+returns missing verifier result. Its existing mutation checks remain responsible
+for changes made by the provider itself. No runtime path fills empty or missing
+progress evidence; the real publish harness continues to reject missing sections.
+
+Known CLI modules require a valid matching observation; missing fields, wrong
+profile or invalid paths fail before effects. AppServer/custom returns pass through
+without extra callbacks or policy selected by arbitrary payload fields. Sessions
+remain opaque. ErrorHandler.run_logged_agent_turn/5 is transport plus logging,
+not a second delivery entry point, and does not infer workspace from a session.
+
+Exceptions in local effects, synthesis or the final callback retain the moved
+catch boundary. An error callback that itself fails escapes without recursive
+notification. A normal callback that delivered before throwing may be followed by
+an error event: callback delivery is not exactly once. No local effect is retried.
+
+This is P3b.1. Nonzero format/add/commit and executor rejection retain their previous
+handling until P3b.2. Planning still advances through its historical error path;
+B1 does not guarantee that a failed transport or preparation blocks plan. I2 will
+validate execution ownership between transport and effects and at dynamic tool
+entry points; this boundary alone does not authorize stale work or fence remote
+provider effects. CLI usage remains scoped to each invocation until I2.

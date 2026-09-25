@@ -756,7 +756,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       )
 
     {provider_turn_result, turn_log_context} =
-      run_logged_agent_turn(provider, app_session, prompt, issue, turn_opts)
+      run_logged_agent_turn(provider, app_session, workspace, prompt, issue, turn_opts)
 
     reported_turn_result = fetch_turn_result(issue)
     plan_completed = match?({:ok, _}, provider_turn_result) and match?({:ok, _}, reported_turn_result)
@@ -964,7 +964,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             )
 
           {provider_turn_result, turn_log_context} =
-            run_logged_agent_turn(provider, app_session, prompt, issue, turn_opts)
+            run_logged_agent_turn(provider, app_session, workspace, prompt, issue, turn_opts)
 
           with {:ok, _turn_session} <- provider_turn_result,
                {:ok, turn_result} <- fetch_turn_result(issue) do
@@ -3561,9 +3561,10 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp run_logged_agent_turn(provider, app_session, prompt, issue, opts) do
+  defp run_logged_agent_turn(provider, app_session, workspace, prompt, issue, opts) do
     started_at = System.monotonic_time()
-    turn_result = provider.run_turn(app_session, prompt, issue, opts)
+    transport_result = provider.run_turn(app_session, prompt, issue, opts)
+    turn_result = SymphonyElixir.DeliveryEngine.TurnEffects.apply_result(provider, transport_result, workspace, issue, opts, :delivery)
 
     duration_ms =
       System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)

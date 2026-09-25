@@ -4,7 +4,8 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
 
   Uses `codex exec --json` for JSONL streaming, same pattern as the Claude adapter
   but with Codex CLI's event format (thread.started, turn.started, item.completed,
-  turn.completed).
+  turn.completed). Returns a transport observation; DeliveryEngine owns local Git
+  preparation, delivery synthesis and the final normal callback.
   """
 
   @behaviour SymphonyElixir.AgentProvider
@@ -12,7 +13,6 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
   require Logger
 
   alias SymphonyElixir.Config
-  alias SymphonyElixir.DeliveryEngine.TurnEffects
 
   @default_model "gpt-5.4"
   @default_max_turns 30
@@ -76,29 +76,21 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
     send(port, {self(), {:command, ""}})
 
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
-    tool_executor = Keyword.get(opts, :tool_executor)
 
     try do
       {exit_result, stream_state} = receive_stream(port, on_message, %StreamState{})
-
-      stream_state = TurnEffects.detect_changed_files(stream_state, session.workspace, :codex_cli)
-      TurnEffects.maybe_patch_progress_file(session.workspace, stream_state)
-      stream_state = TurnEffects.maybe_auto_commit(stream_state, session.workspace)
-
-      TurnEffects.synthesize_turn_result(stream_state, tool_executor)
-
-      on_message.(%{
-        event: :turn_completed,
-        timestamp: DateTime.utc_now(),
-        payload: %{},
-        usage: stream_state.usage
-      })
 
       {:ok,
        %{
          result: exit_result,
          session_id: session.session_id,
-         usage: stream_state.usage
+         usage: stream_state.usage,
+         cli_observation: %{
+           profile: :codex_cli,
+           files_touched: stream_state.files_touched,
+           result_text: stream_state.result_text,
+           error: stream_state.error
+         }
        }}
     catch
       kind, reason ->

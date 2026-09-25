@@ -7,6 +7,7 @@ defmodule SymphonyElixir.VerifierRunner do
   alias SymphonyElixir.BehavioralProof
   alias SymphonyElixir.Config
   alias SymphonyElixir.DebugArtifacts
+  alias SymphonyElixir.DeliveryEngine.TurnEffects
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Observability
@@ -139,7 +140,9 @@ defmodule SymphonyElixir.VerifierRunner do
 
     with {:ok, session} <- provider.start_session(workspace, verifier_opts) do
       try do
-        with {:ok, _turn_session} <- provider.run_turn(session, prompt, verifier_issue(issue), verifier_opts),
+        transport_result = provider.run_turn(session, prompt, verifier_issue(issue), verifier_opts)
+
+        with {:ok, _turn_session} <- TurnEffects.apply_result(provider, transport_result, workspace, issue, verifier_opts, :verifier),
              {:ok, result} <- fetch_verifier_result(issue) do
           after_snapshot = RunInspector.inspect(workspace, opts)
 

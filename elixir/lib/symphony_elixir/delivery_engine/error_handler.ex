@@ -37,7 +37,14 @@ defmodule SymphonyElixir.DeliveryEngine.ErrorHandler do
   # Turn logging — run_logged_agent_turn / log_agent_turn_lifecycle
   # ---------------------------------------------------------------------------
 
-  @doc "Run a provider turn and return `{turn_result, log_context}`."
+  @doc """
+  Run provider transport and return `{turn_result, log_context}`.
+
+  This helper applies no local delivery policy. In particular, direct CLI calls do
+  not prepare Git, synthesize delivery reports or emit the engine-owned final event.
+  The runtime delivery and verifier callers apply their own policy with an explicit
+  workspace; this transport-only API does not infer one from an opaque session.
+  """
   @spec run_logged_agent_turn(module(), term(), term(), map(), keyword()) :: {term(), map()}
   def run_logged_agent_turn(provider, app_session, prompt, issue, opts) do
     started_at = System.monotonic_time()

@@ -1,14 +1,86 @@
 defmodule SymphonyElixir.DeliveryEngine.TurnEffects do
   @moduledoc """
-  Existing local CLI turn effects, extracted without changing their policy.
+  Applies local CLI delivery policy after transport returns.
 
-  Claude and CodexCLI still invoke these functions inside their turn catch boundary,
-  in the caller process. Their stream structs are retained, as are their distinct
-  Git observations, progress fallbacks and currently ignored command failures.
-  Moving authorization and effect policy to the engine is a separate change.
+  Delivery prepares successful CLI turns and synthesizes their structured report.
+  Verification emits the terminal callback without preparing or synthesizing a
+  delivery result. Neither purpose fills progress evidence. Command failure
+  propagation remains the existing policy until the separate error-handling change.
   """
 
   require Logger
+
+  alias SymphonyElixir.AgentProvider.Claude
+  alias SymphonyElixir.AgentProvider.CodexCLI
+
+  @doc "Apply the caller's delivery or verifier policy to a completed transport call."
+  @spec apply_result(module(), term(), Path.t(), map(), keyword(), :delivery | :verifier) :: term()
+  def apply_result(provider, transport_result, workspace, _issue, opts, purpose)
+      when is_binary(workspace) and purpose in [:delivery, :verifier] do
+    case {cli_profile(provider), transport_result} do
+      {nil, _} -> transport_result
+      {_profile, {:error, _reason}} -> transport_result
+      {profile, result} -> apply_cli_result(profile, result, workspace, opts, purpose)
+    end
+  end
+
+  defp cli_profile(Claude), do: :claude_cli
+  defp cli_profile(CodexCLI), do: :codex_cli
+  defp cli_profile(_provider), do: nil
+
+  defp apply_cli_result(profile, transport_result, workspace, opts, purpose) do
+    on_message = Keyword.get(opts, :on_message, fn _message -> :ok end)
+
+    case validate_observation(profile, transport_result) do
+      {:ok, result, observation} ->
+        try do
+          if purpose == :delivery do
+            observation =
+              if result.result == :turn_completed do
+                observation
+                |> detect_changed_files(workspace, profile)
+                |> maybe_auto_commit(workspace)
+              else
+                observation
+              end
+
+            synthesize_turn_result(observation, Keyword.get(opts, :tool_executor))
+          end
+
+          on_message.(%{
+            event: :turn_completed,
+            timestamp: DateTime.utc_now(),
+            payload: %{},
+            usage: result.usage
+          })
+
+          transport_result
+        catch
+          kind, reason -> report_error(on_message, {kind, reason})
+        end
+
+      {:error, reason} ->
+        report_error(on_message, reason)
+    end
+  end
+
+  defp validate_observation(profile, {:ok, %{result: status, usage: %{}, cli_observation: %{profile: profile, files_touched: paths, result_text: summary, error: _error} = observation} = result})
+       when status in [:turn_completed, :turn_failed] and is_list(paths) and
+              (is_binary(summary) or is_nil(summary)) do
+    if Enum.all?(paths, &is_binary/1), do: {:ok, result, observation}, else: {:error, {:invalid_cli_observation, profile}}
+  end
+
+  defp validate_observation(profile, _result), do: {:error, {:invalid_cli_observation, profile}}
+
+  defp report_error(on_message, reason) do
+    on_message.(%{
+      event: :turn_ended_with_error,
+      timestamp: DateTime.utc_now(),
+      payload: %{error: inspect(reason)}
+    })
+
+    {:error, reason}
+  end
 
   @doc "Observe changed files with the selected CLI adapter's existing Git rules."
   @spec detect_changed_files(map(), Path.t(), :claude_cli | :codex_cli) :: map()
@@ -57,59 +129,6 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffects do
     Enum.uniq(state.files_touched ++ uncommitted ++ branch_diff)
     |> then(&%{state | files_touched: &1})
   end
-
-  @doc "Apply the existing CLI progress-section fallbacks."
-  @spec maybe_patch_progress_file(Path.t(), map()) :: :ok
-  def maybe_patch_progress_file(workspace, %{} = state) do
-    progress_dir = Path.join(workspace, ".symphony/progress")
-
-    case File.ls(progress_dir) do
-      {:ok, files} ->
-        Enum.each(files, fn file ->
-          if String.ends_with?(file, ".md") do
-            path = Path.join(progress_dir, file)
-            content = File.read!(path)
-            patched = patch_empty_sections(content, state)
-
-            if patched != content do
-              File.write!(path, patched)
-            end
-          end
-        end)
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp patch_empty_sections(content, state) do
-    summary = state.result_text || "Turn completed."
-    files = state.files_touched |> Enum.reject(&(&1 == "")) |> Enum.take(10)
-
-    content
-    |> ensure_section_content("Work Log", "- #{summary}")
-    |> ensure_section_content("Evidence", files_evidence(files))
-  end
-
-  defp ensure_section_content(content, section, fallback) do
-    # Match ## Section\n followed by empty lines or next section
-    regex = ~r/(## #{Regex.escape(section)}\s*\n)((?:\s*\n)*?)(?=## |\z)/
-
-    case Regex.run(regex, content) do
-      [full, header, body] ->
-        if String.trim(body) == "" do
-          String.replace(content, full, header <> fallback <> "\n\n", global: false)
-        else
-          content
-        end
-
-      _ ->
-        content
-    end
-  end
-
-  defp files_evidence([]), do: "- Changes applied."
-  defp files_evidence(files), do: Enum.map_join(files, "\n", &"- `#{&1}`")
 
   @doc "Apply the existing CLI format and auto-commit sequence."
   @spec maybe_auto_commit(map(), Path.t()) :: map()

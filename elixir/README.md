@@ -446,8 +446,11 @@ and dispatch reservation; restarting does not clear it. See
 [the dispatch identity contract](../docs/dispatch-audit.md#durable-logical-run-identity).
 
 
-Claude/CodexCLI local postprocessing is shared in `DeliveryEngine.TurnEffects`.
-This mechanical extraction preserves the adapters' current order, Git observation
-rules, progress fallbacks, automatic commits and error behavior. It does not yet
-move effects out of `run_turn` or enforce verifier-only behavior; those changes
-belong to P3b. See [the runtime contract](../docs/RUNTIME_CONTRACT.md#cli-turn-effects-mechanical-extraction).
+Claude/CodexCLI return transport observations. DeliveryEngine applies local Git
+preparation and delivery reporting after transport; VerifierRunner applies no
+local delivery effects and still requires its own structured verifier report.
+Failed CLI transport skips preparation. Empty progress evidence is never filled
+by the runtime. Direct adapter and ErrorHandler transport calls no longer commit
+or synthesize delivery reports. Command-error propagation and execution-ownership
+checks remain separate P3b.2/I2 work. See
+[the runtime contract](../docs/RUNTIME_CONTRACT.md#cli-transport-and-local-turn-effects).

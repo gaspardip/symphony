@@ -72,7 +72,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
     @provider provider
     @state_module state_module
 
-    test "P3-A01 #{@profile}: adapter preserves effect order, commit, callback process and result", context do
+    test "P3-B1-02 #{@profile}: delivery boundary preserves order, commit, callback process and result", context do
       prepare_changed_workspace!(context)
       write_stream!(context.root, @profile)
       caller = self()
@@ -96,7 +96,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
       end
 
       assert {:ok, session} = @provider.start_session(context.workspace, model: "test-model")
-      assert {:ok, result} = @provider.run_turn(session, "task", %{identifier: "P3-A01"}, tool_executor: executor, on_message: on_message)
+      assert {:ok, result} = run_delivery(@provider, session, "task", %{identifier: "P3-A01"}, tool_executor: executor, on_message: on_message)
       assert result.result == :turn_completed
       assert result.session_id == session.session_id
       assert result.usage == %{input_tokens: 7, output_tokens: 3}
@@ -131,7 +131,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
       assert updated.__struct__ == @state_module
     end
 
-    test "P3-A03 #{@profile}: clean progress is still patched without triggering a commit", context do
+    test "P3-B1-03 #{@profile}: empty progress stays unchanged without triggering a commit", context do
       write_progress!(context.workspace)
       git!(context.workspace, ["add", "-A"])
       git!(context.workspace, ["commit", "-qm", "progress"])
@@ -139,13 +139,13 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
       before_head = git!(context.workspace, ["rev-parse", "HEAD"])
       File.write!(Path.join(context.root, "stream"), "")
       assert {:ok, session} = @provider.start_session(context.workspace)
-      assert {:ok, %{result: :turn_completed}} = @provider.run_turn(session, "task", %{identifier: "P3-A03"})
+      assert {:ok, %{result: :turn_completed}} = run_delivery(@provider, session, "task", %{identifier: "P3-A03"})
       assert git!(context.workspace, ["rev-parse", "HEAD"]) == before_head
-      assert File.read!(Path.join(context.workspace, ".symphony/progress/turn.md")) == "## Work Log\n\n- Turn completed.\n\n## Evidence\n\n- Changes applied.\n\n"
+      assert File.read!(Path.join(context.workspace, ".symphony/progress/turn.md")) == "## Work Log\n\n## Evidence\n\n"
       assert command_steps(context.root) == ["transport"] ++ detection_steps(@profile)
     end
 
-    test "P3-A04 #{@profile}: failed transport still prepares and commits before reporting blocked", context do
+    test "P3-B1-06 #{@profile}: failed transport reports blocked without preparing or committing", context do
       prepare_changed_workspace!(context)
       write_stream!(context.root, @profile)
       System.put_env("SYMPHONY_P3A_EXIT", "9")
@@ -153,26 +153,30 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
       assert {:ok, session} = @provider.start_session(context.workspace)
 
       assert {:ok, %{result: :turn_failed}} =
-               @provider.run_turn(session, "task", %{identifier: "P3-A04"},
+               run_delivery(@provider, session, "task", %{identifier: "P3-A04"},
                  tool_executor: fn _, result ->
                    Process.put(:p3a_failed_report, result)
                    %{"success" => true}
                  end
                )
 
-      assert Process.get(:p3a_failed_report) == expected_report(true)
-      refute git!(context.workspace, ["rev-parse", "HEAD"]) == before_head
+      assert Process.get(:p3a_failed_report) == %{expected_report(true) | "files_touched" => ["existing.txt"]}
+      assert git!(context.workspace, ["rev-parse", "HEAD"]) == before_head
       assert File.read!(Path.join(context.workspace, ".symphony/progress/turn.md")) == expected_progress()
+      assert command_steps(context.root) == ["transport"]
     end
 
-    test "P3-A05 #{@profile}: executor throw remains inside the adapter catch after commit", context do
+    test "P3-B1-07 #{@profile}: executor throw is caught by delivery after commit", context do
       prepare_changed_workspace!(context)
       write_stream!(context.root, @profile)
       caller = self()
       assert {:ok, session} = @provider.start_session(context.workspace)
 
       assert {:error, {:throw, :executor_failed}} =
-               @provider.run_turn(session, "task", %{identifier: "P3-A05"}, tool_executor: fn _, _ -> throw(:executor_failed) end, on_message: fn event -> send(caller, {:p3a_event, event.event}) end)
+               run_delivery(@provider, session, "task", %{identifier: "P3-A05"},
+                 tool_executor: fn _, _ -> throw(:executor_failed) end,
+                 on_message: fn event -> send(caller, {:p3a_event, event.event}) end
+               )
 
       assert_receive {:p3a_event, :turn_ended_with_error}
       refute_receive {:p3a_event, :turn_completed}
@@ -207,7 +211,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
         assert {:ok, session} = @provider.start_session(context.workspace)
 
         assert {:ok, %{result: :turn_completed}} =
-                 @provider.run_turn(session, "task", %{identifier: "P3-A07"},
+                 run_delivery(@provider, session, "task", %{identifier: "P3-A07"},
                    tool_executor: fn _, result ->
                      Process.put(:p3a_ignored_error, result)
                      %{"success" => true}
@@ -255,6 +259,268 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
     assert TurnEffects.detect_changed_files(codex, context.workspace, :codex_cli) == codex
   end
 
+  defmodule OpaqueProvider do
+    def run_turn(%{opaque: true}, _prompt, _issue, opts) do
+      Keyword.fetch!(opts, :on_message).(%{event: :custom_finished})
+      {:ok, %{result: :turn_completed, session_id: "opaque", usage: %{input_tokens: 2, output_tokens: 1}, cli_observation: :custom_owned}}
+    end
+  end
+
+  for {profile, provider, _state_module} <- @profiles do
+    @profile profile
+    @provider provider
+
+    test "P3-B1-01 #{@profile}: direct transport cannot prepare a dirty workspace", context do
+      prepare_changed_workspace!(context)
+      write_stream!(context.root, @profile)
+      before = workspace_bytes(context.workspace)
+      caller = self()
+      assert {:ok, session} = @provider.start_session(context.workspace, model: "test-model")
+      opts = [tool_executor: fn _, _ -> flunk("transport synthesized delivery") end, on_message: fn message -> send(caller, {:direct_event, message.event}) end]
+      assert {:ok, result} = @provider.run_turn(session, "task", %{identifier: "B1-direct"}, opts)
+      assert result.cli_observation == %{profile: @profile, files_touched: ["existing.txt"], result_text: "Implemented change", error: nil}
+      assert result.usage == %{input_tokens: 7, output_tokens: 3}
+      assert workspace_bytes(context.workspace) == before
+      assert command_steps(context.root) == ["transport"]
+      assert_receive {:direct_event, :notification}
+      refute_receive {:direct_event, :turn_completed}
+      refute_receive {:direct_event, :turn_ended_with_error}
+    end
+
+    test "P3-B1-09 #{@profile}: partial final callback delivery is followed by one error", context do
+      write_stream!(context.root, @profile)
+      caller = self()
+      assert {:ok, session} = @provider.start_session(context.workspace)
+
+      on_message = fn message ->
+        send(caller, {:terminal_attempt, message.event})
+        if message.event == :turn_completed, do: throw(:final_callback_failed)
+      end
+
+      assert {:error, {:throw, :final_callback_failed}} = run_delivery(@provider, session, "task", %{}, on_message: on_message)
+      assert_receive {:terminal_attempt, :turn_completed}
+      assert_receive {:terminal_attempt, :turn_ended_with_error}
+      refute_receive {:terminal_attempt, :turn_ended_with_error}
+      assert Enum.count(command_steps(context.root), &(&1 == "git add -A")) == 1
+    end
+
+    test "P3-B1-08 #{@profile}: stream callback failure belongs to transport only", context do
+      write_stream!(context.root, @profile)
+      caller = self()
+      assert {:ok, session} = @provider.start_session(context.workspace)
+
+      callback = fn message ->
+        send(caller, {:stream_attempt, message.event})
+        if message.event == :notification, do: throw(:stream_callback_failed)
+      end
+
+      assert {:error, {:throw, :stream_callback_failed}} = run_delivery(@provider, session, "task", %{}, on_message: callback)
+      assert_receive {:stream_attempt, :notification}
+      assert_receive {:stream_attempt, :turn_ended_with_error}
+      refute_receive {:stream_attempt, :turn_completed}
+      refute_receive {:stream_attempt, :turn_ended_with_error}
+      assert command_steps(context.root) == ["transport"]
+    end
+
+    test "P3-B1-12 #{@profile}: a reused handle emits one engine terminal per invocation", context do
+      caller = self()
+      assert {:ok, session} = @provider.start_session(context.workspace)
+      opts = [on_message: fn message -> send(caller, {:usage_event, message}) end]
+
+      for {first_usage, final_usage} <- [
+            {%{input_tokens: 2, output_tokens: 1}, %{input_tokens: 7, output_tokens: 3}},
+            {%{input_tokens: 1, output_tokens: 1}, %{input_tokens: 3, output_tokens: 2}}
+          ] do
+        event_types = if @profile == :claude_cli, do: ["message_delta", "result"], else: ["turn.completed", "turn.completed"]
+
+        events =
+          Enum.zip_with(event_types, [first_usage, final_usage], fn type, usage ->
+            %{"type" => type, "usage" => usage}
+          end)
+
+        File.write!(Path.join(context.root, "stream"), Enum.map_join(events, "\n", &Jason.encode!/1) <> "\n")
+
+        assert {:ok, %{session_id: id, usage: ^final_usage}} = run_delivery(@provider, session, "task", %{}, opts)
+        assert id == session.session_id
+        assert_receive {:usage_event, %{event: :notification, usage: ^first_usage}}
+        assert_receive {:usage_event, %{event: :notification, usage: ^final_usage}}
+        assert_receive {:usage_event, %{event: :turn_completed, usage: ^final_usage}}
+        refute_receive {:usage_event, _}
+      end
+    end
+
+    test "P3-B1-10 #{@profile}: invalid observation is rejected before effects", context do
+      caller = self()
+
+      invalid_results = [
+        %{result: :turn_completed, usage: %{}},
+        %{result: :turn_completed, usage: %{}, cli_observation: %{profile: :wrong, files_touched: [], result_text: nil, error: nil}},
+        %{result: :turn_completed, usage: %{}, cli_observation: %{profile: @profile, files_touched: [1], result_text: nil, error: nil}},
+        %{result: :turn_completed, usage: %{}, cli_observation: %{profile: @profile, files_touched: [], result_text: nil}}
+      ]
+
+      for result <- invalid_results do
+        assert {:error, {:invalid_cli_observation, @profile}} =
+                 TurnEffects.apply_result(@provider, {:ok, result}, context.workspace, %{}, [on_message: fn message -> send(caller, {:invalid_event, message.event}) end], :delivery)
+
+        assert_receive {:invalid_event, :turn_ended_with_error}
+        refute_receive {:invalid_event, :turn_ended_with_error}
+      end
+
+      assert command_steps(context.root) == []
+
+      assert catch_throw(
+               TurnEffects.apply_result(
+                 @provider,
+                 {:ok, %{}},
+                 context.workspace,
+                 %{},
+                 [
+                   on_message: fn message ->
+                     send(caller, {:invalid_throw, message.event})
+                     throw(:error_callback_failed)
+                   end
+                 ],
+                 :delivery
+               )
+             ) == :error_callback_failed
+
+      assert_receive {:invalid_throw, :turn_ended_with_error}
+      refute_receive {:invalid_throw, :turn_ended_with_error}
+    end
+
+    test "P3-B1-06 #{@profile}: timeout skips preparation for delivery and verifier", context do
+      write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: 1)
+      name = if @profile == :claude_cli, do: "claude", else: "codex"
+      write_executable!(Path.join([context.root, "bin", name]), "exec sleep 2\n")
+      assert {:ok, session} = @provider.start_session(context.workspace)
+      before = workspace_bytes(context.workspace)
+
+      for purpose <- [:delivery, :verifier] do
+        Process.delete(:timeout_report)
+        opts = [tool_executor: fn _, report -> Process.put(:timeout_report, report) end]
+        result = @provider.run_turn(session, "task", %{}, opts)
+        assert {:ok, %{result: :turn_failed, cli_observation: %{error: "timeout"}}} = result
+        assert ^result = TurnEffects.apply_result(@provider, result, context.workspace, %{}, opts, purpose)
+        if purpose == :delivery, do: assert(Process.get(:timeout_report)["blocked"]), else: assert(Process.get(:timeout_report) == nil)
+      end
+
+      assert workspace_bytes(context.workspace) == before
+      assert command_steps(context.root) == []
+    end
+  end
+
+  test "P3-B1-11: opaque providers and ErrorHandler retain transport-only contracts", context do
+    caller = self()
+    opts = [on_message: fn event -> send(caller, event) end]
+    {result, log} = SymphonyElixir.DeliveryEngine.ErrorHandler.run_logged_agent_turn(OpaqueProvider, %{opaque: true}, "task", %{}, opts)
+    assert {:ok, %{cli_observation: :custom_owned}} = result
+    assert log.duration_ms >= 0
+    assert_receive %{event: :custom_finished}
+
+    for provider <- [OpaqueProvider, SymphonyElixir.AgentProvider.Codex], purpose <- [:delivery, :verifier] do
+      assert TurnEffects.apply_result(provider, result, context.workspace, %{}, opts, purpose) == result
+      assert TurnEffects.apply_result(provider, {:error, :original}, context.workspace, %{}, opts, purpose) == {:error, :original}
+    end
+
+    refute_receive %{event: _}
+    assert command_steps(context.root) == []
+  end
+
+  test "P3-B1-09: error callback after final failure escapes without recursive notification", context do
+    callback = fn message ->
+      send(self(), {:double_failure, message.event})
+      throw(message.event)
+    end
+
+    result = {:ok, %{result: :turn_completed, usage: %{}, cli_observation: %{profile: :claude_cli, files_touched: [], result_text: nil, error: nil}}}
+    assert catch_throw(TurnEffects.apply_result(Claude, result, context.workspace, %{}, [on_message: callback], :verifier)) == :turn_ended_with_error
+    assert_receive {:double_failure, :turn_completed}
+    assert_receive {:double_failure, :turn_ended_with_error}
+    refute_receive {:double_failure, _}
+  end
+
+  test "P3-B1-07: raised executor failure is returned after effects without retry", context do
+    prepare_changed_workspace!(context)
+    write_stream!(context.root, :claude_cli)
+    assert {:ok, session} = Claude.start_session(context.workspace)
+    caller = self()
+
+    assert {:error, {:error, %RuntimeError{message: "executor raised"}}} =
+             run_delivery(Claude, session, "task", %{}, tool_executor: fn _, _ -> raise "executor raised" end, on_message: fn event -> send(caller, {:raised_event, event.event}) end)
+
+    assert_receive {:raised_event, :turn_ended_with_error}
+    refute_receive {:raised_event, :turn_completed}
+    refute_receive {:raised_event, :turn_ended_with_error}
+    assert Enum.count(command_steps(context.root), &(&1 == "git commit -m Implemented change")) == 1
+  end
+
+  test "P3-B1-08: transport error callback failure escapes without another event", context do
+    write_stream!(context.root, :claude_cli)
+    assert {:ok, session} = Claude.start_session(context.workspace)
+    caller = self()
+
+    callback = fn event ->
+      send(caller, {:transport_failure, event.event})
+      throw(event.event)
+    end
+
+    assert catch_throw(run_delivery(Claude, session, "task", %{}, on_message: callback)) == :turn_ended_with_error
+    assert_receive {:transport_failure, :notification}
+    assert_receive {:transport_failure, :turn_ended_with_error}
+    refute_receive {:transport_failure, :turn_ended_with_error}
+    assert command_steps(context.root) == ["transport"]
+  end
+
+  test "P3-B1-11: ErrorHandler invokes CLI transport without restoring delivery policy", context do
+    prepare_changed_workspace!(context)
+    write_stream!(context.root, :claude_cli)
+    before = workspace_bytes(context.workspace)
+    assert {:ok, session} = Claude.start_session(context.workspace)
+    {result, _log} = SymphonyElixir.DeliveryEngine.ErrorHandler.run_logged_agent_turn(Claude, session, "task", %{}, tool_executor: fn _, _ -> flunk("transport-only API synthesized delivery") end)
+    assert {:ok, %{cli_observation: %{profile: :claude_cli}}} = result
+    assert workspace_bytes(context.workspace) == before
+    assert command_steps(context.root) == ["transport"]
+  end
+
+  test "P3-B1-13: helper exception is caught at the moved effect boundary", context do
+    System.put_env("SYMPHONY_P3A_FAIL_GIT", "ls-files --others --exclude-standard")
+    result = {:ok, %{result: :turn_completed, usage: %{}, cli_observation: %{profile: :claude_cli, files_touched: [], result_text: nil, error: nil}}}
+    caller = self()
+    opts = [on_message: fn event -> send(caller, {:helper_event, event}) end]
+    assert {:error, {:error, {:badmatch, {"", 2}}}} = TurnEffects.apply_result(Claude, result, context.workspace, %{}, opts, :delivery)
+    assert_receive {:helper_event, %{event: :turn_ended_with_error, payload: %{error: "{:error, {:badmatch, {\"\", 2}}}"}}}
+    refute_receive {:helper_event, _}
+    assert command_steps(context.root) == detection_steps(:claude_cli)
+  end
+
+  test "P3-B1-03: real publish gate still rejects missing evidence", context do
+    for dir <- ["knowledge", "features"], do: File.mkdir_p!(Path.join(context.workspace, ".symphony/#{dir}"))
+
+    harness = %SymphonyElixir.RepoHarness{
+      agent_harness: %{
+        knowledge: %{root: ".symphony/knowledge", required_files: []},
+        features: %{root: ".symphony/features", required_fields: []},
+        progress: %{root: ".symphony/progress", pattern: "turn.md", required_sections: ["Work Log", "Evidence"]},
+        publish_gate: %{require_progress: true, require_feature_update_on_code_change: false}
+      }
+    }
+
+    write_progress!(context.workspace)
+    assert {:error, {:invalid_progress_file, "turn.md", {:missing_sections, ["Work Log", "Evidence"]}}} = SymphonyElixir.AgentHarness.publish_gate(context.workspace, %{identifier: "B1"}, harness)
+    File.write!(Path.join(context.workspace, ".symphony/progress/turn.md"), "## Work Log\nActual change\n")
+    assert {:error, {:invalid_progress_file, "turn.md", {:missing_sections, ["Evidence"]}}} = SymphonyElixir.AgentHarness.publish_gate(context.workspace, %{identifier: "B1"}, harness)
+  end
+
+  defp run_delivery(provider, session, prompt, issue, opts \\ []) do
+    result = provider.run_turn(session, prompt, issue, opts)
+    TurnEffects.apply_result(provider, result, session.workspace, issue, opts, :delivery)
+  end
+
+  defp workspace_bytes(workspace) do
+    %{head: git!(workspace, ["rev-parse", "HEAD"]), index: File.read!(Path.join(workspace, ".git/index")), progress: File.read!(Path.join(workspace, ".symphony/progress/turn.md"))}
+  end
+
   defp prepare_changed_workspace!(context) do
     write_progress!(context.workspace)
     File.mkdir_p!(Path.join(context.workspace, "elixir"))
@@ -286,7 +552,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
     File.write!(Path.join(root, "stream"), Enum.map_join(events, "\n", &Jason.encode!/1) <> "\n")
   end
 
-  defp expected_progress, do: "## Work Log\n\n- Implemented change\n\n## Evidence\n\n- `existing.txt`\n- `.symphony/progress/turn.md`\n\n"
+  defp expected_progress, do: "## Work Log\n\n## Evidence\n\n"
 
   defp expected_report(blocked),
     do: %{

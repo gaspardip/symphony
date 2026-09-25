@@ -376,6 +376,145 @@ defmodule SymphonyElixir.VerifierRunnerTest do
     assert excerpt =~ "\n...\n"
   end
 
+  for {provider_name, provider, stream} <- [
+        {"claude", SymphonyElixir.AgentProvider.Claude, ~s({"type":"result","result":"Checked","usage":{"input_tokens":2,"output_tokens":1}})},
+        {"codex-cli", SymphonyElixir.AgentProvider.CodexCLI, ~s({"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":1}})}
+      ] do
+    @provider_name provider_name
+    @provider provider
+    @stream stream
+
+    test "P3-B1-04 #{@provider_name}: real verifier transport cannot prepare delivery", do: verify_cli_read_only(@provider_name, @provider, @stream)
+  end
+
+  test "P3-B1-05: real AppServer verifier report does not permit transport mutation" do
+    workspace = git_workspace!("b1-verifier-mutating")
+    bin = workspace <> "-bin"
+    File.mkdir_p!(bin)
+
+    on_exit(fn ->
+      File.rm_rf!(workspace)
+      File.rm_rf!(bin)
+    end)
+
+    binary = Path.join(bin, "fake-verifier")
+
+    File.write!(binary, """
+    #!/bin/sh
+    while IFS= read -r line; do
+      case "$line" in
+        *'"id":1'*) printf '%s\n' '{"id":1,"result":{}}' ;;
+        *'"id":2'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"b1-verifier"}}}' ;;
+        *'"method":"turn/start"'*)
+          printf changed > README.md
+          printf '%s\n' '{"id":3,"result":{"turn":{"id":"b1-turn"}}}'
+          printf '%s\n' '{"id":104,"method":"item/tool/call","params":{"tool":"report_verifier_result","callId":"b1-call","threadId":"b1-verifier","turnId":"b1-turn","arguments":{"verdict":"pass","summary":"Reviewed","acceptance_gaps":[],"risky_areas":[],"evidence":["Read source"],"raw_output":"pass"}}}'
+          printf '%s\n' '{"method":"turn/completed"}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(binary, 0o755)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: Path.dirname(workspace), codex_command: binary)
+    issue = %Issue{id: "b1-mutating", identifier: "B1-MUTATING", title: "Verify", description: "Verify source"}
+    result = VerifierRunner.verify(workspace, issue, %{}, verifier_inspection(workspace), include_pr_details: false)
+    assert result.verdict == "blocked"
+    assert result.risky_areas == [":verifier_mutated_workspace"]
+    assert File.read!(Path.join(workspace, "README.md")) == "changed"
+    refute Enum.any?(Process.get(), fn {key, _} -> key == {:symphony_verifier_result, issue.id} end)
+  end
+
+  defp verify_cli_read_only(provider_name, provider, stream) do
+    workspace = git_workspace!("b1-verifier-#{provider_name}")
+    bin = workspace <> "-bin"
+    File.mkdir_p!(bin)
+    File.mkdir_p!(Path.join(workspace, "elixir"))
+    File.mkdir_p!(Path.join(workspace, ".symphony/progress"))
+    progress = Path.join(workspace, ".symphony/progress/verifier.md")
+    File.write!(progress, "## Work Log\n\n## Evidence\n\n")
+    File.write!(Path.join(workspace, "README.md"), "pending changes\n")
+    binary_name = if provider_name == "claude", do: "claude", else: "codex"
+    File.write!(Path.join(bin, binary_name), "#!/bin/sh\nprintf '%s\\n' '#{stream}'\n")
+    File.chmod!(Path.join(bin, binary_name), 0o755)
+    File.write!(Path.join(bin, "mix"), "#!/bin/sh\nprintf forbidden > ../runtime-prepared\nexit 0\n")
+    File.chmod!(Path.join(bin, "mix"), 0o755)
+    System.put_env("PATH", bin <> ":" <> System.fetch_env!("PATH"))
+
+    on_exit(fn ->
+      File.rm_rf!(workspace)
+      File.rm_rf!(bin)
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: Path.dirname(workspace))
+    workflow = Workflow.workflow_file_path()
+    File.write!(workflow, String.replace(File.read!(workflow), "agent:\n", "agent:\n  provider: #{provider_name}\n"))
+    WorkflowStore.force_reload()
+    issue = %Issue{id: "b1-cli-#{provider_name}", identifier: "B1-CLI", title: "Verify", description: "Verify existing source"}
+    System.cmd("git", ["status", "--porcelain"], cd: workspace)
+    before = verifier_bytes(workspace, progress)
+    caller = self()
+
+    result =
+      count_session_stops(provider, fn ->
+        VerifierRunner.verify(workspace, issue, %{}, verifier_inspection(workspace), include_pr_details: false, on_message: fn event -> send(caller, {:cli_verifier_event, event}) end)
+      end)
+
+    assert result.verdict == "blocked"
+    assert result.summary =~ "without reporting `report_verifier_result`"
+    assert verifier_bytes(workspace, progress) == before
+    refute File.exists?(Path.join(workspace, "runtime-prepared"))
+    assert_receive {:cli_verifier_event, %{event: :turn_completed, usage: %{input_tokens: 2, output_tokens: 1}}}
+    refute_receive {:cli_verifier_event, %{event: :turn_completed}}
+    refute Enum.any?(Process.get(), fn {key, _} -> key in [{:symphony_verifier_result, issue.id}, {:symphony_turn_result, issue.id}] end)
+  end
+
+  defp verifier_inspection(workspace) do
+    %RunInspector.Snapshot{
+      workspace: workspace,
+      harness: %RepoHarness{smoke_command: "true", behavioral_proof: %{required: false, mode: "unit_first", source_paths: [], test_paths: [], artifact_path: nil}, ui_proof: %{required: false}}
+    }
+  end
+
+  defp verifier_bytes(workspace, progress) do
+    {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+    %{head: head, index: File.read!(Path.join(workspace, ".git/index")), progress: File.read!(progress), source: File.read!(Path.join(workspace, "README.md"))}
+  end
+
+  defp count_session_stops(provider, fun) do
+    Code.ensure_loaded!(provider)
+    owner = self()
+    tracer = spawn(fn -> relay_stop_calls(owner) end)
+    :erlang.trace_pattern({provider, :stop_session, 1}, true, [])
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    try do
+      result = fun.()
+      ref = :erlang.trace_delivered(self())
+      assert_receive {:trace_delivered, _, ^ref}
+      send(tracer, {:flush, self()})
+      assert_receive {:stop_count, 1}
+      result
+    after
+      :erlang.trace(self(), false, [:call])
+      :erlang.trace_pattern({provider, :stop_session, 1}, false, [])
+      send(tracer, :stop)
+    end
+  end
+
+  defp relay_stop_calls(owner, count \\ 0) do
+    receive do
+      {:trace, ^owner, :call, {_provider, :stop_session, [_session]}} ->
+        relay_stop_calls(owner, count + 1)
+
+      {:flush, ^owner} ->
+        send(owner, {:stop_count, count})
+        relay_stop_calls(owner, count)
+
+      :stop ->
+        :ok
+    end
+  end
+
   defp git_workspace!(suffix) do
     workspace =
       Path.join(

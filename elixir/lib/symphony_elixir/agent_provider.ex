@@ -6,15 +6,30 @@ defmodule SymphonyElixir.AgentProvider do
   alias SymphonyElixir.Config
 
   @type session :: map()
+  @type cli_observation :: %{
+          profile: :claude_cli | :codex_cli,
+          files_touched: [String.t()],
+          result_text: String.t() | nil,
+          error: term()
+        }
+
   @type turn_result :: %{
-          result: :turn_completed | :turn_failed | :turn_cancelled,
-          session_id: String.t(),
-          usage: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer()}
+          required(:result) => :turn_completed | :turn_failed | :turn_cancelled,
+          required(:session_id) => String.t(),
+          required(:usage) => %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer()},
+          optional(:cli_observation) => cli_observation()
         }
 
   @callback start_session(workspace :: Path.t(), opts :: keyword()) ::
               {:ok, session()} | {:error, term()}
 
+  @doc """
+  Execute transport and report stream callbacks synchronously in the caller process.
+
+  Claude/CodexCLI return a required `cli_observation` for the engine to apply local
+  policy. Direct callers receive no Git preparation, delivery synthesis or normal
+  final CLI event. Other providers retain their own tool and event contracts.
+  """
   @callback run_turn(session(), prompt :: String.t(), issue :: map(), opts :: keyword()) ::
               {:ok, turn_result()} | {:error, term()}
 
