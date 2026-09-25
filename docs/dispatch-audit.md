@@ -50,3 +50,53 @@ or another VM performing reconciliation.
 Local cancellation does not establish cancellation of a remote request or reverse
 an external effect. Publication, merge, deployment and other legacy ledger callers
 retain their separate validation and audit work.
+
+## Durable logical run identity
+
+Admission now binds each new `dispatch_id` to the snapshot's `run_id`. A retry or
+new coordinator reuses that logical run; it receives a new dispatch identity.
+Lease owner/epoch and the exact worker ticket still control authorization. Run
+identity does not replace ownership or imply acceptance.
+
+While holding the workspace lock and exclusive dispatch reservation, `RunIdentity`
+records `run.identity.requested`, writes the identified snapshot with
+`run_identity_pending`, records `run.identity.created` (no previous snapshot) or
+`run.identity.adopted` (an existing snapshot without identity), and removes pending
+through atomic file replacement. Only then can dispatch authorization be recorded.
+The adoption is an explicit checked operation within authorized admission, never a
+side effect of a read, default or render. Existing snapshots have unknown origin;
+`adopted` does not claim when their historical execution began. Consumption, stage,
+approvals and other snapshot fields are preserved, and old ledger bytes stay intact.
+
+A new workspace contains only `.symphony/run_state.json` before worker creation.
+The existing workspace bootstrap preserves that metadata while executing the
+configured after-create hook, then restores it. The hook does not run during
+identity creation. A failed write never yields a worker ticket. A failure after
+identity persistence and before authorization retains the dispatch reservation;
+it cannot silently start a second logical run.
+
+The snapshot retains its identity confirmation event and original ledger path.
+Admission and gated authorization check the exact issue, run, original ledger and
+matching checked intent/confirmation. The confirmation records the initial and
+previous snapshot digests; subsequent progress remains authoritative in the
+snapshot, so that initial digest is not a checksum of later progress. Existing
+snapshot writers preserve an omitted binding and reject a replacement binding or
+contradictory issue. Missing, malformed or pending identity blocks authorization.
+Finished/blocked snapshots retain the existing explicit-resume gate; starting a new
+logical cycle for a finished issue is outside this contract.
+
+There is no identity replay/reconciliation API in this unit. For future explicit
+recovery, preserve the pending snapshot, dispatch reservation and original ledger.
+Investigation needs the exact stored intent and confirmation, matching issue/run,
+original ledger path, the identified snapshot digest (excluding pending), and
+proof the previous owner/worker stopped. A missing confirmation must not be
+manufactured; completing identity alone would not retire or authorize a pending
+dispatch. This fail-closed boundary does not complete I3 recovery. Writes use local
+atomic rename without directory fsync, and ordinary snapshot mutation is serialized
+within one BEAM node; these are not a distributed transaction or a power-loss claim.
+
+New dispatch journals use version 2, which requires the run identity binding.
+Historical version 1 journals remain readable for exact completion/finishing
+reconciliation against their original ledger, without adding run IDs to old events.
+An authorized legacy journal cannot open a worker gate under the new runtime; its
+missing run identity requires investigation, not implicit historical authorization.

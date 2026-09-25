@@ -5552,7 +5552,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp persisted_dispatch_stage(issue) do
     with :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
-         :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)) do
+         :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)),
+         :ok <- SymphonyElixir.RunIdentity.ensure_issue(Workspace.path_for_issue(issue), issue) do
       case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
         {:ok, %{stage: stage}} when stage in ["blocked", "done"] ->
           {:error, {:persisted_stage_requires_explicit_resume, stage}}

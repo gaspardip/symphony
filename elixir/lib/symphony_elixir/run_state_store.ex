@@ -24,7 +24,8 @@ defmodule SymphonyElixir.RunStateStore do
          {:ok, payload} <- File.read(path),
          {:ok, decoded} <- Jason.decode(payload),
          true <- is_map(decoded) or {:error, :invalid_state},
-         :ok <- ensure_audit_complete(decoded) do
+         :ok <- ensure_audit_complete(decoded),
+         :ok <- SymphonyElixir.RunIdentity.validate_snapshot(decoded) do
       {:ok, atomize(decoded)}
     else
       {:error, reason} -> {:error, reason}
@@ -214,7 +215,8 @@ defmodule SymphonyElixir.RunStateStore do
     path = state_path(workspace)
 
     with {:ok, previous_state} <- load_for_update(workspace, %{}),
-         :ok <- File.mkdir_p(Path.dirname(path)) do
+         :ok <- File.mkdir_p(Path.dirname(path)),
+         {:ok, state} <- SymphonyElixir.RunIdentity.preserve(state, previous_state) do
       state = preserve_token_usage(state, previous_state)
       write_json_atomically(path, ensure_runner_metadata(state))
     end
@@ -473,7 +475,9 @@ defmodule SymphonyElixir.RunStateStore do
     if valid?, do: :ok, else: {:error, :audit_intent_mismatch}
   end
 
-  defp snapshot_digest(state) do
+  @doc "Canonical checksum shared by checked snapshot transitions and identity adoption."
+  @spec snapshot_digest(map()) :: String.t()
+  def snapshot_digest(state) do
     state
     |> Jason.encode!()
     |> Jason.decode!()

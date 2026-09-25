@@ -428,3 +428,11 @@ you.
 ## License
 
 This project is licensed under the [Apache License 2.0](../LICENSE).
+
+Logical run identity is established during audited admission, before workspace
+hooks or provider work. Retries reuse `run_id` and create a new `dispatch_id`.
+Legacy snapshots remain readable and are explicitly adopted with checked audit
+evidence at admission, preserving their budget usage, stage and approvals.
+A `run_identity_pending` snapshot requires investigation with its original ledger
+and dispatch reservation; restarting does not clear it. See
+[the dispatch identity contract](../docs/dispatch-audit.md#durable-logical-run-identity).

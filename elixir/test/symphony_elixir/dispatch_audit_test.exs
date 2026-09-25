@@ -27,7 +27,8 @@ defmodule SymphonyElixir.DispatchAuditTest do
 
   test "checked admission precedes workspace access and survives workspace deletion", context do
     assert {:ok, ticket} = DispatchAudit.begin(context.workspace, context.attrs)
-    refute File.exists?(context.workspace)
+    assert File.ls!(context.workspace) == [".symphony"]
+    assert File.ls!(Path.join(context.workspace, ".symphony")) == ["run_state.json"]
     assert {:ok, entry} = RunLedger.fetch_entry_checked(ticket.entry_event_id)
     assert entry["event_type"] == "dispatch.started"
     assert entry["metadata"]["dispatch_id"] == ticket.dispatch_id
@@ -49,7 +50,7 @@ defmodule SymphonyElixir.DispatchAuditTest do
     assert {:error, :dispatch_audit_not_authorized} = DispatchAudit.ensure_workspace_access(context.workspace)
     assert :ok = DispatchAudit.finish(ticket, :normal)
     assert :ok = DispatchAudit.ensure_available(context.workspace)
-    assert Enum.map(rows(), & &1["event_type"]) == ["dispatch.requested", "dispatch.started", "dispatch.finished"]
+    assert Enum.map(rows(), & &1["event_type"]) == ["run.identity.requested", "run.identity.created", "dispatch.requested", "dispatch.started", "dispatch.finished"]
     assert List.last(rows())["metadata"]["authorization_event_id"] == ticket.entry_event_id
   end
 
@@ -97,7 +98,7 @@ defmodule SymphonyElixir.DispatchAuditTest do
 
     assert [{:ok, ticket}] = Enum.filter(results, &match?({:ok, _}, &1))
     assert Enum.count(results, &match?({:error, {:dispatch_audit_pending, _}}, &1)) == 5
-    assert Enum.map(rows(), & &1["event_type"]) == ["dispatch.requested", "dispatch.started"]
+    assert Enum.map(rows(), & &1["event_type"]) == ["run.identity.requested", "run.identity.created", "dispatch.requested", "dispatch.started"]
     assert :ok = DispatchAudit.finish(ticket, :not_started)
   end
 
@@ -144,7 +145,8 @@ defmodule SymphonyElixir.DispatchAuditTest do
       assert fault == context.boundary_fault
       assert {:error, {:dispatch_audit_pending, _}} = DispatchAudit.ensure_available(context.workspace)
       assert {:error, _} = DispatchAudit.ensure_workspace_access(context.workspace)
-      refute File.exists?(context.workspace)
+      assert File.ls!(context.workspace) == [".symphony"]
+      assert File.ls!(Path.join(context.workspace, ".symphony")) == ["run_state.json"]
     end
   end
 
@@ -220,7 +222,7 @@ defmodule SymphonyElixir.DispatchAuditTest do
     assert {:error, {:dispatch_audit_pending, _}} = DispatchAudit.ensure_available(context.workspace)
   end
 
-  for event <- ["dispatch.requested", "dispatch.started", "dispatch.finished"] do
+  for event <- ["run.identity.requested", "run.identity.created", "dispatch.requested", "dispatch.started", "dispatch.finished"] do
     @tag barrier_event: event
     test "kill after #{event} keeps admission blocked with the recorded identity", context do
       handler = "dispatch-audit-barrier-" <> Base.encode16(:crypto.strong_rand_bytes(8))

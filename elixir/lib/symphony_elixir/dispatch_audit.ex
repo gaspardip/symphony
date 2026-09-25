@@ -8,13 +8,14 @@ defmodule SymphonyElixir.DispatchAudit do
   investigation; neither elapsed time nor lease takeover clears them.
   """
 
-  alias SymphonyElixir.{RunLedger, RunStateStore}
+  alias SymphonyElixir.{RunIdentity, RunLedger, RunStateStore}
 
   @context_key {__MODULE__, :authorization}
   @marker_name "marker.json"
   @type ticket :: %{
           workspace: Path.t(),
           dispatch_id: String.t(),
+          run_id: String.t(),
           entry_event_id: String.t(),
           owner: String.t(),
           epoch: pos_integer(),
@@ -35,8 +36,9 @@ defmodule SymphonyElixir.DispatchAudit do
       RunStateStore.with_workspace_lock(workspace, fn ->
         with :ok <- ensure_available(workspace),
              :ok <- ensure_begin_snapshot(workspace, attrs),
-             :ok <- create_marker_directory(workspace) do
-          prepare_dispatch(workspace, attrs)
+             :ok <- create_marker_directory(workspace),
+             {:ok, run_id} <- RunIdentity.admit(workspace, attrs) do
+          prepare_dispatch(workspace, Map.put(attrs, :run_id, run_id))
         end
       end)
     end
@@ -63,7 +65,7 @@ defmodule SymphonyElixir.DispatchAudit do
         with {:ok, marker} <- read_marker(workspace),
              true <- marker["status"] == "authorized" or {:error, :dispatch_audit_not_authorized},
              true <- Process.get(@context_key) == marker_identity(marker) or {:error, :dispatch_audit_not_authorized} do
-          ensure_authorized_snapshot(workspace)
+          ensure_authorized_snapshot(workspace, marker)
         end
 
       {:error, _reason} = error ->
@@ -75,7 +77,8 @@ defmodule SymphonyElixir.DispatchAudit do
   def with_authorization(ticket, fun) when is_map(ticket) and is_function(fun, 0) do
     with {:ok, marker} <- validated_ticket(ticket),
          true <- marker["status"] == "authorized" or {:error, :dispatch_audit_not_authorized},
-         :ok <- validate_recorded_admission(marker) do
+         :ok <- validate_recorded_admission(marker),
+         :ok <- RunIdentity.verify(ticket.workspace, marker["run_id"], marker["authorized"]["issue_id"], marker["authorized"]["issue_identifier"]) do
       previous = Process.get(@context_key)
       Process.put(@context_key, marker_identity(marker))
 
@@ -132,7 +135,7 @@ defmodule SymphonyElixir.DispatchAudit do
 
   defp prepare_dispatch(workspace, attrs) do
     dispatch_id = SymphonyElixir.Util.generate_id("dispatch_")
-    metadata = Map.merge(attrs.metadata, %{dispatch_id: dispatch_id, workspace: workspace})
+    metadata = Map.merge(attrs.metadata, %{dispatch_id: dispatch_id, run_id: attrs.run_id, workspace: workspace})
     attrs = attrs |> Map.put(:metadata, metadata) |> Map.put(:actor_type, "runtime") |> Map.put(:actor_id, attrs.metadata.owner)
 
     with {:ok, ledger_path} <- RunLedger.ledger_file_path_checked(),
@@ -140,9 +143,10 @@ defmodule SymphonyElixir.DispatchAudit do
          {:ok, authorized} <- RunLedger.prepare_entry("dispatch.started", Map.put(attrs, :summary, "Authorized a gated worker; execution has not yet been observed.")),
          {:ok, _entry} <- RunLedger.persist_prepared(requested) do
       marker = %{
-        "version" => 1,
+        "version" => 2,
         "workspace" => workspace,
         "dispatch_id" => dispatch_id,
+        "run_id" => attrs.run_id,
         "owner" => metadata.owner,
         "epoch" => metadata.epoch,
         "ledger_path" => ledger_path,
@@ -155,7 +159,7 @@ defmodule SymphonyElixir.DispatchAudit do
            :ok <- ensure_ledger_path(ledger_path),
            {:ok, _entry} <- RunLedger.persist_prepared(authorized),
            :ok <- write_marker(workspace, Map.put(marker, "status", "authorized")) do
-        {:ok, %{workspace: workspace, dispatch_id: dispatch_id, entry_event_id: authorized.event_id, owner: metadata.owner, epoch: metadata.epoch, ledger_path: ledger_path}}
+        {:ok, %{workspace: workspace, dispatch_id: dispatch_id, run_id: attrs.run_id, entry_event_id: authorized.event_id, owner: metadata.owner, epoch: metadata.epoch, ledger_path: ledger_path}}
       end
     end
   end
@@ -174,18 +178,17 @@ defmodule SymphonyElixir.DispatchAudit do
       case RunStateStore.load_checked(workspace, %{id: attrs.issue_id, identifier: attrs.issue_identifier}) do
         {:ok, %{stage: stage}} when stage in ["blocked", "done"] -> {:error, {:persisted_stage_requires_explicit_resume, stage}}
         {:ok, _state} -> :ok
-        {:mismatch, _state} -> :ok
+        {:mismatch, _state} -> {:error, :run_identity_issue_mismatch}
         {:error, :missing} -> :ok
         {:error, reason} -> {:error, {:run_state_unreadable, reason}}
       end
     end
   end
 
-  defp ensure_authorized_snapshot(workspace) do
+  defp ensure_authorized_snapshot(workspace, marker) do
     case RunStateStore.load(workspace) do
       {:ok, %{stage: stage}} when stage in ["blocked", "done"] -> {:error, {:persisted_stage_requires_explicit_resume, stage}}
-      {:ok, _state} -> :ok
-      {:error, :missing} -> :ok
+      {:ok, _state} -> RunIdentity.verify(workspace, marker["run_id"], marker["authorized"]["issue_id"], marker["authorized"]["issue_identifier"])
       {:error, reason} -> {:error, {:run_state_unreadable, reason}}
     end
   end
@@ -232,7 +235,7 @@ defmodule SymphonyElixir.DispatchAudit do
 
   defp validate_marker(
          %{
-           "version" => 1,
+           "version" => version,
            "workspace" => workspace,
            "dispatch_id" => id,
            "owner" => owner,
@@ -244,9 +247,9 @@ defmodule SymphonyElixir.DispatchAudit do
          } = marker,
          workspace
        )
-       when is_binary(id) and id != "" and is_binary(owner) and owner != "" and is_integer(epoch) and epoch > 0 and is_binary(path) and path != "" and
+       when version in [1, 2] and is_binary(id) and id != "" and is_binary(owner) and owner != "" and is_integer(epoch) and epoch > 0 and is_binary(path) and path != "" and
               status in ["prepared", "authorized", "finishing"] and is_map(requested) and is_map(authorized) do
-    if matching_event?(requested, "dispatch.requested", marker) and matching_event?(authorized, "dispatch.started", marker) and
+    if valid_marker_identity?(marker) and matching_event?(requested, "dispatch.requested", marker) and matching_event?(authorized, "dispatch.started", marker) and
          requested["event_id"] != authorized["event_id"] and requested["issue_id"] == authorized["issue_id"] and
          requested["issue_identifier"] == authorized["issue_identifier"],
        do: :ok,
@@ -255,27 +258,41 @@ defmodule SymphonyElixir.DispatchAudit do
 
   defp validate_marker(_marker, _workspace), do: {:error, :invalid_dispatch_audit_marker}
 
+  defp valid_marker_identity?(%{"version" => 1} = marker), do: not Map.has_key?(marker, "run_id")
+  defp valid_marker_identity?(%{"version" => 2, "run_id" => run_id}), do: is_binary(run_id) and run_id != ""
+  defp valid_marker_identity?(_marker), do: false
+
   defp matching_event?(%{"metadata" => %{} = metadata} = event, type, marker) do
     event["event_type"] == type and is_binary(event["event_id"]) and event["event_id"] != "" and
-      metadata["dispatch_id"] == marker["dispatch_id"] and metadata["workspace"] == marker["workspace"] and
+      metadata["run_id"] == marker["run_id"] and metadata["dispatch_id"] == marker["dispatch_id"] and metadata["workspace"] == marker["workspace"] and
       metadata["owner"] == marker["owner"] and metadata["epoch"] == marker["epoch"]
   end
 
   defp matching_event?(_event, _type, _marker), do: false
 
-  defp validated_ticket(%{workspace: workspace, dispatch_id: id, entry_event_id: event_id, owner: owner, epoch: epoch, ledger_path: ledger_path})
+  defp validated_ticket(%{workspace: workspace, dispatch_id: id, run_id: run_id, entry_event_id: event_id, owner: owner, epoch: epoch, ledger_path: ledger_path})
        when is_binary(workspace) do
     with {:ok, marker} <- read_marker(workspace),
          true <-
-           (marker_identity(marker) == {Path.expand(workspace), id, owner, epoch} and
+           (marker_identity(marker) == {Path.expand(workspace), id, run_id, owner, epoch} and
               get_in(marker, ["authorized", "event_id"]) == event_id and marker["ledger_path"] == ledger_path) or {:error, :dispatch_audit_ticket_mismatch} do
       {:ok, marker}
     end
   end
 
+  defp validated_ticket(%{workspace: workspace, dispatch_id: _, entry_event_id: _, owner: _, epoch: _, ledger_path: _} = ticket) when is_binary(workspace) do
+    with {:ok, %{"version" => 1}} <- read_marker(workspace),
+         false <- Map.has_key?(ticket, :run_id) do
+      validated_ticket(Map.put(ticket, :run_id, nil))
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :invalid_dispatch_audit_ticket}
+    end
+  end
+
   defp validated_ticket(_ticket), do: {:error, :invalid_dispatch_audit_ticket}
 
-  defp marker_identity(marker), do: {marker["workspace"], marker["dispatch_id"], marker["owner"], marker["epoch"]}
+  defp marker_identity(marker), do: {marker["workspace"], marker["dispatch_id"], marker["run_id"], marker["owner"], marker["epoch"]}
 
   defp validate_finished(%{"finished" => finished, "authorized" => authorized} = marker) when is_map(finished) do
     if matching_event?(finished, "dispatch.finished", marker) and
@@ -316,6 +333,7 @@ defmodule SymphonyElixir.DispatchAudit do
       summary: "Closed dispatch admission after observed worker exit or confirmed absence of a worker.",
       metadata: %{
         dispatch_id: marker["dispatch_id"],
+        run_id: marker["run_id"],
         workspace: marker["workspace"],
         owner: marker["owner"],
         epoch: marker["epoch"],

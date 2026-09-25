@@ -194,6 +194,51 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     end
   end
 
+  for field <- ["issue_id", "issue_identifier"] do
+    @tag conflicting_identity_field: field
+    test "I1-14 conflicting #{field} blocks the orchestrator before lease snapshot overwrite", context do
+      path = RunStateStore.state_path(context.workspace)
+      conflicting = File.read!(path) |> Jason.decode!() |> Map.put(context.conflicting_identity_field, "other-issue") |> Jason.encode!()
+      File.write!(path, conflicting)
+      ledger = File.read!(RunLedger.ledger_file_path())
+      owner = owner_harness()
+      workers = MapSet.new(Task.Supervisor.children(SymphonyElixir.TaskSupervisor))
+      runtime = GenServer.call(owner, {:dispatch, context.issue})
+      assert runtime.running == %{}
+      assert runtime.retry_attempts == %{}
+      assert File.read!(path) == conflicting
+      assert File.read!(RunLedger.ledger_file_path()) == ledger
+      assert MapSet.new(Task.Supervisor.children(SymphonyElixir.TaskSupervisor)) == workers
+      refute File.exists?(Path.join(context.workspace, ".symphony/hook-executed"))
+      refute File.exists?(Path.join(context.workspace, ".symphony/provider-invoked"))
+      refute_received {:authorization_held, ^owner, _, _, _, _}
+    end
+  end
+
+  test "I1-13 identity persisted but authorization fails before worker creation", context do
+    handler = "identity-admission-fault-#{System.unique_integer([:positive])}"
+    :ok = :telemetry.attach(handler, [:symphony, :ledger, :event], &__MODULE__.identity_boundary_fault/4, context.issue.id)
+    on_exit(fn -> :telemetry.detach(handler) end)
+    owner = owner_harness()
+    workers = MapSet.new(Task.Supervisor.children(SymphonyElixir.TaskSupervisor))
+    runtime = GenServer.call(owner, {:dispatch, context.issue})
+    assert runtime.running == %{}
+    assert runtime.retry_attempts == %{}
+    assert {:dispatch_audit_failed, _, _} = runtime.candidate_fetch_error
+    assert MapSet.new(Task.Supervisor.children(SymphonyElixir.TaskSupervisor)) == workers
+    assert {:ok, snapshot} = RunStateStore.load(context.workspace)
+    assert is_binary(snapshot.run_id)
+    assert {:error, {:dispatch_audit_pending, _}} = DispatchAudit.ensure_available(context.workspace)
+    refute File.exists?(Path.join(context.workspace, ".symphony/hook-executed"))
+    refute File.exists?(Path.join(context.workspace, ".symphony/provider-invoked"))
+    refute_received {:authorization_held, ^owner, _, _, _, _}
+  end
+
+  def identity_boundary_fault(_event, _measurements, metadata, issue_id) do
+    if metadata[:event_type] == "run.identity.adopted" and metadata[:issue_id] == issue_id,
+      do: File.write!(RunLedger.ledger_file_path(), "{torn", [:append])
+  end
+
   test "worker body waits until a callback sees its installed running ticket", context do
     owner = owner_harness()
     runtime = GenServer.call(owner, {:dispatch, context.issue})

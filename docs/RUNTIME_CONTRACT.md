@@ -62,3 +62,10 @@ proof unless those contracts are explicitly revised.
 Worker admission and recovery follow [the audited dispatch contract](dispatch-audit.md).
 A recorded authorization is distinct from execution, and a closed worker process is
 distinct from acceptance of its task. Pending journals block retries and cleanup.
+
+A logical delivery cycle has a durable `run_id` established by checked dispatch
+admission. The existing `dispatch_id` identifies each worker admission within that
+cycle. Reading historical snapshots does not manufacture identity; their explicit
+adoption at admission preserves progress, accumulated consumption and approvals.
+The snapshot and checked identity evidence must agree before opening the worker
+gate. See [durable identity and interruption limits](dispatch-audit.md#durable-logical-run-identity).
