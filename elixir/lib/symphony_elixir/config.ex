@@ -19,6 +19,7 @@ defmodule SymphonyElixir.Config do
       :linear_project_slug,
       :linear_assignee,
       :tracker_handoff_mode,
+      :policy_pack_name,
       :linear_active_states,
       :linear_terminal_states,
       :linear_client_module,
@@ -35,6 +36,7 @@ defmodule SymphonyElixir.Config do
             linear_project_slug: String.t() | nil,
             linear_assignee: String.t() | nil,
             tracker_handoff_mode: String.t(),
+            policy_pack_name: String.t(),
             linear_active_states: [String.t()],
             linear_terminal_states: [String.t()],
             linear_client_module: module(),
@@ -732,6 +734,7 @@ defmodule SymphonyElixir.Config do
         |> resolve_env_value(System.get_env("LINEAR_ASSIGNEE"))
         |> normalize_secret_value(),
       tracker_handoff_mode: options |> get_in([:tracker, :handoff_mode]) |> normalize_handoff_mode(),
+      policy_pack_name: get_in(options, [:company, :policy_pack]) || get_in(options, [:company, :mode]) || @default_company_policy_pack,
       linear_active_states: get_in(options, [:tracker, :active_states]),
       linear_terminal_states: get_in(options, [:tracker, :terminal_states]),
       linear_client_module: Application.get_env(:symphony_elixir, :linear_client_module, SymphonyElixir.Linear.Client),

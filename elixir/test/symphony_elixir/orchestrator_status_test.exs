@@ -909,7 +909,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "orchestrator healing handlers update cycle state and rejection metadata" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
-      healing_poll_interval_ms: 50
+      healing_poll_interval_ms: 60_000
     )
 
     orchestrator_name = Module.concat(__MODULE__, :HealingHandlersOrchestrator)
@@ -921,11 +921,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    wait_for_state(pid, fn initial_state ->
-      assert initial_state.first_poll_completed == true
-      assert initial_state.poll_check_in_progress == false
-      assert initial_state.current_poll_mode == nil
-    end)
+    wait_for_state(
+      pid,
+      fn initial_state ->
+        assert initial_state.first_poll_completed == true
+        assert initial_state.poll_check_in_progress == false
+        assert initial_state.current_poll_mode == nil
+      end,
+      5_000
+    )
 
     state =
       :sys.replace_state(pid, fn current_state ->
@@ -1030,7 +1034,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     state =
-      :sys.get_state(pid)
+      wait_for_state(pid, fn state ->
+        assert state.tracker_poll_cycle == nil
+        assert state.tracker_poll_read == nil
+        assert state.tracker_poll_pending == []
+        assert state.poll_check_in_progress == false
+        assert state.candidate_fetch_error == {:runner_health, "runner.install_missing"}
+      end)
       |> Map.put(:poll_check_in_progress, true)
       |> Map.put(:current_poll_mode, :discovery)
 
@@ -1060,7 +1070,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:tracker_backoff_reason, "rate limited")
       |> Map.put(:max_concurrent_agents, 0)
 
-    assert {:noreply, rate_limited_state} = Orchestrator.handle_info(:run_poll_cycle, backoff_state)
+    :sys.replace_state(pid, fn _ -> backoff_state end)
+    send(pid, :run_poll_cycle)
+
+    rate_limited_state =
+      wait_for_state(pid, fn observed ->
+        assert observed.tracker_poll_cycle == nil
+        assert observed.tracker_poll_read == nil
+        assert observed.tracker_poll_pending == []
+        assert observed.poll_check_in_progress == false
+        assert is_integer(observed.next_poll_due_at_ms)
+        assert observed.candidate_fetch_error == {:tracker_backoff, "tracker.rate_limited"}
+        assert Enum.any?(observed.last_candidate_issues, &(&1.identifier == "BACKOFF-MANUAL"))
+      end)
+
     assert rate_limited_state.candidate_fetch_error == {:tracker_backoff, "tracker.rate_limited"}
     assert Enum.any?(rate_limited_state.last_candidate_issues, &(&1.identifier == "BACKOFF-MANUAL"))
 
@@ -1166,11 +1189,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       SymphonyElixir.TrackerEventInbox.reset()
     end)
 
-    wait_for_state(pid, fn initial_state ->
-      assert initial_state.first_poll_completed == true
-      assert initial_state.poll_check_in_progress == false
-      assert initial_state.current_poll_mode == nil
-    end)
+    wait_for_state(
+      pid,
+      fn initial_state ->
+        assert initial_state.first_poll_completed == true
+        assert initial_state.poll_check_in_progress == false
+        assert initial_state.current_poll_mode == nil
+      end,
+      5_000
+    )
 
     send(pid, :run_webhook_cycle)
 
@@ -1226,10 +1253,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       started_at: stale_activity_at
     }
 
-    :sys.replace_state(pid, fn _ ->
-      initial_state
+    :sys.replace_state(pid, fn current_state ->
+      current_state
       |> Map.put(:running, %{issue_id => running_entry})
-      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+      |> Map.put(:claimed, MapSet.put(current_state.claimed, issue_id))
     end)
 
     send(pid, :tick)

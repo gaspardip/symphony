@@ -33,6 +33,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.StatusDashboard
   alias SymphonyElixir.TrackerEvent
+  alias SymphonyElixir.TrackerReader
   alias SymphonyElixir.TrackerEventInbox
   alias SymphonyElixir.Workflow
   alias SymphonyElixir.WorkflowStore
@@ -91,6 +92,9 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :current_poll_mode,
       :lease_owner,
+      tracker_poll_read: nil,
+      tracker_poll_cycle: nil,
+      tracker_poll_pending: [],
       running: %{},
       completed: %{},
       claimed: MapSet.new(),
@@ -155,7 +159,7 @@ defmodule SymphonyElixir.Orchestrator do
       agent_rate_limits: nil
     }
 
-    run_terminal_workspace_cleanup()
+    send(self(), :startup_terminal_cleanup)
     :ok = schedule_tick(0)
     :ok = schedule_healing_tick(Config.healing_poll_interval_ms())
 
@@ -163,6 +167,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_info(:startup_terminal_cleanup, state), do: {:noreply, enqueue_tracker_poll(state, :startup_cleanup)}
+
   def handle_info(:tick, state) do
     state = refresh_runtime_config(state)
 
@@ -193,45 +199,8 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
-  def handle_info(:run_poll_cycle, state) do
-    state = refresh_runtime_config(state)
-    state = maybe_dispatch(state, :discovery)
-    now_ms = System.monotonic_time(:millisecond)
-    next_poll_due_at_ms = now_ms + state.poll_interval_ms
-    :ok = schedule_tick(state.poll_interval_ms)
-
-    state = %{
-      state
-      | poll_check_in_progress: false,
-        current_poll_mode: nil,
-        next_poll_due_at_ms: next_poll_due_at_ms
-    }
-
-    notify_dashboard()
-    {:noreply, state}
-  end
-
-  def handle_info(:run_healing_cycle, state) do
-    state = refresh_runtime_config(state)
-    state = maybe_dispatch(state, :healing)
-    now_ms = System.monotonic_time(:millisecond)
-    next_healing_poll_due_at_ms = now_ms + state.healing_poll_interval_ms
-    :ok = schedule_healing_tick(state.healing_poll_interval_ms)
-
-    state = %{
-      state
-      | poll_check_in_progress: false,
-        current_poll_mode: nil,
-        completed:
-          state.completed
-          |> Enum.reject(fn {_issue_id, completed_at_ms} -> now_ms - completed_at_ms > @completed_retention_ms end)
-          |> Map.new(),
-        next_healing_poll_due_at_ms: next_healing_poll_due_at_ms
-    }
-
-    notify_dashboard()
-    {:noreply, state}
-  end
+  def handle_info(:run_poll_cycle, state), do: {:noreply, enqueue_tracker_poll(refresh_runtime_config(state), :discovery)}
+  def handle_info(:run_healing_cycle, state), do: {:noreply, enqueue_tracker_poll(refresh_runtime_config(state), :healing)}
 
   def handle_info({:tracker_events_available, attrs}, state) when is_map(attrs) do
     state =
@@ -242,7 +211,7 @@ defmodule SymphonyElixir.Orchestrator do
     notify_dashboard()
 
     if state.poll_check_in_progress == true do
-      {:noreply, state}
+      {:noreply, queue_tracker_poll(state, :webhook)}
     else
       :ok = schedule_webhook_cycle_start()
       {:noreply, %{state | poll_check_in_progress: true, current_poll_mode: :webhook}}
@@ -270,7 +239,7 @@ defmodule SymphonyElixir.Orchestrator do
     notify_dashboard()
 
     if state.github_webhook_check_in_progress == true do
-      {:noreply, state}
+      {:noreply, queue_tracker_poll(state, :github_webhook)}
     else
       :ok = schedule_github_webhook_cycle_start()
       {:noreply, %{state | github_webhook_check_in_progress: true}}
@@ -289,20 +258,21 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
-  def handle_info(:run_webhook_cycle, state) do
-    state = refresh_runtime_config(state)
-    state = maybe_dispatch(state, :webhook)
-    state = %{state | poll_check_in_progress: false, current_poll_mode: nil}
-    notify_dashboard()
-    {:noreply, state}
+  def handle_info(:run_webhook_cycle, state), do: {:noreply, enqueue_tracker_poll(refresh_runtime_config(state), :webhook)}
+  def handle_info(:run_github_webhook_cycle, state), do: {:noreply, enqueue_tracker_poll(refresh_runtime_config(state), :github_webhook)}
+
+  def handle_info({:tracker_read_result, ref, result}, %{tracker_poll_read: %{ref: expected} = operation} = state) when ref == expected do
+    Process.demonitor(operation.monitor, [:flush])
+    state = %{state | tracker_poll_read: nil}
+    {:noreply, receive_tracker_poll_result(state, operation, result)}
   end
 
-  def handle_info(:run_github_webhook_cycle, state) do
-    state = refresh_runtime_config(state)
-    state = maybe_dispatch(state, :github_webhook)
-    state = %{state | github_webhook_check_in_progress: false}
-    notify_dashboard()
-    {:noreply, state}
+  def handle_info({:tracker_read_result, _obsolete_ref, _result}, state), do: {:noreply, state}
+
+  def handle_info({:DOWN, ref, :process, pid, reason}, %{tracker_poll_read: %{monitor: expected, pid: reader_pid} = operation} = state)
+      when ref == expected and pid == reader_pid do
+    state = %{state | tracker_poll_read: nil}
+    {:noreply, receive_tracker_poll_result(state, operation, {:error, {:tracker_reader_down, reason}})}
   end
 
   def handle_info({:authorize_dispatch, issue_id, dispatch_id, pid}, state) do
@@ -465,119 +435,325 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
-  defp maybe_dispatch(%State{} = state, mode) do
-    runner = RunnerRuntime.info()
+  defp queue_tracker_poll(state, mode) do
+    pending = state.tracker_poll_pending
+    %{state | tracker_poll_pending: if(mode in pending, do: pending, else: pending ++ [mode])}
+  end
 
-    cond do
-      mode == :github_webhook ->
-        with :ok <- Config.validate!() do
-          state
-          |> maybe_note_tracker_backoff(mode)
-          |> reconcile_running_issues(:manual_only)
-          |> maybe_promote_review_ready_issues(:manual_only)
-          |> maybe_dispatch_mode(:github_webhook)
-          |> Map.put(
-            :candidate_fetch_error,
-            if(Map.get(runner, :dispatch_enabled, true),
-              do: nil,
-              else: {:runner_health, Map.get(runner, :runner_health_rule_id)}
-            )
-          )
-        else
-          {:error, reason} ->
-            record_invalid_dispatch_configuration(reason, %{
-              actor_id: state.lease_owner,
-              metadata: %{dispatch_mode: mode}
-            })
+  defp enqueue_tracker_poll(state, mode) do
+    state = queue_tracker_poll(state, mode)
+    state = if is_nil(state.tracker_poll_cycle), do: begin_next_tracker_poll(state), else: state
+    sync_tracker_poll_flags(state)
+  end
 
-            Logger.error("Failed to run GitHub webhook dispatch cycle: #{inspect(reason)}")
-            %{state | skipped_issues: [], candidate_fetch_error: reason}
-        end
+  defp begin_next_tracker_poll(%{tracker_poll_pending: []} = state), do: state
 
-      not Map.get(runner, :dispatch_enabled, true) ->
-        %{
-          state
-          | skipped_issues: [],
-            last_candidate_issues: [],
-            candidate_fetch_error: {:runner_health, Map.get(runner, :runner_health_rule_id)}
-        }
+  defp begin_next_tracker_poll(%{tracker_poll_pending: [mode | pending]} = state) do
+    cycle = %{mode: mode, phase: if(mode == :startup_cleanup, do: :cleanup, else: :running), fingerprint: nil, invalidated: MapSet.new(), error: nil}
+    state = %{state | tracker_poll_pending: pending, tracker_poll_cycle: cycle}
 
-      tracker_backoff_active?(state) ->
-        with :ok <- Config.validate!() do
-          state
-          |> maybe_note_tracker_backoff(mode)
-          |> reconcile_running_issues(:manual_only)
-          |> maybe_promote_review_ready_issues(:manual_only)
-          |> maybe_dispatch_mode(:manual_only)
-          |> Map.put(
-            :candidate_fetch_error,
-            {:tracker_backoff, Map.get(state, :tracker_backoff_rule_id)}
-          )
-        else
-          {:error, reason} ->
-            record_invalid_dispatch_configuration(reason, %{
-              actor_id: state.lease_owner,
-              metadata: %{dispatch_mode: mode}
-            })
+    state =
+      case mode do
+        :discovery -> %{state | next_poll_due_at_ms: nil}
+        :healing -> %{state | next_healing_poll_due_at_ms: nil}
+        _ -> state
+      end
 
-            Logger.error("Failed to run degraded tracker dispatch cycle: #{inspect(reason)}")
+    state = if tracker_backoff_active?(state), do: maybe_note_tracker_backoff(state, mode), else: state
+    runner = RunnerRuntime.runner_health()
 
-            %{
-              state
-              | skipped_issues: [],
-                candidate_fetch_error: {:tracker_backoff, Map.get(state, :tracker_backoff_rule_id)}
-            }
-        end
-
-      true ->
-        with :ok <- Config.validate!() do
-          state
-          |> reconcile_running_issues()
-          |> maybe_promote_review_ready_issues()
-          |> maybe_dispatch_mode(mode)
-        else
-          {:error, reason} ->
-            record_invalid_dispatch_configuration(reason, %{
-              actor_id: state.lease_owner,
-              metadata: %{dispatch_mode: mode}
-            })
-
-            Logger.error("Dispatch blocked by config validation: #{inspect(reason)}")
-            %{state | skipped_issues: [], candidate_fetch_error: reason}
-        end
+    if mode not in [:startup_cleanup, :github_webhook] and not Map.get(runner, :dispatch_enabled, true) do
+      state
+      |> Map.put(:last_candidate_issues, [])
+      |> Map.put(:skipped_issues, [])
+      |> tracker_poll_error({:runner_health, Map.fetch!(runner, :rule_id)})
+      |> finish_tracker_poll()
+    else
+      start_tracker_poll_phase(state)
     end
   end
 
-  defp maybe_dispatch_mode(%State{} = state, :webhook) do
-    drain_tracker_events(state)
+  defp capture_tracker_poll_context do
+    with :ok <- Config.validate!(), do: {:ok, Config.tracker_read_context()}
+  rescue
+    error in NimbleOptions.ValidationError -> {:error, {:invalid_tracker_read_context, Exception.message(error)}}
   end
 
-  defp maybe_dispatch_mode(%State{} = state, :github_webhook) do
-    drain_github_events(state)
-  end
-
-  defp maybe_dispatch_mode(%State{} = state, :manual_only) do
-    case IssueSource.fetch_manual_candidate_issues() do
-      {:ok, issues} ->
-        process_candidate_issues(state, issues)
+  defp start_tracker_poll_phase(%{tracker_poll_cycle: %{fingerprint: nil}} = state) do
+    case capture_tracker_poll_context() do
+      {:ok, context} ->
+        state = put_in(state.tracker_poll_cycle.fingerprint, context.fingerprint)
+        start_tracker_poll_read(state, context)
 
       {:error, reason} ->
-        Logger.error("Failed to fetch manual candidate issues during tracker backoff: #{inspect(reason)}")
-
-        %{state | skipped_issues: [], candidate_fetch_error: reason}
+        state |> tracker_poll_configuration_error(reason) |> finish_tracker_poll()
     end
   end
 
-  defp maybe_dispatch_mode(%State{} = state, _mode) do
-    case tracker_read(state, &IssueSource.fetch_candidate_issues/0) do
-      {%State{} = next_state, {:ok, issues}} ->
-        process_candidate_issues(next_state, issues)
+  defp start_tracker_poll_read(state, context) do
+    phase = state.tracker_poll_cycle.phase
+    state = if phase == :running, do: reconcile_stalled_running_issues(state), else: state
+    mode = state.tracker_poll_cycle.mode
+    manual_only = mode == :github_webhook or tracker_backoff_active?(state)
 
-      {%State{} = next_state, {:error, reason}} ->
-        Logger.error("Failed to fetch candidate issues from tracker: #{inspect(reason)}")
-        %{next_state | skipped_issues: [], candidate_fetch_error: reason}
+    args =
+      case phase do
+        :cleanup -> context.linear_terminal_states
+        :running -> Map.keys(state.running)
+        :approval -> WorkflowProfile.approval_gate_states(policy_pack: context.policy_pack_name)
+        :candidates -> []
+      end
+
+    if phase == :running and args == [] do
+      advance_tracker_poll(state, context)
+    else
+      # Capture read inputs only. No State, claims or continuation travels to I/O.
+      read = fn -> {:ok, tracker_poll_sources(phase, args, context, manual_only)} end
+
+      case TrackerReader.start(read) do
+        {:ok, reader} ->
+          operation =
+            Map.merge(reader, %{
+              phase: phase,
+              fingerprint: context.fingerprint,
+              running: Map.new(state.running, fn {id, entry} -> {id, tracker_poll_worker_identity(entry)} end),
+              backoff: tracker_poll_backoff_identity(state)
+            })
+
+          %{state | tracker_poll_read: operation}
+
+        {:error, reason} ->
+          state |> tracker_poll_error({:tracker_reader_start_failed, reason}) |> finish_tracker_poll()
+      end
     end
   end
+
+  defp tracker_poll_sources(phase, args, context, true) do
+    manual =
+      case phase do
+        :running -> IssueSource.fetch_manual_issue_states_by_ids(args, context)
+        :candidates -> IssueSource.fetch_manual_candidate_issues(context)
+        _ -> IssueSource.fetch_manual_issues_by_states(args, context)
+      end
+
+    %{tracker: :disabled, manual: manual}
+  end
+
+  defp tracker_poll_sources(:running, ids, context, false), do: IssueSource.fetch_issue_states_by_ids_outcomes(ids, context)
+  defp tracker_poll_sources(:candidates, _args, context, false), do: IssueSource.fetch_candidate_outcomes(context)
+  defp tracker_poll_sources(_phase, states, context, false), do: IssueSource.fetch_issues_by_states_outcomes(states, context)
+
+  defp receive_tracker_poll_result(state, operation, result) do
+    state = refresh_runtime_config(state)
+
+    case capture_tracker_poll_context() do
+      {:ok, %{fingerprint: fingerprint} = context} when fingerprint == operation.fingerprint ->
+        runner = RunnerRuntime.runner_health()
+
+        if state.tracker_poll_cycle.mode in [:startup_cleanup, :github_webhook] or Map.get(runner, :dispatch_enabled, true) do
+          state |> apply_tracker_poll_result(operation, result) |> advance_tracker_poll(context)
+        else
+          state |> tracker_poll_error({:runner_health, Map.fetch!(runner, :rule_id)}) |> finish_tracker_poll()
+        end
+
+      {:ok, _context} ->
+        state |> tracker_poll_error(:tracker_read_context_changed) |> finish_tracker_poll()
+
+      {:error, reason} ->
+        state |> tracker_poll_configuration_error(reason) |> finish_tracker_poll()
+    end
+  end
+
+  defp apply_tracker_poll_result(state, _operation, {:error, reason}), do: tracker_poll_error(state, {:tracker_read_failed, reason})
+
+  defp apply_tracker_poll_result(state, operation, {:ok, %{tracker: tracker, manual: manual}}) do
+    # A later throttle decision belongs to current State. The old remote result
+    # cannot clear it or feed admission; the independently read manual result stays.
+    tracker = if tracker != :disabled and tracker_poll_backoff_identity(state) != operation.backoff, do: :discarded, else: tracker
+
+    state =
+      if tracker in [:disabled, :discarded] do
+        state
+      else
+        {next, _result} = tracker_read(state, fn -> tracker end)
+        next
+      end
+
+    state =
+      Enum.reduce([tracker, manual], state, fn
+        {:error, reason}, acc -> tracker_poll_error(acc, reason)
+        _result, acc -> acc
+      end)
+
+    issues =
+      [manual, tracker]
+      |> Enum.flat_map(fn
+        {:ok, issues} when is_list(issues) -> issues
+        {:error, _reason} -> []
+        outcome when outcome in [:disabled, :discarded] -> []
+      end)
+      |> Enum.reject(&tracker_poll_issue_invalidated?(state, &1))
+
+    case operation.phase do
+      :cleanup ->
+        Enum.each(issues, &cleanup_current_terminal_issue(state, &1))
+        state
+
+      :running ->
+        current_issues =
+          Enum.filter(issues, fn
+            %Issue{} = issue ->
+              case Map.fetch(state.running, issue.id) do
+                {:ok, entry} -> Map.get(operation.running, issue.id) == tracker_poll_worker_identity(entry)
+                :error -> false
+              end
+
+            _issue ->
+              false
+          end)
+
+        reconcile_running_issue_states(current_issues, state, active_state_set(), terminal_state_set())
+
+      :approval ->
+        Enum.reduce(issues, state, fn
+          %Issue{} = issue, acc -> maybe_promote_review_ready_issue(acc, issue)
+          _issue, acc -> acc
+        end)
+
+      :candidates ->
+        if match?({:ok, _}, tracker) or match?({:ok, [_ | _]}, manual) or (tracker in [:disabled, :discarded] and match?({:ok, _}, manual)) do
+          process_candidate_issues(state, issues)
+        else
+          %{state | skipped_issues: []}
+        end
+    end
+  end
+
+  defp advance_tracker_poll(%{tracker_poll_cycle: %{phase: :cleanup}} = state, _context), do: finish_tracker_poll(state)
+
+  defp advance_tracker_poll(%{tracker_poll_cycle: %{phase: :running}} = state, context) do
+    state |> put_in([Access.key(:tracker_poll_cycle), :phase], :approval) |> start_tracker_poll_read(context)
+  end
+
+  defp advance_tracker_poll(%{tracker_poll_cycle: %{phase: :approval, mode: mode}} = state, context) do
+    cond do
+      mode == :github_webhook -> state |> drain_github_events() |> finish_tracker_poll()
+      mode == :webhook and not tracker_backoff_active?(state) -> state |> drain_tracker_events() |> finish_tracker_poll()
+      true -> state |> put_in([Access.key(:tracker_poll_cycle), :phase], :candidates) |> start_tracker_poll_read(context)
+    end
+  end
+
+  defp advance_tracker_poll(state, _context), do: finish_tracker_poll(state)
+
+  defp finish_tracker_poll(state) do
+    cycle = state.tracker_poll_cycle
+    now_ms = System.monotonic_time(:millisecond)
+    state = %{state | tracker_poll_cycle: nil, tracker_poll_read: nil}
+    runner = RunnerRuntime.runner_health()
+
+    error =
+      cond do
+        cycle.mode == :github_webhook and not Map.get(runner, :dispatch_enabled, true) ->
+          {:runner_health, Map.fetch!(runner, :rule_id)}
+
+        cycle.mode != :github_webhook and tracker_backoff_active?(state) ->
+          {:tracker_backoff, state.tracker_backoff_rule_id}
+
+        true ->
+          cycle.error
+      end
+
+    state = if error, do: %{state | candidate_fetch_error: error}, else: state
+
+    state =
+      case cycle.mode do
+        :discovery ->
+          if :discovery in state.tracker_poll_pending do
+            state
+          else
+            :ok = schedule_tick(state.poll_interval_ms)
+            %{state | next_poll_due_at_ms: now_ms + state.poll_interval_ms}
+          end
+
+        :healing ->
+          completed = Map.reject(state.completed, fn {_id, at} -> now_ms - at > @completed_retention_ms end)
+          state = %{state | completed: completed}
+
+          if :healing in state.tracker_poll_pending do
+            state
+          else
+            :ok = schedule_healing_tick(state.healing_poll_interval_ms)
+            %{state | next_healing_poll_due_at_ms: now_ms + state.healing_poll_interval_ms}
+          end
+
+        _ ->
+          state
+      end
+
+    state = begin_next_tracker_poll(state) |> sync_tracker_poll_flags()
+    notify_dashboard()
+    state
+  end
+
+  defp sync_tracker_poll_flags(state) do
+    mode = if state.tracker_poll_cycle, do: state.tracker_poll_cycle.mode
+    modes = [mode | state.tracker_poll_pending]
+
+    %{
+      state
+      | poll_check_in_progress: Enum.any?(modes, &(&1 not in [nil, :github_webhook])),
+        current_poll_mode: if(mode == :github_webhook, do: nil, else: mode),
+        github_webhook_check_in_progress: :github_webhook in modes
+    }
+  end
+
+  defp tracker_poll_configuration_error(state, reason) do
+    record_invalid_dispatch_configuration(reason, %{
+      actor_id: state.lease_owner,
+      metadata: %{dispatch_mode: state.tracker_poll_cycle.mode}
+    })
+
+    Logger.error("Dispatch blocked by config validation: #{inspect(reason)}")
+    state |> Map.put(:skipped_issues, []) |> tracker_poll_error(reason)
+  end
+
+  defp tracker_poll_error(state, reason) do
+    state = put_in(state.tracker_poll_cycle.error, state.tracker_poll_cycle.error || reason)
+    %{state | candidate_fetch_error: reason}
+  end
+
+  defp invalidate_tracker_poll_issue(%{tracker_poll_cycle: nil} = state, _identifier), do: state
+
+  defp invalidate_tracker_poll_issue(state, identifier) when is_binary(identifier) do
+    update_in(state.tracker_poll_cycle.invalidated, &MapSet.put(&1, String.trim(identifier)))
+  end
+
+  defp invalidate_tracker_poll_issue(state, _identifier), do: state
+
+  defp tracker_poll_issue_invalidated?(state, %Issue{} = issue) do
+    invalidated = state.tracker_poll_cycle.invalidated
+    MapSet.member?(invalidated, issue.identifier) or MapSet.member?(invalidated, issue.id)
+  end
+
+  defp tracker_poll_issue_invalidated?(_state, _issue), do: false
+
+  defp tracker_poll_worker_identity(entry),
+    do: {Map.get(entry, :pid), Map.get(entry, :ref), lease_owner_from_entry(entry), lease_epoch_from_entry(entry)}
+
+  defp tracker_poll_backoff_identity(state),
+    do: {state.tracker_backoff_until_ms, state.tracker_backoff_reason, state.tracker_backoff_rule_id}
+
+  defp cleanup_current_terminal_issue(state, %Issue{id: id, identifier: identifier, state: issue_state}) when is_binary(identifier) do
+    unavailable =
+      Map.has_key?(state.running, id) or MapSet.member?(state.claimed, id) or
+        Map.has_key?(state.retry_attempts, id) or Map.has_key?(state.paused_issue_states, id)
+
+    if not unavailable and terminal_issue_state?(issue_state, terminal_state_set()) and LeaseManager.read(id) == {:error, :missing} do
+      cleanup_issue_workspace(identifier)
+    end
+  end
+
+  defp cleanup_current_terminal_issue(_state, _issue), do: :ok
 
   defp process_candidate_issues(%State{} = state, issues) when is_list(issues) do
     {state, candidate_issues} = block_candidate_policy_conflicts(state, issues)
@@ -2282,39 +2458,6 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp reconcile_running_issues(%State{} = state, source_mode \\ :all) do
-    state = reconcile_stalled_running_issues(state)
-    running_ids = Map.keys(state.running)
-
-    if running_ids == [] do
-      state
-    else
-      fetch_result =
-        case source_mode do
-          :manual_only ->
-            {state, IssueSource.fetch_manual_issue_states_by_ids(running_ids)}
-
-          _ ->
-            tracker_read(state, fn -> IssueSource.fetch_issue_states_by_ids(running_ids) end)
-        end
-
-      case fetch_result do
-        {%State{} = next_state, {:ok, issues}} ->
-          reconcile_running_issue_states(
-            issues,
-            next_state,
-            active_state_set(),
-            terminal_state_set()
-          )
-
-        {%State{} = next_state, {:error, reason}} ->
-          Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
-
-          next_state
-      end
-    end
-  end
-
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
   def reconcile_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
@@ -3958,23 +4101,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp cleanup_issue_workspace(_identifier), do: :ok
 
-  defp run_terminal_workspace_cleanup do
-    case IssueSource.fetch_issues_by_states(Config.linear_terminal_states()) do
-      {:ok, issues} ->
-        issues
-        |> Enum.each(fn
-          %Issue{identifier: identifier} when is_binary(identifier) ->
-            cleanup_issue_workspace(identifier)
-
-          _ ->
-            :ok
-        end)
-
-      {:error, reason} ->
-        Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
-    end
-  end
-
   defp notify_dashboard do
     StatusDashboard.notify_update()
   end
@@ -4795,6 +4921,9 @@ defmodule SymphonyElixir.Orchestrator do
       :ok = schedule_github_webhook_cycle_start()
     end
 
+    state = if poll_coalesced, do: queue_tracker_poll(state, :webhook), else: state
+    state = if github_coalesced, do: queue_tracker_poll(state, :github_webhook), else: state
+
     state = %{
       state
       | poll_check_in_progress: state.poll_check_in_progress or not poll_coalesced,
@@ -4812,24 +4941,28 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:pause_issue, issue_identifier}, _from, state) do
+    state = invalidate_tracker_poll_issue(state, issue_identifier)
     {reply, state} = Controls.pause_issue_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:resume_issue, issue_identifier}, _from, state) do
+    state = invalidate_tracker_poll_issue(state, issue_identifier)
     {reply, state} = Controls.resume_issue_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:stop_issue, issue_identifier}, _from, state) do
+    state = invalidate_tracker_poll_issue(state, issue_identifier)
     {reply, state} = Controls.stop_issue_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:hold_issue_for_human_review, issue_identifier}, _from, state) do
+    state = invalidate_tracker_poll_issue(state, issue_identifier)
     {reply, state} = Controls.hold_issue_for_human_review_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
@@ -4902,19 +5035,23 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:set_policy_class, issue_identifier, policy_class}, _from, state) do
+    state = invalidate_tracker_poll_issue(state, issue_identifier)
     {reply, state} = Controls.set_policy_class_runtime(state, issue_identifier, policy_class)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:clear_policy_override, issue_identifier}, _from, state) do
+    state = invalidate_tracker_poll_issue(state, issue_identifier)
     {reply, state} = Controls.clear_policy_override_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:submit_manual_issue, spec}, _from, state) do
+    refresh_coalesced = state.poll_check_in_progress == true
     {reply, state} = Controls.submit_manual_issue_runtime(state, spec)
+    state = if refresh_coalesced and match?(%{accepted: true}, reply), do: queue_tracker_poll(state, :discovery), else: state
     notify_dashboard()
     {:reply, reply, state}
   end
@@ -5503,34 +5640,6 @@ defmodule SymphonyElixir.Orchestrator do
     |> to_string()
     |> String.trim()
     |> String.upcase()
-  end
-
-  defp maybe_promote_review_ready_issues(%State{} = state, source_mode \\ :all) do
-    approval_gate_states =
-      WorkflowProfile.approval_gate_states(policy_pack: Config.policy_pack_name())
-
-    fetch_result =
-      case source_mode do
-        :manual_only ->
-          {state, IssueSource.fetch_manual_issues_by_states(approval_gate_states)}
-
-        _ ->
-          tracker_read(state, fn -> IssueSource.fetch_issues_by_states(approval_gate_states) end)
-      end
-
-    case fetch_result do
-      {%State{} = next_state, {:ok, issues}} ->
-        Enum.reduce(issues, next_state, fn
-          %Issue{} = issue, state_acc ->
-            maybe_promote_review_ready_issue(state_acc, issue)
-
-          _issue, state_acc ->
-            state_acc
-        end)
-
-      {%State{} = next_state, {:error, _reason}} ->
-        next_state
-    end
   end
 
   defp maybe_promote_review_ready_issue(%State{} = state, %Issue{} = issue) do
