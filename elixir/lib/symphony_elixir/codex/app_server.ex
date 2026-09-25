@@ -109,7 +109,8 @@ defmodule SymphonyElixir.Codex.AppServer do
              workspace,
              approval_policy,
              turn_sandbox_policy,
-             Keyword.get(opts, :effort)
+             Keyword.get(opts, :effort),
+             Keyword.get(opts, :model)
            ) do
         {:ok, turn_id} ->
           session_id = "#{thread_id}-#{turn_id}"
@@ -373,7 +374,8 @@ defmodule SymphonyElixir.Codex.AppServer do
          workspace,
          approval_policy,
          turn_sandbox_policy,
-         effort
+         effort,
+         model
        ) do
     params =
       %{
@@ -390,6 +392,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         "sandboxPolicy" => turn_sandbox_policy
       }
       |> maybe_put_effort(effort)
+      |> maybe_put_model(model)
 
     send_message(port, %{
       "method" => "turn/start",
@@ -408,6 +411,12 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_put_effort(params, _effort), do: params
+
+  defp maybe_put_model(params, model) when is_binary(model) and model != "" do
+    Map.put(params, "model", model)
+  end
+
+  defp maybe_put_model(params, _model), do: params
 
   defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
     receive_loop(port, on_message, Config.agent_turn_timeout_ms(), "", tool_executor, auto_approve_requests)

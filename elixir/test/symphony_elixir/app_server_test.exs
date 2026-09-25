@@ -1196,6 +1196,109 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server sends requested models per turn and propagates model rejection" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-turn-model-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-92")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "turn-input.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      while IFS= read -r line; do
+        printf '%s\\n' "$line" >> "#{trace_file}"
+        case "$line" in
+          *'"id":1'*)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          *'"id":2'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-92"}}}'
+            ;;
+          *'"method":"turn/start"'*)
+            case "$line" in
+              *'"model":"rejected-model"'*)
+                printf '%s\\n' '{"id":3,"error":{"code":-32602,"message":"model unavailable"}}'
+                ;;
+              *)
+                printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-92"}}}'
+                printf '%s\\n' '{"method":"turn/completed"}'
+                ;;
+            esac
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-turn-model",
+        identifier: "MT-92",
+        title: "Turn model",
+        description: "Check model request wiring"
+      }
+
+      assert {:ok, session} = AppServer.start_session(workspace)
+
+      try do
+        assert {:ok, _result} =
+                 AppServer.run_turn(session, "First model", issue,
+                   model: "first-model",
+                   effort: "high"
+                 )
+
+        assert {:ok, _result} =
+                 AppServer.run_turn(session, "Second model", issue, model: "second-model")
+
+        assert {:ok, _result} = AppServer.run_turn(session, "Inherited model", issue)
+
+        assert {:error, {:response_error, %{"code" => -32_602, "message" => "model unavailable"}}} =
+                 AppServer.run_turn(session, "Rejected model", issue, model: "rejected-model")
+
+        turns =
+          trace_file
+          |> File.read!()
+          |> String.split("\n", trim: true)
+          |> Enum.map(&Jason.decode!/1)
+          |> Enum.filter(&(&1["method"] == "turn/start"))
+
+        assert Enum.map(turns, &get_in(&1, ["params", "model"])) == [
+                 "first-model",
+                 "second-model",
+                 nil,
+                 "rejected-model"
+               ]
+
+        assert Enum.all?(turns, &(get_in(&1, ["params", "threadId"]) == session.thread_id))
+        assert get_in(Enum.at(turns, 0), ["params", "effort"]) == "high"
+        refute Map.has_key?(Enum.at(turns, 2)["params"], "model")
+
+        assert Enum.all?(turns, fn turn ->
+                 params = turn["params"]
+
+                 params["approvalPolicy"] == session.approval_policy and
+                   params["sandboxPolicy"] == session.turn_sandbox_policy
+               end)
+      after
+        AppServer.stop_session(session)
+      end
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server fails implement turns that exceed the command output budget" do
     test_root =
       Path.join(

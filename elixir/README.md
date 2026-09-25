@@ -139,6 +139,10 @@ Notes:
   `externalSandbox`, `workspaceWrite`.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `agent.model` and `agent.models.<stage>` select the model requested on Codex `turn/start`.
+  A model override applies to that turn and subsequent turns in the same thread. When a later
+  turn omits the model, Codex inherits the previous selection; omission does not restore the
+  initial model. A successful `turn/start` response does not confirm the model actually used.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
