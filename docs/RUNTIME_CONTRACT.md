@@ -141,3 +141,13 @@ changes. A reset invalidates it; other mismatches remain blocked and visible.
 Owner restart can replay effects: delivery is at least once, not exactly once.
 No autonomous wakeup, reader slot or async admission routing is introduced here.
 Those remain C4b work after C3.
+
+
+## Snapshot metadata reads
+
+RunStateStore resolves runner metadata only for missing, nil or empty-string
+fields. Existing values survive reads and writes without consulting Git to
+recompute a value that would be discarded. Creating a snapshot and filling legacy
+metadata still use the current getters; no cross-operation cache is introduced.
+This metadata remains historical context, not proof of the code currently loaded.
+Workspace locking, run identity guards and monotonic token usage are unchanged.

@@ -568,15 +568,19 @@ defmodule SymphonyElixir.RunStateStore do
   end
 
   defp default_state(issue) when is_map(issue) do
+    issue |> state_defaults() |> ensure_runner_metadata()
+  end
+
+  defp state_defaults(issue) when is_map(issue) do
     %{
       issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
       issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
       issue_source: Map.get(issue, :source) || Map.get(issue, "source"),
-      runner_instance_id: Config.runner_instance_id(),
-      runner_instance_name: Config.runner_instance_name(),
-      runner_channel: Config.runner_channel(),
-      runner_runtime_version: RunnerRuntime.runtime_version(),
-      runner_workspace_root: Config.workspace_root(),
+      runner_instance_id: nil,
+      runner_instance_name: nil,
+      runner_channel: nil,
+      runner_runtime_version: nil,
+      runner_workspace_root: nil,
       stage: "checkout",
       stage_history: [],
       stage_transition_counts: %{},
@@ -630,7 +634,7 @@ defmodule SymphonyElixir.RunStateStore do
   end
 
   defp merge_defaults(state, issue) when is_map(state) and is_map(issue) do
-    defaults = default_state(issue)
+    defaults = state_defaults(issue)
 
     defaults
     |> Map.merge(state)
@@ -661,11 +665,11 @@ defmodule SymphonyElixir.RunStateStore do
 
   defp ensure_runner_metadata(state) when is_map(state) do
     state
-    |> put_missing(:runner_instance_id, Config.runner_instance_id())
-    |> put_missing(:runner_instance_name, Config.runner_instance_name())
-    |> put_missing(:runner_channel, Config.runner_channel())
-    |> put_missing(:runner_runtime_version, RunnerRuntime.runtime_version())
-    |> put_missing(:runner_workspace_root, Config.workspace_root())
+    |> put_missing(:runner_instance_id, &Config.runner_instance_id/0)
+    |> put_missing(:runner_instance_name, &Config.runner_instance_name/0)
+    |> put_missing(:runner_channel, &Config.runner_channel/0)
+    |> put_missing(:runner_runtime_version, &RunnerRuntime.runtime_version/0)
+    |> put_missing(:runner_workspace_root, &Config.workspace_root/0)
   end
 
   defp apply_lease_attrs(state, lease_attrs) when is_map(state) and is_map(lease_attrs) do
@@ -714,9 +718,9 @@ defmodule SymphonyElixir.RunStateStore do
     }
   end
 
-  defp put_missing(state, key, value) when is_map(state) do
+  defp put_missing(state, key, value) when is_map(state) and is_function(value, 0) do
     case Map.get(state, key) do
-      existing when existing in [nil, ""] -> Map.put(state, key, value)
+      existing when existing in [nil, ""] -> Map.put(state, key, value.())
       _existing -> state
     end
   end

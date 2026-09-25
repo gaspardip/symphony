@@ -14,6 +14,7 @@ source_paths:
   - elixir/lib/symphony_elixir/orchestrator.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
 acceptance_signals:
+  - Snapshot reads and writes preserve existing runner metadata without redundant Git lookups; absent, nil and empty fields still use current getters, with identity and consumption guards unchanged
   - Tracker and GitHub inboxes acknowledge captured physical prefixes under a shared filesystem lock; corruption and uncertain persistence remain visible, legacy migration is explicit, and logical reset invalidates older generations
   - CLI adapters return transport observations; delivery applies local effects after transport, verification skips them, failed transport skips preparation, and progress evidence is never fabricated
   - Retry timers identify their generation and share one asynchronous admission reader with poll candidates; obsolete callbacks preserve newer retries, accumulated budget context and run identity.
@@ -84,4 +85,4 @@ acceptance_signals:
   - Seeded manual continuation retries can reuse the persisted issue envelope and workspace branch identity so local stable-ingress replays survive the `review_verification` to `implement` handoff
 dependencies:
   - harness
-last_updated_by_issue: architecture-C4a
+last_updated_by_issue: architecture-snapshot-metadata
