@@ -83,6 +83,7 @@ acceptance_signals:
   - Operator API reads remain responsive during active runs because workspace inspection can skip live GitHub PR shell-outs and recover staged `run_state.json` files while a bootstrap-only workspace is being rebuilt
   - Replay refresh drains GitHub inbox work even when runner metadata disables normal tracker dispatch
   - Seeded manual continuation retries can reuse the persisted issue envelope and workspace branch identity so local stable-ingress replays survive the `review_verification` to `implement` handoff
+  - CLI preparation and report failures preserve their cause and stop plan/implement before subsequent effects; partial workspace/index/commit changes remain visible without rollback or internal retry
 dependencies:
   - harness
-last_updated_by_issue: architecture-snapshot-metadata
+last_updated_by_issue: architecture-P3b2

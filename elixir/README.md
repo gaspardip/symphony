@@ -451,8 +451,11 @@ preparation and delivery reporting after transport; VerifierRunner applies no
 local delivery effects and still requires its own structured verifier report.
 Failed CLI transport skips preparation. Empty progress evidence is never filled
 by the runtime. Direct adapter and ErrorHandler transport calls no longer commit
-or synthesize delivery reports. Command-error propagation and execution-ownership
-checks remain separate P3b.2/I2 work. See
+or synthesize delivery reports. Failed Git detection, formatting, staging, commit
+or report acceptance now returns `turn_effect_failed` and stops plan/implement
+before the next stage; prior local effects remain. Missing Git base references
+are errors without fallback, and delivery requires an executor returning a
+string-keyed boolean `success`. Execution-ownership checks remain I2 work. See
 [the runtime contract](../docs/RUNTIME_CONTRACT.md#cli-transport-and-local-turn-effects).
 
 ### Inbox state migration and recovery

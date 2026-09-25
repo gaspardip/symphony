@@ -112,12 +112,12 @@ defmodule SymphonyElixir.AgentProvider.Claude do
   def parse_stream_line_for_test(line, state), do: parse_stream_line(line, state)
 
   @doc false
-  @spec synthesize_turn_result_for_test(StreamState.t(), (String.t(), map() -> map()) | nil) :: map()
+  @spec synthesize_turn_result_for_test(StreamState.t(), term()) :: {:ok, map()} | {:error, {:turn_effect_failed, map()}}
   def synthesize_turn_result_for_test(state, tool_executor),
     do: TurnEffects.synthesize_turn_result(state, tool_executor)
 
   @doc false
-  @spec detect_changed_files_for_test(StreamState.t(), Path.t()) :: StreamState.t()
+  @spec detect_changed_files_for_test(StreamState.t(), Path.t()) :: {:ok, StreamState.t()} | {:error, {:turn_effect_failed, map()}}
   def detect_changed_files_for_test(state, workspace),
     do: TurnEffects.detect_changed_files(state, workspace, :claude_cli)
 

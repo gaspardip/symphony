@@ -758,23 +758,30 @@ defmodule SymphonyElixir.DeliveryEngine do
     {provider_turn_result, turn_log_context} =
       run_logged_agent_turn(provider, app_session, workspace, prompt, issue, turn_opts)
 
-    reported_turn_result = fetch_turn_result(issue)
-    plan_completed = match?({:ok, _}, provider_turn_result) and match?({:ok, _}, reported_turn_result)
+    case provider_turn_result do
+      {:error, {:turn_effect_failed, _details}} = error ->
+        log_agent_turn_lifecycle(turn_log_context, plan_turn_log_result(error, error, false))
+        error
 
-    log_agent_turn_lifecycle(
-      turn_log_context,
-      plan_turn_log_result(provider_turn_result, reported_turn_result, plan_completed)
-    )
+      _ ->
+        reported_turn_result = fetch_turn_result(issue)
+        plan_completed = match?({:ok, _}, provider_turn_result) and match?({:ok, _}, reported_turn_result)
 
-    progress_path = progress_path_for_issue(workspace, issue)
+        log_agent_turn_lifecycle(
+          turn_log_context,
+          plan_turn_log_result(provider_turn_result, reported_turn_result, plan_completed)
+        )
 
-    {:ok, _state} =
-      RunStateStore.transition(workspace, "implement", %{
-        plan_completed: plan_completed,
-        resume_context: %{next_objective: "Follow the implementation plan in #{progress_path}. Read it first, then implement each step."}
-      })
+        progress_path = progress_path_for_issue(workspace, issue)
 
-    do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+        {:ok, _state} =
+          RunStateStore.transition(workspace, "implement", %{
+            plan_completed: plan_completed,
+            resume_context: %{next_objective: "Follow the implementation plan in #{progress_path}. Read it first, then implement each step."}
+          })
+
+        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+    end
   end
 
   defp progress_path_for_issue(workspace, issue) do
@@ -1088,6 +1095,9 @@ defmodule SymphonyElixir.DeliveryEngine do
               )
 
               case error do
+                {:error, {:turn_effect_failed, _details}} ->
+                  error
+
                 {:error, {:turn_runtime_error, reason}} ->
                   handle_implementation_turn_error(
                     app_session,

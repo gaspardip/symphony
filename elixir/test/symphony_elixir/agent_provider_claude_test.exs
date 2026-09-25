@@ -248,7 +248,7 @@ defmodule SymphonyElixir.AgentProvider.ClaudeTest do
         %{"success" => true}
       end
 
-      result = Claude.synthesize_turn_result_for_test(state, tool_executor)
+      assert {:ok, result} = Claude.synthesize_turn_result_for_test(state, tool_executor)
 
       assert result["summary"] == "Added greeter module"
       assert result["files_touched"] == ["lib/greeter.ex", "test/greeter_test.exs"]
@@ -265,14 +265,16 @@ defmodule SymphonyElixir.AgentProvider.ClaudeTest do
         error: "exit_status_1"
       }
 
-      result = Claude.synthesize_turn_result_for_test(state, nil)
+      assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: :missing_tool_executor}}} = Claude.synthesize_turn_result_for_test(state, nil)
+      assert {:ok, result} = Claude.synthesize_turn_result_for_test(state, fn _, _ -> %{"success" => true} end)
       assert result["blocked"] == true
       assert result["blocker_type"] == "implementation"
     end
 
     test "uses default summary when result_text is nil" do
       state = %StreamState{}
-      result = Claude.synthesize_turn_result_for_test(state, nil)
+      assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: :missing_tool_executor}}} = Claude.synthesize_turn_result_for_test(state, nil)
+      assert {:ok, result} = Claude.synthesize_turn_result_for_test(state, fn _, _ -> %{"success" => true} end)
       assert result["summary"] == "Turn completed."
     end
 
@@ -281,7 +283,8 @@ defmodule SymphonyElixir.AgentProvider.ClaudeTest do
         files_touched: ["lib/a.ex", "", "lib/a.ex", "lib/b.ex"]
       }
 
-      result = Claude.synthesize_turn_result_for_test(state, nil)
+      assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: :missing_tool_executor}}} = Claude.synthesize_turn_result_for_test(state, nil)
+      assert {:ok, result} = Claude.synthesize_turn_result_for_test(state, fn _, _ -> %{"success" => true} end)
       assert result["files_touched"] == ["lib/a.ex", "lib/b.ex"]
     end
   end
@@ -313,7 +316,7 @@ defmodule SymphonyElixir.AgentProvider.ClaudeTest do
       File.write!(Path.join(workspace, "existing.txt"), "modified")
 
       state = %StreamState{files_touched: []}
-      updated = Claude.detect_changed_files_for_test(state, workspace)
+      assert {:ok, updated} = Claude.detect_changed_files_for_test(state, workspace)
       assert "existing.txt" in updated.files_touched
     end
 
@@ -321,7 +324,7 @@ defmodule SymphonyElixir.AgentProvider.ClaudeTest do
       File.write!(Path.join(workspace, "new_file.ex"), "defmodule New do\nend")
 
       state = %StreamState{files_touched: []}
-      updated = Claude.detect_changed_files_for_test(state, workspace)
+      assert {:ok, updated} = Claude.detect_changed_files_for_test(state, workspace)
       assert "new_file.ex" in updated.files_touched
     end
 
@@ -329,14 +332,14 @@ defmodule SymphonyElixir.AgentProvider.ClaudeTest do
       File.write!(Path.join(workspace, "existing.txt"), "modified")
 
       state = %StreamState{files_touched: ["stream_detected.ex"]}
-      updated = Claude.detect_changed_files_for_test(state, workspace)
+      assert {:ok, updated} = Claude.detect_changed_files_for_test(state, workspace)
       assert "stream_detected.ex" in updated.files_touched
       assert "existing.txt" in updated.files_touched
     end
 
     test "returns unchanged state when no git changes", %{workspace: workspace} do
       state = %StreamState{files_touched: ["previously.ex"]}
-      updated = Claude.detect_changed_files_for_test(state, workspace)
+      assert {:ok, updated} = Claude.detect_changed_files_for_test(state, workspace)
       assert updated.files_touched == ["previously.ex"]
     end
   end

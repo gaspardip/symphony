@@ -85,7 +85,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
         assert tool == "report_agent_turn_result"
         assert git!(context.workspace, ["status", "--porcelain"]) == ""
         assert git!(context.workspace, ["show", "HEAD:.symphony/progress/turn.md"]) == expected_progress()
-        %{"success" => false}
+        %{"success" => true}
       end
 
       on_message = fn event ->
@@ -125,7 +125,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
       File.write!(Path.join(context.workspace, "existing.txt"), "changed\n")
       File.write!(Path.join(context.workspace, "untracked.txt"), "new\n")
       state = struct!(@state_module, files_touched: ["stream.txt", "existing.txt"], error: "retained")
-      updated = TurnEffects.detect_changed_files(state, context.workspace, @profile)
+      assert {:ok, updated} = TurnEffects.detect_changed_files(state, context.workspace, @profile)
       expected_files = if @profile == :claude_cli, do: ["stream.txt", "existing.txt", "untracked.txt"], else: ["stream.txt", "existing.txt", "untracked.txt", "committed.txt"]
       assert updated == %{state | files_touched: expected_files}
       assert updated.__struct__ == @state_module
@@ -172,7 +172,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
       caller = self()
       assert {:ok, session} = @provider.start_session(context.workspace)
 
-      assert {:error, {:throw, :executor_failed}} =
+      assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: {:executor_exception, :throw, :executor_failed}}}} =
                run_delivery(@provider, session, "task", %{identifier: "P3-A05"},
                  tool_executor: fn _, _ -> throw(:executor_failed) end,
                  on_message: fn event -> send(caller, {:p3a_event, event.event}) end
@@ -186,7 +186,9 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
     test "P3-A06 #{@profile}: existing defaults, empty paths and false error are not normalized" do
       state = struct!(@state_module, files_touched: ["a", "", "a", "b"], error: false)
 
-      assert TurnEffects.synthesize_turn_result(state, nil) == %{
+      assert {:ok, report} = TurnEffects.synthesize_turn_result(state, fn _, _ -> %{"success" => true} end)
+
+      assert report == %{
                "summary" => "Turn completed.",
                "files_touched" => ["a", "b"],
                "needs_another_turn" => false,
@@ -195,68 +197,64 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
              }
     end
 
-    for failing_step <- [:format, :add, :commit] do
+    for {failing_step, command, prefix} <- [
+          {:format, nil, ["mix format"]},
+          {:stage, "add -A", ["mix format", "git add -A"]},
+          {:index_diff, "diff --cached --quiet", ["mix format", "git add -A", "git diff --cached --quiet"]},
+          {:commit, "commit -m Implemented change", ["mix format", "git add -A", "git diff --cached --quiet", "git commit -m Implemented change"]}
+        ] do
       @failing_step failing_step
-      test "P3-A07 #{@profile}: #{@failing_step} failure retains existing ignored-error behavior", context do
+      @failed_command command
+      @prefix prefix
+      test "P3-B2-04/05/06/07 #{@profile}: #{@failing_step} stops subsequent effects", context do
         prepare_changed_workspace!(context)
         write_stream!(context.root, @profile)
-
-        case @failing_step do
-          :format -> System.put_env("SYMPHONY_P3A_MIX_STATUS", "2")
-          :add -> System.put_env("SYMPHONY_P3A_FAIL_GIT", "add -A")
-          :commit -> System.put_env("SYMPHONY_P3A_FAIL_GIT", "commit -m Implemented change")
-        end
-
+        if @failing_step == :format, do: System.put_env("SYMPHONY_P3A_MIX_STATUS", "2"), else: System.put_env("SYMPHONY_P3A_FAIL_GIT", @failed_command)
         before_head = git!(context.workspace, ["rev-parse", "HEAD"])
         assert {:ok, session} = @provider.start_session(context.workspace)
+        caller = self()
 
-        assert {:ok, %{result: :turn_completed}} =
-                 run_delivery(@provider, session, "task", %{identifier: "P3-A07"},
-                   tool_executor: fn _, result ->
-                     Process.put(:p3a_ignored_error, result)
-                     %{"success" => true}
-                   end
-                 )
+        log =
+          capture_log(fn ->
+            assert {:error, {:turn_effect_failed, %{step: @failing_step, reason: {:exit_status, 2}, output: ""}}} =
+                     run_delivery(@provider, session, "task", %{},
+                       tool_executor: fn _, _ -> flunk("report after command failure") end,
+                       on_message: fn event -> send(caller, {:failed_effect, event.event}) end
+                     )
+          end)
 
-        assert Process.get(:p3a_ignored_error) == expected_report(false)
-        after_head = git!(context.workspace, ["rev-parse", "HEAD"])
-        if @failing_step == :format, do: refute(after_head == before_head), else: assert(after_head == before_head)
-        steps = command_steps(context.root)
-        assert "mix format" in steps
-        assert "git add -A" in steps
-
-        if @failing_step == :add do
-          refute "git diff --cached --quiet" in steps
-          assert git!(context.workspace, ["diff", "--cached", "--name-only"]) == ""
-        else
-          assert "git commit -m Implemented change" in steps
-        end
-
-        if @failing_step == :commit, do: assert(git!(context.workspace, ["diff", "--cached", "--name-only"]) != "")
+        refute log =~ "Auto-committed"
+        assert_receive {:failed_effect, :turn_ended_with_error}
+        refute_receive {:failed_effect, :turn_completed}
+        refute_receive {:failed_effect, :turn_ended_with_error}
+        assert command_steps(context.root) == ["transport"] ++ detection_steps(@profile) ++ @prefix
+        assert git!(context.workspace, ["rev-parse", "HEAD"]) == before_head
+        if @failing_step in [:index_diff, :commit], do: assert(git!(context.workspace, ["diff", "--cached", "--name-only"]) != "")
       end
     end
+  end
 
-    test "P3-A08 #{@profile}: unexpected index diff status still raises CaseClauseError", context do
-      System.put_env("SYMPHONY_P3A_FAIL_GIT", "diff --cached --quiet")
-      state = struct!(@state_module, files_touched: ["existing.txt"])
-      assert_raise CaseClauseError, fn -> TurnEffects.maybe_auto_commit(state, context.workspace) end
+  for {profile, provider, command, expected_steps} <- [
+        {:claude_cli, Claude, "diff --name-only HEAD", ["git diff --name-only HEAD"]},
+        {:claude_cli, Claude, "ls-files --others --exclude-standard", ["git diff --name-only HEAD", "git ls-files --others --exclude-standard"]},
+        {:codex_cli, CodexCLI, "status --porcelain", ["git status --porcelain"]},
+        {:codex_cli, CodexCLI, "diff origin/main --name-only", ["git status --porcelain", "git diff origin/main --name-only"]}
+      ] do
+    @profile profile
+    @provider provider
+    @command command
+    @expected_steps expected_steps
+    test "P3-B2-01 #{@profile}: #{@command} fails despite stream evidence", context do
+      System.put_env("SYMPHONY_P3A_FAIL_GIT", @command)
+      result = observation(@profile, ["stream.txt"])
+      caller = self()
+      opts = [tool_executor: fn _, _ -> flunk("report after detection failure") end, on_message: fn event -> send(caller, {:detection_event, event.event}) end]
+      assert {:error, {:turn_effect_failed, details}} = TurnEffects.apply_result(@provider, result, context.workspace, %{}, opts, :delivery)
+      assert details == %{step: :detect_changes, reason: {:exit_status, 2}, executable: "git", argv: String.split(@command), cwd: context.workspace, output: ""}
+      assert command_steps(context.root) == @expected_steps
+      assert_receive {:detection_event, :turn_ended_with_error}
+      refute_receive {:detection_event, _}
     end
-  end
-
-  test "P3-A09: Claude ls-files failure remains a MatchError", context do
-    System.put_env("SYMPHONY_P3A_FAIL_GIT", "ls-files --others --exclude-standard")
-    assert_raise MatchError, fn -> TurnEffects.detect_changed_files(%Claude.StreamState{}, context.workspace, :claude_cli) end
-  end
-
-  test "P3-A10: existing Git observation failures keep stream data", context do
-    System.put_env("SYMPHONY_P3A_FAIL_GIT", "diff --name-only HEAD")
-    claude = %Claude.StreamState{files_touched: ["stream.txt"]}
-    assert TurnEffects.detect_changed_files(claude, context.workspace, :claude_cli) == claude
-    System.put_env("SYMPHONY_P3A_FAIL_GIT", "status --porcelain")
-    codex = %CodexCLI.StreamState{files_touched: ["stream.txt"]}
-    assert TurnEffects.detect_changed_files(codex, context.workspace, :codex_cli) == codex
-    System.put_env("SYMPHONY_P3A_FAIL_GIT", "diff origin/main --name-only")
-    assert TurnEffects.detect_changed_files(codex, context.workspace, :codex_cli) == codex
   end
 
   defmodule OpaqueProvider do
@@ -398,7 +396,14 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
 
       for purpose <- [:delivery, :verifier] do
         Process.delete(:timeout_report)
-        opts = [tool_executor: fn _, report -> Process.put(:timeout_report, report) end]
+
+        opts = [
+          tool_executor: fn _, report ->
+            Process.put(:timeout_report, report)
+            %{"success" => true}
+          end
+        ]
+
         result = @provider.run_turn(session, "task", %{}, opts)
         assert {:ok, %{result: :turn_failed, cli_observation: %{error: "timeout"}}} = result
         assert ^result = TurnEffects.apply_result(@provider, result, context.workspace, %{}, opts, purpose)
@@ -446,7 +451,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
     assert {:ok, session} = Claude.start_session(context.workspace)
     caller = self()
 
-    assert {:error, {:error, %RuntimeError{message: "executor raised"}}} =
+    assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: {:executor_exception, :error, %RuntimeError{message: "executor raised"}}}}} =
              run_delivery(Claude, session, "task", %{}, tool_executor: fn _, _ -> raise "executor raised" end, on_message: fn event -> send(caller, {:raised_event, event.event}) end)
 
     assert_receive {:raised_event, :turn_ended_with_error}
@@ -483,17 +488,6 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
     assert command_steps(context.root) == ["transport"]
   end
 
-  test "P3-B1-13: helper exception is caught at the moved effect boundary", context do
-    System.put_env("SYMPHONY_P3A_FAIL_GIT", "ls-files --others --exclude-standard")
-    result = {:ok, %{result: :turn_completed, usage: %{}, cli_observation: %{profile: :claude_cli, files_touched: [], result_text: nil, error: nil}}}
-    caller = self()
-    opts = [on_message: fn event -> send(caller, {:helper_event, event}) end]
-    assert {:error, {:error, {:badmatch, {"", 2}}}} = TurnEffects.apply_result(Claude, result, context.workspace, %{}, opts, :delivery)
-    assert_receive {:helper_event, %{event: :turn_ended_with_error, payload: %{error: "{:error, {:badmatch, {\"\", 2}}}"}}}
-    refute_receive {:helper_event, _}
-    assert command_steps(context.root) == detection_steps(:claude_cli)
-  end
-
   test "P3-B1-03: real publish gate still rejects missing evidence", context do
     for dir <- ["knowledge", "features"], do: File.mkdir_p!(Path.join(context.workspace, ".symphony/#{dir}"))
 
@@ -512,7 +506,193 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
     assert {:error, {:invalid_progress_file, "turn.md", {:missing_sections, ["Evidence"]}}} = SymphonyElixir.AgentHarness.publish_gate(context.workspace, %{identifier: "B1"}, harness)
   end
 
+  test "P3-B2-02: missing origin/main is explicit and creates no fallback ref", context do
+    git!(context.workspace, ["update-ref", "-d", "refs/remotes/origin/main"])
+    File.write!(Path.join(context.workspace, "existing.txt"), "changed\n")
+    before_refs = git!(context.workspace, ["show-ref"])
+
+    assert {:error, {:turn_effect_failed, %{step: :detect_changes, reason: {:exit_status, 128}, argv: ["diff", "origin/main", "--name-only"], output: output}}} =
+             TurnEffects.apply_result(CodexCLI, observation(:codex_cli, ["existing.txt"]), context.workspace, %{}, [tool_executor: fn _, _ -> flunk("missing ref reported success") end], :delivery)
+
+    assert output =~ "origin/main"
+    assert git!(context.workspace, ["show-ref"]) == before_refs
+    assert command_steps(context.root) == detection_steps(:codex_cli)
+  end
+
+  test "P3-B2-03: missing HEAD and non-repository are detection errors", context do
+    empty_repo = Path.join(context.root, "empty")
+    not_repo = Path.join(context.root, "not-repo")
+    File.mkdir_p!(empty_repo)
+    File.mkdir_p!(not_repo)
+    git!(empty_repo, ["init", "-q"])
+
+    for {workspace, exit_status, expected_output} <- [{empty_repo, 128, "HEAD"}, {not_repo, 129, "Not a git repository"}] do
+      assert {:error, {:turn_effect_failed, %{step: :detect_changes, reason: {:exit_status, ^exit_status}, output: output, executable: "git", argv: ["diff", "--name-only", "HEAD"], cwd: ^workspace}}} =
+               TurnEffects.detect_changed_files(%Claude.StreamState{}, workspace, :claude_cli)
+
+      assert output != ""
+      assert output =~ expected_output
+    end
+  end
+
+  test "P3-B2-04: partial formatter writes remain after its failure", context do
+    prepare_changed_workspace!(context)
+    write_executable!(Path.join([context.root, "bin", "mix"]), "printf 'mix format\\n' >> \"$SYMPHONY_P3A_ROOT/commands\"\nprintf partial > ../existing.txt\nexit 2\n")
+    assert {:error, {:turn_effect_failed, %{step: :format}}} = TurnEffects.maybe_auto_commit(%Claude.StreamState{files_touched: ["existing.txt"]}, context.workspace)
+    assert File.read!(Path.join(context.workspace, "existing.txt")) == "partial"
+    assert command_steps(context.root) == ["mix format"]
+    assert git!(context.workspace, ["diff", "--cached", "--name-only"]) == ""
+  end
+
+  test "P3-B2-05: partial stage writes remain and no later command runs", context do
+    File.write!(Path.join(context.workspace, "existing.txt"), "partial stage\n")
+    write_executable!(Path.join([context.root, "bin", "git"]), "printf 'git %s\\n' \"$*\" >> \"$SYMPHONY_P3A_ROOT/commands\"\n\"$SYMPHONY_P3A_GIT\" add existing.txt\nexit 2\n")
+    assert {:error, {:turn_effect_failed, %{step: :stage}}} = TurnEffects.maybe_auto_commit(%Claude.StreamState{files_touched: ["existing.txt"]}, context.workspace)
+    assert git!(context.workspace, ["show", ":existing.txt"]) == "partial stage\n"
+    assert command_steps(context.root) == ["git add -A"]
+  end
+
+  test "P3-B2-06: index exit zero skips commit but reports once", context do
+    caller = self()
+
+    opts = [
+      tool_executor: fn _, report ->
+        send(caller, {:empty_index_report, report})
+        %{"success" => true}
+      end
+    ]
+
+    assert {:ok, _} = TurnEffects.apply_result(Claude, observation(:claude_cli, ["existing.txt"]), context.workspace, %{}, opts, :delivery)
+    assert command_steps(context.root) == detection_steps(:claude_cli) ++ ["git add -A", "git diff --cached --quiet"]
+    assert_receive {:empty_index_report, %{"files_touched" => ["existing.txt"]}}
+    refute_receive {:empty_index_report, _}
+  end
+
+  test "P3-B2-07: failing commit hook leaves its write and staged changes", context do
+    File.write!(Path.join(context.workspace, "existing.txt"), "staged\n")
+    write_executable!(Path.join(context.workspace, ".git/hooks/pre-commit"), "printf hook-write > hook-output.txt\nexit 1\n")
+    before_head = git!(context.workspace, ["rev-parse", "HEAD"])
+
+    log =
+      capture_log(fn ->
+        assert {:error, {:turn_effect_failed, %{step: :commit, reason: {:exit_status, 1}}}} = TurnEffects.maybe_auto_commit(%Claude.StreamState{files_touched: ["existing.txt"]}, context.workspace)
+      end)
+
+    refute log =~ "Auto-committed"
+    assert File.read!(Path.join(context.workspace, "hook-output.txt")) == "hook-write"
+    assert git!(context.workspace, ["show", ":existing.txt"]) == "staged\n"
+    assert git!(context.workspace, ["rev-parse", "HEAD"]) == before_head
+  end
+
+  test "P3-B2-08: only string-keyed boolean success accepts the report" do
+    state = %Claude.StreamState{result_text: "Report"}
+
+    for response <- [nil, :ok, {:ok, %{"success" => true}}, %{}, %{success: true}, %{"success" => "true"}, %{"success" => 1}] do
+      caller = self()
+
+      assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: :invalid_tool_response, response: ^response}}} =
+               TurnEffects.synthesize_turn_result(state, fn _, _ ->
+                 send(caller, :executor_called)
+                 response
+               end)
+
+      assert_receive :executor_called
+      refute_receive :executor_called
+    end
+
+    assert {:error, {:turn_effect_failed, %{reason: :tool_rejected, response: %{"success" => false}}}} = TurnEffects.synthesize_turn_result(state, fn _, _ -> %{"success" => false} end)
+    assert {:ok, %{"blocked" => true}} = TurnEffects.synthesize_turn_result(%{state | error: "failed"}, fn _, _ -> %{"success" => true, "contentItems" => "ignored diagnostic"} end)
+  end
+
+  test "P3-B2-08: absent or wrong-arity executor fails before Git", context do
+    for executor <- [nil, fn _ -> :ok end, :invalid], status <- [:turn_completed, :turn_failed] do
+      {:ok, result} = observation(:claude_cli, ["existing.txt"])
+
+      assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: :missing_tool_executor}}} =
+               TurnEffects.apply_result(Claude, {:ok, %{result | result: status}}, context.workspace, %{}, [tool_executor: executor], :delivery)
+    end
+
+    assert command_steps(context.root) == []
+  end
+
+  test "P3-B2-09: command invocation exception keeps its step and reason", context do
+    empty_bin = Path.join(context.root, "empty-bin")
+    File.mkdir_p!(empty_bin)
+    System.put_env("PATH", empty_bin)
+    workspace = context.workspace
+    caller = self()
+    opts = [tool_executor: fn _, _ -> flunk("report after command exception") end, on_message: fn event -> send(caller, {:command_exception_event, event.event}) end]
+
+    assert {:error, {:turn_effect_failed, %{step: :detect_changes, executable: "git", cwd: ^workspace, reason: {:command_exception, :error, :enoent}}}} =
+             TurnEffects.apply_result(Claude, observation(:claude_cli, []), workspace, %{}, opts, :delivery)
+
+    assert_receive {:command_exception_event, :turn_ended_with_error}
+    refute_receive {:command_exception_event, _}
+  end
+
+  test "P3-B2-13: failed transport still requires an accepted blocked report", context do
+    for {profile, provider, _} <- @profiles do
+      {:ok, result} = observation(profile, ["stream.txt"])
+      result = %{result | result: :turn_failed, cli_observation: %{result.cli_observation | error: "exit_status_9"}}
+      caller = self()
+
+      opts = [
+        tool_executor: fn _, report ->
+          send(caller, {:blocked_report, report})
+          %{"success" => false}
+        end
+      ]
+
+      assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: :tool_rejected}}} = TurnEffects.apply_result(provider, {:ok, result}, context.workspace, %{}, opts, :delivery)
+      assert_receive {:blocked_report, %{"blocked" => true, "files_touched" => ["stream.txt"]}}
+      refute_receive {:blocked_report, _}
+    end
+
+    assert command_steps(context.root) == []
+  end
+
+  test "P3-B2-09: error callback throw is not recaught after executor throw", context do
+    caller = self()
+
+    opts = [
+      tool_executor: fn _, _ -> throw(:executor_failed) end,
+      on_message: fn event ->
+        send(caller, {:error_callback, event.event})
+        throw(:callback_failed)
+      end
+    ]
+
+    assert catch_throw(TurnEffects.apply_result(Claude, observation(:claude_cli, []), context.workspace, %{}, opts, :delivery)) == :callback_failed
+    assert_receive {:error_callback, :turn_ended_with_error}
+    refute_receive {:error_callback, _}
+  end
+
+  test "P3-B2-12: commit survives executor rejection and no normal final occurs", context do
+    File.write!(Path.join(context.workspace, "existing.txt"), "retained commit\n")
+    caller = self()
+
+    opts = [
+      tool_executor: fn _, _ ->
+        send(caller, :rejected_report)
+        %{"success" => false}
+      end,
+      on_message: fn event -> send(caller, {:rejected_event, event.event}) end
+    ]
+
+    assert {:error, {:turn_effect_failed, %{step: :report_turn_result, reason: :tool_rejected}}} =
+             TurnEffects.apply_result(Claude, observation(:claude_cli, []), context.workspace, %{}, opts, :delivery)
+
+    assert git!(context.workspace, ["show", "HEAD:existing.txt"]) == "retained commit\n"
+    assert_receive :rejected_report
+    refute_receive :rejected_report
+    assert_receive {:rejected_event, :turn_ended_with_error}
+    refute_receive {:rejected_event, _}
+  end
+
+  defp observation(profile, files), do: {:ok, %{result: :turn_completed, usage: %{}, cli_observation: %{profile: profile, files_touched: files, result_text: nil, error: nil}}}
+
   defp run_delivery(provider, session, prompt, issue, opts \\ []) do
+    opts = Keyword.put_new(opts, :tool_executor, fn _, _ -> %{"success" => true} end)
     result = provider.run_turn(session, prompt, issue, opts)
     TurnEffects.apply_result(provider, result, session.workspace, issue, opts, :delivery)
   end

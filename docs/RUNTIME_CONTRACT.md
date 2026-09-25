@@ -98,17 +98,42 @@ without extra callbacks or policy selected by arbitrary payload fields. Sessions
 remain opaque. ErrorHandler.run_logged_agent_turn/5 is transport plus logging,
 not a second delivery entry point, and does not infer workspace from a session.
 
-Exceptions in local effects, synthesis or the final callback retain the moved
-catch boundary. An error callback that itself fails escapes without recursive
-notification. A normal callback that delivered before throwing may be followed by
-an error event: callback delivery is not exactly once. No local effect is retried.
+Command and executor failures return `{:error, {:turn_effect_failed, details}}`.
+Details identify the runtime-owned step (`detect_changes`, `format`, `stage`,
+`index_diff`, `commit`, or `report_turn_result`) and exact status/output or exception
+kind/reason. Command diagnostics include executable, argv and cwd; they do not
+capture environment or transport options. Detection failures are not empty diffs.
+Missing `origin/main` for CodexCLI and missing HEAD for Claude are explicit errors,
+without fetching, fallback refs or retry. Index diff exit 0 skips commit; exit 1
+allows commit; every other exit status stops the chain. Only a successful commit
+emits the auto-commit success log.
 
-This is P3b.1. Nonzero format/add/commit and executor rejection retain their previous
-handling until P3b.2. Planning still advances through its historical error path;
-B1 does not guarantee that a failed transport or preparation blocks plan. I2 will
-validate execution ownership between transport and effects and at dynamic tool
-entry points; this boundary alone does not authorize stale work or fence remote
-provider effects. CLI usage remains scoped to each invocation until I2.
+CLI delivery requires an arity-two report executor before preparing Git. Its
+response must contain the string key `"success"` with a boolean: true accepts the
+report, false is `tool_rejected`; other responses are `invalid_tool_response`.
+Absent or wrong-arity executors are `missing_tool_executor`. Executor exceptions
+retain kind/reason inside the same effect-failure tag. A failed transport still
+skips preparation but its blocked report must be accepted by the executor.
+Acceptance of a blocked report is not successful delivery.
+
+The engine returns this tag from plan before reading an old report or transitioning
+to implement, and from implement before its after-snapshot, review updates/replies,
+next-stage transition or issue refresh. It does not retry the turn internally or
+count it as a successful implementation. Previously accepted token usage remains.
+Changes already made by the provider, formatter, index, commit hooks or executor
+remain: there is no rollback or atomicity promise. The owner's later generic retry
+is a separate policy and is unchanged.
+
+The error callback is attempted once outside failure classification. If it fails,
+its error escapes without recursive notification. Final-callback exceptions retain
+B1 behavior: a normal callback that delivered before throwing may be followed by
+an error event. Successful synthesis precedes a normal CLI final event; failed
+preparation or report acceptance emits no normal final event.
+
+Other historical plan behavior for transport errors/raw failed turns is unchanged.
+I2 will validate execution ownership between transport and effects and at dynamic
+tool entry points; B2 does not authorize stale work or fence remote provider effects.
+CLI usage remains scoped to each invocation until I2.
 
 ## Checked inbox storage (C4a)
 
