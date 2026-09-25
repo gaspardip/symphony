@@ -109,3 +109,35 @@ B1 does not guarantee that a failed transport or preparation blocks plan. I2 wil
 validate execution ownership between transport and effects and at dynamic tool
 entry points; this boundary alone does not authorize stale work or fence remote
 provider effects. CLI usage remains scoped to each invocation until I2.
+
+## Checked inbox storage (C4a)
+
+Tracker and GitHub inboxes share a checked storage contract. State version 2 binds
+an absolute byte offset to a queue generation. Each captured physical row carries
+a cursor for its observed prefix, including malformed complete rows. A repeated
+ack is idempotent only for that exact prefix and generation. Append preserves the
+current offset and ack preserves current dedupe keys under the same filesystem
+lock. All cooperating processes must use the same absolute configured path;
+symlink aliases and older binaries do not participate in this guarantee.
+
+A missing pair is an uninitialized inbox; a missing single file, corrupt state,
+invalid offset or unknown version is an error. Reads never invent a generation or
+replace corruption with empty defaults. Legacy state requires explicit migration
+while older writers are stopped. Migration maps the recorded physical line count
+to bytes and preserves dedupe, without reconstructing past effects.
+
+State publication uses a same-directory temporary, sync, close and rename. Append
+and state publication are separate operations: partial or uncertain failure is
+visible and may permit redelivery. A persistent tail without newline blocks append
+and reset; no automatic truncation or repair occurs. Records and capture batches
+are limited to 4 MiB; ordinary drains also stop at 100 physical rows. Oversize input
+is rejected before append. Logical reset preserves history and changes generation,
+sets the offset to EOF and clears dedupe. It is not corruption repair or compaction.
+
+Both event drains remain synchronous. After applying a prefix, the coordinator
+retains an unconfirmed cursor on storage failure and retries only that ack at the
+next drain opportunity. The cursor keeps its original location across configuration
+changes. A reset invalidates it; other mismatches remain blocked and visible.
+Owner restart can replay effects: delivery is at least once, not exactly once.
+No autonomous wakeup, reader slot or async admission routing is introduced here.
+Those remain C4b work after C3.

@@ -454,3 +454,38 @@ by the runtime. Direct adapter and ErrorHandler transport calls no longer commit
 or synthesize delivery reports. Command-error propagation and execution-ownership
 checks remain separate P3b.2/I2 work. See
 [the runtime contract](../docs/RUNTIME_CONTRACT.md#cli-transport-and-local-turn-effects).
+
+### Inbox state migration and recovery
+
+Tracker and GitHub inbox state version 2 uses queue generations and physical byte
+cursors. New empty inboxes initialize on enqueue. Existing legacy inboxes stop with
+`migration_required`; reads do not migrate or replace missing/corrupt state.
+
+Stop all older writers before upgrading an existing inbox. In a local runtime
+configured with the intended `:log_file`, capture each module's `location()` and
+call `TrackerEventInbox.migrate_legacy(location)` or
+`GitHubEventInbox.migrate_legacy(location)` respectively. Check `:ok` and inspect
+`stats()` before restarting intake. Do this separately for every configured root.
+Migration preserves JSONL bytes, dedupe and the physical meaning of the old count;
+it cannot infer which effects an older malformed-row cursor already applied.
+Do not run an older binary concurrently with the new writer protocol.
+
+`capture(location, %{max_rows: 100, max_bytes: 4 * 1024 * 1024})` returns physical
+rows with cursors. Use `ack(row.cursor)` for a completed prefix; numeric ack is
+removed. The inspection helper `pending_events/1` still returns maps, but raises a
+specific inbox error on storage failure. Stats expose unknown depth as nil and
+mark bounded counts incomplete. A record, including its newline, may not exceed
+4 MiB; oversized enqueue is rejected before writing.
+
+All operations share a filesystem lock for the same absolute configured location.
+An occupied/orphaned lock is a visible error; the runtime does not steal it. A
+partial tail blocks append/reset and is never repaired implicitly. Investigate
+and preserve the files before any manual recovery. Reset is now logical: it keeps
+JSONL history, changes generation, advances to complete EOF and clears dedupe.
+It refuses corrupt or partial queues and is not a repair or compaction command.
+
+State uses atomic rename; append and state publication are not a single transaction.
+An uncertain failure can redeliver events. The live coordinator retries a retained
+ack without replaying its already applied prefix, while restart remains at-least-once.
+Errors expose sanitized phases/codes, not raw event payloads. Event draining remains
+synchronous; this storage change does not provide C4b reader availability.

@@ -124,6 +124,8 @@ defmodule SymphonyElixir.Orchestrator do
       webhook_last_rejected_reason: nil,
       webhook_last_rejected_rule_id: nil,
       inbox_last_drained_at: nil,
+      inbox_ack_pending: nil,
+      inbox_storage_error: nil,
       github_webhook_last_accepted_at: nil,
       github_webhook_last_ignored_at: nil,
       github_webhook_last_ignored_reason: nil,
@@ -132,6 +134,8 @@ defmodule SymphonyElixir.Orchestrator do
       github_webhook_last_rejected_reason: nil,
       github_webhook_last_rejected_rule_id: nil,
       github_inbox_last_drained_at: nil,
+      github_inbox_ack_pending: nil,
+      github_inbox_storage_error: nil,
       github_webhook_check_in_progress: false,
       github_last_assignment: nil,
       first_poll_completed: false
@@ -1033,54 +1037,91 @@ defmodule SymphonyElixir.Orchestrator do
   defp block_candidate_policy_conflicts(%State{} = state, _issues), do: {state, []}
 
   defp drain_tracker_events(%State{} = state) do
-    pending_events = TrackerEventInbox.pending_events(100)
-
-    {state, ack_count} =
-      Enum.reduce_while(pending_events, {state, 0}, fn record, {state_acc, ack_count} ->
-        case decode_tracker_event_record(record) do
-          %TrackerEvent{} = event ->
-            case maybe_process_tracker_event(state_acc, event) do
-              {:ok, next_state} ->
-                {:cont, {next_state, ack_count + 1}}
-
-              {:drop, next_state} ->
-                {:cont, {next_state, ack_count + 1}}
-
-              {:rate_limited, next_state} ->
-                {:halt, {next_state, ack_count}}
-            end
-
-          _ ->
-            {:cont, {state_acc, ack_count + 1}}
-        end
-      end)
-
-    if ack_count > 0 do
-      _ = TrackerEventInbox.ack(ack_count)
-    end
-
-    %{state | inbox_last_drained_at: DateTime.utc_now(), candidate_fetch_error: nil}
+    fields = %{pending: :inbox_ack_pending, error: :inbox_storage_error, drained: :inbox_last_drained_at}
+    drain_inbox(state, TrackerEventInbox, fields, &process_tracker_inbox_row/2)
   end
 
   defp drain_github_events(%State{} = state) do
-    pending_events = GitHubEventInbox.pending_events(100)
+    fields = %{pending: :github_inbox_ack_pending, error: :github_inbox_storage_error, drained: :github_inbox_last_drained_at}
+    drain_inbox(state, GitHubEventInbox, fields, &process_github_inbox_row/2)
+  end
 
-    {state, ack_count} =
-      Enum.reduce(pending_events, {state, 0}, fn record, {state_acc, ack_count} ->
-        case decode_github_event_record(record) do
-          %GitHubEvent{} = event ->
-            {maybe_process_github_event(state_acc, event), ack_count + 1}
-
-          _ ->
-            {state_acc, ack_count + 1}
-        end
-      end)
-
-    if ack_count > 0 do
-      _ = GitHubEventInbox.ack(ack_count)
+  defp process_tracker_inbox_row(state, {:ok, record}) do
+    case decode_tracker_event_record(record) do
+      %TrackerEvent{} = event -> maybe_process_tracker_event(state, event)
+      _ -> {:drop, state}
     end
+  end
 
-    %{state | github_inbox_last_drained_at: DateTime.utc_now()}
+  defp process_tracker_inbox_row(state, {:invalid, _reason}), do: {:drop, state}
+
+  defp process_github_inbox_row(state, {:ok, record}) do
+    case decode_github_event_record(record) do
+      %GitHubEvent{} = event -> {:ok, maybe_process_github_event(state, event)}
+      _ -> {:drop, state}
+    end
+  end
+
+  defp process_github_inbox_row(state, {:invalid, _reason}), do: {:drop, state}
+
+  defp drain_inbox(state, inbox, fields, process_row) do
+    if Map.get(state, fields.pending) do
+      # Applied effects are not replayed when only their physical ack is pending.
+      confirm_inbox_prefix(state, inbox, fields)
+    else
+      case inbox.capture(inbox.location(), %{max_rows: 100, max_bytes: 4 * 1024 * 1024}) do
+        {:ok, batch} ->
+          {state, cursor} =
+            Enum.reduce_while(batch.rows, {state, nil}, fn row, {acc, cursor} ->
+              case process_row.(acc, row.record) do
+                {:ok, next} -> {:cont, {next, row.cursor}}
+                {:drop, next} -> {:cont, {next, row.cursor}}
+                {:rate_limited, next} -> {:halt, {next, cursor}}
+              end
+            end)
+
+          finish_inbox_batch(state, inbox, fields, batch, cursor)
+
+        {:error, error} ->
+          inbox_storage_failed(state, fields, error)
+      end
+    end
+  end
+
+  defp finish_inbox_batch(state, inbox, fields, _batch, %SymphonyElixir.EventInbox.Cursor{} = cursor) do
+    state |> Map.put(fields.pending, cursor) |> confirm_inbox_prefix(inbox, fields)
+  end
+
+  defp finish_inbox_batch(state, _inbox, fields, %{rows: [], tail: :none, limit_reached: false}, nil) do
+    state |> Map.put(fields.error, nil) |> Map.put(fields.drained, DateTime.utc_now())
+  end
+
+  defp finish_inbox_batch(state, _inbox, fields, _batch, nil), do: Map.put(state, fields.error, nil)
+
+  defp confirm_inbox_prefix(state, inbox, fields) do
+    case inbox.ack(Map.fetch!(state, fields.pending)) do
+      {:ok, _confirmation} ->
+        state |> Map.put(fields.pending, nil) |> Map.put(fields.error, nil) |> Map.put(fields.drained, DateTime.utc_now())
+
+      {:error, %{reason_code: :generation_changed} = error} ->
+        state |> Map.put(fields.pending, nil) |> inbox_storage_failed(fields, error)
+
+      {:error, error} ->
+        inbox_storage_failed(state, fields, error)
+    end
+  end
+
+  defp inbox_storage_failed(state, fields, error) do
+    summary = SymphonyElixir.EventInbox.error_summary(error)
+    Logger.error("Inbox storage failed phase=#{summary.phase} reason=#{summary.reason_code} confirmation=#{summary.confirmation}")
+    Map.put(state, fields.error, summary)
+  end
+
+  defp inbox_snapshot(inbox, pending, error, drained_at) do
+    inbox.stats()
+    |> Map.put(:ack_pending, not is_nil(pending))
+    |> Map.put(:last_storage_error, error)
+    |> Map.put(:last_drained_at, datetime_to_iso8601(drained_at))
   end
 
   defp maybe_process_github_event(%State{} = state, %GitHubEvent{} = event) do
@@ -5243,15 +5284,9 @@ defmodule SymphonyElixir.Orchestrator do
          last_rejected_reason: Map.get(state, :github_webhook_last_rejected_reason),
          last_rejected_rule_id: Map.get(state, :github_webhook_last_rejected_rule_id)
        },
-       tracker_inbox:
-         TrackerEventInbox.stats()
-         |> Map.put(:last_drained_at, datetime_to_iso8601(Map.get(state, :inbox_last_drained_at))),
+       tracker_inbox: inbox_snapshot(TrackerEventInbox, state.inbox_ack_pending, state.inbox_storage_error, state.inbox_last_drained_at),
        github_inbox:
-         GitHubEventInbox.stats()
-         |> Map.put(
-           :last_drained_at,
-           datetime_to_iso8601(Map.get(state, :github_inbox_last_drained_at))
-         )
+         inbox_snapshot(GitHubEventInbox, state.github_inbox_ack_pending, state.github_inbox_storage_error, state.github_inbox_last_drained_at)
          |> Map.put(:last_assignment, Map.get(state, :github_last_assignment)),
        polling: %{
          checking?: state.poll_check_in_progress == true,

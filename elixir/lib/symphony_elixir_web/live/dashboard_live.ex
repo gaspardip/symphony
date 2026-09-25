@@ -530,6 +530,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <span class="data-key">Inbox depth</span>
                   <span class="data-value mono"><%= format_int(Map.get(@payload.tracker_inbox || %{}, :depth)) %></span>
                 </div>
+                <%= for {label, inbox} <- [{"Tracker inbox", @payload.tracker_inbox || %{}}, {"GitHub inbox", @payload.github_inbox || %{}}] do %>
+                  <%= if error = Map.get(inbox, :last_storage_error) || Map.get(inbox, :error) do %>
+                    <div class="data-row">
+                      <span class="data-key"><%= label %></span>
+                      <span class="data-value"><%= Map.get(error, :phase) %>: <%= Map.get(error, :reason_code) %></span>
+                    </div>
+                  <% end %>
+                <% end %>
                 <div class="data-row">
                   <span class="data-key">Oldest pending</span>
                   <span class="data-value mono"><%= Map.get(@payload.tracker_inbox || %{}, :oldest_pending_event_at) || "n/a" %></span>

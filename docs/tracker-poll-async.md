@@ -112,3 +112,22 @@ compatibility path or unversioned-message executor.
 Webhook/GitHub event processing, immediate controls, pre-dispatch revalidation from those entry points, passive-to-active promotion after lease acquisition, tracker mutations and local business effects still use their existing paths. Applying read results can call those paths. An injected slow operation there can still occupy the coordinator. Configuration lookup remains a WorkflowStore call; an invalid file that WorkflowStore has not adopted is not a new active configuration. This phase establishes availability during the selected reads only.
 
 The new tests use closed tracker callbacks, local manual issues, real leases and controlled TaskSupervisor children. No external tracker, provider, Git operation or publication is needed. The backoff status test observes the real coordinator with its existing assertions and deadline. Manual submissions accepted during a held cycle queue discovery so that the accepted task is not delayed until the next polling interval.
+
+## Inbox storage and synchronous confirmation (C4a)
+
+The shared Tracker/GitHub storage now captures bounded physical prefixes and
+acknowledges a cursor, replacing the numeric ack API. It fixes append/ack cursor
+races without moving the event lookup or GitHub effects outside the coordinator.
+Complete invalid rows have physical positions; a partial tail is retained and
+blocks further append. State corruption and storage failures remain visible in
+snapshot and dashboard instead of appearing as an empty queue.
+
+A failed ack retains one applied-prefix cursor per inbox. A subsequent drain
+attempts only that confirmation and returns, even if the configured root changed.
+The retained location prevents confirming another root. Reset changes generation
+and retires the old cursor without touching the new queue. After restart this
+volatile evidence is absent, so processing remains at least once.
+
+No C4b availability claim follows from this storage change. Webhook tracker lookup,
+its second pre-dispatch validation, GitHub work and local effects remain synchronous;
+429 retry wakeups and shared reader arbitration still require C4b after C3.

@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.TrackerEventInbox do
   @moduledoc """
-  Durable file-backed inbox for tracker webhook events.
+  Checked file-backed inbox for tracker webhook events.
+
+  Captured cursors acknowledge physical prefixes. Legacy state requires explicit
+  `migrate_legacy(location())`; reset changes generation without deleting history.
   """
 
   alias SymphonyElixir.TrackerEvent

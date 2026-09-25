@@ -1549,7 +1549,8 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     assert [%{"event" => payload}] = TrackerEventInbox.pending_events(10)
     assert payload["issue_identifier"] == "MT-1"
 
-    assert :ok = TrackerEventInbox.ack(1)
+    assert {:ok, %{rows: [%{cursor: cursor}]}} = TrackerEventInbox.capture(TrackerEventInbox.location(), %{max_rows: 10, max_bytes: 4 * 1024 * 1024})
+    assert {:ok, :advanced} = TrackerEventInbox.ack(cursor)
     assert [] == TrackerEventInbox.pending_events(10)
   end
 
