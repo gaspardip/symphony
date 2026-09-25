@@ -104,9 +104,12 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
       end
     end)
 
+    :ok = wait_for_initial_poll(pid)
+    :sys.replace_state(pid, fn state -> %{state | last_candidate_issues: []} end)
+
+    deadline_ms = System.monotonic_time(:millisecond) + 5_000
     send(pid, :run_poll_cycle)
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = wait_for_candidate_poll(pid, issue, deadline_ms)
 
     assert state.running == %{}
     assert state.last_candidate_issues == [issue]
@@ -265,16 +268,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
   end
 
   test "direct run_poll_cycle handling logs workflow parse configuration errors" do
-    orchestrator_name = Module.concat(__MODULE__, :DirectPollCycleOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
-
-    state = :sys.get_state(pid)
+    state = Orchestrator.refresh_runtime_config(%Orchestrator.State{lease_owner: "direct-poll-cycle-test"})
     workflow_store_pid = Process.whereis(WorkflowStore)
 
     on_exit(fn ->
@@ -530,7 +524,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     issue = %Issue{id: "issue-running-refresh", identifier: "MT-RUNNING", state: "In Progress"}
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_concurrent_agents: 0)
 
     orchestrator_name = Module.concat(__MODULE__, :RunningRefreshOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -541,6 +535,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
       end
     end)
 
+    :ok = wait_for_initial_poll(pid)
     initial_state = :sys.get_state(pid)
     claim_issue_lease!(issue.id, issue.identifier, initial_state.lease_owner)
 
@@ -557,16 +552,16 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
       started_at: DateTime.utc_now()
     }
 
-    :sys.replace_state(pid, fn _ ->
-      initial_state
+    :sys.replace_state(pid, fn current_state ->
+      current_state
       |> Map.put(:running, %{issue.id => running_entry})
-      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue.id))
+      |> Map.put(:claimed, MapSet.put(current_state.claimed, issue.id))
     end)
 
     send(pid, :run_poll_cycle)
     Process.sleep(50)
 
-    refreshed_state = :sys.get_state(pid)
+    refreshed_state = wait_for_running_issue(pid, issue, System.monotonic_time(:millisecond) + 5_000)
     assert refreshed_state.running[issue.id].issue == issue
   end
 
@@ -670,6 +665,63 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
   test "reconcile_issue_states_for_test accepts non-struct state values" do
     state = %{marker: :ok}
     assert %{marker: :ok} = Orchestrator.reconcile_issue_states_for_test([], state)
+  end
+
+  defp wait_for_candidate_poll(pid, issue, deadline_ms, last_observed \\ %{}) do
+    remaining_ms = deadline_ms - System.monotonic_time(:millisecond)
+    assert remaining_ms > 0, "candidate poll did not finish within 5,000 ms; last observed: #{inspect(last_observed)}"
+    state = :sys.get_state(pid, remaining_ms)
+
+    if state.last_candidate_issues == [issue] and is_nil(state.tracker_poll_cycle) and
+         is_nil(state.tracker_poll_read) and state.tracker_poll_pending == [] and
+         state.poll_check_in_progress == false and is_nil(state.current_poll_mode) do
+      state
+    else
+      observed = %{
+        cycle: state.tracker_poll_cycle,
+        read: if(state.tracker_poll_read, do: Map.take(state.tracker_poll_read, [:pid, :ref, :phase])),
+        pending: state.tracker_poll_pending,
+        checking: state.poll_check_in_progress,
+        mode: state.current_poll_mode,
+        candidate_error: state.candidate_fetch_error,
+        candidates: state.last_candidate_issues,
+        running_issue_ids: Map.keys(state.running)
+      }
+
+      Process.sleep(min(5, remaining_ms))
+      wait_for_candidate_poll(pid, issue, deadline_ms, observed)
+    end
+  catch
+    :exit, {:timeout, _details} ->
+      flunk("candidate poll state query timed out; last observed: #{inspect(last_observed)}")
+  end
+
+  defp wait_for_running_issue(pid, issue, deadline_ms) do
+    remaining_ms = deadline_ms - System.monotonic_time(:millisecond)
+    assert remaining_ms > 0, "running issue did not refresh within 5,000 ms"
+    state = :sys.get_state(pid, remaining_ms)
+
+    if get_in(state.running, [issue.id, :issue]) == issue do
+      state
+    else
+      Process.sleep(min(5, remaining_ms))
+      wait_for_running_issue(pid, issue, deadline_ms)
+    end
+  end
+
+  defp wait_for_initial_poll(pid, deadline_ms \\ System.monotonic_time(:millisecond) + 5_000) do
+    remaining_ms = deadline_ms - System.monotonic_time(:millisecond)
+    assert remaining_ms > 0, "initial poll did not complete within 5,000 ms"
+    state = :sys.get_state(pid, remaining_ms)
+
+    if state.first_poll_completed == true and is_nil(state.tracker_poll_cycle) and
+         is_nil(state.tracker_poll_read) and state.tracker_poll_pending == [] and
+         state.poll_check_in_progress == false and is_nil(state.current_poll_mode) do
+      :ok
+    else
+      Process.sleep(min(5, remaining_ms))
+      wait_for_initial_poll(pid, deadline_ms)
+    end
   end
 
   defp running_state_with_issue!(issue, running_entry \\ nil) do

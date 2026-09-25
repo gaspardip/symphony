@@ -208,6 +208,26 @@ disabled manual source returns `{:ok, []}`. These APIs let a coordinator handle
 remote rate limits before combining source results; the existing merged APIs
 retain their prior error behavior.
 
+## Asynchronous startup and polling reads
+
+Startup terminal cleanup and polling use a supervised `TrackerReader` with one
+active read. The coordinator remains the sole owner of State and applies results
+only after checking the operation reference, captured configuration, current worker
+identity and newer backoff decisions. Stop, pause, hold, resume and policy changes
+invalidate affected data from the current cycle; priority changes remain in current
+State. The read context also captures the policy pack from the same options.
+
+Notifications retain the scheduled cycle-message boundary and pending modes are
+coalesced. Manual success does not erase a remote 429 or its diagnostic. Candidate
+lists still refresh at zero capacity. Read errors preserve running workers, and
+cleanup respects a lease acquired during the read.
+
+This is a partial availability boundary. Webhook/GitHub processing, retries,
+immediate controls, pre-dispatch revalidation and tracker writes remain synchronous;
+applying a result may still invoke those paths. The next phase must address them
+before claiming general coordinator availability. See [the phase contract and
+regressions](../docs/tracker-poll-async.md).
+
 ## Bounded retries during implementation
 
 `policy.token_budget.broad_implement` lets the runtime retry an implementation turn

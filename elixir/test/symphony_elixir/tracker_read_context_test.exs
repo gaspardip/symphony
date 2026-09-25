@@ -262,15 +262,77 @@ defmodule SymphonyElixir.TrackerReadContextTest do
         # Register restoration before suspension, including a failed suspension request.
         # ExUnit runs it after the later workflow/environment restoration callback.
         on_exit(fn -> :ok = :sys.resume(pid) end)
-        :ok = :sys.suspend(pid)
+        suspend_quiescent_scheduler!(pid, System.monotonic_time(:millisecond) + 5_000)
         state = :sys.get_state(pid)
         assert state.running == %{}, "Refusing to change workflow with active issue workers"
+        assert scheduler_quiescent?(state), "Refusing to change workflow while a tracker cycle is active"
 
         assert Task.Supervisor.children(SymphonyElixir.TaskSupervisor) == [],
                "Refusing to change workflow while application tasks are active"
 
         :ok
     end
+  end
+
+  defp suspend_quiescent_scheduler!(pid, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+    assert remaining > 0, "Timed out waiting for the supervised scheduler to become quiescent"
+    state = :sys.get_state(pid, remaining)
+    assert state.running == %{}, "Refusing to change workflow with active issue workers"
+    tasks = Task.Supervisor.children(SymphonyElixir.TaskSupervisor)
+
+    if scheduler_quiescent?(state) and tasks == [] do
+      remaining = deadline - System.monotonic_time(:millisecond)
+      assert remaining > 0, "Timed out before suspending the supervised scheduler"
+      :ok = :sys.suspend(pid, remaining)
+      remaining = deadline - System.monotonic_time(:millisecond)
+      assert remaining > 0, "Timed out before checking the suspended scheduler"
+      suspended_state = :sys.get_state(pid, remaining)
+      assert suspended_state.running == %{}, "Refusing to change workflow with active issue workers"
+      suspended_tasks = Task.Supervisor.children(SymphonyElixir.TaskSupervisor)
+
+      if scheduler_quiescent?(suspended_state) and suspended_tasks == [] do
+        :ok
+      else
+        # A tick may have started between observation and suspension. Let only
+        # this supervised owner finish its work, then attempt suspension again.
+        :ok = :sys.resume(pid)
+        await_scheduler_retry!(pid, deadline, suspended_state, suspended_tasks)
+      end
+    else
+      await_scheduler_retry!(pid, deadline, state, tasks)
+    end
+  end
+
+  defp await_scheduler_retry!(pid, deadline, state, tasks) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining > 0, do: Process.sleep(min(5, remaining))
+
+    if System.monotonic_time(:millisecond) >= deadline do
+      cycle = state.tracker_poll_cycle
+      reader = state.tracker_poll_read
+
+      diagnostic = %{
+        mode: if(cycle, do: cycle.mode),
+        phase: if(cycle, do: cycle.phase),
+        pending: state.tracker_poll_pending,
+        reader_pid: if(reader, do: reader.pid),
+        reader_phase: if(reader, do: reader.phase),
+        poll_check_in_progress: state.poll_check_in_progress,
+        github_check_in_progress: state.github_webhook_check_in_progress,
+        task_pids: tasks
+      }
+
+      flunk("Timed out waiting for scheduler quiescence: #{inspect(diagnostic)}")
+    end
+
+    suspend_quiescent_scheduler!(pid, deadline)
+  end
+
+  defp scheduler_quiescent?(state) do
+    is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and state.tracker_poll_pending == [] and
+      not state.poll_check_in_progress and not state.github_webhook_check_in_progress
   end
 
   defp write_workflow_file!(path, overrides \\ []) do

@@ -74,6 +74,12 @@ credentials and source root selected for an in-flight read. See the
 explicit context APIs and limits; this consistency boundary does not itself make
 tracker I/O asynchronous.
 
+Startup cleanup and polling now run their tracker reads outside the coordinator,
+with one active read and current-state checks before applying results. Remote
+throttling remains visible when manual reads succeed. See the [polling scope and
+remaining synchronous operations](docs/tracker-poll-async.md); webhook processing,
+retries, immediate controls and pre-dispatch revalidation still need the next phase.
+
 ---
 
 ## License

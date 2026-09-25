@@ -345,7 +345,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
         "symphony-github-webhook-#{System.unique_integer([:positive])}"
       )
 
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: workspace_root)
     Application.put_env(:symphony_elixir, :pr_watcher_github_client, FakeGitHubReviewClient)
 
     orchestrator_name = :"github-webhook-orchestrator-#{System.unique_integer([:positive])}"
