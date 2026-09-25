@@ -2100,10 +2100,24 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     assert :ok = LeaseManager.acquire("issue-spawn-errors", "MT-SPAWN-ERRORS", owner)
 
+    spawn_issue = %{issue | id: "issue-spawn-errors", identifier: "MT-SPAWN-ERRORS"}
+    old_retry_ref = make_ref()
+    resume_context = %{focus: "retain spawn failure focus", target_paths: ["lib/worker.ex"]}
+
+    previous_retry = %{
+      retry_ref: old_retry_ref,
+      status: :reading,
+      timer_ref: nil,
+      due_at_ms: 0,
+      attempt: 4,
+      identifier: spawn_issue.identifier,
+      budget_resume_context: resume_context
+    }
+
     spawned_state =
       Orchestrator.do_spawn_issue_worker_for_test(
-        %State{lease_owner: owner},
-        %{issue | id: "issue-spawn-errors", identifier: "MT-SPAWN-ERRORS"},
+        %State{lease_owner: owner, retry_attempts: %{spawn_issue.id => previous_retry}},
+        spawn_issue,
         4,
         self(),
         start_child_fun: fn _supervisor, _fun -> {:error, :noproc} end
@@ -2113,6 +2127,37 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert retry_entry.attempt == 5
     assert retry_entry.identifier == "MT-SPAWN-ERRORS"
     assert retry_entry.error =~ "failed to spawn agent: :noproc"
+    assert retry_entry.retry_ref != old_retry_ref
+    assert retry_entry.status == :scheduled
+    assert retry_entry.budget_resume_context == resume_context
+    on_exit(fn -> Process.cancel_timer(retry_entry.timer_ref) end)
+
+    # Compose the existing worker-start failure seam with the public completion
+    # boundary; this does not claim a timer-to-spawn-failure end-to-end run.
+    old_operation = %{
+      purpose: :retry,
+      phase: :refresh,
+      issue: spawn_issue,
+      retry_ref: old_retry_ref,
+      ref: make_ref(),
+      monitor: make_ref(),
+      fingerprint: Config.tracker_read_context().fingerprint,
+      backoff: {spawned_state.tracker_backoff_until_ms, spawned_state.tracker_backoff_reason, spawned_state.tracker_backoff_rule_id},
+      lease_identity: :missing,
+      invalidated: false
+    }
+
+    assert {:noreply, after_callback} =
+             Orchestrator.handle_info(
+               {:tracker_read_result, old_operation.ref, {:ok, [spawn_issue]}},
+               %{spawned_state | admission_read: old_operation}
+             )
+
+    assert after_callback.retry_attempts[spawn_issue.id] == retry_entry
+    assert after_callback.admission_read == nil
+    assert after_callback.running == %{}
+    assert {:noreply, after_old_timer} = Orchestrator.handle_info({:retry_issue, spawn_issue.id, old_retry_ref}, after_callback)
+    assert after_old_timer == after_callback
   end
 
   test "dispatch clears persisted lease metadata when worker startup fails after lease acquisition" do
@@ -2517,6 +2562,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
   end
 
   test "passive retry path uses issue lookup instead of candidate list fetch" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     issue_id = "manual:issue-passive-retry"
     identifier = "MT-PASSIVE-RETRY"
     owner = "passive-retry-owner"
@@ -2526,21 +2573,16 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       claimed: MapSet.new([issue_id])
     }
 
-    {:noreply, next_state} =
-      Orchestrator.handle_retry_issue_for_test(
-        state,
-        issue_id,
-        1,
-        %{identifier: identifier, delay_type: :passive_continuation},
-        {:error, :candidate_fetch_should_not_run},
-        {:ok, nil}
-      )
+    entry = %{attempt: 1, retry_ref: make_ref(), status: :scheduled, timer_ref: nil, due_at_ms: 0, identifier: identifier, delay_type: :passive_continuation}
+    {:noreply, next_state} = SymphonyElixir.OrchestratorRetryDriver.run(%{state | retry_attempts: %{issue_id => entry}}, issue_id)
 
     refute MapSet.member?(next_state.claimed, issue_id)
     refute Map.has_key?(next_state.retry_attempts, issue_id)
   end
 
   test "manual continuation retry reuses seeded issue metadata when tracker lookup is empty" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_concurrent_agents: 0)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     issue_id = "manual:issue-continuation-retry"
     identifier = "MT-CONTINUATION-RETRY"
 
@@ -2552,14 +2594,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       source: :manual
     }
 
-    {:noreply, next_state} =
-      Orchestrator.handle_retry_issue_for_test(
-        %State{max_concurrent_agents: 0},
-        issue_id,
-        1,
-        %{identifier: identifier, delay_type: :continuation, issue: issue},
-        {:ok, []}
-      )
+    entry = %{attempt: 1, retry_ref: make_ref(), status: :scheduled, timer_ref: nil, due_at_ms: 0, identifier: identifier, delay_type: :continuation, issue: issue}
+    {:noreply, next_state} = SymphonyElixir.OrchestratorRetryDriver.run(%State{max_concurrent_agents: 0, retry_attempts: %{issue_id => entry}}, issue_id)
 
     retry_entry = Map.fetch!(next_state.retry_attempts, issue_id)
     assert retry_entry.attempt == 2

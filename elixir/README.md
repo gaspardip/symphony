@@ -232,7 +232,15 @@ new polls do not accumulate admission batches. Returning results must match the
 issue ID and identifier and pass current configuration, controls, worker,
 capacity, budget and audit checks. Stale data cannot clean newer work.
 
-This is a partial availability boundary. Webhook/GitHub processing, retries,
+Retries now share that admission reader. Timers identify their generation, and
+lookup/refresh preserve attempt and budget context until a current dispatch or
+explicit reschedule. Ready retries alternate with poll admissions; ordinary retries
+query candidates and passive continuations query their issue. Stale callbacks
+cannot consume a newer retry, and refresh errors explicitly reschedule instead of
+abandoning the entry. Current identity, capacity, ownership and audit checks still
+apply before worker authorization.
+
+This is a partial availability boundary. Webhook/GitHub processing,
 immediate controls, their pre-dispatch reads, promotion after lease acquisition
 and tracker writes remain synchronous;
 applying a result may still invoke those paths. The next phase must address them

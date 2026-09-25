@@ -14,6 +14,7 @@ source_paths:
   - elixir/lib/symphony_elixir/run_state_store.ex
 acceptance_signals:
   - Claude and CodexCLI share concrete local turn effects while retaining adapter-specific Git observations, caller-process synthesis and existing command-error behavior; engine-owned effect policy remains separate
+  - Retry timers identify their generation and share one asynchronous admission reader with poll candidates; obsolete callbacks preserve newer retries, accumulated budget context and run identity.
   - Audited dispatch binds each worker admission to a durable logical run identity, explicitly adopting historical snapshots without resetting consumption, stages or approvals; uncertain identity writes block work.
   - Stale lease takeover confirms checked intent and outcome before authorizing the new owner
   - Pending ownership evidence blocks renewal, acquisition, release and TTL reclamation
@@ -81,4 +82,4 @@ acceptance_signals:
   - Seeded manual continuation retries can reuse the persisted issue envelope and workspace branch identity so local stable-ingress replays survive the `review_verification` to `implement` handoff
 dependencies:
   - harness
-last_updated_by_issue: architecture-P3a
+last_updated_by_issue: architecture-c2

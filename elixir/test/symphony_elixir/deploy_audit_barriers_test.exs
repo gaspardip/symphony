@@ -70,7 +70,7 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
       max_concurrent_agents: 1,
       agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       claimed: MapSet.new([issue.id]),
-      retry_attempts: %{issue.id => %{identifier: issue.identifier, attempt: 2, timer_ref: timer, due_at_ms: System.monotonic_time(:millisecond) + 60_000}}
+      retry_attempts: %{issue.id => %{identifier: issue.identifier, attempt: 2, retry_ref: make_ref(), status: :scheduled, timer_ref: timer, due_at_ms: System.monotonic_time(:millisecond) + 60_000}}
     }
 
     {:ok, root: root, workspace: workspace, issue: issue, state: state, timer: timer, before: protected_bytes(workspace, issue), dispatch_ticket: dispatch_ticket}
@@ -131,7 +131,7 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
   end
 
   test "automatic retry halts without releasing the held lease or clearing deploy evidence", context do
-    assert {:noreply, blocked} = Orchestrator.handle_info({:retry_issue, context.issue.id}, context.state)
+    assert {:noreply, blocked} = Orchestrator.handle_info({:retry_issue, context.issue.id, context.state.retry_attempts[context.issue.id].retry_ref}, context.state)
     assert {:dispatch_audit_failed, "deploy-barrier", {:deploy_audit_pending, _}} = blocked.candidate_fetch_error
     assert blocked.running == %{}
     assert blocked.claimed == context.state.claimed

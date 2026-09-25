@@ -62,6 +62,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     end)
 
     initial_state = :sys.get_state(pid)
+    retry_ref = make_ref()
 
     :sys.replace_state(pid, fn _ ->
       initial_state
@@ -70,6 +71,9 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
       |> Map.put(:retry_attempts, %{
         issue_id => %{
           attempt: 2,
+          retry_ref: retry_ref,
+          status: :scheduled,
+          due_at_ms: 0,
           timer_ref: make_ref(),
           identifier: "MT-RETRY",
           error: "previous failure"
@@ -77,9 +81,8 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
       })
     end)
 
-    send(pid, {:retry_issue, issue_id})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
+    send(pid, {:retry_issue, issue_id, retry_ref})
+    state = await_retry_settled(pid, issue_id, System.monotonic_time(:millisecond) + 2_000)
 
     refute Map.has_key?(state.retry_attempts, issue_id)
     refute MapSet.member?(state.claimed, issue_id)
@@ -774,5 +777,20 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     on_exit(fn ->
       LeaseManager.release(issue_id)
     end)
+  end
+
+  defp await_retry_settled(pid, id, deadline) do
+    state = :sys.get_state(pid, 500)
+
+    if Map.has_key?(state.retry_attempts, id) do
+      assert System.monotonic_time(:millisecond) < deadline
+
+      receive do
+      after
+        5 -> await_retry_settled(pid, id, deadline)
+      end
+    else
+      state
+    end
   end
 end

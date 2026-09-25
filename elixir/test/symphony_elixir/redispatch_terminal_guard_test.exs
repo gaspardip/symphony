@@ -349,7 +349,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
           else: metadata
 
       state = with_pending_timer(%{state | max_concurrent_agents: 0}, issue, metadata)
-      assert {:noreply, next} = Orchestrator.handle_info({:retry_issue, issue.id}, state)
+      assert {:noreply, next} = SymphonyElixir.OrchestratorRetryDriver.run(state, issue.id)
 
       try do
         assert next.running == %{}
@@ -400,7 +400,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
         Map.put(metadata, :identifier, issue.identifier)
       )
 
-    assert {:noreply, next} = Orchestrator.handle_info({:retry_issue, issue.id}, state)
+    assert {:noreply, next} = SymphonyElixir.OrchestratorRetryDriver.run(state, issue.id)
 
     try do
       assert {:ok, %{stage: "implement", stop_reason: nil, review_claims: ^claims}} =
@@ -438,7 +438,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       })
 
     state = with_pending_timer(%{state | max_concurrent_agents: 0}, issue, timer_metadata)
-    assert {:noreply, next} = Orchestrator.handle_info({:retry_issue, issue.id}, state)
+    assert {:noreply, next} = SymphonyElixir.OrchestratorRetryDriver.run(state, issue.id)
 
     try do
       assert {:ok, %{stage: "implement", resume_context: %{budget_retry_count: 1}}} =
@@ -571,7 +571,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "other-owner")
     snapshot_bytes = File.read!(RunStateStore.state_path(workspace))
     lease_bytes = File.read!(LeaseManager.lease_path(issue.id))
-    assert {:noreply, next} = Orchestrator.handle_info({:retry_issue, issue.id}, state)
+    assert {:noreply, next} = SymphonyElixir.OrchestratorRetryDriver.run(state, issue.id)
 
     try do
       assert File.read!(RunStateStore.state_path(workspace)) == snapshot_bytes
@@ -594,16 +594,8 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     File.mkdir!(lock_path)
     parent = self()
 
-    worker =
-      spawn(fn ->
-        receive do
-          :run ->
-            send(
-              parent,
-              {:timer_result, self(), Orchestrator.handle_info({:retry_issue, id}, state)}
-            )
-        end
-      end)
+    {:ok, worker} = SymphonyElixir.OrchestratorRetryDriver.start_link(state, id, parent)
+    Process.unlink(worker)
 
     on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
     mfa = {LeaseManager, :acquire, 4}
@@ -667,7 +659,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
              RunStateStore.sync_lease(workspace, issue, LeaseManager.snapshot_for_state(lease))
 
     state = %{state | claimed: MapSet.new([issue.id])}
-    assert {:noreply, next} = Orchestrator.handle_info({:retry_issue, issue.id}, state)
+    assert {:noreply, next} = SymphonyElixir.OrchestratorRetryDriver.run(state, issue.id)
 
     try do
       assert {:ok, %{stage: "implement", lease_owner: nil}} = RunStateStore.load(workspace)
@@ -704,16 +696,8 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     on_exit(fn -> if Process.alive?(locker), do: Process.exit(locker, :kill) end)
     assert_receive {:snapshot_locked, ^locker}, 2_000
 
-    worker =
-      spawn(fn ->
-        receive do
-          :run ->
-            send(
-              parent,
-              {:timer_result, self(), Orchestrator.handle_info({:retry_issue, id}, state)}
-            )
-        end
-      end)
+    {:ok, worker} = SymphonyElixir.OrchestratorRetryDriver.start_link(state, id, parent)
+    Process.unlink(worker)
 
     on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
     mfa = {LeaseManager, :acquire, 4}
@@ -797,7 +781,12 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
   end
 
   defp with_pending_timer(state, issue, metadata) do
-    retry = Map.merge(metadata, %{attempt: 2, timer_ref: nil, due_at_ms: 0})
+    # Timer admission reads real configuration; seed its capacity and cached State consistently.
+    assert {:ok, workflow} = Workflow.current()
+    config = put_in(workflow.config, ["agent", "max_concurrent_agents"], state.max_concurrent_agents)
+    File.write!(Workflow.workflow_file_path(), "---\n" <> Jason.encode!(config) <> "\n---\n" <> workflow.prompt)
+    assert :ok = WorkflowStore.force_reload()
+    retry = Map.merge(metadata, %{attempt: 2, timer_ref: nil, due_at_ms: 0, retry_ref: make_ref(), status: :scheduled})
     %{state | retry_attempts: %{issue.id => retry}}
   end
 

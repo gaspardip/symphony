@@ -98,6 +98,7 @@ defmodule SymphonyElixir.Orchestrator do
       tracker_poll_pending: [],
       admission_read: nil,
       admission_batch: nil,
+      next_admission_kind: :poll,
       running: %{},
       completed: %{},
       claimed: MapSet.new(),
@@ -428,21 +429,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:agent_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
-  def handle_info({:retry_issue, issue_id}, state) do
-    result =
-      case dispatch_retry_guard(state, issue_id) do
-        :ok ->
-          case pop_retry_attempt_state(state, issue_id) do
-            {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
-            :missing -> {:noreply, state}
-          end
+  def handle_info({:retry_issue, issue_id, retry_ref}, state) do
+    case Map.get(state.retry_attempts, issue_id) do
+      %{retry_ref: ^retry_ref, status: :scheduled} ->
+        state = put_in(state.retry_attempts[issue_id].status, :ready)
+        state = advance_admission(state)
+        notify_dashboard()
+        {:noreply, state}
 
-        {:error, reason} ->
-          {:noreply, halt_dispatch_audit(state, issue_id, reason)}
-      end
-
-    notify_dashboard()
-    result
+      _ ->
+        {:noreply, state}
+    end
   end
 
   def handle_info(msg, state) do
@@ -818,15 +815,46 @@ defmodule SymphonyElixir.Orchestrator do
     case capture_tracker_poll_context() do
       {:ok, context} ->
         batch = %{issues: sort_issues_for_dispatch(issues, state), invalidated: MapSet.new()}
-        advance_admission_batch(%{state | admission_batch: batch}, context)
+        advance_admission(%{state | admission_batch: batch}, context)
 
       {:error, reason} ->
         %{state | candidate_fetch_error: reason}
     end
   end
 
-  defp advance_admission_batch(%{admission_read: operation} = state, _context) when not is_nil(operation), do: state
-  defp advance_admission_batch(%{admission_batch: %{issues: []}} = state, _context), do: %{state | admission_batch: nil}
+  defp advance_admission(%{admission_read: operation} = state) when not is_nil(operation), do: state
+
+  defp advance_admission(state) do
+    case capture_tracker_poll_context() do
+      {:ok, context} -> advance_admission(state, context)
+      {:error, reason} -> defer_ready_retries(%{state | candidate_fetch_error: reason, admission_batch: nil})
+    end
+  end
+
+  defp advance_admission(%{admission_read: operation} = state, _context) when not is_nil(operation), do: state
+
+  defp advance_admission(state, context) do
+    retry =
+      state.retry_attempts
+      |> Enum.filter(fn {_id, entry} -> Map.get(entry, :status) == :ready end)
+      |> Enum.min_by(fn {id, entry} -> {entry.due_at_ms, id} end, fn -> nil end)
+
+    poll? = match?(%{issues: [_ | _]}, state.admission_batch)
+
+    cond do
+      retry != nil and (state.next_admission_kind == :retry or not poll?) ->
+        {id, entry} = retry
+        state = start_retry_lookup(%{state | next_admission_kind: :poll}, id, entry, context)
+        advance_admission(state, context)
+
+      poll? ->
+        state = advance_admission_batch(%{state | next_admission_kind: :retry}, context)
+        advance_admission(state, context)
+
+      true ->
+        %{state | admission_batch: nil}
+    end
+  end
 
   defp advance_admission_batch(%{admission_batch: %{issues: [issue | rest]}} = state, context) do
     state = put_in(state.admission_batch.issues, rest)
@@ -844,7 +872,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
       end
 
-    advance_admission_batch(state, context)
+    state
   end
 
   defp start_admission_read(state, issue, context) do
@@ -853,13 +881,19 @@ defmodule SymphonyElixir.Orchestrator do
 
     case TrackerReader.start(read) do
       {:ok, reader} ->
-        operation = Map.merge(reader, %{issue: issue, fingerprint: context.fingerprint, backoff: tracker_poll_backoff_identity(state)})
+        operation = Map.merge(reader, %{purpose: :poll, issue: issue, fingerprint: context.fingerprint, backoff: tracker_poll_backoff_identity(state)})
         Logger.info("[admission] pending issue_id=#{issue.id} remaining=#{length(state.admission_batch.issues)}")
         %{state | admission_read: operation}
 
       {:error, reason} ->
         admission_discard(state, issue, {:tracker_reader_start_failed, reason})
     end
+  end
+
+  defp receive_admission_result(state, %{purpose: :retry} = operation, result) do
+    state
+    |> receive_retry_result(operation, result)
+    |> advance_admission()
   end
 
   defp receive_admission_result(state, operation, result) do
@@ -869,12 +903,12 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, context} <- capture_tracker_poll_context(),
          true <- context.fingerprint == operation.fingerprint or {:error, :admission_context_changed} do
       state = apply_admission_result(state, operation, result)
-      state = advance_admission_batch(state, context)
+      state = advance_admission(state, context)
       notify_dashboard()
       state
     else
       {:error, reason} ->
-        state |> admission_discard(operation.issue, reason) |> Map.put(:admission_batch, nil)
+        state |> admission_discard(operation.issue, reason) |> Map.put(:admission_batch, nil) |> advance_admission()
     end
   end
 
@@ -935,10 +969,21 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | candidate_fetch_error: reason}
   end
 
-  defp invalidate_admission_issue(%{admission_batch: nil} = state, _identifier), do: state
-
   defp invalidate_admission_issue(state, identifier) do
-    update_in(state.admission_batch.invalidated, &MapSet.put(&1, String.trim(identifier)))
+    identifier = String.trim(identifier)
+
+    state =
+      if state.admission_batch,
+        do: update_in(state.admission_batch.invalidated, &MapSet.put(&1, identifier)),
+        else: state
+
+    case state.admission_read do
+      %{purpose: :retry, issue: issue} when identifier in [issue.id, issue.identifier] ->
+        put_in(state.admission_read.invalidated, true)
+
+      _ ->
+        state
+    end
   end
 
   defp maybe_warn_first_poll(%State{first_poll_completed: true} = state, _candidate_count),
@@ -2905,59 +2950,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
-  @spec handle_retry_issue_for_test(State.t(), String.t(), non_neg_integer() | nil, map(), term()) ::
-          State.t()
-  def handle_retry_issue_for_test(%State{} = state, issue_id, attempt, metadata, issues_result) do
-    handle_retry_issue(
-      state,
-      issue_id,
-      attempt,
-      metadata,
-      fn -> issues_result end,
-      fn ref_id -> IssueSource.fetch_issue(%{id: ref_id}) end
-    )
-  end
-
-  @doc false
-  @spec handle_retry_issue_for_test(
-          State.t(),
-          String.t(),
-          non_neg_integer() | nil,
-          map(),
-          term(),
-          term()
-        ) :: State.t()
-  def handle_retry_issue_for_test(
-        %State{} = state,
-        issue_id,
-        attempt,
-        metadata,
-        issues_result,
-        issue_result
-      ) do
-    handle_retry_issue(
-      state,
-      issue_id,
-      attempt,
-      metadata,
-      fn -> issues_result end,
-      fn _ -> issue_result end
-    )
-  end
-
-  @doc false
-  @spec handle_retry_issue_lookup_for_test(
-          term(),
-          State.t(),
-          String.t(),
-          non_neg_integer() | nil,
-          map()
-        ) :: State.t()
-  def handle_retry_issue_lookup_for_test(issue, %State{} = state, issue_id, attempt, metadata) do
-    handle_retry_issue_lookup(issue, state, issue_id, attempt, metadata)
-  end
-
-  @doc false
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues, %State{})
@@ -4093,10 +4085,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_schedule_issue_retry(state, issue_id, attempt, metadata) do
+  defp do_schedule_issue_retry(state, issue_id, attempt, metadata, delay_override \\ nil, persist_context? \\ true) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
+    metadata = Map.merge(retry_metadata(previous_retry), metadata)
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
-    delay_ms = retry_delay(next_attempt, metadata)
+    delay_ms = delay_override || retry_delay(next_attempt, metadata)
     old_timer = Map.get(previous_retry, :timer_ref)
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
@@ -4106,13 +4099,14 @@ defmodule SymphonyElixir.Orchestrator do
       Process.cancel_timer(old_timer)
     end
 
-    timer_ref = Process.send_after(self(), {:retry_issue, issue_id}, delay_ms)
+    retry_ref = make_ref()
+    timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_ref}, delay_ms)
 
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
 
-    persist_retry_budget_resume_context(identifier, metadata)
+    if persist_context?, do: persist_retry_budget_resume_context(identifier, metadata)
 
     %{
       state
@@ -4122,12 +4116,14 @@ defmodule SymphonyElixir.Orchestrator do
             issue_id,
             %{
               attempt: next_attempt,
+              retry_ref: retry_ref,
+              status: :scheduled,
               timer_ref: timer_ref,
               due_at_ms: due_at_ms,
               identifier: identifier,
               error: error
             }
-            |> Map.merge(Map.drop(metadata, [:identifier, :error]))
+            |> Map.merge(Map.drop(metadata, [:identifier, :error, :attempt, :timer_ref, :due_at_ms, :retry_ref, :status]))
           )
     }
   end
@@ -4136,82 +4132,279 @@ defmodule SymphonyElixir.Orchestrator do
     case get_in(state.retry_attempts, [issue_id, :identifier]) do
       identifier when is_binary(identifier) ->
         workspace = Workspace.path_for_issue(identifier)
-        with :ok <- DeployAudit.ensure_available(workspace), do: DispatchAudit.ensure_available(workspace)
+
+        with :ok <- DeployAudit.ensure_available(workspace),
+             :ok <- DispatchAudit.ensure_available(workspace),
+             do: SymphonyElixir.RunIdentity.ensure_issue(workspace, %{id: issue_id, identifier: identifier})
 
       _ ->
         :ok
     end
   end
 
-  defp pop_retry_attempt_state(%State{} = state, issue_id) do
-    case Map.get(state.retry_attempts, issue_id) do
-      %{attempt: attempt} = retry_entry ->
-        metadata = Map.drop(retry_entry, [:attempt, :timer_ref, :due_at_ms])
+  defp retry_metadata(entry), do: Map.drop(entry, [:attempt, :timer_ref, :due_at_ms, :retry_ref, :status])
 
-        {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
+  defp defer_ready_retries(state) do
+    Enum.reduce(state.retry_attempts, state, fn
+      {id, %{status: :ready} = entry}, current -> rearm_retry(current, id, entry)
+      _, current -> current
+    end)
+  end
 
-      _ ->
-        :missing
+  defp rearm_retry(state, id, entry) do
+    delay =
+      if tracker_backoff_active?(state),
+        do: max(1, state.tracker_backoff_until_ms - System.monotonic_time(:millisecond)),
+        else: retry_delay(entry.attempt, entry)
+
+    do_schedule_issue_retry(state, id, entry.attempt, retry_metadata(entry), delay, false)
+  end
+
+  defp start_retry_lookup(state, id, entry, context) do
+    state = %{state | max_concurrent_agents: Config.max_concurrent_agents()}
+    issue = %Issue{id: id, identifier: entry.identifier}
+
+    cond do
+      Map.has_key?(state.running, id) or issue_paused?(state, issue) ->
+        cancel_dispatch_retry(state, id)
+
+      not Map.get(RunnerRuntime.runner_health(), :dispatch_enabled, true) ->
+        rearm_retry(state, id, entry)
+
+      not ManualIssueSpec.runtime_issue_id?(id) and tracker_backoff_active?(state) ->
+        rearm_retry(state, id, entry)
+
+      true ->
+        with :ok <- dispatch_retry_guard(state, id),
+             {:ok, lease_identity} <- retry_lease_identity(id) do
+          state = put_in(state.retry_attempts[id].status, :reading)
+          passive? = entry[:delay_type] == :passive_continuation
+          manual_only? = tracker_backoff_active?(state)
+
+          read = fn ->
+            cond do
+              passive? -> IssueSource.fetch_issue(%{id: id}, context)
+              manual_only? -> {:ok, %{tracker: :disabled, manual: IssueSource.fetch_manual_candidate_issues(context)}}
+              true -> {:ok, IssueSource.fetch_candidate_outcomes(context)}
+            end
+          end
+
+          operation = %{
+            purpose: :retry,
+            phase: :lookup,
+            issue: issue,
+            retry_ref: entry.retry_ref,
+            fingerprint: context.fingerprint,
+            backoff: tracker_poll_backoff_identity(state),
+            lease_identity: lease_identity,
+            invalidated: false
+          }
+
+          start_retry_read(state, operation, read)
+        else
+          {:error, reason} -> halt_dispatch_audit(state, id, reason)
+        end
     end
   end
 
-  defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    handle_retry_issue(
-      state,
-      issue_id,
-      attempt,
-      metadata,
-      &IssueSource.fetch_candidate_issues/0,
-      fn ref_id -> IssueSource.fetch_issue(%{id: ref_id}) end
-    )
+  defp start_retry_refresh(state, issue, _attempt) do
+    entry = Map.fetch!(state.retry_attempts, issue.id)
+
+    with {:ok, context} <- capture_tracker_poll_context(),
+         {:ok, lease_identity} <- retry_lease_identity(issue.id) do
+      operation = %{
+        purpose: :retry,
+        phase: :refresh,
+        issue: issue,
+        retry_ref: entry.retry_ref,
+        fingerprint: context.fingerprint,
+        backoff: tracker_poll_backoff_identity(state),
+        lease_identity: lease_identity,
+        invalidated: false
+      }
+
+      id = issue.id
+      start_retry_read(state, operation, fn -> IssueSource.fetch_issue_states_by_ids([id], context) end)
+    else
+      {:error, reason} ->
+        state |> Map.put(:candidate_fetch_error, reason) |> rearm_retry(issue.id, entry)
+    end
   end
 
-  defp handle_retry_issue(
-         %State{} = state,
-         issue_id,
-         attempt,
-         metadata,
-         candidate_issue_fetcher,
-         issue_fetcher
-       )
-       when is_function(candidate_issue_fetcher, 0) and is_function(issue_fetcher, 1) do
-    case metadata[:delay_type] do
-      :passive_continuation ->
-        case tracker_read(state, fn -> issue_fetcher.(issue_id) end) do
-          {%State{} = next_state, {:ok, issue}} ->
-            handle_retry_issue_lookup(issue, next_state, issue_id, attempt, metadata)
+  defp start_retry_read(state, operation, read) do
+    case TrackerReader.start(read) do
+      {:ok, reader} -> %{state | admission_read: Map.merge(operation, reader)}
+      {:error, reason} -> retry_read_error(state, operation, {:tracker_reader_start_failed, reason})
+    end
+  end
 
-          {%State{} = next_state, {:error, reason}} ->
-            Logger.warning("Passive retry lookup failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+  defp retry_lease_identity(id) do
+    case LeaseManager.read(id) do
+      {:ok, lease} -> {:ok, Map.take(lease, ["owner", "epoch", "acquired_at"])}
+      {:error, :missing} -> {:ok, :missing}
+      {:error, reason} -> {:error, {:retry_lease_read_failed, id, reason}}
+    end
+  end
 
-            {:noreply,
-             schedule_issue_retry(
-               next_state,
-               issue_id,
-               attempt + 1,
-               Map.merge(metadata, %{error: "passive retry lookup failed: #{inspect(reason)}"})
-             )}
-        end
+  defp receive_retry_result(state, operation, result) do
+    id = operation.issue.id
+
+    case capture_tracker_poll_context() do
+      {:ok, context} when context.fingerprint == operation.fingerprint ->
+        state =
+          if retry_generation_current?(state, operation),
+            do: %{state | max_concurrent_agents: Config.max_concurrent_agents()},
+            else: state
+
+        {state, result} = observe_retry_transport(state, operation, result)
+
+        state =
+          cond do
+            not retry_generation_current?(state, operation) ->
+              state
+
+            operation.invalidated ->
+              rearm_current_retry(state, operation)
+
+            Map.has_key?(state.running, id) or issue_paused?(state, operation.issue) ->
+              cancel_dispatch_retry(state, id)
+
+            retry_lease_identity(id) != {:ok, operation.lease_identity} ->
+              rearm_current_retry(state, operation)
+
+            result == :discarded ->
+              rearm_current_retry(state, operation)
+
+            true ->
+              case dispatch_retry_guard(state, id) do
+                :ok -> apply_retry_result(state, operation, result)
+                {:error, reason} -> halt_dispatch_audit(state, id, reason)
+              end
+          end
+
+        finish_retry_read(state, operation)
 
       _ ->
-        case tracker_read(state, candidate_issue_fetcher) do
-          {%State{} = next_state, {:ok, issues}} ->
-            issues
-            |> find_issue_by_id(issue_id)
-            |> handle_retry_issue_lookup(next_state, issue_id, attempt, metadata)
-
-          {%State{} = next_state, {:error, reason}} ->
-            Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
-
-            {:noreply,
-             schedule_issue_retry(
-               next_state,
-               issue_id,
-               attempt + 1,
-               Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
-             )}
-        end
+        state
+        |> Map.put(:candidate_fetch_error, :admission_context_changed)
+        |> Map.put(:admission_batch, nil)
+        |> rearm_current_retry(operation)
     end
+  end
+
+  defp retry_generation_current?(state, operation) do
+    case Map.get(state.retry_attempts, operation.issue.id) do
+      %{retry_ref: ref, status: :reading, identifier: identifier} ->
+        ref == operation.retry_ref and identifier == operation.issue.identifier
+
+      _ ->
+        false
+    end
+  end
+
+  defp rearm_current_retry(state, operation) do
+    if retry_generation_current?(state, operation),
+      do: rearm_retry(state, operation.issue.id, Map.fetch!(state.retry_attempts, operation.issue.id)),
+      else: state
+  end
+
+  defp finish_retry_read(state, operation) do
+    if is_nil(state.admission_read) and retry_generation_current?(state, operation),
+      do: cancel_dispatch_retry(state, operation.issue.id),
+      else: state
+  end
+
+  defp observe_retry_transport(state, operation, {:ok, %{tracker: tracker, manual: manual}}) do
+    {state, tracker} = observe_retry_remote(state, operation, tracker)
+    selected = if ManualIssueSpec.runtime_issue_id?(operation.issue.id), do: manual, else: tracker
+    selected = if selected == :disabled, do: {:ok, []}, else: selected
+    {state, selected}
+  end
+
+  defp observe_retry_transport(state, operation, result) do
+    if ManualIssueSpec.runtime_issue_id?(operation.issue.id),
+      do: {state, result},
+      else: observe_retry_remote(state, operation, result)
+  end
+
+  defp observe_retry_remote(state, _operation, :disabled), do: {state, :disabled}
+
+  defp observe_retry_remote(state, operation, result) do
+    if tracker_poll_backoff_identity(state) == operation.backoff,
+      do: tracker_read(state, fn -> result end),
+      else: {state, :discarded}
+  end
+
+  defp apply_retry_result(state, operation, {:error, reason}), do: retry_read_error(state, operation, reason)
+
+  defp apply_retry_result(state, %{phase: :lookup} = operation, {:ok, result}) do
+    entry = Map.fetch!(state.retry_attempts, operation.issue.id)
+    issue = if is_list(result), do: find_issue_by_id(result, operation.issue.id), else: result
+    issue = issue || manual_retry_issue_fallback(entry)
+
+    if is_nil(issue) or retry_issue_identity?(issue, operation.issue) do
+      {:noreply, next} = handle_retry_issue_lookup(issue, state, operation.issue.id, entry.attempt, retry_metadata(entry))
+      next
+    else
+      admission_discard(state, operation.issue, :admission_identity_mismatch)
+    end
+  end
+
+  defp apply_retry_result(state, %{phase: :refresh} = operation, {:ok, []}),
+    do: apply_retry_refresh(state, operation, [])
+
+  defp apply_retry_result(state, %{phase: :refresh, issue: expected} = operation, {:ok, [%Issue{id: id, identifier: identifier} = issue]})
+       when id == expected.id and identifier == expected.identifier,
+       do: apply_retry_refresh(state, operation, [issue])
+
+  defp apply_retry_result(state, %{phase: :refresh} = operation, {:ok, _issues}),
+    do: admission_discard(state, operation.issue, :admission_identity_mismatch)
+
+  defp apply_retry_refresh(state, operation, issues) do
+    case revalidate_issue_for_dispatch(operation.issue, fn _ -> {:ok, issues} end, terminal_state_set()) do
+      {:ok, issue} ->
+        if retry_issue_identity?(issue, operation.issue) and retry_active_current?(state, issue) do
+          entry = Map.fetch!(state.retry_attempts, issue.id)
+
+          if dispatch_slots_available?(issue, state) and company_slots_available?(state, PolicyPack.resolve(policy_pack_name(issue, state))) do
+            dispatch_runtime_issue(state, issue, entry.attempt, &do_dispatch_issue/3, &dispatch_passive_issue/3)
+          else
+            schedule_issue_retry(state, issue.id, entry.attempt + 1, Map.put(retry_metadata(entry), :error, "no available orchestrator slots"))
+          end
+        else
+          admission_discard(state, operation.issue, :admission_refresh_ineligible)
+        end
+
+      {:skip, _} ->
+        admission_discard(state, operation.issue, :admission_refresh_ineligible)
+
+      {:error, reason} ->
+        retry_read_error(state, operation, reason)
+    end
+  end
+
+  defp retry_issue_identity?(%Issue{id: id, identifier: identifier}, expected), do: id == expected.id and identifier == expected.identifier
+  defp retry_issue_identity?(_issue, _expected), do: false
+
+  defp retry_active_current?(state, issue) do
+    not Map.has_key?(state.running, issue.id) and not issue_paused?(state, issue) and
+      Map.get(RunnerRuntime.runner_health(), :dispatch_enabled, true) and
+      is_nil(dispatch_skip_reason(issue, state)) and
+      retry_candidate_issue?(issue, terminal_state_set()) and
+      not todo_issue_blocked_by_non_terminal?(issue, terminal_state_set())
+  end
+
+  defp retry_read_error(state, operation, reason) do
+    entry = Map.fetch!(state.retry_attempts, operation.issue.id)
+
+    prefix =
+      cond do
+        operation.phase == :refresh -> "retry refresh failed"
+        entry[:delay_type] == :passive_continuation -> "passive retry lookup failed"
+        true -> "retry poll failed"
+      end
+
+    schedule_issue_retry(state, operation.issue.id, entry.attempt + 1, Map.put(retry_metadata(entry), :error, "#{prefix}: #{inspect(reason)}"))
   end
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
@@ -4221,8 +4414,12 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(issue.identifier)
-        {:noreply, release_issue_claim(state, issue_id)}
+        if retry_cleanup_allowed?(state, issue_id) do
+          cleanup_issue_workspace(issue.identifier)
+          {:noreply, release_issue_claim(state, issue_id)}
+        else
+          {:noreply, stop_terminal_dispatch(state, issue, :retry_ownership_changed)}
+        end
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
@@ -4230,7 +4427,7 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, release_retry_claim(state, issue)}
     end
   end
 
@@ -4241,12 +4438,26 @@ defmodule SymphonyElixir.Orchestrator do
 
       nil ->
         Logger.debug("Issue no longer visible, removing claim issue_id=#{issue_id}")
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, release_retry_claim(state, %Issue{id: issue_id, identifier: metadata[:identifier]})}
     end
   end
 
   defp manual_retry_issue_fallback(%{issue: %Issue{source: :manual} = issue}), do: issue
   defp manual_retry_issue_fallback(_metadata), do: nil
+
+  defp retry_cleanup_allowed?(state, id) do
+    case LeaseManager.read(id) do
+      {:ok, %{"owner" => owner}} -> owner == state.lease_owner
+      {:error, :missing} -> true
+      _ -> false
+    end
+  end
+
+  defp release_retry_claim(state, issue) do
+    if retry_cleanup_allowed?(state, issue.id),
+      do: release_issue_claim(state, issue.id),
+      else: stop_terminal_dispatch(state, issue, :retry_ownership_changed)
+  end
 
   defp cleanup_issue_workspace(identifier) when is_binary(identifier) do
     Workspace.remove_issue_workspaces(identifier)
@@ -4379,28 +4590,32 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
-         dispatch_slots_available?(issue, state) do
-      dispatch_fun =
-        case metadata[:delay_type] do
-          :passive_continuation -> &dispatch_passive_issue/3
-          _ -> &dispatch_issue/3
-        end
+    cond do
+      not retry_active_current?(state, issue) ->
+        {:noreply, admission_discard(state, issue, :admission_no_longer_eligible)}
 
-      {:noreply, dispatch_runtime_issue(state, issue, attempt, dispatch_fun, &dispatch_passive_issue/3)}
-    else
-      Logger.debug("No available slots for retrying #{SymphonyElixir.Util.issue_log_context(issue)}; retrying again")
+      dispatch_slots_available?(issue, state) and company_slots_available?(state, PolicyPack.resolve(policy_pack_name(issue, state))) ->
+        dispatch_fun =
+          case metadata[:delay_type] do
+            :passive_continuation -> &dispatch_passive_issue/3
+            _ -> &start_retry_refresh/3
+          end
 
-      {:noreply,
-       schedule_issue_retry(
-         state,
-         issue.id,
-         attempt + 1,
-         Map.merge(metadata, %{
-           identifier: issue.identifier,
-           error: "no available orchestrator slots"
-         })
-       )}
+        {:noreply, dispatch_runtime_issue(state, issue, attempt, dispatch_fun, &dispatch_passive_issue/3)}
+
+      true ->
+        Logger.debug("No available slots for retrying #{SymphonyElixir.Util.issue_log_context(issue)}; retrying again")
+
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue.id,
+           attempt + 1,
+           Map.merge(metadata, %{
+             identifier: issue.identifier,
+             error: "no available orchestrator slots"
+           })
+         )}
     end
   end
 

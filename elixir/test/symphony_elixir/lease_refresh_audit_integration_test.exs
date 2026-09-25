@@ -57,7 +57,8 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
     assert_receive {:body_entered, ^worker}, 1_000
 
     monitor = Process.monitor(worker)
-    timer = Process.send_after(self(), {:retry_issue, issue.id}, 60_000)
+    retry_ref = make_ref()
+    timer = Process.send_after(self(), {:retry_issue, issue.id, retry_ref}, 60_000)
 
     running = %{
       pid: worker,
@@ -74,7 +75,7 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
       lease_owner: lease_owner,
       running: %{issue.id => running},
       claimed: MapSet.new([issue.id]),
-      retry_attempts: %{issue.id => %{timer_ref: timer, identifier: issue.identifier, attempt: 1}},
+      retry_attempts: %{issue.id => %{retry_ref: retry_ref, status: :scheduled, due_at_ms: System.monotonic_time(:millisecond) + 60_000, timer_ref: timer, identifier: issue.identifier, attempt: 1}},
       agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0.0}
     }
 

@@ -66,7 +66,7 @@ defmodule SymphonyElixir.DispatchRetryAuditTest do
 
     metadata = Orchestrator.continuation_metadata_for_running_entry_for_test(%{identifier: c.issue.identifier})
     assert metadata.delay_type == :continuation
-    retry = metadata |> Map.put(:identifier, c.issue.identifier) |> Map.merge(%{attempt: 2, timer_ref: nil, due_at_ms: 0})
+    retry = metadata |> Map.put(:identifier, c.issue.identifier) |> Map.merge(%{attempt: 2, timer_ref: nil, due_at_ms: 0, retry_ref: make_ref(), status: :scheduled})
     state = %{c.state | retry_attempts: %{c.issue.id => retry}}
     snapshot_path = RunStateStore.state_path(c.workspace)
     marker_path = Path.join(DispatchAudit.marker_directory(c.workspace), "marker.json")
@@ -74,7 +74,7 @@ defmodule SymphonyElixir.DispatchRetryAuditTest do
     marker_before = File.read!(marker_path)
     ledger_before = File.read!(RunLedger.ledger_file_path())
     workers_before = MapSet.new(Task.Supervisor.children(SymphonyElixir.TaskSupervisor))
-    assert {:noreply, next} = Orchestrator.handle_info({:retry_issue, c.issue.id}, state)
+    assert {:noreply, next} = Orchestrator.handle_info({:retry_issue, c.issue.id, retry.retry_ref}, state)
 
     try do
       mutations = self() |> Process.info(:messages) |> elem(1) |> Enum.filter(&tracker_mutation?/1)

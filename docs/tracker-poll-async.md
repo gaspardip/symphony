@@ -55,8 +55,60 @@ message barriers, local leases and synthetic tracker callbacks. Availability is
 limited to the held pre-lease read. No LSP tool was available for implementation;
 compilation, specs, tests and Dialyzer remain separate verification gates.
 
+## Retry admission (C2)
+
+Retry timers carry a generation reference. Only the matching scheduled entry can
+become ready; an old, duplicate or unversioned message has no effect. Entries stay
+in `retry_attempts` through lookup and refresh, preserving attempt, issue envelope
+and budget resume context. A successful worker consumes its entry; errors replace
+only the current generation. Metadata cannot overwrite scheduler-owned fields.
+
+Ready retries share C1's single admission reader. The coordinator alternates one
+logical poll admission and one ready retry, ordered by due time and issue ID within
+retries. An ordinary retry performs candidate lookup followed by active pre-lease
+refresh in the same logical turn. A passive continuation uses an individual lookup.
+The two phases are serial, and the existing B reader remains independent: at most
+one admission/retry reader plus one polling reader. Waiting for this slot does not
+increment attempts or accumulate another queue.
+
+Responses must match the timer and reader references, issue ID and identifier,
+configuration and observed lease identity. Controls and newer webhook observations
+invalidate retries even when no C1 batch exists. Current state supplies running
+workers, pauses, routing, capacity, token budgets and audit guards. The retry's own
+metadata and claim remain present while these checks run. Review-budget continuation
+keeps its second authorization check under the existing lease acquisition boundary.
+I1 still validates persisted issue identity before lease synchronization.
+Refresh identity is checked on the raw singleton response before merging optional
+fields; missing IDs cannot inherit the requested identity. Timer selection and
+current results refresh the cached global capacity from validated configuration
+without renewing unrelated workers' leases. A timer arriving while the shared
+reader is occupied marks readiness only, preserving that reader's batch even if
+configuration is temporarily invalid.
+
+Current lookup errors, reader DOWN and pre-lease refresh errors reschedule once with
+attempt + 1 and retained metadata. Rescheduling refresh errors explicitly fixes the
+previous path that could abandon a retry after removing its entry. Changed context,
+invalidation or newer backoff rearms a surviving generation without increasing its
+attempt. This timer-only rearm does not persist old resume context into a newly
+configured workspace. Configuration changes also discard any waiting C1 cursor.
+Stop or a replacement retry makes the old callback unable to remove the new entry.
+
+Remote and manual candidate outcomes remain separate. A remote 429 updates backoff
+even when the issue was stopped; manual success never clears that throttle. Ready
+remote retries wait until backoff permits reading, without counting another attempt.
+Manual retries can use their existing validated seeded-issue fallback. Terminal or
+missing replies cannot clean a workspace with a newer worker or observed lease.
+Atomic lease generation fencing and passive-to-active reads after acquisition remain
+C3, so this check is not a distributed reservation across cleanup operations.
+
+`orchestrator_retry_async_test.exs` covers held lookup and refresh, timer races,
+arbitration with C1/B, current versus obsolete errors, webhook/control invalidation,
+capacity, ownership and I1 composition. Existing retry fixtures now retain a test
+coordinator until its real callbacks complete; production has no synchronous retry
+compatibility path or unversioned-message executor.
+
 ## Remaining synchronous work
 
-Webhook/GitHub event processing, retries, immediate controls, pre-dispatch revalidation from those entry points, passive-to-active promotion after lease acquisition, tracker mutations and local business effects still use their existing paths. Applying read results can call those paths. An injected slow operation there can still occupy the coordinator. Configuration lookup remains a WorkflowStore call; an invalid file that WorkflowStore has not adopted is not a new active configuration. This phase establishes availability during the selected reads only.
+Webhook/GitHub event processing, immediate controls, pre-dispatch revalidation from those entry points, passive-to-active promotion after lease acquisition, tracker mutations and local business effects still use their existing paths. Applying read results can call those paths. An injected slow operation there can still occupy the coordinator. Configuration lookup remains a WorkflowStore call; an invalid file that WorkflowStore has not adopted is not a new active configuration. This phase establishes availability during the selected reads only.
 
 The new tests use closed tracker callbacks, local manual issues, real leases and controlled TaskSupervisor children. No external tracker, provider, Git operation or publication is needed. The backoff status test observes the real coordinator with its existing assertions and deadline. Manual submissions accepted during a held cycle queue discovery so that the accepted task is not delayed until the next polling interval.
