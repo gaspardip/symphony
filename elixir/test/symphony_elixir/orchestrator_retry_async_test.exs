@@ -281,7 +281,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     workspace = Workspace.path_for_issue("ISSUE-A")
     File.mkdir_p!(workspace)
     File.write!(Path.join(workspace, "sentinel"), "successor")
-    assert :ok = LeaseManager.acquire("A", "ISSUE-A", "successor")
+    assert {:ok, _successor} = LeaseManager.acquire("A", "ISSUE-A", "successor")
     before = File.read!(LeaseManager.lease_path("A"))
     send(reader, {:answer, {:ok, [%{issue("A") | state: "Done"}]}})
     state = settled!(pid)
@@ -703,9 +703,25 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     workspace = Workspace.path_for_issue(issue)
     File.mkdir_p!(workspace)
     assert :ok = RunStateStore.save(workspace, RunStateStore.load_or_default(workspace, issue))
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+    custody_ref = make_ref()
+
+    claim = %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: custody_ref,
+      holder: :running,
+      workspace: workspace,
+      issue: issue,
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
 
     entry = %{
+      custody_ref: custody_ref,
+      lease_token: acquired.token,
       pid: worker,
       ref: Process.monitor(worker),
       issue: issue,
@@ -724,7 +740,10 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
       agent_process_id: nil
     }
 
-    replace_runtime(pid, fn state -> %{state | running: Map.put(state.running, issue.id, entry), claimed: MapSet.put(state.claimed, issue.id)} end)
+    replace_runtime(pid, fn state ->
+      %{state | lease_claims: Map.put(state.lease_claims, issue.id, claim), running: Map.put(state.running, issue.id, entry), claimed: MapSet.put(state.claimed, issue.id)}
+    end)
+
     worker
   end
 

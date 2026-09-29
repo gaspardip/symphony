@@ -540,7 +540,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
 
     :ok = wait_for_initial_poll(pid)
     initial_state = :sys.get_state(pid)
-    claim_issue_lease!(issue.id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue.id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -558,6 +558,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     :sys.replace_state(pid, fn current_state ->
       current_state
       |> Map.put(:running, %{issue.id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(current_state.claimed, issue.id))
     end)
 
@@ -740,7 +741,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     end)
 
     initial_state = :sys.get_state(pid)
-    claim_issue_lease!(issue.id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue.id, issue.identifier, initial_state.lease_owner)
     worker_pid = spawn(fn -> Process.sleep(:infinity) end)
 
     on_exit(fn ->
@@ -769,14 +770,31 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
         },
         claimed: MapSet.put(initial_state.claimed, issue.id)
     }
+    |> attach_custody(claim)
   end
 
   defp claim_issue_lease!(issue_id, identifier, owner) do
-    assert :ok = LeaseManager.acquire(issue_id, identifier, owner)
+    assert {:ok, acquired} = LeaseManager.acquire(issue_id, identifier, owner)
+    on_exit(fn -> LeaseManager.release_token(acquired.token) end)
 
-    on_exit(fn ->
-      LeaseManager.release(issue_id)
-    end)
+    %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: make_ref(),
+      holder: :running,
+      workspace: Workspace.path_for_issue(identifier),
+      issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
+  end
+
+  defp attach_custody(state, claim) do
+    id = claim.token.storage.issue_id
+    entry = state.running |> Map.fetch!(id) |> Map.merge(%{custody_ref: claim.custody_ref, lease_token: claim.token})
+    %{state | lease_claims: Map.put(state.lease_claims, id, claim), running: Map.put(state.running, id, entry)}
   end
 
   defp await_retry_settled(pid, id, deadline) do

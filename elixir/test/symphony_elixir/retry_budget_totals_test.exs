@@ -217,7 +217,26 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
       agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }
 
-    assert :ok = SymphonyElixir.LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+    assert {:ok, acquired} = SymphonyElixir.LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+
+    state = %{
+      state
+      | lease_claims: %{
+          issue.id => %{
+            token: acquired.token,
+            lease: acquired.lease,
+            custody_ref: make_ref(),
+            holder: :retry,
+            workspace: Workspace.path_for_issue(issue),
+            issue: issue,
+            started_at_ms: System.monotonic_time(:millisecond),
+            deadline: :not_pending,
+            promotion_ref: nil,
+            timer: nil
+          }
+        }
+    }
+
     Orchestrator.do_spawn_issue_worker_for_test(state, issue, attempt, self(), start_child_fun: fn _supervisor, _fun -> {:ok, worker} end)
   end
 

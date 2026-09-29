@@ -12,7 +12,6 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   alias SymphonyElixir.DeployAudit
   alias SymphonyElixir.IssuePolicy
   alias SymphonyElixir.IssueSource
-  alias SymphonyElixir.LeaseManager
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.ManualIssueStore
   alias SymphonyElixir.Orchestrator
@@ -282,13 +281,10 @@ defmodule SymphonyElixir.Orchestrator.Controls do
          {:ok, %Issue{} = issue} <- resolve_issue_for_control(state, issue_identifier),
          :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
          false <- Orchestrator.issue_paused?(state, issue),
+         {:ok, state} <- Orchestrator.prepare_retry_custody(state, issue.id),
          {%State{} = resumed_state, %Issue{} = resumed_issue} <- maybe_resume_blocked_issue(state, issue) do
       state = cancel_retry(resumed_state, resumed_issue.id)
       issue = retry_issue_control_envelope(resumed_issue)
-
-      if not Map.has_key?(state.running, issue.id) do
-        LeaseManager.release(issue.id)
-      end
 
       {reply, state} = retry_issue_now_outcome(state, issue)
 
@@ -314,6 +310,9 @@ defmodule SymphonyElixir.Orchestrator.Controls do
          Map.drop(reply, [:summary])
        ), state}
     else
+      {:error, reason, retained_state} ->
+        {%{ok: false, action: "retry_now", issue_identifier: issue_identifier, dispatch_outcome: "deferred", error: inspect(reason)}, retained_state}
+
       true ->
         {%{
            ok: false,
@@ -1300,7 +1299,14 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   def maybe_resume_blocked_issue(%State{} = state, %Issue{} = issue) do
     workspace = Workspace.path_for_issue(issue.identifier)
 
-    with :ok <- DeployAudit.ensure_available(workspace) do
+    location_matches =
+      case Map.get(state.lease_claims, issue.id) do
+        nil -> true
+        %{workspace: captured} -> Path.expand(workspace) == Path.expand(captured)
+      end
+
+    with true <- location_matches or {:error, :lease_workspace_changed},
+         :ok <- DeployAudit.ensure_available(workspace) do
       resume_available_blocked_issue(state, issue, workspace)
     end
   end

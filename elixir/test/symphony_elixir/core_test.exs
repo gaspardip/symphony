@@ -1073,6 +1073,8 @@ defmodule SymphonyElixir.CoreTest do
         retry_attempts: %{}
       }
 
+      state = attach_running_custody(state, issue_id)
+
       issue = %Issue{
         id: issue_id,
         identifier: issue_identifier,
@@ -1093,7 +1095,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "terminal issue state stops running agent and cleans workspace" do
+  test "terminal issue state stops running agent and preserves its v2 workspace" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1136,6 +1138,8 @@ defmodule SymphonyElixir.CoreTest do
         retry_attempts: %{}
       }
 
+      state = attach_running_custody(state, issue_id)
+
       issue = %Issue{
         id: issue_id,
         identifier: issue_identifier,
@@ -1145,12 +1149,22 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
+      state_path = SymphonyElixir.RunStateStore.state_path(workspace)
+      snapshot_before = File.read!(state_path)
+      token = state.lease_claims[issue_id].token
+      sentinel = Path.join(workspace, "sentinel.txt")
+      File.write!(sentinel, "preserve v2 candidate bytes")
+
       updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
 
       refute Map.has_key?(updated_state.running, issue_id)
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Process.alive?(agent_pid)
-      refute File.exists?(workspace)
+      assert File.exists?(workspace)
+      assert File.read!(state_path) == snapshot_before
+      assert File.read!(sentinel) == "preserve v2 candidate bytes"
+      refute Map.has_key?(updated_state.lease_claims, issue_id)
+      assert {:error, :missing} = SymphonyElixir.LeaseManager.read_at(token.storage)
     after
       File.rm_rf(test_root)
     end
@@ -1177,6 +1191,8 @@ defmodule SymphonyElixir.CoreTest do
       agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
+
+    state = attach_running_custody(state, issue_id)
 
     issue = %Issue{
       id: issue_id,
@@ -1225,6 +1241,8 @@ defmodule SymphonyElixir.CoreTest do
       retry_attempts: %{}
     }
 
+    state = attach_running_custody(state, issue_id)
+
     issue = %Issue{
       id: issue_id,
       identifier: "MT-561",
@@ -1246,6 +1264,9 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-resume"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", manual_enabled: false)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
@@ -1253,6 +1274,8 @@ defmodule SymphonyElixir.CoreTest do
         Process.exit(pid, :normal)
       end
     end)
+
+    await_initial_poll(pid, 150)
 
     initial_state = :sys.get_state(pid, 15_000)
 
@@ -1264,12 +1287,14 @@ defmodule SymphonyElixir.CoreTest do
       started_at: DateTime.utc_now()
     }
 
-    :sys.replace_state(pid, fn _ ->
+    state_to_install =
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
       |> Map.put(:claimed, MapSet.new([issue_id]))
       |> Map.put(:retry_attempts, %{})
-    end)
+      |> attach_running_custody(issue_id)
+
+    :sys.replace_state(pid, fn _ -> state_to_install end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
@@ -1287,6 +1312,15 @@ defmodule SymphonyElixir.CoreTest do
     identifier = "MT-560"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :PassiveContinuationOrchestrator)
+
+    workspace_root =
+      Path.join(System.tmp_dir!(), "symphony-passive-continuation-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace_root)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, tracker_kind: "memory", manual_enabled: false)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
@@ -1295,12 +1329,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    workspace_root =
-      Path.join(System.tmp_dir!(), "symphony-passive-continuation-#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(workspace_root)
-
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    await_initial_poll(pid, 150)
 
     workspace = Workspace.path_for_issue(identifier)
     File.mkdir_p!(workspace)
@@ -1321,12 +1350,14 @@ defmodule SymphonyElixir.CoreTest do
       started_at: DateTime.utc_now()
     }
 
-    :sys.replace_state(pid, fn _ ->
+    state_to_install =
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
       |> Map.put(:claimed, MapSet.new([issue_id]))
       |> Map.put(:retry_attempts, %{})
-    end)
+      |> attach_running_custody(issue_id)
+
+    :sys.replace_state(pid, fn _ -> state_to_install end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
@@ -1342,6 +1373,15 @@ defmodule SymphonyElixir.CoreTest do
     identifier = "MT-561"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :TerminalContinuationOrchestrator)
+
+    workspace_root =
+      Path.join(System.tmp_dir!(), "symphony-terminal-continuation-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workspace_root)
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, tracker_kind: "memory", manual_enabled: false)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
@@ -1350,12 +1390,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    workspace_root =
-      Path.join(System.tmp_dir!(), "symphony-terminal-continuation-#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(workspace_root)
-
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    await_initial_poll(pid, 150)
 
     workspace = Workspace.path_for_issue(identifier)
     File.mkdir_p!(workspace)
@@ -1375,12 +1410,14 @@ defmodule SymphonyElixir.CoreTest do
       started_at: DateTime.utc_now()
     }
 
-    :sys.replace_state(pid, fn _ ->
+    state_to_install =
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
       |> Map.put(:claimed, MapSet.new([issue_id]))
       |> Map.put(:retry_attempts, %{})
-    end)
+      |> attach_running_custody(issue_id)
+
+    :sys.replace_state(pid, fn _ -> state_to_install end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
@@ -1394,6 +1431,9 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-crash"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :CrashRetryOrchestrator)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", manual_enabled: false)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
@@ -1401,6 +1441,8 @@ defmodule SymphonyElixir.CoreTest do
         Process.exit(pid, :normal)
       end
     end)
+
+    await_initial_poll(pid, 150)
 
     initial_state = :sys.get_state(pid, 15_000)
 
@@ -1413,12 +1455,14 @@ defmodule SymphonyElixir.CoreTest do
       started_at: DateTime.utc_now()
     }
 
-    :sys.replace_state(pid, fn _ ->
+    state_to_install =
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
       |> Map.put(:claimed, MapSet.new([issue_id]))
       |> Map.put(:retry_attempts, %{})
-    end)
+      |> attach_running_custody(issue_id)
+
+    :sys.replace_state(pid, fn _ -> state_to_install end)
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
@@ -1434,6 +1478,9 @@ defmodule SymphonyElixir.CoreTest do
     issue_id = "issue-crash-initial"
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :InitialCrashRetryOrchestrator)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", manual_enabled: false)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
@@ -1441,6 +1488,8 @@ defmodule SymphonyElixir.CoreTest do
         Process.exit(pid, :normal)
       end
     end)
+
+    await_initial_poll(pid, 150)
 
     initial_state = :sys.get_state(pid, 15_000)
 
@@ -1452,12 +1501,14 @@ defmodule SymphonyElixir.CoreTest do
       started_at: DateTime.utc_now()
     }
 
-    :sys.replace_state(pid, fn _ ->
+    state_to_install =
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
       |> Map.put(:claimed, MapSet.new([issue_id]))
       |> Map.put(:retry_attempts, %{})
-    end)
+      |> attach_running_custody(issue_id)
+
+    :sys.replace_state(pid, fn _ -> state_to_install end)
 
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
@@ -1467,6 +1518,56 @@ defmodule SymphonyElixir.CoreTest do
              state.retry_attempts[issue_id]
 
     assert_due_in_range(due_at_ms, -5_000, 10_500)
+  end
+
+  defp await_initial_poll(_pid, 0), do: flunk("Orchestrator did not finish its initial poll before fixture injection")
+
+  defp await_initial_poll(pid, remaining) do
+    state = :sys.get_state(pid, 15_000)
+
+    if state.first_poll_completed and is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and
+         state.tracker_poll_pending == [] and not state.poll_check_in_progress and not state.github_webhook_check_in_progress and
+         is_nil(state.admission_read) and is_nil(state.admission_batch) do
+      assert state.running == %{}
+      :ok
+    else
+      Process.sleep(10)
+      await_initial_poll(pid, remaining - 1)
+    end
+  end
+
+  defp attach_running_custody(state, issue_id) do
+    entry = Map.fetch!(state.running, issue_id)
+    issue = entry.issue
+    workspace = Workspace.path_for_issue(issue)
+    owner = state.lease_owner || "core-fixture-#{System.unique_integer([:positive])}"
+    assert {:ok, acquired} = SymphonyElixir.LeaseManager.acquire(issue.id, issue.identifier, owner)
+    assert {:ok, _snapshot} = SymphonyElixir.RunStateStore.sync_lease(workspace, issue, SymphonyElixir.LeaseManager.snapshot_for_state(acquired.lease))
+    custody_ref = make_ref()
+
+    claim = %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: custody_ref,
+      holder: :running,
+      workspace: workspace,
+      issue: issue,
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
+
+    on_exit(fn ->
+      assert {:ok, _outcome} = SymphonyElixir.LeaseManager.release_token(acquired.token)
+    end)
+
+    %{
+      state
+      | lease_owner: owner,
+        lease_claims: Map.put(state.lease_claims, issue_id, claim),
+        running: Map.put(state.running, issue_id, Map.merge(entry, %{custody_ref: custody_ref, lease_token: acquired.token, workspace_path: workspace}))
+    }
   end
 
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do

@@ -17,6 +17,53 @@ defmodule SymphonyElixir.RunStateConcurrencyTest do
     %{workspace: workspace, issue: issue}
   end
 
+  for identity_mode <- [:legacy, :identified] do
+    @tag identity_mode: identity_mode
+    test "lease generation roundtrip preserves #{identity_mode} identity and consumption", context do
+      identity_fields = [:run_id, :run_identity_event_id, :run_identity_ledger_path]
+
+      if context.identity_mode == :identified do
+        assert {:ok, ticket} =
+                 SymphonyElixir.DispatchAudit.begin(context.workspace, %{
+                   issue_id: context.issue.id,
+                   issue_identifier: context.issue.identifier,
+                   metadata: %{owner: "roundtrip-owner", epoch: 1}
+                 })
+
+        assert :ok = SymphonyElixir.DispatchAudit.finish(ticket, :not_started)
+      end
+
+      assert {:ok, before} = RunStateStore.load(context.workspace)
+      identity = Map.take(before, identity_fields)
+
+      case context.identity_mode do
+        :legacy ->
+          assert identity == %{}
+
+        :identified ->
+          assert map_size(identity) == 3
+          assert Enum.all?(identity, fn {_key, value} -> is_binary(value) and value != "" end)
+      end
+
+      assert {:ok, consumed} = RunStateStore.record_token_usage(context.workspace, context.issue, %{input_tokens: 17, output_tokens: 3, total_tokens: 20})
+      assert Map.take(consumed, identity_fields) == identity
+      attrs = %{lease_owner: "owner", lease_epoch: 2, lease_version: 2, lease_generation: "generation", lease_updated_at: DateTime.to_iso8601(DateTime.utc_now())}
+      assert {:ok, synced} = RunStateStore.sync_lease(context.workspace, context.issue, attrs)
+      assert Map.take(synced, identity_fields) == identity
+      assert synced.token_usage == consumed.token_usage
+      assert {:ok, loaded} = RunStateStore.load(context.workspace)
+      assert loaded.lease_version == 2
+      assert loaded.lease_generation == "generation"
+      assert Map.take(loaded, identity_fields) == identity
+      assert loaded.token_usage == consumed.token_usage
+      assert {:ok, cleared} = RunStateStore.clear_lease(context.workspace)
+      assert cleared.lease_generation == nil
+      assert cleared.lease_version == nil
+      assert cleared.token_usage == consumed.token_usage
+      assert Map.take(cleared, identity_fields) == identity
+    end
+  end
+
   test "a blocked transition waits for the complete update and preserves both changes", %{workspace: workspace} do
     updater = paused_update(workspace, &Map.put(&1, :last_validation, %{status: "passed"}))
     assert_update_holds_lock(workspace)

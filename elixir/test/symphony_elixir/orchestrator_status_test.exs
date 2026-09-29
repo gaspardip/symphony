@@ -44,7 +44,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     initial_state = :sys.get_state(pid)
     started_at = DateTime.utc_now()
-    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -62,6 +62,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state_with_issue =
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
 
     :sys.replace_state(pid, fn _ -> state_with_issue end)
@@ -126,7 +127,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
-    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -150,6 +151,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     :sys.replace_state(pid, fn _ ->
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
@@ -225,7 +227,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
-    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -248,6 +250,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     :sys.replace_state(pid, fn _ ->
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
@@ -301,7 +304,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
-    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -324,6 +327,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     :sys.replace_state(pid, fn _ ->
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
@@ -415,7 +419,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
-    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -438,6 +442,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     :sys.replace_state(pid, fn _ ->
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
@@ -497,7 +502,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
-    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -520,6 +525,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     :sys.replace_state(pid, fn _ ->
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
@@ -586,7 +592,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
-    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -609,6 +615,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     :sys.replace_state(pid, fn _ ->
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
@@ -661,7 +668,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     initial_state = :sys.get_state(pid)
     process_ref = make_ref()
     started_at = DateTime.utc_now()
-    claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, issue.identifier, initial_state.lease_owner)
 
     running_entry = %{
       pid: self(),
@@ -684,6 +691,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     :sys.replace_state(pid, fn _ ->
       initial_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
@@ -1235,7 +1243,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
     initial_state = :sys.get_state(pid)
-    claim_issue_lease!(issue_id, "MT-STALL", initial_state.lease_owner)
+    claim = claim_issue_lease!(issue_id, "MT-STALL", initial_state.lease_owner)
 
     running_entry = %{
       pid: worker_pid,
@@ -1256,6 +1264,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     :sys.replace_state(pid, fn current_state ->
       current_state
       |> Map.put(:running, %{issue_id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(current_state.claimed, issue_id))
     end)
 
@@ -1907,12 +1916,63 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     do_wait_for_snapshot(pid, predicate, deadline_ms)
   end
 
-  defp claim_issue_lease!(issue_id, identifier, owner) do
-    assert :ok = SymphonyElixir.LeaseManager.acquire(issue_id, identifier, owner)
+  test "lease diagnostics distinguish live history missing and unreadable ownership without rewriting snapshot" do
+    alias SymphonyElixir.{LeaseManager, RunStateStore}
+    root = Path.join(System.tmp_dir!(), "lease-diagnostics-#{System.unique_integer([:positive])}")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_required_labels: [], workspace_root: root)
+    issue = %Issue{id: "lease-diagnostics", identifier: "LEASE-DIAGNOSTICS", title: "Lease diagnostics", state: "In Progress", source: :tracker, labels: []}
+    workspace = Workspace.path_for_issue(issue)
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf!(root) end)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, "diagnostic-owner")
+    assert {:ok, _} = RunStateStore.sync_lease(workspace, issue, LeaseManager.snapshot_for_state(acquired.lease))
+    state = %Orchestrator.State{last_candidate_issues: [issue], max_concurrent_agents: 0}
+    bytes = File.read!(RunStateStore.state_path(workspace))
 
-    on_exit(fn ->
-      SymphonyElixir.LeaseManager.release(issue_id)
-    end)
+    diagnostic = fn ->
+      assert [entry] = SymphonyElixir.Orchestrator.Snapshot.queue_snapshot(state)
+      assert {:reply, snapshot, _} = Orchestrator.handle_call(:snapshot, {self(), make_ref()}, state)
+      assert [internal] = snapshot.queue
+      assert Map.drop(internal.lease, [:lease_age_ms]) == Map.drop(entry.lease, [:lease_age_ms])
+      entry.lease
+    end
+
+    assert %{lease_source: "live", lease_status: "held", lease_reclaimable: false} = diagnostic.()
+    assert {:ok, :released} = LeaseManager.release_token(acquired.token)
+    assert %{lease_source: "historical", lease_status: "historical", lease_reclaimable: false} = diagnostic.()
+    assert File.read!(RunStateStore.state_path(workspace)) == bytes
+    File.write!(acquired.token.storage.lease_path, "{broken")
+    assert %{lease_source: "unverified", lease_status: "unverified", lease_reclaimable: false, lease_error: error} = diagnostic.()
+    assert is_binary(error)
+    assert error =~ "DecodeError"
+    assert File.read!(RunStateStore.state_path(workspace)) == bytes
+    File.rm!(acquired.token.storage.lease_path)
+    assert {:ok, _} = RunStateStore.clear_lease(workspace)
+    assert %{lease_source: "missing", lease_status: "missing", lease_reclaimable: false} = diagnostic.()
+  end
+
+  defp claim_issue_lease!(issue_id, identifier, owner) do
+    assert {:ok, acquired} = SymphonyElixir.LeaseManager.acquire(issue_id, identifier, owner)
+    on_exit(fn -> SymphonyElixir.LeaseManager.release_token(acquired.token) end)
+
+    %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: make_ref(),
+      holder: :running,
+      workspace: Workspace.path_for_issue(identifier),
+      issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
+  end
+
+  defp attach_custody(state, claim) do
+    id = claim.token.storage.issue_id
+    entry = state.running |> Map.fetch!(id) |> Map.merge(%{custody_ref: claim.custody_ref, lease_token: claim.token})
+    %{state | lease_claims: Map.put(state.lease_claims, id, claim), running: Map.put(state.running, id, entry)}
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do

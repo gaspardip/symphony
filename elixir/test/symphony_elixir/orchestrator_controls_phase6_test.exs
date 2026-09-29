@@ -360,7 +360,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     end)
 
     initial_state = :sys.get_state(pid)
-    claim_issue_lease!(issue.id, issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(issue.id, issue.identifier, initial_state.lease_owner)
     worker_pid = spawn(fn -> Process.sleep(:infinity) end)
 
     running_entry = %{
@@ -380,6 +380,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     :sys.replace_state(pid, fn _ ->
       initial_state
       |> Map.put(:running, %{issue.id => running_entry})
+      |> attach_custody(claim)
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue.id))
     end)
 
@@ -1174,11 +1175,11 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       })
 
     :ok = SymphonyElixir.ManualIssueStore.update_issue_state(issue.id, "Blocked")
-    :ok = SymphonyElixir.LeaseManager.release(issue.id)
-    :ok = SymphonyElixir.LeaseManager.acquire(issue.id, issue.identifier, "stale-owner")
+    claim = %{claim_issue_lease!(issue.id, issue.identifier, "stale-owner") | holder: :retry}
 
     orchestrator_name = Module.concat(__MODULE__, :RetryResumeOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    :sys.replace_state(pid, fn state -> %{state | lease_claims: %{issue.id => claim}, claimed: MapSet.put(state.claimed, issue.id)} end)
 
     on_exit(fn ->
       if Process.alive?(pid) do
@@ -2009,6 +2010,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     owner = "dispatch-owner-#{System.unique_integer([:positive])}"
 
     assert %State{} =
+             initial_dispatch =
              Orchestrator.dispatch_issue_for_test(
                %State{lease_owner: owner, max_concurrent_agents: 1},
                issue
@@ -2064,8 +2066,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         Process.exit(pid, :kill)
       end
 
-      LeaseManager.release(issue.id, owner)
-      LeaseManager.release(spawned_issue.id, owner)
+      release_custodies(initial_dispatch)
+      release_custodies(state)
       File.rm_rf(workspace_root)
     end)
   end
@@ -2098,7 +2100,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert lease_log =~
              "Skipping dispatch; failed to acquire lease for issue_id=issue-dispatch-errors issue_identifier=MT-DISPATCH-ERRORS: :disk_full"
 
-    assert :ok = LeaseManager.acquire("issue-spawn-errors", "MT-SPAWN-ERRORS", owner)
+    claim = %{claim_issue_lease!("issue-spawn-errors", "MT-SPAWN-ERRORS", owner) | holder: :retry}
 
     spawn_issue = %{issue | id: "issue-spawn-errors", identifier: "MT-SPAWN-ERRORS"}
     old_retry_ref = make_ref()
@@ -2116,7 +2118,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     spawned_state =
       Orchestrator.do_spawn_issue_worker_for_test(
-        %State{lease_owner: owner, retry_attempts: %{spawn_issue.id => previous_retry}},
+        %State{lease_owner: owner, lease_claims: %{spawn_issue.id => claim}, retry_attempts: %{spawn_issue.id => previous_retry}},
         spawn_issue,
         4,
         self(),
@@ -2130,6 +2132,10 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert retry_entry.retry_ref != old_retry_ref
     assert retry_entry.status == :scheduled
     assert retry_entry.budget_resume_context == resume_context
+    refute Map.has_key?(spawned_state.lease_claims, spawn_issue.id)
+    assert {:error, :missing} = LeaseManager.read_at(claim.token.storage)
+    assert retry_entry.custody_ref == nil
+    assert retry_entry.lease_token == nil
     on_exit(fn -> Process.cancel_timer(retry_entry.timer_ref) end)
 
     # Compose the existing worker-start failure seam with the public completion
@@ -2160,7 +2166,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     assert after_old_timer == after_callback
   end
 
-  test "dispatch clears persisted lease metadata when worker startup fails after lease acquisition" do
+  test "failed worker startup releases the exact lease and preserves its historical snapshot" do
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -2185,6 +2191,8 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       labels: ["ops"]
     }
 
+    parent = self()
+
     returned_state =
       Orchestrator.do_dispatch_issue_for_test(
         %State{lease_owner: owner},
@@ -2196,7 +2204,10 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
             dispatch_issue,
             attempt,
             recipient,
-            start_child_fun: fn _supervisor, _fun -> {:error, :noproc} end
+            start_child_fun: fn _supervisor, _fun ->
+              send(parent, {:before_failed_spawn, File.read!(RunStateStore.state_path(Workspace.path_for_issue(issue)))})
+              {:error, :noproc}
+            end
           )
         end
       )
@@ -2208,13 +2219,17 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     workspace = Path.join(workspace_root, issue.identifier)
     assert {:ok, run_state} = SymphonyElixir.RunStateStore.load(workspace)
-    assert run_state.lease_owner == nil
-    assert run_state.lease_owner_instance_id == nil
-    assert run_state.lease_owner_channel == nil
-    assert run_state.lease_acquired_at == nil
-    assert run_state.lease_updated_at == nil
-    assert run_state.lease_status == nil
-    assert run_state.lease_epoch == nil
+    assert_receive {:before_failed_spawn, snapshot_bytes}
+    assert File.read!(RunStateStore.state_path(workspace)) == snapshot_bytes
+    assert run_state.lease_owner == owner
+    assert run_state.lease_owner_instance_id == "stable:stable-runner"
+    assert run_state.lease_owner_channel == "stable"
+    assert is_binary(run_state.lease_acquired_at)
+    assert is_binary(run_state.lease_updated_at)
+    assert run_state.lease_status == "held"
+    assert run_state.lease_epoch == 1
+    assert run_state.lease_version == 2
+    assert is_binary(run_state.lease_generation)
 
     on_exit(fn ->
       File.rm_rf(workspace_root)
@@ -2277,11 +2292,11 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
              "Skipping dispatch; lease already held for issue_id=issue-wrapper-dispatch issue_identifier=MT-WRAPPER-DISPATCH"
 
     spawned_issue = %{issue | id: "issue-wrapper-spawn", identifier: "MT-WRAPPER-SPAWN"}
-    assert :ok = LeaseManager.acquire(spawned_issue.id, spawned_issue.identifier, "wrapper-owner-3")
+    claim = %{claim_issue_lease!(spawned_issue.id, spawned_issue.identifier, "wrapper-owner-3") | holder: :retry}
 
     state =
       Orchestrator.do_spawn_issue_worker_default_for_test(
-        %State{lease_owner: "wrapper-owner-3"},
+        %State{lease_owner: "wrapper-owner-3", lease_claims: %{spawned_issue.id => claim}},
         spawned_issue,
         nil,
         self()
@@ -2300,7 +2315,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         Process.exit(pid, :kill)
       end
 
-      LeaseManager.release(spawned_issue.id, "wrapper-owner-3")
+      release_custodies(state)
       File.rm_rf(workspace_root)
     end)
   end
@@ -2330,12 +2345,14 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
     assert %State{} =
+             dispatched4 =
              Orchestrator.dispatch_issue_default_for_test(
                %State{lease_owner: "wrapper-owner-4", max_concurrent_agents: 1},
                issue
              )
 
     assert %State{} =
+             dispatched4b =
              Orchestrator.dispatch_issue_private_head_for_test(
                %State{lease_owner: "wrapper-owner-4b", max_concurrent_agents: 1},
                issue,
@@ -2343,11 +2360,11 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
              )
 
     spawned_issue = %{issue | id: "issue-wrapper-default-spawn", identifier: "MT-WRAPPER-DEFAULT-SPAWN"}
-    assert :ok = LeaseManager.acquire(spawned_issue.id, spawned_issue.identifier, "wrapper-owner-5")
+    claim = %{claim_issue_lease!(spawned_issue.id, spawned_issue.identifier, "wrapper-owner-5") | holder: :retry}
 
     state =
       Orchestrator.do_spawn_issue_worker_for_test(
-        %State{lease_owner: "wrapper-owner-5"},
+        %State{lease_owner: "wrapper-owner-5", lease_claims: %{spawned_issue.id => claim}},
         spawned_issue,
         nil,
         self()
@@ -2366,9 +2383,9 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
         Process.exit(pid, :kill)
       end
 
-      LeaseManager.release(issue.id, "wrapper-owner-4")
-      LeaseManager.release(issue.id, "wrapper-owner-4b")
-      LeaseManager.release(spawned_issue.id, "wrapper-owner-5")
+      release_custodies(dispatched4)
+      release_custodies(dispatched4b)
+      release_custodies(state)
       File.rm_rf(workspace_root)
     end)
   end
@@ -2525,12 +2542,13 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
       File.rm_rf(workspace_root)
     end)
 
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "retry-focus-owner")
+    claim = %{claim_issue_lease!(issue.id, issue.identifier, "retry-focus-owner") | holder: :retry}
 
     state =
       Orchestrator.do_spawn_issue_worker_for_test(
         %State{
           lease_owner: "retry-focus-owner",
+          lease_claims: %{issue.id => claim},
           retry_attempts: %{
             issue.id => %{
               attempt: 2,
@@ -3081,10 +3099,10 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
     workspace = Workspace.path_for_issue(issue)
     init_git_workspace!(workspace, branch: SymphonyElixir.GitManager.issue_branch_name(issue))
     assert {:ok, _} = RunStateStore.transition(workspace, "await_checks", %{issue_id: issue.id, issue_identifier: issue.identifier})
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "passive-owner")
+    claim = %{claim_issue_lease!(issue.id, issue.identifier, "passive-owner") | holder: :retry}
 
     on_exit(fn ->
-      LeaseManager.release(issue.id, "passive-owner")
+      LeaseManager.release_token(claim.token)
       File.rm_rf(root)
     end)
 
@@ -3098,7 +3116,7 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
 
     state =
       Orchestrator.dispatch_passive_issue_for_test(
-        %State{lease_owner: "passive-owner", claimed: MapSet.new([issue.id])},
+        %State{lease_owner: "passive-owner", lease_claims: %{issue.id => claim}, claimed: MapSet.new([issue.id])},
         issue,
         spawn_fun: fn dispatch_state, dispatch_issue, attempt, recipient ->
           Orchestrator.do_spawn_passive_worker_for_test(
@@ -3284,11 +3302,31 @@ defmodule SymphonyElixir.OrchestratorControlsPhase6Test do
   end
 
   defp claim_issue_lease!(issue_id, identifier, owner) do
-    assert :ok = LeaseManager.acquire(issue_id, identifier, owner)
+    assert {:ok, acquired} = LeaseManager.acquire(issue_id, identifier, owner)
+    on_exit(fn -> LeaseManager.release_token(acquired.token) end)
 
-    on_exit(fn ->
-      LeaseManager.release(issue_id)
-    end)
+    %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: make_ref(),
+      holder: :running,
+      workspace: Workspace.path_for_issue(identifier),
+      issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
+  end
+
+  defp release_custodies(state) do
+    Enum.each(state.lease_claims, fn {_id, claim} -> LeaseManager.release_token(claim.token) end)
+  end
+
+  defp attach_custody(state, claim) do
+    id = claim.token.storage.issue_id
+    entry = state.running |> Map.fetch!(id) |> Map.merge(%{custody_ref: claim.custody_ref, lease_token: claim.token})
+    %{state | lease_claims: Map.put(state.lease_claims, id, claim), running: Map.put(state.running, id, entry)}
   end
 
   defp assert_eventually(fun, attempts \\ 60)

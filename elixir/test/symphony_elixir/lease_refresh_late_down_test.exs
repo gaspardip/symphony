@@ -20,8 +20,22 @@ defmodule SymphonyElixir.LeaseRefreshLateDownTest do
     File.mkdir_p!(workspace)
     File.write!(Path.join(workspace, "keep.txt"), "preserve this workspace")
     lease_owner = "lease-refresh-owner-#{System.unique_integer([:positive])}"
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, lease_owner)
-    assert {:ok, lease} = LeaseManager.read(issue.id)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, lease_owner)
+    lease = acquired.lease
+    custody_ref = make_ref()
+
+    claim = %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: custody_ref,
+      holder: :running,
+      workspace: workspace,
+      issue: issue,
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
 
     assert {:ok, _snapshot} =
              RunStateStore.transition(workspace, "implement", %{
@@ -61,6 +75,8 @@ defmodule SymphonyElixir.LeaseRefreshLateDownTest do
     timer = Process.send_after(self(), {:retry_issue, issue.id, retry_ref}, 60_000)
 
     running = %{
+      custody_ref: custody_ref,
+      lease_token: acquired.token,
       pid: worker,
       ref: monitor,
       issue: issue,
@@ -73,6 +89,7 @@ defmodule SymphonyElixir.LeaseRefreshLateDownTest do
 
     state = %State{
       lease_owner: lease_owner,
+      lease_claims: %{issue.id => claim},
       running: %{issue.id => running},
       claimed: MapSet.new([issue.id]),
       retry_attempts: %{issue.id => %{retry_ref: retry_ref, status: :scheduled, due_at_ms: System.monotonic_time(:millisecond) + 60_000, timer_ref: timer, identifier: issue.identifier, attempt: 1}},

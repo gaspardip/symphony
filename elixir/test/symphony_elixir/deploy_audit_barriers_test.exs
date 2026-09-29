@@ -39,12 +39,11 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
              })
 
     owner = "deploy-barrier-owner"
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, owner)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, owner)
 
     dispatch_ticket =
       if context[:dispatch_ticket] do
-        assert {:ok, lease} = LeaseManager.read(issue.id)
-        assert {:ok, ticket} = DispatchAudit.begin(workspace, %{issue_id: issue.id, issue_identifier: issue.identifier, metadata: %{owner: owner, epoch: lease["epoch"]}})
+        assert {:ok, ticket} = DispatchAudit.begin(workspace, %{issue_id: issue.id, issue_identifier: issue.identifier, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}})
         ticket
       end
 
@@ -67,6 +66,20 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
 
     state = %State{
       lease_owner: owner,
+      lease_claims: %{
+        issue.id => %{
+          token: acquired.token,
+          lease: acquired.lease,
+          custody_ref: make_ref(),
+          holder: :retry,
+          workspace: Workspace.path_for_issue(issue),
+          issue: issue,
+          started_at_ms: System.monotonic_time(:millisecond),
+          deadline: :not_pending,
+          promotion_ref: nil,
+          timer: nil
+        }
+      },
       max_concurrent_agents: 1,
       agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       claimed: MapSet.new([issue.id]),
@@ -163,10 +176,14 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
         issue: context.issue,
         started_at: DateTime.utc_now(),
         workspace_path: context.workspace,
-        dispatch_ticket: context.dispatch_ticket
+        dispatch_ticket: context.dispatch_ticket,
+        custody_ref: context.state.lease_claims[context.issue.id].custody_ref,
+        lease_token: context.state.lease_claims[context.issue.id].token
       }
 
-      state = %{context.state | running: %{context.issue.id => entry}}
+      state = context.state
+      state = put_in(state.lease_claims[context.issue.id].holder, :running)
+      state = %{state | running: %{context.issue.id => entry}}
 
       assert {:noreply, halted} = Orchestrator.handle_info(down, state)
       assert {:dispatch_audit_failed, "deploy-barrier", {:deploy_audit_pending, _}} = halted.candidate_fetch_error
@@ -206,10 +223,14 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
       issue: context.issue,
       started_at: DateTime.utc_now(),
       workspace_path: context.workspace,
-      dispatch_ticket: context.dispatch_ticket
+      dispatch_ticket: context.dispatch_ticket,
+      custody_ref: context.state.lease_claims[context.issue.id].custody_ref,
+      lease_token: context.state.lease_claims[context.issue.id].token
     }
 
-    state = %{context.state | running: %{context.issue.id => entry}}
+    state = context.state
+    state = put_in(state.lease_claims[context.issue.id].holder, :running)
+    state = %{state | running: %{context.issue.id => entry}}
 
     assert {:noreply, halted} = Orchestrator.handle_info(down, state)
     assert {:dispatch_audit_failed, "deploy-barrier", {:deploy_audit_pending, detail}} = halted.candidate_fetch_error

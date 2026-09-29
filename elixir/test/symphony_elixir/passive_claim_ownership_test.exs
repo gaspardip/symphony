@@ -99,7 +99,7 @@ defmodule SymphonyElixir.PassiveClaimOwnershipTest do
 
   test "stale local passive claim cannot mutate or start under a foreign lease", context do
     %{issue: issue, workspace: workspace, state: state} = context
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "foreign-owner")
+    assert {:ok, _foreign} = LeaseManager.acquire(issue.id, issue.identifier, "foreign-owner")
     assert {:ok, lease} = LeaseManager.read(issue.id)
 
     assert {:ok, _} =
@@ -117,7 +117,26 @@ defmodule SymphonyElixir.PassiveClaimOwnershipTest do
 
   test "valid own passive claim reacquires once and cannot start a duplicate worker", context do
     %{issue: issue, workspace: workspace, state: state} = context
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+
+    state = %{
+      state
+      | lease_claims: %{
+          issue.id => %{
+            token: acquired.token,
+            lease: acquired.lease,
+            custody_ref: make_ref(),
+            holder: :retry,
+            workspace: Workspace.path_for_issue(issue),
+            issue: issue,
+            started_at_ms: System.monotonic_time(:millisecond),
+            deadline: :not_pending,
+            promotion_ref: nil,
+            timer: nil
+          }
+        }
+    }
+
     assert {:ok, lease} = LeaseManager.read(issue.id)
 
     assert {:ok, _} =
@@ -139,7 +158,11 @@ defmodule SymphonyElixir.PassiveClaimOwnershipTest do
   defp dispatch(state, issue) do
     acquire = fn id, identifier, owner ->
       Process.put(:passive_acquires, Process.get(:passive_acquires) + 1)
-      LeaseManager.acquire(id, identifier, owner)
+
+      case Map.get(state.lease_claims, id) do
+        nil -> LeaseManager.acquire(id, identifier, owner)
+        claim -> LeaseManager.acquire(id, identifier, owner, storage: claim.token.storage, expected_token: claim.token)
+      end
     end
 
     starter = fn _, _ ->

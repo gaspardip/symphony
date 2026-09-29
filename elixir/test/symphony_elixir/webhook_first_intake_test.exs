@@ -1182,10 +1182,10 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     workspace = Path.join(workspace_root, "EVT-GH-LEASED")
     File.mkdir_p!(workspace)
 
-    :ok = LeaseManager.acquire("manual:evt-gh-leased", "EVT-GH-LEASED", "other-orchestrator-owner")
+    {:ok, acquired} = LeaseManager.acquire("manual:evt-gh-leased", "EVT-GH-LEASED", "other-orchestrator-owner")
 
     on_exit(fn ->
-      LeaseManager.release("manual:evt-gh-leased")
+      LeaseManager.release_token(acquired.token)
     end)
 
     :ok =

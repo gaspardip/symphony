@@ -964,7 +964,20 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
         end
       end)
 
-    assert :ok = SymphonyElixir.LeaseManager.acquire(issue_id, issue.identifier, "budget-owner")
+    assert {:ok, acquired} = SymphonyElixir.LeaseManager.acquire(issue_id, issue.identifier, "budget-owner")
+
+    claim = %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: make_ref(),
+      holder: :running,
+      workspace: Workspace.path_for_issue(issue),
+      issue: issue,
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
 
     initial_state = :sys.get_state(pid)
 
@@ -974,6 +987,8 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
       identifier: issue.identifier,
       issue: issue,
       session_id: "thread-turn",
+      custody_ref: claim.custody_ref,
+      lease_token: claim.token,
       turn_count: 1,
       agent_input_tokens: 0,
       agent_output_tokens: 0,
@@ -990,6 +1005,7 @@ defmodule SymphonyElixir.PolicyRuntimeTest do
       |> Map.put(:running, %{issue_id => running_entry})
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
       |> Map.put(:lease_owner, "budget-owner")
+      |> Map.put(:lease_claims, %{issue_id => claim})
     end)
 
     send(

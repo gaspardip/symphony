@@ -35,7 +35,7 @@ defmodule SymphonyElixir.LeaseTakeoverAuditTest do
       send(parent, {:boundary, meta.event_type, File.read!(c.path), LeaseManager.read(c.id)})
     end)
 
-    assert :ok = LeaseManager.acquire(c.id, "LEASE-1", "new-owner")
+    assert {:ok, %{token: token, acquisition: :takeover}} = LeaseManager.acquire(c.id, "LEASE-1", "new-owner")
     assert_receive {:boundary, "lease.takeover.requested", old, {:ok, %{"owner" => "old-owner"}}}
     assert old == c.old
 
@@ -44,6 +44,7 @@ defmodule SymphonyElixir.LeaseTakeoverAuditTest do
     candidate = Jason.decode!(candidate_bytes)
     assert candidate["owner"] == "new-owner"
     assert candidate["epoch"] == 8
+    assert candidate["lease_generation"] == token.lease_generation
     assert candidate["audit_pending"]["operation_id"] == op
     [intent, confirmation] = rows(c)
     assert intent["event_type"] == "lease.takeover.requested"
@@ -70,15 +71,15 @@ defmodule SymphonyElixir.LeaseTakeoverAuditTest do
 
     assert {:ok, lease} = LeaseManager.read(c.id)
     refute Map.has_key?(lease, "audit_pending")
-    assert {:error, :claimed} = LeaseManager.refresh(c.id, "old-owner")
-    assert :ok = LeaseManager.release(c.id, "old-owner")
+    assert {:error, :lease_token_required} = LeaseManager.refresh(c.id, "old-owner")
+    assert {:error, :lease_token_required} = LeaseManager.release(c.id, "old-owner")
     assert {:ok, ^lease} = LeaseManager.read(c.id)
   end
 
   test "initial acquisition and normal refresh do not require takeover events", c do
     id = c.id <> "-initial"
-    assert :ok = LeaseManager.acquire(id, "LEASE-2", "owner")
-    assert :ok = LeaseManager.refresh(id, "owner")
+    assert {:ok, acquired} = LeaseManager.acquire(id, "LEASE-2", "owner")
+    assert {:ok, _lease} = LeaseManager.refresh_token(acquired.token)
     assert {:ok, %{"epoch" => 1, "owner" => "owner"}} = LeaseManager.read(id)
     refute File.exists?(c.ledger)
   end
@@ -154,7 +155,7 @@ defmodule SymphonyElixir.LeaseTakeoverAuditTest do
 
     for owner <- ["old-owner", "new-owner", "third-owner"] do
       assert {:error, {:lease_audit_pending, ^op}} =
-               LeaseManager.acquire(c.id, "LEASE-1", owner, ttl_ms: -1)
+               LeaseManager.acquire(c.id, "LEASE-1", owner, ttl_ms: 1)
 
       assert {:error, {:lease_audit_pending, ^op}} = LeaseManager.refresh(c.id, owner)
       assert {:error, {:lease_audit_pending, ^op}} = LeaseManager.release(c.id, owner)

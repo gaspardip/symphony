@@ -20,8 +20,22 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
     File.mkdir_p!(workspace)
     File.write!(Path.join(workspace, "keep.txt"), "preserve this workspace")
     lease_owner = "lease-refresh-owner-#{System.unique_integer([:positive])}"
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, lease_owner)
-    assert {:ok, lease} = LeaseManager.read(issue.id)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, lease_owner)
+    lease = acquired.lease
+    custody_ref = make_ref()
+
+    claim = %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: custody_ref,
+      holder: :running,
+      workspace: workspace,
+      issue: issue,
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
 
     assert {:ok, _snapshot} =
              RunStateStore.transition(workspace, "implement", %{
@@ -61,6 +75,8 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
     timer = Process.send_after(self(), {:retry_issue, issue.id, retry_ref}, 60_000)
 
     running = %{
+      custody_ref: custody_ref,
+      lease_token: acquired.token,
       pid: worker,
       ref: monitor,
       issue: issue,
@@ -73,6 +89,7 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
 
     state = %State{
       lease_owner: lease_owner,
+      lease_claims: %{issue.id => claim},
       running: %{issue.id => running},
       claimed: MapSet.new([issue.id]),
       retry_attempts: %{issue.id => %{retry_ref: retry_ref, status: :scheduled, due_at_ms: System.monotonic_time(:millisecond) + 60_000, timer_ref: timer, identifier: issue.identifier, attempt: 1}},
@@ -124,7 +141,7 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
     test "#{fault} stops a real worker and preserves uncertain ownership without retry", c do
       payload = fault_payload(c.lease, c.lease_fault)
       File.write!(c.lease_path, payload)
-      assert {:error, reason} = LeaseManager.refresh(c.issue.id, c.state.lease_owner)
+      assert {:error, reason} = LeaseManager.refresh_token(c.state.lease_claims[c.issue.id].token)
       assert_fault_reason(c.lease_fault, reason)
       watch = Process.monitor(c.worker)
 
@@ -177,16 +194,19 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
     assert File.read!(c.marker_path) == c.marker_before
   end
 
-  test "ordinary filesystem refresh errors retain the existing transient-error behavior", c do
+  test "filesystem refresh errors block the worker and preserve uncertain audit evidence", c do
     File.rename!(c.lease_path, c.lease_path <> ".healthy")
     File.mkdir!(c.lease_path)
-    assert {:error, :eisdir} = LeaseManager.refresh(c.issue.id, c.state.lease_owner)
+    assert {:error, :eisdir} = LeaseManager.refresh_token(c.state.lease_claims[c.issue.id].token)
+    watch = Process.monitor(c.worker)
     refreshed = Orchestrator.refresh_runtime_config(c.state)
-    assert Process.alive?(c.worker)
-    assert refreshed.running[c.issue.id].pid == c.worker
+    assert_receive {:DOWN, ^watch, :process, _, _}, 1_000
+    refute Process.alive?(c.worker)
+    assert refreshed.running == %{}
     assert refreshed.claimed == c.state.claimed
-    assert refreshed.retry_attempts == c.state.retry_attempts
-    assert refreshed.candidate_fetch_error == nil
+    assert refreshed.retry_attempts == %{}
+    assert Process.read_timer(c.timer) == false
+    assert refreshed.candidate_fetch_error == {:lease_ownership_uncertain, c.issue.id, :eisdir}
     assert File.dir?(c.lease_path)
     assert File.read!(c.marker_path) == c.marker_before
     assert File.read!(c.snapshot_path) == c.snapshot_before

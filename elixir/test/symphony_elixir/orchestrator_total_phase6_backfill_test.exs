@@ -45,7 +45,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
     worker_pid = spawn(fn -> Process.sleep(:infinity) end)
     worker_monitor = Process.monitor(worker_pid)
     lease_owner = "orchestrator-test-stall"
-    claim_issue_lease!(issue.id, issue.identifier, lease_owner)
+    claim = claim_issue_lease!(issue.id, issue.identifier, lease_owner)
 
     state = %State{
       lease_owner: lease_owner,
@@ -68,6 +68,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
       claimed: MapSet.new([issue.id])
     }
 
+    state = attach_custody(state, claim)
     updated_state = Orchestrator.reconcile_stalled_running_issues_for_test(state)
 
     assert_receive {:DOWN, ^worker_monitor, :process, ^worker_pid, :shutdown}, 5_000
@@ -287,7 +288,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
 
     initial_state = :sys.get_state(pid)
     worker_pid = spawn(fn -> Process.sleep(:infinity) end)
-    claim_issue_lease!(running_issue.id, running_issue.identifier, initial_state.lease_owner)
+    claim = claim_issue_lease!(running_issue.id, running_issue.identifier, initial_state.lease_owner)
 
     on_exit(fn ->
       if Process.alive?(worker_pid) do
@@ -323,6 +324,7 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
             }
           }
       }
+      |> attach_custody(claim)
     end)
 
     snapshot = Orchestrator.snapshot(orchestrator_name, 5_000)
@@ -443,11 +445,27 @@ defmodule SymphonyElixir.OrchestratorTotalPhase6BackfillTest do
   end
 
   defp claim_issue_lease!(issue_id, identifier, owner) do
-    assert :ok = LeaseManager.acquire(issue_id, identifier, owner)
+    assert {:ok, acquired} = LeaseManager.acquire(issue_id, identifier, owner)
+    on_exit(fn -> LeaseManager.release_token(acquired.token) end)
 
-    on_exit(fn ->
-      LeaseManager.release(issue_id)
-    end)
+    %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: make_ref(),
+      holder: :running,
+      workspace: Workspace.path_for_issue(identifier),
+      issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
+  end
+
+  defp attach_custody(state, claim) do
+    id = claim.token.storage.issue_id
+    entry = state.running |> Map.fetch!(id) |> Map.merge(%{custody_ref: claim.custody_ref, lease_token: claim.token})
+    %{state | lease_claims: Map.put(state.lease_claims, id, claim), running: Map.put(state.running, id, entry)}
   end
 
   defp unique_workspace_root!(suffix) do

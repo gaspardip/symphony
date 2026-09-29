@@ -70,7 +70,7 @@ defmodule SymphonyElixir.Orchestrator do
              normalize_issue_source: 1,
              maybe_start_autonomous_review_follow_up: 8,
              maybe_start_autonomous_ci_follow_up: 6,
-             autonomous_review_follow_up?: 3,
+             autonomous_review_follow_up?: 4,
              paused_issue?: 3,
              maybe_dispatch_autonomous_review_follow_up: 2,
              ci_resume_context: 3,
@@ -102,6 +102,7 @@ defmodule SymphonyElixir.Orchestrator do
       running: %{},
       completed: %{},
       claimed: MapSet.new(),
+      lease_claims: %{},
       retry_attempts: %{},
       token_usage_errors: %{},
       paused_issue_states: %{},
@@ -275,6 +276,30 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, receive_tracker_poll_result(state, operation, result)}
   end
 
+  def handle_info({:tracker_read_result, ref, result}, %{admission_read: %{purpose: :promotion, invalidated: true, ref: expected} = operation} = state) when ref == expected do
+    {state, _result} = observe_promotion_result(state, operation, result)
+    {:noreply, state}
+  end
+
+  def handle_info({:promotion_timeout, id, promotion_ref}, state) do
+    case Map.get(state.lease_claims, id) do
+      %{promotion_ref: ^promotion_ref, deadline: deadline} when is_integer(deadline) ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          next = if Map.has_key?(state.running, id), do: terminate_running_issue(state, id, false), else: release_issue_claim(state, id)
+
+          case next.candidate_fetch_error do
+            {tag, ^id, _reason} when tag in [:lease_release_failed, :lease_release_audit_failed] -> {:noreply, next}
+            _ -> {:noreply, %{next | candidate_fetch_error: {:promotion_deadline_expired, id}}}
+          end
+        else
+          {:noreply, state}
+        end
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:tracker_read_result, ref, result}, %{admission_read: %{ref: expected} = operation} = state) when ref == expected do
     Process.demonitor(operation.monitor, [:flush])
     state = %{state | admission_read: nil}
@@ -297,13 +322,22 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:authorize_dispatch, issue_id, dispatch_id, pid}, state) do
     case Map.get(state.running, issue_id) do
-      %{pid: ^pid, dispatch_ticket: %{dispatch_id: ^dispatch_id} = ticket} ->
-        with {:ok, lease} <- LeaseManager.read(issue_id),
-             true <- (lease["owner"] == ticket.owner and lease["epoch"] == ticket.epoch) or {:error, :dispatch_lease_changed},
-             :ok <- DispatchAudit.with_authorization(ticket, fn -> DispatchAudit.ensure_workspace_access(ticket.workspace) end) do
-          DispatchGate.activate(pid, dispatch_id)
-          {:noreply, state}
+      %{pid: ^pid, dispatch_ticket: %{dispatch_id: ^dispatch_id} = ticket} = entry ->
+        with {:ok, %{holder: :gated} = claim} <- current_issue_custody(state, issue_id, entry.custody_ref),
+             {:ok, _workspace} <- current_custody_workspace(state, entry.issue),
+             :ok <- DispatchAudit.with_authorization(ticket, fn -> DispatchAudit.ensure_workspace_access(ticket.workspace) end),
+             :ok <- LeaseManager.activate_dispatch(claim.token, claim.deadline, pid, dispatch_id) do
+          state = transfer_issue_custody(state, issue_id, :running)
+          claim = Map.fetch!(state.lease_claims, issue_id)
+          if is_reference(claim.timer), do: Process.cancel_timer(claim.timer)
+          claim = %{claim | promotion_ref: nil, timer: nil}
+          state = put_in(state.lease_claims[issue_id], claim)
+          entry = %{entry | custody_ref: claim.custody_ref}
+          {:noreply, %{state | running: Map.put(state.running, issue_id, entry)}}
         else
+          {:ok, _already_transferred_claim} ->
+            {:noreply, state}
+
           {:error, reason} ->
             stopped = terminate_running_issue(state, issue_id, false)
             {:noreply, halt_dispatch_audit(stopped, issue_id, reason)}
@@ -894,6 +928,99 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp start_promotion_read(state, issue, attempt, recipient, start_child_fun, initial_stage, stage) do
+    with {:ok, claim} <- current_issue_custody(state, issue.id),
+         {:ok, context} <- capture_tracker_poll_context(),
+         :ok <- validate_dispatch_configuration(issue),
+         {:ok, run_state} <- RunStateStore.load_checked(claim.workspace, issue) do
+      run_identity = Map.take(run_state, [:run_id, :run_identity_event_id, :run_identity_ledger_path])
+      deadline = claim.started_at_ms + div(claim.token.storage.ttl_ms, 2)
+
+      if System.monotonic_time(:millisecond) < deadline and is_nil(state.admission_read) and
+           (ManualIssueSpec.runtime_issue_id?(issue.id) or not tracker_backoff_active?(state)) do
+        promotion_ref = make_ref()
+        timer = Process.send_after(self(), {:promotion_timeout, issue.id, promotion_ref}, max(0, deadline - System.monotonic_time(:millisecond)))
+        claim = %{claim | deadline: deadline, promotion_ref: promotion_ref, timer: timer}
+        state = put_in(state.lease_claims[issue.id], claim)
+        id = issue.id
+
+        case TrackerReader.start(fn -> IssueSource.fetch_issue_states_by_ids([id], context) end) do
+          {:ok, reader} ->
+            operation =
+              Map.merge(reader, %{
+                purpose: :promotion,
+                issue: issue,
+                attempt: attempt,
+                recipient: recipient,
+                start_child_fun: start_child_fun,
+                initial_stage: initial_stage,
+                stage: stage,
+                run_identity: run_identity,
+                token: claim.token,
+                custody_ref: claim.custody_ref,
+                deadline: deadline,
+                fingerprint: context.fingerprint,
+                backoff: tracker_poll_backoff_identity(state),
+                invalidated: false
+              })
+
+            %{state | admission_read: operation}
+
+          {:error, reason} ->
+            stop_terminal_dispatch(state, issue, {:promotion_reader_failed, reason})
+        end
+      else
+        stop_terminal_dispatch(state, issue, :promotion_unavailable)
+      end
+    else
+      {:error, reason} -> stop_terminal_dispatch(state, issue, reason)
+      {:mismatch, _snapshot} -> stop_terminal_dispatch(state, issue, :promotion_identity_mismatch)
+    end
+  end
+
+  defp receive_admission_result(state, %{purpose: :promotion} = operation, result) do
+    id = operation.issue.id
+    {state, result} = observe_promotion_result(state, operation, result)
+
+    next =
+      with false <- operation.invalidated,
+           {:ok, claim} <- current_issue_custody(state, id, operation.custody_ref),
+           {:ok, context} <- capture_tracker_poll_context(),
+           true <- context.fingerprint == operation.fingerprint or {:error, :promotion_context_changed} do
+        state = %{state | max_concurrent_agents: Config.max_concurrent_agents()}
+        available_state = %{state | lease_claims: Map.delete(state.lease_claims, id)}
+
+        with true <- System.monotonic_time(:millisecond) < operation.deadline or {:error, :promotion_deadline_expired},
+             true <- ManualIssueSpec.runtime_issue_id?(id) or tracker_poll_backoff_identity(state) == operation.backoff or {:error, :promotion_backoff_changed},
+             {:ok, issues} <- result,
+             true <- issues == [] or match?([%Issue{id: ^id, identifier: identifier}] when identifier == operation.issue.identifier, issues),
+             {:ok, refreshed} <- revalidate_issue_for_dispatch(operation.issue, fn _ -> {:ok, issues} end, terminal_state_set()),
+             true <- retry_active_current?(state, refreshed) or {:error, :promotion_ineligible},
+             true <-
+               (dispatch_slots_available?(refreshed, available_state) and company_slots_available?(available_state, PolicyPack.resolve(policy_pack_name(refreshed, state)))) or
+                 {:error, :promotion_capacity_changed},
+             :ok <- validate_dispatch_configuration(refreshed),
+             :ok <- persisted_issue_token_budget_guard(refreshed, claim.workspace),
+             {:ok, run_state} <- RunStateStore.load_checked(claim.workspace, refreshed),
+             true <- Map.take(run_state, [:run_id, :run_identity_event_id, :run_identity_ledger_path]) == operation.run_identity or {:error, :promotion_run_changed},
+             {:ok, stage} when stage == operation.stage <- persisted_dispatch_stage(refreshed, claim.workspace) do
+          start_active_issue_worker(state, refreshed, operation.attempt, operation.recipient, operation.start_child_fun, stage)
+        else
+          {:error, :promotion_ineligible} -> stop_terminal_dispatch(state, operation.issue, {:dispatch_no_longer_eligible, id})
+          {:skip, _reason} -> stop_terminal_dispatch(state, operation.issue, {:dispatch_no_longer_eligible, id})
+          {:error, reason} -> stop_terminal_dispatch(state, operation.issue, {:promotion_failed, reason})
+          _ -> stop_terminal_dispatch(state, operation.issue, :promotion_refresh_ineligible)
+        end
+      else
+        true -> state
+        {:error, :lease_custody_changed} -> state
+        {:error, :lease_custody_missing} -> state
+        {:error, reason} -> stop_terminal_dispatch(state, operation.issue, reason)
+      end
+
+    advance_admission(next)
+  end
+
   defp receive_admission_result(state, %{purpose: :retry} = operation, result) do
     state
     |> receive_retry_result(operation, result)
@@ -913,6 +1040,24 @@ defmodule SymphonyElixir.Orchestrator do
     else
       {:error, reason} ->
         state |> admission_discard(operation.issue, reason) |> Map.put(:admission_batch, nil) |> advance_admission()
+    end
+  end
+
+  defp observe_promotion_result(state, operation, result) do
+    case capture_tracker_poll_context() do
+      {:ok, context} when context.fingerprint == operation.fingerprint -> observe_retry_transport(state, operation, result)
+      _ -> {state, {:error, :promotion_context_changed}}
+    end
+  end
+
+  defp cancel_promotion_reader(state, issue_id) do
+    case state.admission_read do
+      %{purpose: :promotion, issue: %{id: ^issue_id}, invalidated: false} = reader ->
+        :ok = TrackerReader.cancel(%{owner: reader.owner, pid: reader.pid, monitor: reader.monitor, ref: reader.ref})
+        %{state | admission_read: %{reader | invalidated: true}}
+
+      _ ->
+        state
     end
   end
 
@@ -982,6 +1127,9 @@ defmodule SymphonyElixir.Orchestrator do
         else: state
 
     case state.admission_read do
+      %{purpose: :promotion, issue: issue} when identifier in [issue.id, issue.identifier] ->
+        release_issue_claim(state, issue.id)
+
       %{purpose: :retry, issue: issue} when identifier in [issue.id, issue.identifier] ->
         put_in(state.admission_read.invalidated, true)
 
@@ -1252,7 +1400,7 @@ defmodule SymphonyElixir.Orchestrator do
     issue_identifier = Map.get(run_state, :issue_identifier)
     target_runner_channel = Map.get(run_state, :runner_channel)
     runner_instance_id = Map.get(run_state, :runner_instance_id)
-    lease_status = review_follow_up_lease_status(state, run_state)
+    lease_status = review_follow_up_lease_status(state, run_state, workspace)
 
     cond do
       not run_state_routed_to_current_runner?(run_state) ->
@@ -1360,7 +1508,7 @@ defmodule SymphonyElixir.Orchestrator do
     issue_identifier = Map.get(run_state, :issue_identifier)
     target_runner_channel = Map.get(run_state, :runner_channel)
     runner_instance_id = Map.get(run_state, :runner_instance_id)
-    lease_status = review_follow_up_lease_status(state, run_state)
+    lease_status = review_follow_up_lease_status(state, run_state, workspace)
 
     cond do
       not run_state_routed_to_current_runner?(run_state) ->
@@ -1517,34 +1665,60 @@ defmodule SymphonyElixir.Orchestrator do
     channel_matches? and instance_matches?
   end
 
-  defp review_follow_up_lease_status(%State{} = state, run_state) when is_map(run_state) do
-    case Map.get(run_state, :issue_id) do
-      issue_id when is_binary(issue_id) and issue_id != "" ->
-        case LeaseManager.read(issue_id) do
-          {:ok, lease} ->
-            owner = LeaseManager.snapshot_for_state(lease).lease_owner
+  defp review_follow_up_lease_status(%State{} = state, run_state, workspace) when is_map(run_state) do
+    with {:ok, _issue, storage, claim} <- follow_up_location(state, run_state, workspace) do
+      case LeaseManager.read_at(storage) do
+        {:ok, lease} ->
+          owner = lease["owner"]
 
-            cond do
-              owner == state.lease_owner ->
-                :ok
+          cond do
+            not is_nil(claim) and claim.holder in [:pending, :gated] ->
+              {:skip, :lease_attempt_pending}
 
-              LeaseManager.reclaimable?(lease) or
-                  same_runner_instance_lease_reclaimable?(run_state) ->
-                {:reclaimable, owner}
+            not is_nil(claim) and lease["owner"] == claim.token.owner and lease["epoch"] == claim.token.epoch and
+              lease["lease_generation"] == claim.token.lease_generation and lease["acquired_at"] == claim.token.acquired_at ->
+              :ok
 
-              true ->
-                {:skip, owner}
+            LeaseManager.reclaimable?(lease, DateTime.utc_now(), ttl_ms: storage.ttl_ms) ->
+              {:reclaimable, owner}
+
+            true ->
+              {:skip, owner}
+          end
+
+        {:error, :missing} when is_nil(claim) ->
+          :ok
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp follow_up_location(state, run_state, workspace) do
+    issue = issue_ref_for_run_state(run_state)
+
+    cond do
+      not present?(issue.id) ->
+        {:error, :missing_issue_id}
+
+      not is_binary(workspace) ->
+        {:error, :lease_workspace_changed}
+
+      true ->
+        case Map.get(state.lease_claims, issue.id) do
+          %{workspace: captured_workspace, token: token} = claim ->
+            if Path.expand(workspace) == Path.expand(captured_workspace), do: {:ok, issue, token.storage, claim}, else: {:error, :lease_workspace_changed}
+
+          nil ->
+            with {:ok, context} <- capture_tracker_poll_context(),
+                 true <- Path.expand(workspace) == Path.expand(Workspace.path_for_issue(issue)) or {:error, :lease_workspace_changed},
+                 {:ok, storage} <- LeaseManager.capture_storage(issue.id),
+                 {:ok, current} <- capture_tracker_poll_context(),
+                 true <- context.fingerprint == current.fingerprint or {:error, :lease_workspace_changed} do
+              {:ok, issue, storage, nil}
             end
-
-          {:error, :missing} ->
-            :ok
-
-          {:error, reason} ->
-            {:error, reason}
         end
-
-      _ ->
-        :ok
     end
   end
 
@@ -1645,7 +1819,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:ok, next_state, :non_actionable} ->
           next_state
 
-        :not_autonomous ->
+        {:not_autonomous, state} ->
           summary = "New PR review feedback detected on #{pr_url}."
 
           human_action =
@@ -1701,7 +1875,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, next_state} ->
         next_state
 
-      :not_autonomous ->
+      {:not_autonomous, state} ->
         summary = "GitHub CI failure detected on #{pr_url}: #{ci_failure_summary(ci_failure)}."
 
         human_action =
@@ -1742,14 +1916,14 @@ defmodule SymphonyElixir.Orchestrator do
          pr_url,
          ci_failure
        ) do
-    if autonomous_review_follow_up?(state, issue, run_state) do
+    if autonomous_review_follow_up?(state, issue, run_state, workspace) do
       summary = "GitHub CI failure detected on #{pr_url}. Returning to implement to fix failing checks."
 
       next_objective =
         "Investigate and fix the failing GitHub checks on #{pr_url}. Focus first on #{ci_failure_summary(ci_failure)} and return the branch to runtime validation."
 
-      case ensure_review_follow_up_lease(state, run_state) do
-        {:ok, lease_attrs, release_on_failure?} ->
+      case ensure_review_follow_up_lease(state, run_state, workspace) do
+        {:ok, state, lease_attrs, release_on_failure?} ->
           case RunStateStore.transition(
                  workspace,
                  "implement",
@@ -1804,24 +1978,22 @@ defmodule SymphonyElixir.Orchestrator do
               {:ok, maybe_dispatch_autonomous_review_follow_up(state, refreshed_issue)}
 
             {:error, reason} ->
-              if release_on_failure? do
-                release_review_follow_up_lease(state, run_state, workspace)
-              end
+              state = if release_on_failure?, do: release_review_follow_up_lease(state, run_state, workspace), else: state
 
               Logger.warning("Failed to transition #{pr_url} back to implement after CI failure: #{inspect(reason)}")
-              :not_autonomous
+              {:not_autonomous, state}
           end
 
         {:skip, owner} ->
           Logger.info("Skipping autonomous CI follow-up for #{pr_url}; lease is owned by #{inspect(owner)}")
-          :not_autonomous
+          {:not_autonomous, state}
 
         {:error, reason} ->
           Logger.warning("Unable to secure lease for autonomous CI follow-up on #{pr_url}: #{inspect(reason)}")
-          :not_autonomous
+          {:ok, state}
       end
     else
-      :not_autonomous
+      {:not_autonomous, state}
     end
   end
 
@@ -2056,7 +2228,7 @@ defmodule SymphonyElixir.Orchestrator do
          review_threads,
          review_claims
        ) do
-    if autonomous_review_follow_up?(state, issue, run_state) and
+    if autonomous_review_follow_up?(state, issue, run_state, workspace) and
          PRWatcher.actionable_feedback?(feedback) do
       target_stage = PRWatcher.follow_up_stage(feedback)
 
@@ -2078,8 +2250,8 @@ defmodule SymphonyElixir.Orchestrator do
             "GitHub review feedback detected on #{pr_url}. Returning to implement to address the requested changes."
         end
 
-      case ensure_review_follow_up_lease(state, run_state) do
-        {:ok, lease_attrs, release_on_failure?} ->
+      case ensure_review_follow_up_lease(state, run_state, workspace) do
+        {:ok, state, lease_attrs, release_on_failure?} ->
           case RunStateStore.transition(
                  workspace,
                  target_stage,
@@ -2142,27 +2314,25 @@ defmodule SymphonyElixir.Orchestrator do
               {:ok, maybe_dispatch_autonomous_review_follow_up(state, refreshed_issue)}
 
             {:error, reason} ->
-              if release_on_failure? do
-                release_review_follow_up_lease(state, run_state, workspace)
-              end
+              state = if release_on_failure?, do: release_review_follow_up_lease(state, run_state, workspace), else: state
 
               Logger.warning("Failed to transition #{pr_url} back to implement after review feedback: #{inspect(reason)}")
 
-              :not_autonomous
+              {:not_autonomous, state}
           end
 
         {:skip, owner} ->
           Logger.info("Skipping autonomous PR review follow-up for #{pr_url}; lease is owned by #{inspect(owner)}")
 
-          :not_autonomous
+          {:not_autonomous, state}
 
         {:error, reason} ->
           Logger.warning("Unable to secure lease for autonomous PR review follow-up on #{pr_url}: #{inspect(reason)}")
 
-          :not_autonomous
+          {:ok, state}
       end
     else
-      case {autonomous_review_follow_up?(state, issue, run_state), PRWatcher.actionable_feedback?(feedback)} do
+      case {autonomous_review_follow_up?(state, issue, run_state, workspace), PRWatcher.actionable_feedback?(feedback)} do
         {true, false} ->
           summary =
             "GitHub review feedback detected on #{pr_url}, but the current adjudicator triaged it as non-actionable noise."
@@ -2196,16 +2366,16 @@ defmodule SymphonyElixir.Orchestrator do
             {:error, reason} ->
               Logger.warning("Failed to persist non-actionable review triage for #{pr_url}: #{inspect(reason)}")
 
-              :not_autonomous
+              {:not_autonomous, state}
           end
 
         _ ->
-          :not_autonomous
+          {:not_autonomous, state}
       end
     end
   end
 
-  defp autonomous_review_follow_up?(%State{} = state, issue, run_state) when is_map(run_state) do
+  defp autonomous_review_follow_up?(%State{} = state, issue, run_state, workspace) when is_map(run_state) do
     stage = Map.get(run_state, :stage)
 
     policy_class =
@@ -2220,7 +2390,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     policy_class == "fully_autonomous" and
       run_state_routed_to_current_runner?(run_state) and
-      case review_follow_up_lease_status(state, run_state) do
+      case review_follow_up_lease_status(state, run_state, workspace) do
         :ok -> true
         {:reclaimable, _owner} -> true
         _ -> false
@@ -2235,7 +2405,7 @@ defmodule SymphonyElixir.Orchestrator do
       not paused_issue?(state, issue, run_state)
   end
 
-  defp autonomous_review_follow_up?(_state, _issue, _run_state), do: false
+  defp autonomous_review_follow_up?(_state, _issue, _run_state, _workspace), do: false
 
   defp paused_issue?(%State{} = state, %Issue{id: issue_id}, _run_state)
        when is_binary(issue_id) do
@@ -3019,16 +3189,16 @@ defmodule SymphonyElixir.Orchestrator do
   @spec review_follow_up_lease_status_for_test(State.t(), map()) :: term()
   def review_follow_up_lease_status_for_test(%State{} = state, run_state)
       when is_map(run_state) do
-    review_follow_up_lease_status(state, run_state)
+    review_follow_up_lease_status(state, run_state, Workspace.path_for_issue(issue_ref_for_run_state(run_state)))
   end
 
   @spec ensure_review_follow_up_lease_for_test(State.t(), map()) :: term()
   def ensure_review_follow_up_lease_for_test(%State{} = state, run_state)
       when is_map(run_state) do
-    ensure_review_follow_up_lease(state, run_state)
+    ensure_review_follow_up_lease(state, run_state, Workspace.path_for_issue(issue_ref_for_run_state(run_state)))
   end
 
-  @spec release_review_follow_up_lease_for_test(State.t(), map(), Path.t()) :: :ok | {:error, term()}
+  @spec release_review_follow_up_lease_for_test(State.t(), map(), Path.t()) :: State.t()
   def release_review_follow_up_lease_for_test(%State{} = state, run_state, workspace)
       when is_map(run_state) and is_binary(workspace) do
     release_review_follow_up_lease(state, run_state, workspace)
@@ -3134,26 +3304,30 @@ defmodule SymphonyElixir.Orchestrator do
         release_issue_claim(state, issue_id)
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
-        case terminate_task(pid) do
-          :ok ->
-            if is_reference(ref), do: Process.demonitor(ref, [:flush])
-            state = record_session_completion_totals(state, running_entry)
-            state = %{state | running: Map.delete(state.running, issue_id)}
-            state = cancel_dispatch_retry(state, issue_id)
+        with {:ok, _claim} <- current_issue_custody(state, issue_id, Map.get(running_entry, :custody_ref)) do
+          case terminate_task(pid) do
+            :ok ->
+              if is_reference(ref), do: Process.demonitor(ref, [:flush])
+              state = record_session_completion_totals(state, running_entry)
+              state = %{state | running: Map.delete(state.running, issue_id)}
+              state = cancel_dispatch_retry(state, issue_id)
 
-            case finish_running_dispatch(running_entry, :shutdown) do
-              :ok ->
-                if cleanup_workspace, do: cleanup_issue_workspace(identifier)
-                stop_terminal_dispatch(state, %{id: issue_id}, state.candidate_fetch_error)
+              case finish_running_dispatch(running_entry, :shutdown) do
+                :ok ->
+                  if cleanup_workspace and not Map.has_key?(state.lease_claims, issue_id) and legacy_cleanup_allowed?(issue_id), do: cleanup_issue_workspace(identifier)
+                  stop_terminal_dispatch(state, %{id: issue_id}, state.candidate_fetch_error)
 
-              {:error, reason} ->
-                state
-                |> stop_terminal_dispatch(%{id: issue_id}, reason)
-                |> halt_dispatch_audit(issue_id, reason)
-            end
+                {:error, reason} ->
+                  state
+                  |> stop_terminal_dispatch(%{id: issue_id}, reason)
+                  |> halt_dispatch_audit(issue_id, reason)
+              end
 
-          {:error, reason} ->
-            halt_dispatch_audit(state, issue_id, reason)
+            {:error, reason} ->
+              halt_dispatch_audit(state, issue_id, reason)
+          end
+        else
+          {:error, reason} -> stop_for_uncertain_lease(state, issue_id, reason)
         end
 
       _ ->
@@ -3354,7 +3528,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("[dispatch] reject #{id} check=company_slots_exhausted")
         false
 
-      !state_slots_available?(issue, running) ->
+      !state_slots_available?(issue, capacity_entries(state)) ->
         Logger.info("[dispatch] reject #{id} check=state_slots_exhausted")
         false
 
@@ -3375,8 +3549,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   def state_slots_available?(_issue, _running), do: false
 
-  defp company_slots_available?(%State{running: running}, %PolicyPack{} = pack)
-       when is_map(running) do
+  defp company_slots_available?(%State{} = state, %PolicyPack{} = pack) do
+    running = capacity_entries(state)
+
     case pack.max_concurrent_runs_per_company do
       limit when is_integer(limit) and limit > 0 ->
         map_size(running) < limit
@@ -3570,14 +3745,20 @@ defmodule SymphonyElixir.Orchestrator do
     do_dispatch_issue(state, issue, attempt, &LeaseManager.acquire/3, &do_spawn_issue_worker/4)
   end
 
+  defp do_dispatch_issue(%State{admission_read: %{purpose: :promotion, issue: %{id: id}}} = state, %{id: id}, _attempt, _acquire_fun, _spawn_fun), do: state
+
+  defp do_dispatch_issue(%State{admission_read: reader} = state, issue, attempt, _acquire_fun, _spawn_fun) when not is_nil(reader) do
+    schedule_issue_retry(state, issue.id, attempt, %{identifier: issue.identifier, issue: issue, delay_type: :passive_continuation, error: "admission reader occupied"})
+  end
+
   defp do_dispatch_issue(%State{} = state, issue, attempt, acquire_fun, spawn_fun)
        when is_function(acquire_fun, 3) and is_function(spawn_fun, 4) do
     recipient = self()
-    workspace = Workspace.path_for_issue(issue)
 
-    with :ok <- DeployAudit.ensure_available(workspace) do
-      case acquire_fun.(issue.id, issue.identifier, state.lease_owner) do
-        :ok ->
+    with {:ok, workspace} <- current_custody_workspace(state, issue),
+         :ok <- DeployAudit.ensure_available(workspace) do
+      case acquire_issue_custody(state, issue, acquire_fun, workspace) do
+        {:ok, state} ->
           case persist_dispatchable_issue_lease(state, workspace, issue) do
             {:ok, _run_state} ->
               state = spawn_fun.(state, issue, attempt, recipient)
@@ -3586,8 +3767,7 @@ defmodule SymphonyElixir.Orchestrator do
             {:error, reason} ->
               Logger.warning("Skipping dispatch; failed to persist lease state for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
-              release_persisted_issue_lease(issue.id, state.lease_owner, nil)
-              state
+              release_issue_claim(state, issue.id)
           end
 
         {:error, :claimed} ->
@@ -3610,28 +3790,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp do_spawn_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun)
        when is_function(start_child_fun, 2) do
-    with {:ok, initial_stage} <- persisted_dispatch_stage(issue),
-         _normalized_stage <- normalize_dispatch_stage(issue),
-         {:ok, stage} <- persisted_dispatch_stage(issue) do
+    workspace = workspace_for_issue_id(state, issue.id)
+
+    with {:ok, initial_stage} <- persisted_dispatch_stage(issue, workspace),
+         _normalized_stage <- normalize_dispatch_stage(issue, workspace),
+         {:ok, stage} <- persisted_dispatch_stage(issue, workspace) do
       if stage in ["merge_readiness", "await_checks", "merge", "post_merge"] do
         start_passive_issue_worker(state, issue, attempt, recipient, start_child_fun, stage)
       else
-        refresh_result =
-          if initial_stage in ["merge_readiness", "await_checks", "merge", "post_merge"] do
-            revalidate_issue_for_dispatch(issue, &IssueSource.fetch_issue_states_by_ids/1, terminal_state_set())
-          else
-            {:ok, issue}
-          end
-
-        case refresh_result do
-          {:ok, refreshed_issue} ->
-            start_active_issue_worker(state, refreshed_issue, attempt, recipient, start_child_fun, stage)
-
-          {:skip, _reason} ->
-            stop_terminal_dispatch(state, issue, {:dispatch_no_longer_eligible, issue.id})
-
-          {:error, reason} ->
-            stop_terminal_dispatch(state, issue, {:dispatch_refresh_failed, reason})
+        if initial_stage in ["merge_readiness", "await_checks", "merge", "post_merge"] do
+          start_promotion_read(state, issue, attempt, recipient, start_child_fun, initial_stage, stage)
+        else
+          start_active_issue_worker(state, issue, attempt, recipient, start_child_fun, stage)
         end
       end
     else
@@ -3646,7 +3816,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp start_active_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun, dispatch_stage)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
-    workspace = Workspace.path_for_issue(issue.identifier)
+    workspace = workspace_for_issue_id(state, issue.id)
 
     retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
 
@@ -3656,7 +3826,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> merge_retry_budget_resume_context(retry_metadata)
 
     with :ok <- RunStateStore.ensure_readable(workspace),
-         {:ok, _stage} <- persisted_dispatch_stage(issue),
+         {:ok, _stage} <- persisted_dispatch_stage(issue, workspace),
          stage <- Map.get(run_state, :stage),
          {:ok, pid, ticket} <-
            start_audited_worker(
@@ -3670,6 +3840,8 @@ defmodule SymphonyElixir.Orchestrator do
              end,
              false
            ) do
+      state = transfer_issue_custody(state, issue.id, :gated)
+      claim = Map.fetch!(state.lease_claims, issue.id)
       ref = Process.monitor(pid)
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
@@ -3707,6 +3879,9 @@ defmodule SymphonyElixir.Orchestrator do
           resume_context: Map.get(run_state, :resume_context, %{}),
           last_ledger_event_id: ticket.entry_event_id,
           dispatch_ticket: ticket,
+          lease_token: claim.token,
+          custody_ref: claim.custody_ref,
+          promotion_deadline: claim.deadline,
           started_at: DateTime.utc_now()
         })
 
@@ -3735,7 +3910,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
-        release_persisted_issue_lease(issue.id, state.lease_owner, Workspace.path_for_issue(issue))
+        state = release_issue_claim(state, issue.id)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
@@ -3790,11 +3965,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp start_passive_issue_worker(%State{} = state, issue, attempt, recipient, start_child_fun, dispatch_stage)
        when is_function(start_child_fun, 2) do
     policy_override = Map.get(state.policy_overrides, issue.identifier)
-    workspace = Workspace.path_for_issue(issue.identifier)
+    workspace = workspace_for_issue_id(state, issue.id)
 
     retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
 
-    with {:ok, _stage} <- persisted_dispatch_stage(issue),
+    with {:ok, _stage} <- persisted_dispatch_stage(issue, workspace),
          {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
          run_state <- merge_retry_budget_resume_context(run_state, retry_metadata),
          stage <- Map.get(run_state, :stage),
@@ -3831,6 +4006,8 @@ defmodule SymphonyElixir.Orchestrator do
              end,
              true
            ) do
+      state = transfer_issue_custody(state, issue.id, :gated)
+      claim = Map.fetch!(state.lease_claims, issue.id)
       ref = Process.monitor(pid)
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
@@ -3868,6 +4045,9 @@ defmodule SymphonyElixir.Orchestrator do
           resume_context: Map.get(run_state, :resume_context, %{}),
           last_ledger_event_id: ticket.entry_event_id,
           dispatch_ticket: ticket,
+          lease_token: claim.token,
+          custody_ref: claim.custody_ref,
+          promotion_deadline: claim.deadline,
           passive?: true,
           started_at: DateTime.utc_now()
         })
@@ -3898,10 +4078,6 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.error("Unable to spawn passive runtime worker for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
-        unless MapSet.member?(state.claimed, issue.id) do
-          release_persisted_issue_lease(issue.id, state.lease_owner, Workspace.path_for_issue(issue))
-        end
-
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
@@ -3914,12 +4090,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp start_audited_worker(state, issue, attempt, run_state, start_child_fun, worker_fun, passive?) do
-    workspace = Workspace.path_for_issue(issue)
+    workspace = workspace_for_issue_id(state, issue.id)
     owner = self()
     {policy_class, policy_source, _override} = policy_snapshot_values(issue, state, run_state)
 
-    with {:ok, lease} <- LeaseManager.read(issue.id),
-         true <- lease["owner"] == state.lease_owner or {:error, :claimed},
+    with {:ok, claim} <- current_issue_custody(state, issue.id),
+         lease = claim.lease,
          {:ok, ticket} <-
            DispatchAudit.begin(workspace, %{
              issue_id: issue.id,
@@ -4111,7 +4287,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
     identifier = Map.get(metadata, :identifier) || get_in(state.retry_attempts, [issue_id, :identifier])
-    workspace = if is_binary(identifier), do: Workspace.path_for_issue(identifier), else: workspace_for_issue_id(state, issue_id)
+    workspace = workspace_for_issue_id(state, issue_id) || if(is_binary(identifier), do: Workspace.path_for_issue(identifier))
 
     availability =
       if is_binary(workspace) do
@@ -4127,6 +4303,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_schedule_issue_retry(state, issue_id, attempt, metadata, delay_override \\ nil, persist_context? \\ true) do
+    state = transfer_issue_custody(state, issue_id, :retry)
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     metadata = Map.merge(retry_metadata(previous_retry), metadata)
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
@@ -4147,7 +4324,10 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
 
-    if persist_context?, do: persist_retry_budget_resume_context(identifier, metadata)
+    if persist_context? do
+      workspace = workspace_for_issue_id(state, issue_id) || if(is_binary(identifier), do: Workspace.path_for_issue(identifier))
+      persist_retry_budget_resume_context(workspace, identifier, metadata)
+    end
 
     %{
       state
@@ -4156,6 +4336,8 @@ defmodule SymphonyElixir.Orchestrator do
             state.retry_attempts,
             issue_id,
             %{
+              custody_ref: get_in(state.lease_claims, [issue_id, :custody_ref]),
+              lease_token: get_in(state.lease_claims, [issue_id, :token]),
               attempt: next_attempt,
               retry_ref: retry_ref,
               status: :scheduled,
@@ -4164,7 +4346,7 @@ defmodule SymphonyElixir.Orchestrator do
               identifier: identifier,
               error: error
             }
-            |> Map.merge(Map.drop(metadata, [:identifier, :error, :attempt, :timer_ref, :due_at_ms, :retry_ref, :status]))
+            |> Map.merge(Map.drop(metadata, [:identifier, :error, :attempt, :timer_ref, :due_at_ms, :retry_ref, :status, :custody_ref, :lease_token]))
           )
     }
   end
@@ -4172,7 +4354,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_retry_guard(state, issue_id) do
     case get_in(state.retry_attempts, [issue_id, :identifier]) do
       identifier when is_binary(identifier) ->
-        workspace = Workspace.path_for_issue(identifier)
+        workspace = workspace_for_issue_id(state, issue_id) || Workspace.path_for_issue(identifier)
 
         with :ok <- DeployAudit.ensure_available(workspace),
              :ok <- DispatchAudit.ensure_available(workspace),
@@ -4217,7 +4399,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         with :ok <- dispatch_retry_guard(state, id),
-             {:ok, lease_identity} <- retry_lease_identity(id) do
+             {:ok, lease_identity} <- retry_lease_identity(state, id) do
           state = put_in(state.retry_attempts[id].status, :reading)
           passive? = entry[:delay_type] == :passive_continuation
           manual_only? = tracker_backoff_active?(state)
@@ -4252,7 +4434,7 @@ defmodule SymphonyElixir.Orchestrator do
     entry = Map.fetch!(state.retry_attempts, issue.id)
 
     with {:ok, context} <- capture_tracker_poll_context(),
-         {:ok, lease_identity} <- retry_lease_identity(issue.id) do
+         {:ok, lease_identity} <- retry_lease_identity(state, issue.id) do
       operation = %{
         purpose: :retry,
         phase: :refresh,
@@ -4279,11 +4461,20 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp retry_lease_identity(id) do
-    case LeaseManager.read(id) do
-      {:ok, lease} -> {:ok, Map.take(lease, ["owner", "epoch", "acquired_at"])}
-      {:error, :missing} -> {:ok, :missing}
-      {:error, reason} -> {:error, {:retry_lease_read_failed, id, reason}}
+  defp retry_lease_identity(state, id) do
+    with {:ok, storage} <- retry_lease_storage(state, id) do
+      case LeaseManager.read_at(storage) do
+        {:ok, lease} -> {:ok, %{storage: storage, identity: Map.take(lease, ["owner", "epoch", "acquired_at", "lease_version", "lease_generation"])}}
+        {:error, :missing} -> {:ok, %{storage: storage, identity: :missing}}
+        {:error, reason} -> {:error, {:retry_lease_read_failed, id, reason}}
+      end
+    end
+  end
+
+  defp retry_lease_storage(state, id) do
+    case Map.get(state.lease_claims, id) do
+      %{token: token} -> {:ok, token.storage}
+      nil -> LeaseManager.capture_storage(id)
     end
   end
 
@@ -4310,7 +4501,7 @@ defmodule SymphonyElixir.Orchestrator do
             Map.has_key?(state.running, id) or issue_paused?(state, operation.issue) ->
               cancel_dispatch_retry(state, id)
 
-            retry_lease_identity(id) != {:ok, operation.lease_identity} ->
+            retry_lease_identity(state, id) != {:ok, operation.lease_identity} ->
               rearm_current_retry(state, operation)
 
             result == :discarded ->
@@ -4456,7 +4647,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
         if retry_cleanup_allowed?(state, issue_id) do
-          cleanup_issue_workspace(issue.identifier)
+          if not Map.has_key?(state.lease_claims, issue_id) and legacy_cleanup_allowed?(issue_id), do: cleanup_issue_workspace(issue.identifier)
           {:noreply, release_issue_claim(state, issue_id)}
         else
           {:noreply, stop_terminal_dispatch(state, issue, :retry_ownership_changed)}
@@ -4486,22 +4677,39 @@ defmodule SymphonyElixir.Orchestrator do
   defp manual_retry_issue_fallback(%{issue: %Issue{source: :manual} = issue}), do: issue
   defp manual_retry_issue_fallback(_metadata), do: nil
 
-  defp retry_cleanup_allowed?(state, id) do
-    case LeaseManager.read(id) do
-      {:ok, %{"owner" => owner}} -> owner == state.lease_owner
-      {:error, :missing} -> true
+  defp legacy_cleanup_allowed?(issue_id) do
+    case LeaseManager.read(issue_id) do
+      {:ok, lease} -> lease["lease_version"] in [nil, 1] and not Map.has_key?(lease, "lease_generation")
       _ -> false
     end
   end
 
-  defp release_retry_claim(state, issue) do
-    if retry_cleanup_allowed?(state, issue.id),
-      do: release_issue_claim(state, issue.id),
-      else: stop_terminal_dispatch(state, issue, :retry_ownership_changed)
+  defp retry_cleanup_allowed?(state, id) do
+    case current_issue_custody(state, id) do
+      {:ok, claim} ->
+        case LeaseManager.read_at(claim.token.storage) do
+          {:ok, lease} ->
+            lease["lease_generation"] == claim.token.lease_generation and lease["epoch"] == claim.token.epoch and lease["owner"] == claim.token.owner and
+              lease["acquired_at"] == claim.token.acquired_at
+
+          _ ->
+            false
+        end
+
+      {:error, _reason} ->
+        false
+    end
   end
 
+  defp release_retry_claim(state, issue), do: release_issue_claim(state, issue.id)
+
   defp cleanup_issue_workspace(identifier) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier)
+    case RunStateStore.load(Workspace.path_for_issue(identifier)) do
+      {:ok, %{lease_version: 2}} -> :ok
+      {:ok, _legacy} -> Workspace.remove_issue_workspaces(identifier)
+      {:error, :missing} -> Workspace.remove_issue_workspaces(identifier)
+      {:error, reason} -> Logger.warning("Workspace cleanup blocked identifier=#{identifier}: #{inspect(reason)}")
+    end
   end
 
   defp cleanup_issue_workspace(_identifier), do: :ok
@@ -4511,7 +4719,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_active_retry(state, issue, attempt, metadata) do
-    case retry_resume_action(issue, metadata) do
+    case retry_resume_action(state, issue, metadata) do
       :dispatch ->
         do_handle_active_retry(state, issue, attempt, metadata)
 
@@ -4526,15 +4734,16 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp retry_resume_action(issue, metadata) do
-    with :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
-         :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)) do
-      retry_resume_action_from_snapshot(issue, metadata)
+  defp retry_resume_action(state, issue, metadata) do
+    with {:ok, workspace} <- current_custody_workspace(state, issue),
+         :ok <- DeployAudit.ensure_available(workspace),
+         :ok <- DispatchAudit.ensure_available(workspace) do
+      retry_resume_action_from_snapshot(issue, metadata, workspace)
     end
   end
 
-  defp retry_resume_action_from_snapshot(issue, metadata) do
-    case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
+  defp retry_resume_action_from_snapshot(issue, metadata, workspace) do
+    case RunStateStore.load_checked(workspace, issue) do
       {:ok, %{stage: "blocked"} = run_state} ->
         if metadata[:delay_type] == :continuation and auto_continue_review_fix_budget_stop?(run_state),
           do: :resume,
@@ -4558,53 +4767,28 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp resume_review_retry_under_lease(state, issue, attempt, metadata) do
-    existing_owner? =
-      case LeaseManager.read(issue.id) do
-        {:ok, %{"owner" => owner}} -> owner == state.lease_owner
-        _ -> false
-      end
+    acquisition =
+      with {:ok, workspace} <- current_custody_workspace(state, issue),
+           do: acquire_issue_custody(state, issue, &LeaseManager.acquire/3, workspace)
 
-    case LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner) do
-      :ok ->
+    case acquisition do
+      {:ok, acquired_state} ->
         resume_result =
-          case retry_resume_action(issue, metadata) do
-            :resume ->
-              case Controls.maybe_resume_blocked_issue(state, issue) do
-                {%State{}, %Issue{}} = resumed -> {:ok, resumed}
-                {:error, _reason} = error -> error
-              end
-
-            :dispatch ->
-              {:ok, {state, issue}}
-
-            {:error, _reason} = error ->
-              error
+          case retry_resume_action(acquired_state, issue, metadata) do
+            :resume -> Controls.maybe_resume_blocked_issue(acquired_state, issue)
+            :dispatch -> {acquired_state, issue}
+            {:error, _reason} = error -> error
           end
 
         case resume_result do
+          {%State{} = resumed, %Issue{} = next_issue} ->
+            do_handle_active_retry(transfer_issue_custody(resumed, issue.id, :retry), next_issue, attempt, metadata)
+
           {:error, {tag, _} = reason} when tag in [:dispatch_audit_pending, :dispatch_audit_read_failed, :deploy_audit_pending, :deploy_audit_read_failed] ->
-            {:noreply, halt_dispatch_audit(state, issue.id, reason)}
+            {:noreply, halt_dispatch_audit(acquired_state, issue.id, reason)}
 
-          _ ->
-            resume_state =
-              case resume_result do
-                {:ok, {next_state, _issue}} -> next_state
-                {:error, _reason} -> state
-              end
-
-            released = release_retry_resume_lease(resume_state, issue, existing_owner?)
-
-            if MapSet.member?(released.claimed, issue.id) do
-              {:noreply, released}
-            else
-              case resume_result do
-                {:ok, {_state, next_issue}} ->
-                  do_handle_active_retry(released, next_issue, attempt, metadata)
-
-                {:error, reason} ->
-                  {:noreply, stop_terminal_dispatch(released, issue, reason)}
-              end
-            end
+          {:error, reason} ->
+            {:noreply, stop_terminal_dispatch(acquired_state, issue, reason)}
         end
 
       {:error, reason} ->
@@ -4615,18 +4799,6 @@ defmodule SymphonyElixir.Orchestrator do
            attempt + 1,
            Map.merge(metadata, %{identifier: issue.identifier, error: "review continuation lease unavailable: #{inspect(reason)}"})
          )}
-    end
-  end
-
-  defp release_retry_resume_lease(state, issue, true), do: release_issue_claim(state, issue.id)
-
-  defp release_retry_resume_lease(state, issue, false) do
-    case LeaseManager.release(issue.id, state.lease_owner) do
-      :ok ->
-        %{state | claimed: MapSet.delete(state.claimed, issue.id)}
-
-      {:error, reason} ->
-        %{state | claimed: MapSet.put(state.claimed, issue.id), candidate_fetch_error: {:lease_release_failed, issue.id, reason}}
     end
   end
 
@@ -4661,38 +4833,153 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
-    workspace = workspace_for_issue_id(state, issue_id)
+    state = cancel_promotion_reader(state, issue_id)
 
-    case release_persisted_issue_lease(issue_id, state.lease_owner, workspace) do
-      :ok ->
-        RunLedger.record("lease.released", %{
-          issue_id: issue_id,
-          actor_type: "system",
-          actor_id: state.lease_owner,
-          summary: "Lease released."
-        })
+    case current_issue_custody(state, issue_id) do
+      {:ok, claim} ->
+        case LeaseManager.release_token(claim.token) do
+          {:ok, outcome} when outcome in [:released, :missing] ->
+            state =
+              case state.candidate_fetch_error do
+                {:lease_release_failed, ^issue_id, _} -> %{state | candidate_fetch_error: nil}
+                _ -> state
+              end
 
-        fetch_error =
-          case state.candidate_fetch_error do
-            {:lease_release_failed, ^issue_id, _reason} -> nil
-            other -> other
-          end
+            released = drop_issue_custody(state, issue_id)
+            if outcome == :released, do: record_released_custody(released, issue_id, claim), else: released
 
-        %{state | claimed: MapSet.delete(state.claimed, issue_id), candidate_fetch_error: fetch_error}
+          {:error, :lease_token_mismatch} ->
+            state |> drop_issue_custody(issue_id) |> Map.put(:candidate_fetch_error, {:lease_ownership_changed, issue_id})
 
-      {:error, reason} ->
-        %{state | claimed: MapSet.put(state.claimed, issue_id), candidate_fetch_error: {:lease_release_failed, issue_id, reason}}
+          {:error, reason} ->
+            Logger.error("Lease release failed issue_id=#{issue_id}; persisted ownership was preserved: #{inspect(reason)}")
+            %{state | claimed: MapSet.put(state.claimed, issue_id), candidate_fetch_error: {:lease_release_failed, issue_id, reason}}
+        end
+
+      {:error, :lease_custody_missing} ->
+        case LeaseManager.read(issue_id) do
+          {:error, :missing} -> drop_issue_custody(state, issue_id)
+          result -> %{state | candidate_fetch_error: {:lease_custody_missing, issue_id, result}}
+        end
     end
   end
 
-  defp release_persisted_issue_lease(issue_id, owner, workspace) do
-    case LeaseManager.release(issue_id, owner) do
-      :ok ->
-        maybe_clear_persisted_lease(workspace)
-        :ok
+  defp record_released_custody(state, issue_id, claim) do
+    result =
+      with {:ok, entry} <- RunLedger.prepare_entry("lease.released", %{issue_id: issue_id, actor_type: "system", actor_id: claim.token.owner, summary: "Lease released."}),
+           do: RunLedger.CheckedStorage.persist(entry, claim.token.storage.ledger_path)
 
-      {:error, reason} = error ->
-        Logger.error("Lease release failed issue_id=#{issue_id}; persisted ownership was preserved: #{inspect(reason)}")
+    case result do
+      {:ok, _entry} ->
+        state
+
+      {:error, reason} ->
+        Logger.error("Lease physically released but its audit was not confirmed issue_id=#{issue_id}: #{inspect(reason)}")
+        %{state | candidate_fetch_error: {:lease_release_audit_failed, issue_id, reason}}
+    end
+  end
+
+  @doc false
+  @spec prepare_retry_custody(State.t(), String.t()) :: {:ok, State.t()} | {:error, term(), State.t()}
+  def prepare_retry_custody(state, issue_id) do
+    if Map.has_key?(state.running, issue_id) do
+      {:ok, state}
+    else
+      state = state |> invalidate_admission_issue(issue_id) |> cancel_dispatch_retry(issue_id)
+      released = release_issue_claim(state, issue_id)
+
+      case {Map.has_key?(released.lease_claims, issue_id), released.candidate_fetch_error} do
+        {false, {:lease_custody_missing, ^issue_id, _} = reason} -> {:error, reason, released}
+        {false, {:lease_ownership_changed, ^issue_id} = reason} -> {:error, reason, released}
+        {false, {:lease_release_audit_failed, ^issue_id, _} = reason} -> {:error, reason, released}
+        {false, _} -> {:ok, released}
+        {true, reason} -> {:error, reason, released}
+      end
+    end
+  end
+
+  defp drop_issue_custody(state, issue_id) do
+    case get_in(state.lease_claims, [issue_id, :timer]) do
+      timer when is_reference(timer) -> Process.cancel_timer(timer)
+      _ -> :ok
+    end
+
+    %{state | lease_claims: Map.delete(state.lease_claims, issue_id), claimed: MapSet.delete(state.claimed, issue_id)}
+  end
+
+  defp current_issue_custody(state, issue_id, expected_ref \\ :current) do
+    case Map.fetch(state.lease_claims, issue_id) do
+      {:ok, %{custody_ref: ref} = claim} when expected_ref == :current or expected_ref == ref -> {:ok, claim}
+      {:ok, _claim} -> {:error, :lease_custody_changed}
+      :error -> {:error, :lease_custody_missing}
+    end
+  end
+
+  defp transfer_issue_custody(state, issue_id, holder) do
+    case Map.fetch(state.lease_claims, issue_id) do
+      {:ok, claim} ->
+        next = %{claim | custody_ref: make_ref(), holder: holder}
+
+        next =
+          if holder == :retry do
+            if is_reference(claim.timer), do: Process.cancel_timer(claim.timer)
+            %{next | timer: nil, promotion_ref: nil, deadline: :not_pending}
+          else
+            next
+          end
+
+        %{state | lease_claims: Map.put(state.lease_claims, issue_id, next)}
+
+      :error ->
+        state
+    end
+  end
+
+  defp current_custody_workspace(state, issue) do
+    selected = Workspace.path_for_issue(issue)
+
+    case Map.get(state.lease_claims, issue.id) do
+      nil ->
+        {:ok, selected}
+
+      %{workspace: captured, token: token} ->
+        with true <- Path.expand(selected) == Path.expand(captured) or {:error, :lease_workspace_changed},
+             {:ok, current} <- LeaseManager.capture_storage(issue.id),
+             true <- (current.lease_path == token.storage.lease_path and current.ledger_path == token.storage.ledger_path) or {:error, :lease_location_changed} do
+          {:ok, captured}
+        end
+    end
+  end
+
+  defp acquire_issue_custody(state, issue, acquire_fun, workspace) do
+    started = System.monotonic_time(:millisecond)
+    existing = Map.get(state.lease_claims, issue.id)
+
+    result =
+      if not is_nil(existing) and acquire_fun == (&LeaseManager.acquire/3) do
+        LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner, storage: existing.token.storage, expected_token: existing.token)
+      else
+        acquire_fun.(issue.id, issue.identifier, state.lease_owner)
+      end
+
+    case result do
+      {:ok, %{token: token, lease: lease}} ->
+        claim = %{
+          token: token,
+          lease: lease,
+          custody_ref: make_ref(),
+          holder: :pending,
+          workspace: workspace,
+          issue: issue,
+          started_at_ms: started,
+          deadline: :not_pending,
+          promotion_ref: nil,
+          timer: nil
+        }
+
+        {:ok, %{state | lease_claims: Map.put(state.lease_claims, issue.id, claim), claimed: MapSet.put(state.claimed, issue.id)}}
+
+      {:error, _reason} = error ->
         error
     end
   end
@@ -4950,11 +5237,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp running_entry_session_id(_running_entry), do: "n/a"
 
+  defp capacity_entries(state) do
+    pending = state.lease_claims |> Enum.filter(fn {_id, claim} -> claim.holder in [:pending, :gated] end) |> Map.new(fn {id, claim} -> {id, %{issue: claim.issue}} end)
+
+    pending =
+      case state.admission_read do
+        %{purpose: :promotion, issue: issue} -> Map.put_new(pending, issue.id, %{issue: issue})
+        _ -> pending
+      end
+
+    Map.merge(pending, state.running)
+  end
+
   @doc false
   @spec available_slots(State.t()) :: non_neg_integer()
   def available_slots(%State{} = state) do
     max(
-      (state.max_concurrent_agents || Config.max_concurrent_agents()) - map_size(state.running),
+      (state.max_concurrent_agents || Config.max_concurrent_agents()) - map_size(capacity_entries(state)),
       0
     )
   end
@@ -5742,6 +6041,8 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  defp dispatch_runtime_issue(%State{admission_read: %{purpose: :promotion, issue: %{id: id}}} = state, %Issue{id: id}, _attempt, _active_dispatch_fun, _passive_dispatch_fun), do: state
+
   defp dispatch_runtime_issue(
          %State{} = state,
          %Issue{} = issue,
@@ -5752,11 +6053,12 @@ defmodule SymphonyElixir.Orchestrator do
        when is_function(active_dispatch_fun, 3) and is_function(passive_dispatch_fun, 3) do
     with :ok <- token_usage_dispatch_guard(state, issue.id),
          :ok <- validate_dispatch_configuration(issue),
-         :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
-         :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)),
-         :ok <- RunStateStore.ensure_readable(Workspace.path_for_issue(issue)),
-         :ok <- persisted_issue_token_budget_guard(issue),
-         {:ok, dispatch_stage} <- persisted_dispatch_stage(issue) do
+         {:ok, workspace} <- current_custody_workspace(state, issue),
+         :ok <- DeployAudit.ensure_available(workspace),
+         :ok <- DispatchAudit.ensure_available(workspace),
+         :ok <- RunStateStore.ensure_readable(workspace),
+         :ok <- persisted_issue_token_budget_guard(issue, workspace),
+         {:ok, dispatch_stage} <- persisted_dispatch_stage(issue, workspace) do
       case dispatch_stage do
         stage when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
           passive_dispatch_fun.(state, issue, attempt)
@@ -5775,36 +6077,27 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp persist_dispatchable_issue_lease(state, workspace, issue) do
-    with {:ok, _stage} <- persisted_dispatch_stage(issue) do
+    with {:ok, _stage} <- persisted_dispatch_stage(issue, workspace) do
       persist_live_issue_lease(state, workspace, issue)
     end
   end
 
   defp stop_terminal_dispatch(state, issue, reason) do
-    case LeaseManager.read(issue.id) do
-      {:ok, %{"owner" => owner}} when owner == state.lease_owner ->
-        released = release_issue_claim(state, issue.id)
+    released = release_issue_claim(state, issue.id)
 
-        if MapSet.member?(released.claimed, issue.id),
-          do: released,
-          else: %{released | candidate_fetch_error: reason}
-
-      {:ok, _other_owner} ->
-        %{state | claimed: MapSet.delete(state.claimed, issue.id), candidate_fetch_error: reason}
-
-      {:error, :missing} ->
-        %{state | claimed: MapSet.delete(state.claimed, issue.id), candidate_fetch_error: reason}
-
-      {:error, lease_reason} ->
-        %{state | candidate_fetch_error: {:lease_read_failed, issue.id, lease_reason}}
+    case released.candidate_fetch_error do
+      {:lease_release_audit_failed, id, _} when id == issue.id -> released
+      _ -> if Map.has_key?(released.lease_claims, issue.id), do: released, else: %{released | candidate_fetch_error: reason}
     end
   end
 
-  defp persisted_dispatch_stage(issue) do
-    with :ok <- DeployAudit.ensure_available(Workspace.path_for_issue(issue)),
-         :ok <- DispatchAudit.ensure_available(Workspace.path_for_issue(issue)),
-         :ok <- SymphonyElixir.RunIdentity.ensure_issue(Workspace.path_for_issue(issue), issue) do
-      case RunStateStore.load_checked(Workspace.path_for_issue(issue), issue) do
+  defp persisted_dispatch_stage(issue, workspace \\ nil) do
+    workspace = workspace || Workspace.path_for_issue(issue)
+
+    with :ok <- DeployAudit.ensure_available(workspace),
+         :ok <- DispatchAudit.ensure_available(workspace),
+         :ok <- SymphonyElixir.RunIdentity.ensure_issue(workspace, issue) do
+      case RunStateStore.load_checked(workspace, issue) do
         {:ok, %{stage: stage}} when stage in ["blocked", "done"] ->
           {:error, {:persisted_stage_requires_explicit_resume, stage}}
 
@@ -5854,8 +6147,8 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
-  defp persisted_issue_token_budget_guard(issue) do
-    workspace = Workspace.path_for_issue(issue)
+  defp persisted_issue_token_budget_guard(issue, workspace) do
+    workspace = workspace || Workspace.path_for_issue(issue)
     run_state = RunStateStore.load_or_default(workspace, issue)
 
     case RunPolicy.maybe_stop_for_token_budget(issue, %{
@@ -5876,8 +6169,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp normalize_dispatch_stage(%Issue{} = issue) do
-    workspace = Workspace.path_for_issue(issue)
+  defp normalize_dispatch_stage(%Issue{} = issue, workspace \\ nil) do
+    workspace = workspace || Workspace.path_for_issue(issue)
     inspection = RunInspector.inspect(workspace)
     expected_branch = GitManager.issue_branch_name(issue)
 
@@ -6327,7 +6620,15 @@ defmodule SymphonyElixir.Orchestrator do
   defp datetime_to_iso8601(_timestamp), do: nil
 
   defp pop_running_entry(state, issue_id) do
-    {Map.get(state.running, issue_id), %{state | running: Map.delete(state.running, issue_id)}}
+    entry = Map.get(state.running, issue_id)
+
+    {entry, state} =
+      case current_issue_custody(state, issue_id, Map.get(entry || %{}, :custody_ref)) do
+        {:ok, _claim} -> {entry, transfer_issue_custody(state, issue_id, :retry)}
+        {:error, reason} -> {Map.put(entry, :lease_ownership_uncertain, reason), state}
+      end
+
+    {entry, %{state | running: Map.delete(state.running, issue_id)}}
   end
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
@@ -6356,16 +6657,25 @@ defmodule SymphonyElixir.Orchestrator do
       Enum.reduce(Map.keys(state.running), state, fn issue_id, state_acc ->
         refresh_result =
           case Map.fetch!(state_acc.running, issue_id) do
-            %{lease_ownership_uncertain: reason} -> {:error, reason}
-            _entry -> LeaseManager.refresh(issue_id, state.lease_owner)
+            %{lease_ownership_uncertain: reason} ->
+              {:error, reason}
+
+            entry ->
+              with {:ok, claim} <- current_issue_custody(state_acc, issue_id, Map.get(entry, :custody_ref)) do
+                if claim.holder == :running, do: LeaseManager.refresh_token(claim.token), else: :pending
+              end
           end
 
         case refresh_result do
-          :ok ->
+          {:ok, lease} ->
+            state_acc = put_in(state_acc.lease_claims[issue_id].lease, lease)
             maybe_sync_running_issue_lease(state_acc, issue_id)
             state_acc
 
-          {:error, :claimed} ->
+          :pending ->
+            state_acc
+
+          {:error, reason} when reason in [:claimed, :lease_token_mismatch, :lease_custody_missing, :lease_custody_changed] ->
             Logger.warning("Lost persisted lease for running issue_id=#{issue_id}; terminating local worker")
 
             RunLedger.record("runtime.stopped", %{
@@ -6386,12 +6696,7 @@ defmodule SymphonyElixir.Orchestrator do
             terminate_running_issue(state_acc, issue_id, false)
 
           {:error, reason} ->
-            if uncertain_lease_refresh?(reason) do
-              stop_for_uncertain_lease(state_acc, issue_id, reason)
-            else
-              Logger.warning("Lease refresh failed for issue_id=#{issue_id}: #{inspect(reason)}")
-              state_acc
-            end
+            stop_for_uncertain_lease(state_acc, issue_id, reason)
         end
       end)
 
@@ -6407,12 +6712,6 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
-
-  defp uncertain_lease_refresh?({:lease_audit_pending, _operation_id}), do: true
-  defp uncertain_lease_refresh?(:invalid_lease_audit_pending), do: true
-  defp uncertain_lease_refresh?(:invalid_lease), do: true
-  defp uncertain_lease_refresh?(%Jason.DecodeError{}), do: true
-  defp uncertain_lease_refresh?(_reason), do: false
 
   defp stop_for_uncertain_lease(state, issue_id, reason) do
     Logger.error("Lease ownership uncertain for issue_id=#{issue_id}; terminating worker and preserving its audit: #{inspect(reason)}")
@@ -6446,7 +6745,7 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec dispatch_slots_available?(Issue.t(), State.t()) :: boolean()
   def dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
-    available_slots(state) > 0 and state_slots_available?(issue, state.running)
+    available_slots(state) > 0 and state_slots_available?(issue, capacity_entries(state))
   end
 
   defp apply_agent_token_delta(
@@ -6575,12 +6874,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_run_state(_identifier, _issue, _retry_metadata), do: %{}
 
-  defp persist_retry_budget_resume_context(identifier, metadata)
-       when is_binary(identifier) and is_map(metadata) do
+  defp persist_retry_budget_resume_context(workspace, identifier, metadata)
+       when is_binary(workspace) and is_binary(identifier) and is_map(metadata) do
     case Map.get(metadata, :budget_resume_context) do
       resume_context when is_map(resume_context) ->
-        workspace = Workspace.path_for_issue(identifier)
-
         if File.dir?(workspace) do
           case RunStateStore.update(workspace, fn persisted ->
                  merge_retry_budget_resume_context(persisted, %{budget_resume_context: resume_context})
@@ -6600,7 +6897,7 @@ defmodule SymphonyElixir.Orchestrator do
     :ok
   end
 
-  defp persist_retry_budget_resume_context(_identifier, _metadata), do: :ok
+  defp persist_retry_budget_resume_context(_workspace, _identifier, _metadata), do: :ok
 
   defp merge_retry_budget_resume_context(run_state, retry_metadata)
        when is_map(run_state) and is_map(retry_metadata) do
@@ -6953,8 +7250,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp stateful_lease_details(issue_id, run_state, now)
        when is_binary(issue_id) and is_map(run_state) and is_struct(now, DateTime) do
+    live_result = LeaseManager.read(issue_id)
+
     live_lease =
-      case LeaseManager.read(issue_id) do
+      case live_result do
         {:ok, lease} when is_map(lease) -> lease
         _ -> nil
       end
@@ -6969,12 +7268,13 @@ defmodule SymphonyElixir.Orchestrator do
       lease_field(live_lease, "acquired_at") || Map.get(run_state, :lease_acquired_at)
 
     lease_epoch = lease_field(live_lease, "epoch") || Map.get(run_state, :lease_epoch)
-    reclaimable? = lease_reclaimable?(live_lease, lease_updated_at, ttl_ms, now)
+    reclaimable? = is_map(live_lease) and lease_reclaimable?(live_lease, lease_updated_at, ttl_ms, now)
 
     lease_source =
       cond do
         is_map(live_lease) -> "live"
-        present?(lease_owner) -> "persisted"
+        live_result != {:error, :missing} -> "unverified"
+        present?(lease_owner) -> "historical"
         true -> "missing"
       end
 
@@ -6984,7 +7284,10 @@ defmodule SymphonyElixir.Orchestrator do
       lease_owner_channel: Map.get(run_state, :lease_owner_channel),
       lease_acquired_at: lease_acquired_at,
       lease_updated_at: lease_updated_at,
-      lease_status: lease_status_value(lease_owner, reclaimable?, Map.get(run_state, :lease_status)),
+      lease_status: if(lease_source == "live", do: lease_status_value(lease_owner, reclaimable?), else: lease_source),
+      lease_version: if(live_lease, do: live_lease["lease_version"], else: Map.get(run_state, :lease_version)),
+      lease_generation: if(live_lease, do: live_lease["lease_generation"], else: Map.get(run_state, :lease_generation)),
+      lease_error: if(lease_source == "unverified", do: inspect(live_result), else: nil),
       lease_epoch: lease_epoch,
       lease_age_ms: lease_age_ms(live_lease, lease_updated_at, now),
       lease_ttl_ms: ttl_ms,
@@ -7041,15 +7344,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp lease_reclaimable?(_lease, _updated_at, _ttl_ms, _now), do: false
 
-  defp lease_status_value(nil, _reclaimable?, _persisted_status), do: "missing"
-  defp lease_status_value(_owner, true, _persisted_status), do: "reclaimable"
-
-  defp lease_status_value(_owner, false, persisted_status)
-       when is_binary(persisted_status) and persisted_status != "" do
-    persisted_status
-  end
-
-  defp lease_status_value(_owner, false, _persisted_status), do: "held"
+  defp lease_status_value(nil, _reclaimable?), do: "missing"
+  defp lease_status_value(_owner, true), do: "reclaimable"
+  defp lease_status_value(_owner, false), do: "held"
 
   defp lease_age_ms(lease, _updated_at, %DateTime{} = now) when is_map(lease) do
     LeaseManager.age_ms(lease, now)
@@ -7096,83 +7393,55 @@ defmodule SymphonyElixir.Orchestrator do
   defp lease_reclaimable_from_entry(entry),
     do: get_in(entry, [:lease, :lease_reclaimable]) || Map.get(entry, :lease_reclaimable, false)
 
-  defp ensure_review_follow_up_lease(%State{} = state, run_state) when is_map(run_state) do
-    issue_ref = issue_ref_for_run_state(run_state)
-    issue_id = Map.get(issue_ref, :id)
-    issue_identifier = Map.get(issue_ref, :identifier)
+  defp ensure_review_follow_up_lease(%State{} = state, run_state, workspace) when is_map(run_state) do
+    with {:ok, issue, storage, claim} <- follow_up_location(state, run_state, workspace) do
+      case claim do
+        %{holder: holder} when holder in [:pending, :gated] ->
+          {:skip, :lease_attempt_pending}
 
-    cond do
-      not present?(issue_id) ->
-        {:error, :missing_issue_id}
+        %{} ->
+          case LeaseManager.refresh_token(claim.token) do
+            {:ok, lease} ->
+              next = put_in(state.lease_claims[issue.id].lease, lease)
+              {:ok, next, LeaseManager.snapshot_for_state(lease), false}
 
-      true ->
-        case LeaseManager.read(issue_id) do
-          {:ok, lease} ->
-            snapshot = LeaseManager.snapshot_for_state(lease)
-            owner = snapshot.lease_owner
+            {:error, reason} ->
+              {:error, reason}
+          end
 
-            cond do
-              owner == state.lease_owner ->
-                {:ok, snapshot, false}
+        nil ->
+          acquire = fn id, identifier, owner -> LeaseManager.acquire(id, identifier, owner, storage: storage) end
 
-              LeaseManager.reclaimable?(lease) or
-                  same_runner_instance_lease_reclaimable?(run_state) ->
-                with :ok <-
-                       reclaim_review_follow_up_lease(
-                         issue_id,
-                         issue_identifier,
-                         state.lease_owner,
-                         run_state
-                       ),
-                     {:ok, refreshed_lease} <- LeaseManager.read(issue_id) do
-                  {:ok, LeaseManager.snapshot_for_state(refreshed_lease), true}
-                else
-                  {:error, :claimed} -> {:skip, owner}
-                  {:error, reason} -> {:error, reason}
-                end
+          case acquire_issue_custody(state, issue, acquire, workspace) do
+            {:ok, next} ->
+              next = transfer_issue_custody(next, issue.id, :follow_up)
+              claim = Map.fetch!(next.lease_claims, issue.id)
+              {:ok, next, LeaseManager.snapshot_for_state(claim.lease), true}
 
-              true ->
-                {:skip, owner}
-            end
+            {:error, reason} when reason in [:claimed, :lease_token_required] ->
+              {:skip, reason}
 
-          {:error, :missing} ->
-            with :ok <- LeaseManager.acquire(issue_id, issue_identifier, state.lease_owner),
-                 {:ok, lease} <- LeaseManager.read(issue_id) do
-              {:ok, LeaseManager.snapshot_for_state(lease), true}
-            else
-              {:error, :claimed} -> {:skip, :claimed}
-              {:error, reason} -> {:error, reason}
-            end
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+            {:error, reason} ->
+              {:error, reason}
+          end
+      end
     end
   end
 
-  defp release_review_follow_up_lease(%State{} = state, run_state, workspace)
-       when is_map(run_state) and is_binary(workspace) do
+  defp release_review_follow_up_lease(%State{} = state, run_state, _workspace) when is_map(run_state) do
     case Map.get(run_state, :issue_id) do
-      issue_id when is_binary(issue_id) and issue_id != "" ->
-        release_persisted_issue_lease(issue_id, state.lease_owner, workspace)
-
-      _ ->
-        :ok
+      id when is_binary(id) and id != "" -> release_issue_claim(state, id)
+      _ -> state
     end
   end
 
-  defp release_review_follow_up_lease(_state, _run_state, _workspace), do: :ok
+  defp release_review_follow_up_lease(state, _run_state, _workspace), do: state
 
-  defp persist_live_issue_lease(%State{} = _state, workspace, issue)
-       when is_binary(workspace) and is_map(issue) do
-    case Map.get(issue, :id) || Map.get(issue, "id") do
-      issue_id when is_binary(issue_id) and issue_id != "" ->
-        with {:ok, lease} <- LeaseManager.read(issue_id) do
-          RunStateStore.sync_lease(workspace, issue, LeaseManager.snapshot_for_state(lease))
-        end
-
-      _ ->
-        {:error, :missing_issue_id}
+  defp persist_live_issue_lease(%State{} = state, workspace, issue) when is_binary(workspace) and is_map(issue) do
+    with {:ok, claim} <- current_issue_custody(state, issue.id),
+         true <- workspace == claim.workspace or {:error, :lease_workspace_changed},
+         :ok <- SymphonyElixir.RunIdentity.ensure_issue(workspace, issue) do
+      RunStateStore.sync_lease(workspace, issue, LeaseManager.snapshot_for_state(claim.lease))
     end
   end
 
@@ -7180,7 +7449,7 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(state.running, issue_id) do
       %{issue: issue, identifier: identifier}
       when is_map(issue) and is_binary(identifier) and identifier != "" ->
-        workspace = Workspace.path_for_issue(identifier)
+        workspace = workspace_for_issue_id(state, issue_id)
 
         case persist_live_issue_lease(state, workspace, issue) do
           {:ok, _run_state} ->
@@ -7196,6 +7465,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_sync_running_issue_lease(_state, _issue_id), do: :ok
+
+  defp workspace_for_issue_id(%State{lease_claims: claims}, issue_id) when is_map_key(claims, issue_id),
+    do: Map.fetch!(claims, issue_id).workspace
 
   defp workspace_for_issue_id(%State{} = state, issue_id) when is_binary(issue_id) do
     case Map.get(state.running, issue_id) do
@@ -7234,31 +7506,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_clear_persisted_lease(_workspace), do: :ok
-
-  defp reclaim_review_follow_up_lease(issue_id, issue_identifier, owner, run_state)
-       when is_binary(issue_id) and is_binary(owner) and is_map(run_state) do
-    case LeaseManager.acquire(issue_id, issue_identifier, owner) do
-      :ok ->
-        :ok
-
-      {:error, :claimed} ->
-        if same_runner_instance_lease_reclaimable?(run_state) do
-          :ok = LeaseManager.release(issue_id)
-          LeaseManager.acquire(issue_id, issue_identifier, owner)
-        else
-          {:error, :claimed}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp same_runner_instance_lease_reclaimable?(run_state) when is_map(run_state) do
-    present?(Map.get(run_state, :lease_owner)) and
-      Map.get(run_state, :lease_owner_instance_id) == RunnerRuntime.instance_id() and
-      Map.get(run_state, :lease_owner_channel) == Config.runner_channel()
-  end
 
   defp apply_token_delta(agent_totals, token_delta) do
     input_tokens = Map.get(agent_totals, :input_tokens, 0) + token_delta.input_tokens

@@ -629,7 +629,9 @@ defmodule SymphonyElixir.RunStateStore do
       lease_acquired_at: nil,
       lease_updated_at: nil,
       lease_status: nil,
-      lease_epoch: nil
+      lease_epoch: nil,
+      lease_version: nil,
+      lease_generation: nil
     }
   end
 
@@ -683,6 +685,8 @@ defmodule SymphonyElixir.RunStateStore do
     |> Map.put(:lease_updated_at, Map.get(lease, :lease_updated_at))
     |> Map.put(:lease_status, Map.get(lease, :lease_status) || "held")
     |> Map.put(:lease_epoch, Map.get(lease, :lease_epoch))
+    |> Map.put(:lease_version, Map.get(lease, :lease_version))
+    |> Map.put(:lease_generation, Map.get(lease, :lease_generation))
   end
 
   defp clear_lease_attrs(state) when is_map(state) do
@@ -694,6 +698,8 @@ defmodule SymphonyElixir.RunStateStore do
     |> Map.put(:lease_updated_at, nil)
     |> Map.put(:lease_status, nil)
     |> Map.put(:lease_epoch, nil)
+    |> Map.put(:lease_version, nil)
+    |> Map.put(:lease_generation, nil)
   end
 
   defp normalize_lease_attrs(lease_attrs) when is_map(lease_attrs) do
@@ -711,6 +717,8 @@ defmodule SymphonyElixir.RunStateStore do
       lease_updated_at:
         Map.get(lease_attrs, :lease_updated_at) || Map.get(lease_attrs, "lease_updated_at") ||
           Map.get(lease_attrs, :updated_at) || Map.get(lease_attrs, "updated_at"),
+      lease_version: Map.get(lease_attrs, :lease_version) || Map.get(lease_attrs, "lease_version"),
+      lease_generation: Map.get(lease_attrs, :lease_generation) || Map.get(lease_attrs, "lease_generation"),
       lease_status: Map.get(lease_attrs, :lease_status) || Map.get(lease_attrs, "lease_status"),
       lease_epoch:
         Map.get(lease_attrs, :lease_epoch) || Map.get(lease_attrs, "lease_epoch") ||

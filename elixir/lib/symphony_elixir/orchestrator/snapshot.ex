@@ -390,8 +390,10 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
 
   defp stateful_lease_details(issue_id, run_state, now)
        when is_binary(issue_id) and is_map(run_state) and is_struct(now, DateTime) do
+    live_result = LeaseManager.read(issue_id)
+
     live_lease =
-      case LeaseManager.read(issue_id) do
+      case live_result do
         {:ok, lease} when is_map(lease) -> lease
         _ -> nil
       end
@@ -406,12 +408,13 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
       lease_field(live_lease, "acquired_at") || Map.get(run_state, :lease_acquired_at)
 
     lease_epoch = lease_field(live_lease, "epoch") || Map.get(run_state, :lease_epoch)
-    reclaimable? = lease_reclaimable?(live_lease, lease_updated_at, ttl_ms, now)
+    reclaimable? = is_map(live_lease) and lease_reclaimable?(live_lease, lease_updated_at, ttl_ms, now)
 
     lease_source =
       cond do
         is_map(live_lease) -> "live"
-        present?(lease_owner) -> "persisted"
+        live_result != {:error, :missing} -> "unverified"
+        present?(lease_owner) -> "historical"
         true -> "missing"
       end
 
@@ -421,7 +424,10 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
       lease_owner_channel: Map.get(run_state, :lease_owner_channel),
       lease_acquired_at: lease_acquired_at,
       lease_updated_at: lease_updated_at,
-      lease_status: lease_status_value(lease_owner, reclaimable?, Map.get(run_state, :lease_status)),
+      lease_status: if(lease_source == "live", do: lease_status_value(lease_owner, reclaimable?), else: lease_source),
+      lease_version: if(live_lease, do: live_lease["lease_version"], else: Map.get(run_state, :lease_version)),
+      lease_generation: if(live_lease, do: live_lease["lease_generation"], else: Map.get(run_state, :lease_generation)),
+      lease_error: if(lease_source == "unverified", do: inspect(live_result), else: nil),
       lease_epoch: lease_epoch,
       lease_age_ms: lease_age_ms(live_lease, lease_updated_at, now),
       lease_ttl_ms: ttl_ms,
@@ -478,15 +484,9 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
 
   defp lease_reclaimable?(_lease, _updated_at, _ttl_ms, _now), do: false
 
-  defp lease_status_value(nil, _reclaimable?, _persisted_status), do: "missing"
-  defp lease_status_value(_owner, true, _persisted_status), do: "reclaimable"
-
-  defp lease_status_value(_owner, false, persisted_status)
-       when is_binary(persisted_status) and persisted_status != "" do
-    persisted_status
-  end
-
-  defp lease_status_value(_owner, false, _persisted_status), do: "held"
+  defp lease_status_value(nil, _reclaimable?), do: "missing"
+  defp lease_status_value(_owner, true), do: "reclaimable"
+  defp lease_status_value(_owner, false), do: "held"
 
   defp lease_age_ms(lease, _updated_at, %DateTime{} = now) when is_map(lease) do
     LeaseManager.age_ms(lease, now)

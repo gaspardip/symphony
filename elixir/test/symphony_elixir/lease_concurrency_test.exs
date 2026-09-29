@@ -26,12 +26,13 @@ defmodule SymphonyElixir.LeaseConcurrencyTest do
           {"runner-b", :acquire}
         ])
 
-      assert Enum.count(results, fn {_owner, result} -> result == :ok end) == 1
+      assert Enum.count(results, fn {_owner, result} -> match?({:ok, %{token: _}}, result) end) == 1
       assert Enum.count(results, fn {_owner, result} -> result == {:error, :claimed} end) == 1
-      {winner, :ok} = Enum.find(results, fn {_owner, result} -> result == :ok end)
+      {winner, {:ok, acquired}} = Enum.find(results, fn {_owner, result} -> match?({:ok, %{token: _}}, result) end)
       assert {:ok, lease} = LeaseManager.read(issue_id)
       assert lease["owner"] == winner
       assert lease["epoch"] == 1
+      assert lease["lease_generation"] == acquired.token.lease_generation
       refute File.exists?(LeaseManager.lease_path(issue_id) <> ".lock")
     end
   end
@@ -42,12 +43,15 @@ defmodule SymphonyElixir.LeaseConcurrencyTest do
 
     results = contend(root, issue_id, [{"old-owner", :release}, {"new-owner", :acquire}])
 
-    assert Enum.sort(results) == [{"new-owner", :ok}, {"old-owner", :ok}]
+    assert {:ok, acquired} = Map.fetch!(Map.new(results), "new-owner")
     assert {:ok, lease} = LeaseManager.read(issue_id)
     assert lease["owner"] == "new-owner"
     assert lease["epoch"] in [1, 8]
-    assert {:error, :claimed} = LeaseManager.refresh(issue_id, "old-owner")
-    assert :ok = LeaseManager.release(issue_id, "old-owner")
+    assert lease["lease_generation"] == acquired.token.lease_generation
+    expected_release = if lease["epoch"] == 1, do: :ok, else: {:error, :lease_token_required}
+    assert Map.fetch!(Map.new(results), "old-owner") == expected_release
+    assert {:error, :lease_token_required} = LeaseManager.refresh(issue_id, "old-owner")
+    assert {:error, :lease_token_required} = LeaseManager.release(issue_id, "old-owner")
     assert {:ok, ^lease} = LeaseManager.read(issue_id)
   end
 
@@ -66,14 +70,15 @@ defmodule SymphonyElixir.LeaseConcurrencyTest do
         assert lease["epoch"] == 7
 
       "new-owner" ->
-        assert Map.new(results) == %{"old-owner" => {:error, :claimed}, "new-owner" => :ok}
+        assert %{"old-owner" => {:error, :lease_token_required}, "new-owner" => {:ok, acquired}} = Map.new(results)
         assert lease["epoch"] == 8
+        assert lease["lease_generation"] == acquired.token.lease_generation
     end
   end
 
   test "a foreign or orphaned lock blocks every mutation and is never removed" do
     issue_id = "foreign-lock"
-    assert :ok = LeaseManager.acquire(issue_id, "LOCK-1", "owner-a")
+    assert {:ok, acquired} = LeaseManager.acquire(issue_id, "LOCK-1", "owner-a")
     lease_path = LeaseManager.lease_path(issue_id)
     lock_path = lease_path <> ".lock"
     payload = File.read!(lease_path)
@@ -84,8 +89,8 @@ defmodule SymphonyElixir.LeaseConcurrencyTest do
     assert {:error, {:lease_lock_timeout, ^lock_path}} =
              LeaseManager.acquire(issue_id, "LOCK-1", "owner-b")
 
-    assert {:error, {:lease_lock_timeout, ^lock_path}} = LeaseManager.refresh(issue_id, "owner-a")
-    assert {:error, {:lease_lock_timeout, ^lock_path}} = LeaseManager.release(issue_id)
+    assert {:error, {:lease_lock_timeout, ^lock_path}} = LeaseManager.refresh_token(acquired.token)
+    assert {:error, {:lease_lock_timeout, ^lock_path}} = LeaseManager.release_token(acquired.token)
     assert File.read!(lease_path) == payload
     assert File.read!(marker) == "must remain untouched"
   end

@@ -271,3 +271,48 @@ transient reload. No diagnostic says current_verified. E1 acceptance still requi
 authorized independent checker, an explicit module scope, fresh observations bound to
 I2 run/dispatch validity, and a common publication gate. E1-build alone accepts no task,
 promotes no release and reconciles no deployment.
+
+## Lease custody and passive promotion (C3)
+
+New acquisitions return a generation token and the exact payload persisted under
+its captured lease lock. The coordinator retains that token in independent local
+custody across pending admission, gated/running workers and retries. Reading a
+lease or a historical snapshot never creates authority. Owner-only legacy APIs
+reject generation-bearing leases. Renewal, release and final gate activation
+compare the full token under the original physical lock, including when the
+configured root has changed.
+
+A passive checkpoint repaired to active work reserves the shared C1/C2 admission
+reader and one capacity slot. Its promotion deadline starts before acquisition
+and remains bounded by half the captured TTL through the final gate lock.
+Cancellation invalidates the operation immediately but retains the reader monitor
+and capacity until termination is observed. Transfer to running retires the
+promotion timer; stale timeout and reader callbacks cannot release new custody.
+The independent B polling reader and C4a inbox cursors retain their contracts.
+
+V2 release preserves the historical workspace and snapshot instead of clearing
+lease metadata or deleting the workspace. This applies to terminal retry cleanup,
+terminal running reconciliation and later startup cleanup of v2 snapshots. The
+operator projection distinguishes live, historical, missing and unverified
+ownership; historical metadata is never held/reclaimable authority. Legacy cleanup
+retains its existing physical-lease checks without claiming a cross-process
+transaction over workspace deletion. Pending audit/corrupt/IO outcomes remain
+visible rather than being treated as missing.
+
+C3 does not fence all effects after the gate, recover volatile custody after a
+restart, or move webhook/GitHub/control business I/O to background readers.
+Validation of this candidate remains pending until the recorded repository gates.
+
+GitHub follow-up custody is bound to the explicit destination workspace. A local
+claim from another root is rejected before its payload is lent or renewed; new
+acquisitions capture their lease location and destination before waiting on the
+lock. A rejected location does not fall back to a manual snapshot write.
+
+Retry budget context follows the captured custody workspace after worker `DOWN`.
+A retry/resume or gated dispatch rejects a current workspace/storage location that
+conflicts with that custody before starting new work. `lease.released` is written
+to the captured ledger path. Physical lease removal and ledger persistence are not
+one transaction: if the latter fails, local custody is retired and
+`lease_release_audit_failed` remains explicit; operator retry does not report
+success or recreate the lease. Generic runtime events and post-gate provider effects
+are not covered by this storage guarantee.

@@ -225,12 +225,12 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
         })
       )
 
-      assert :ok = LeaseManager.acquire(issue_id, "MT-402", "owner-b", ttl_ms: 1)
+      assert {:ok, acquired} = LeaseManager.acquire(issue_id, "MT-402", "owner-b", ttl_ms: 1)
       assert {:ok, lease} = LeaseManager.read(issue_id)
       assert lease["owner"] == "owner-b"
       assert lease["epoch"] == 3
-      assert LeaseManager.refresh(issue_id, "owner-a") == {:error, :claimed}
-      assert :ok = LeaseManager.refresh(issue_id, "owner-b")
+      assert LeaseManager.refresh(issue_id, "owner-a") == {:error, :lease_token_required}
+      assert {:ok, _} = LeaseManager.refresh_token(acquired.token)
     after
       File.rm(path)
     end
@@ -274,7 +274,7 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
 
       assert :ok = Orchestrator.review_follow_up_lease_status_for_test(state, run_state)
 
-      assert {:ok, lease_attrs, true} =
+      assert {:ok, state, lease_attrs, true} =
                Orchestrator.ensure_review_follow_up_lease_for_test(state, run_state)
 
       assert lease_attrs.lease_owner == "review-owner"
@@ -285,13 +285,16 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
       assert Orchestrator.workspace_for_issue_id_for_test(state, issue.id) == workspace
 
       assert {:ok, _synced_state} = RunStateStore.sync_lease(workspace, issue, lease_attrs)
-      assert :ok = Orchestrator.release_review_follow_up_lease_for_test(state, run_state, workspace)
+      before_release = File.read!(RunStateStore.state_path(workspace))
+      released = Orchestrator.release_review_follow_up_lease_for_test(state, run_state, workspace)
+      assert released.lease_claims == %{}
       assert {:error, :missing} = LeaseManager.read(issue.id)
 
       assert {:ok, cleared_state} = RunStateStore.load(workspace)
-      assert cleared_state.lease_owner == nil
-      assert cleared_state.lease_status == nil
-      assert Orchestrator.workspace_for_issue_id_for_test(state, issue.id) == nil
+      assert cleared_state.lease_owner == "review-owner"
+      assert cleared_state.lease_status == "held"
+      assert File.read!(RunStateStore.state_path(workspace)) == before_release
+      assert Orchestrator.workspace_for_issue_id_for_test(released, issue.id) == nil
     after
       File.rm_rf(workspace_root)
     end
@@ -352,7 +355,7 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
       assert {:reclaimable, "stale-owner"} =
                Orchestrator.review_follow_up_lease_status_for_test(state, run_state)
 
-      assert {:ok, lease_attrs, true} =
+      assert {:ok, _acquired_state, lease_attrs, true} =
                Orchestrator.ensure_review_follow_up_lease_for_test(state, run_state)
 
       assert lease_attrs.lease_owner == "review-owner"
@@ -367,7 +370,7 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
     end
   end
 
-  test "review follow-up lease helpers reclaim same-instance leases after orchestrator restart" do
+  test "same-instance snapshot metadata does not authorize reclaim after orchestrator restart" do
     workspace_root =
       Path.join(
         System.tmp_dir!(),
@@ -425,19 +428,18 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
         lease_owner_channel: "stable"
       }
 
-      assert {:reclaimable, "orchestrator-old"} =
+      before = File.read!(LeaseManager.lease_path(issue.id))
+
+      assert {:skip, "orchestrator-old"} =
                Orchestrator.review_follow_up_lease_status_for_test(state, run_state)
 
-      assert {:ok, lease_attrs, true} =
+      assert {:skip, :claimed} =
                Orchestrator.ensure_review_follow_up_lease_for_test(state, run_state)
 
-      assert lease_attrs.lease_owner == "orchestrator-new"
-      assert lease_attrs.lease_epoch == 1
-      assert lease_attrs.lease_status == "held"
-
+      assert File.read!(LeaseManager.lease_path(issue.id)) == before
       assert {:ok, lease} = LeaseManager.read(issue.id)
-      assert lease["owner"] == "orchestrator-new"
-      assert lease["epoch"] == 1
+      assert lease["owner"] == "orchestrator-old"
+      assert lease["epoch"] == 2
     after
       File.rm_rf(workspace_root)
     end
@@ -462,10 +464,25 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
 
     try do
       File.mkdir_p!(workspace)
-      assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "persist-owner")
+      assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, "persist-owner")
+      on_exit(fn -> LeaseManager.release_token(acquired.token) end)
+
+      claim = %{
+        token: acquired.token,
+        lease: acquired.lease,
+        custody_ref: make_ref(),
+        holder: :running,
+        workspace: workspace,
+        issue: issue,
+        started_at_ms: System.monotonic_time(:millisecond),
+        deadline: :not_pending,
+        promotion_ref: nil,
+        timer: nil
+      }
 
       state = %Orchestrator.State{
         lease_owner: "persist-owner",
+        lease_claims: %{issue.id => claim},
         running: %{
           issue.id => %{
             issue: issue,
@@ -483,7 +500,8 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
       assert persisted_state.lease_status == "held"
 
       Process.sleep(5)
-      assert :ok = LeaseManager.refresh(issue.id, "persist-owner")
+      assert {:ok, lease} = LeaseManager.refresh_token(acquired.token)
+      state = put_in(state.lease_claims[issue.id].lease, lease)
       assert :ok = Orchestrator.maybe_sync_running_issue_lease_for_test(state, issue.id)
 
       assert {:ok, refreshed_state} = RunStateStore.load(workspace)
@@ -495,7 +513,6 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
       assert cleared_state.lease_owner == nil
       assert cleared_state.lease_epoch == nil
     after
-      LeaseManager.release(issue.id)
       File.rm_rf(workspace_root)
     end
   end
@@ -799,9 +816,12 @@ defmodule SymphonyElixir.RecoveryAndLeaseTest do
         )
 
       assert_receive {:spawned, ^issue_id, 2}
-      assert returned_state == state
-
+      assert returned_state.running == state.running
+      assert returned_state.retry_attempts == state.retry_attempts
+      assert MapSet.member?(returned_state.claimed, issue_id)
+      assert returned_state.lease_claims[issue_id].holder == :pending
       assert {:ok, lease} = LeaseManager.read(issue_id)
+      assert lease["lease_generation"] == returned_state.lease_claims[issue_id].token.lease_generation
       assert lease["owner"] == owner
       assert lease["epoch"] == 5
     after

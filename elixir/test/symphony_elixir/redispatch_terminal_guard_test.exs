@@ -141,7 +141,8 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     test "passive dispatch releases an existing claim for #{terminal}", context do
       %{issue: issue, workspace: workspace, state: state} = context
       assert {:ok, _} = RunStateStore.transition(workspace, unquote(terminal), %{})
-      assert :ok = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+      assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+      state = with_custody(state, issue, acquired)
       state = %{state | claimed: MapSet.new([issue.id])}
 
       next =
@@ -284,7 +285,14 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       ownership = context.ownership
       owner = if ownership == :ours, do: state.lease_owner, else: "another-owner"
       assert {:ok, _} = RunStateStore.transition(workspace, terminal, %{})
-      assert :ok = LeaseManager.acquire(issue.id, issue.identifier, owner)
+      assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+      state = with_custody(state, issue, acquired)
+
+      if ownership == :other do
+        assert {:ok, :released} = LeaseManager.release_token(acquired.token)
+        assert {:ok, _successor} = LeaseManager.acquire(issue.id, issue.identifier, owner)
+      end
+
       lease_bytes = File.read!(LeaseManager.lease_path(issue.id))
       state = %{state | claimed: MapSet.new([issue.id])}
 
@@ -483,10 +491,10 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       assert %{dispatch_stage: "checkout", pid: pid, ref: ref} = next.running[issue.id]
       refute Map.has_key?(next.running[issue.id], :passive?)
       assert_receive {:authorize_dispatch, _, _, ^pid} = authorization
-      assert {:noreply, ^next} = Orchestrator.handle_info(authorization, next)
+      assert {:noreply, authorized} = Orchestrator.handle_info(authorization, next)
 
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal} = down, 2_000
-      assert {:noreply, finished} = Orchestrator.handle_info(down, next)
+      assert {:noreply, finished} = Orchestrator.handle_info(down, authorized)
       cancel_retries(finished)
       assert File.exists?(Path.join(workspace, ".symphony/before-run-seen"))
       refute File.exists?(Path.join(workspace, ".symphony/provider-invoked"))
@@ -568,7 +576,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
   test "review continuation does not mutate a checkpoint leased by another owner", context do
     %{issue: issue, workspace: workspace, state: state} = context
     state = review_timer_state(state, issue, workspace)
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "other-owner")
+    assert {:ok, _foreign} = LeaseManager.acquire(issue.id, issue.identifier, "other-owner")
     snapshot_bytes = File.read!(RunStateStore.state_path(workspace))
     lease_bytes = File.read!(LeaseManager.lease_path(issue.id))
     assert {:noreply, next} = SymphonyElixir.OrchestratorRetryDriver.run(state, issue.id)
@@ -649,10 +657,11 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     end
   end
 
-  test "review continuation releases an existing own claim and persisted ownership", context do
+  test "review continuation retains exact custody while waiting for capacity", context do
     %{issue: issue, workspace: workspace, state: state} = context
     state = review_timer_state(state, issue, workspace)
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+    state = with_custody(state, issue, acquired)
     assert {:ok, lease} = LeaseManager.read(issue.id)
 
     assert {:ok, _} =
@@ -662,9 +671,14 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     assert {:noreply, next} = SymphonyElixir.OrchestratorRetryDriver.run(state, issue.id)
 
     try do
-      assert {:ok, %{stage: "implement", lease_owner: nil}} = RunStateStore.load(workspace)
-      assert {:error, :missing} = LeaseManager.read(issue.id)
-      refute MapSet.member?(next.claimed, issue.id)
+      assert {:ok, %{stage: "implement", lease_owner: owner, lease_generation: generation}} = RunStateStore.load(workspace)
+      assert owner == state.lease_owner
+      assert generation == acquired.token.lease_generation
+      assert {:ok, current} = LeaseManager.read_at(acquired.token.storage)
+      assert current["lease_generation"] == generation
+      assert next.lease_claims[issue.id].token == acquired.token
+      assert next.lease_claims[issue.id].holder == :retry
+      assert MapSet.member?(next.claimed, issue.id)
       assert Map.has_key?(next.retry_attempts, issue.id)
       assert next.running == %{}
     after
@@ -672,7 +686,67 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     end
   end
 
-  test "review resume keeps ownership and reports failure when its lease cannot be released",
+  test "review retry after root change cannot resume a destination outside its captured custody", context do
+    %{issue: issue, workspace: workspace, state: state, root: root} = context
+    state = review_timer_state(state, issue, workspace)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+    state = with_custody(state, issue, acquired)
+    old_snapshot = File.read!(RunStateStore.state_path(workspace))
+    assert {:ok, workflow} = Workflow.current()
+    config = put_in(workflow.config, ["workspace", "root"], Path.join(root, "other-root"))
+    File.write!(Workflow.workflow_file_path(), "---\n" <> Jason.encode!(config) <> "\n---\n" <> workflow.prompt)
+    assert :ok = WorkflowStore.force_reload()
+    Application.put_env(:symphony_elixir, :log_file, Path.join(root, "other-logs/symphony.log"))
+    destination = Workspace.path_for_issue(issue)
+    File.mkdir_p!(destination)
+    assert {:ok, checkpoint} = RunStateStore.load(workspace)
+    assert :ok = RunStateStore.save(destination, checkpoint)
+    assert {:ok, successor} = LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
+    assert {:ok, _} = RunStateStore.sync_lease(destination, issue, LeaseManager.snapshot_for_state(successor.lease))
+    snapshot = File.read!(RunStateStore.state_path(destination))
+    lease = File.read!(successor.token.storage.lease_path)
+    ledger = File.read(successor.token.storage.ledger_path)
+    assert {:noreply, next} = SymphonyElixir.OrchestratorRetryDriver.run(state, issue.id)
+    assert next.candidate_fetch_error == :lease_workspace_changed
+    assert next.running == %{}
+    assert next.retry_attempts == %{}
+    assert next.lease_claims == %{}
+    assert {:error, :missing} = LeaseManager.read_at(acquired.token.storage)
+    assert File.read!(RunStateStore.state_path(workspace)) == old_snapshot
+    assert File.read!(RunStateStore.state_path(destination)) == snapshot
+    assert File.read!(successor.token.storage.lease_path) == lease
+    assert File.read(successor.token.storage.ledger_path) == ledger
+    assert File.read!(acquired.token.storage.ledger_path) =~ "lease.released"
+    refute_received {:memory_tracker_state_update, _, _}
+  end
+
+  test "review resume with one available slot does not count its own acquired reservation", context do
+    %{issue: issue, workspace: workspace, state: state} = context
+    state = review_timer_state(state, issue, workspace)
+    state = with_pending_timer(%{state | max_concurrent_agents: 1}, issue, state.retry_attempts[issue.id])
+    {:ok, driver} = SymphonyElixir.OrchestratorRetryDriver.start_link(state, issue.id)
+    Process.unlink(driver)
+
+    on_exit(fn ->
+      if Process.alive?(driver) do
+        current = GenServer.call(driver, :runtime)
+        GenServer.stop(driver)
+        stop_workers(current)
+      end
+    end)
+
+    send(driver, :run)
+    assert_receive {:timer_result, ^driver, {:noreply, admitted}}, 3_000
+    assert %{pid: worker, dispatch_ticket: ticket} = admitted.running[issue.id]
+    assert is_pid(worker)
+    assert admitted.lease_claims[issue.id].holder == :gated
+    refute Map.has_key?(admitted.retry_attempts, issue.id)
+    assert Enum.any?(RunLedger.recent_entries(), &(&1["event_type"] == "dispatch.started" and get_in(&1, ["metadata", "dispatch_id"]) == ticket.dispatch_id))
+    assert {:ok, snapshot} = RunStateStore.load(workspace)
+    assert snapshot.lease_generation == admitted.lease_claims[issue.id].token.lease_generation
+  end
+
+  test "review resume retains custody and explicit retry cleanup reports a release failure",
        context do
     %{issue: issue, workspace: workspace, state: state} = context
     state = review_timer_state(state, issue, workspace)
@@ -708,11 +782,16 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
 
     try do
       send(worker, :run)
-      assert_receive {:trace, ^worker, :return_from, ^mfa, :ok}, 2_000
+      assert_receive {:trace, ^worker, :return_from, ^mfa, {:ok, acquired}}, 2_000
       File.mkdir!(lock_path)
       send(locker, :release)
       assert_receive {:snapshot_unlocked, ^locker, {:ok, _}}, 2_000
-      assert_receive {:timer_result, ^worker, {:noreply, next}}, 3_000
+      assert_receive {:timer_result, ^worker, {:noreply, resumed}}, 3_000
+      assert resumed.lease_claims[id].token == acquired.token
+      assert resumed.lease_claims[id].holder == :retry
+
+      assert {:error, {:lease_release_failed, ^id, {:lease_lock_timeout, ^lock_path}}, next} =
+               Orchestrator.prepare_retry_custody(resumed, id)
 
       try do
         assert MapSet.member?(next.claimed, id)
@@ -851,10 +930,46 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       )
     end
 
-    Orchestrator.dispatch_runtime_issue_for_test(state, issue, nil,
-      active_dispatch_fun: active,
-      passive_dispatch_fun: passive
-    )
+    state =
+      Orchestrator.dispatch_runtime_issue_for_test(state, issue, nil,
+        active_dispatch_fun: active,
+        passive_dispatch_fun: passive
+      )
+
+    await_promotion(state)
+  end
+
+  defp await_promotion(%{admission_read: %{purpose: :promotion, ref: ref, monitor: monitor}} = state) do
+    receive do
+      {:tracker_read_result, ^ref, _} = result ->
+        assert {:noreply, next} = Orchestrator.handle_info(result, state)
+        next
+
+      {:DOWN, ^monitor, :process, _, _} = down ->
+        assert {:noreply, next} = Orchestrator.handle_info(down, state)
+        next
+    after
+      2_000 -> flunk("promotion reader did not settle")
+    end
+  end
+
+  defp await_promotion(state), do: state
+
+  defp with_custody(state, issue, acquired) do
+    claim = %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: make_ref(),
+      holder: :retry,
+      workspace: Workspace.path_for_issue(issue),
+      issue: issue,
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
+
+    %{state | lease_claims: %{issue.id => claim}, claimed: MapSet.put(state.claimed, issue.id)}
   end
 
   defp admit_and_release(state, issue) do
@@ -867,12 +982,13 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       )
     end
 
-    Orchestrator.dispatch_runtime_issue_for_test(state, issue, 1,
-      active_dispatch_fun: active,
-      passive_dispatch_fun: fn _, _, _ -> flunk("unexpected passive branch") end
-    )
+    admitted =
+      Orchestrator.dispatch_runtime_issue_for_test(state, issue, 1,
+        active_dispatch_fun: active,
+        passive_dispatch_fun: fn _, _, _ -> flunk("unexpected passive branch") end
+      )
 
     assert_received :authorized_spawn_boundary
-    assert :ok = LeaseManager.release(issue.id, state.lease_owner)
+    assert {:ok, :released} = LeaseManager.release_token(admitted.lease_claims[issue.id].token)
   end
 end

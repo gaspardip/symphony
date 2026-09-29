@@ -269,7 +269,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     File.mkdir_p!(workspace)
     sentinel = Path.join(workspace, "preserved.txt")
     File.write!(sentinel, "new private workspace")
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, "other-current-owner")
+    assert {:ok, _successor} = LeaseManager.acquire(issue.id, issue.identifier, "other-current-owner")
     assert {:ok, lease} = LeaseManager.read(issue.id)
     send(reader, {:answer, {:ok, [issue]}})
     idle!(pid)
@@ -348,8 +348,22 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     workspace = Workspace.path_for_issue(issue)
     File.mkdir_p!(workspace)
     assert :ok = RunStateStore.save(workspace, RunStateStore.load_or_default(workspace, issue))
-    assert :ok = LeaseManager.acquire(issue.id, issue.identifier, owner)
-    assert {:ok, lease} = LeaseManager.read(issue.id)
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, owner)
+    lease = acquired.lease
+    custody_ref = make_ref()
+
+    claim = %{
+      token: acquired.token,
+      lease: acquired.lease,
+      custody_ref: custody_ref,
+      holder: :running,
+      workspace: workspace,
+      issue: issue,
+      started_at_ms: System.monotonic_time(:millisecond),
+      deadline: :not_pending,
+      promotion_ref: nil,
+      timer: nil
+    }
 
     :sys.replace_state(pid, fn state ->
       entry = %{
@@ -357,13 +371,15 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
         ref: Process.monitor(worker),
         identifier: issue.identifier,
         issue: issue,
+        custody_ref: custody_ref,
+        lease_token: acquired.token,
         lease_owner: owner,
         lease_epoch: lease["epoch"],
         started_at: DateTime.utc_now(),
         last_event_at: DateTime.utc_now()
       }
 
-      %{state | running: %{issue.id => entry}, claimed: MapSet.new([issue.id])}
+      %{state | lease_claims: Map.put(state.lease_claims, issue.id, claim), running: %{issue.id => entry}, claimed: MapSet.new([issue.id])}
     end)
 
     {issue, worker}

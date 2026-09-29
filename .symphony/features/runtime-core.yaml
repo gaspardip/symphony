@@ -35,7 +35,8 @@ acceptance_signals:
   - Runtime topology supports stable webhook ingress with internal routing to isolated per-issue runners instead of live self-mutation
   - Persisted run state records runner identity and channel so review webhook follow-up can avoid cross-instance interference
   - Persisted run state records live lease ownership so same-channel runners do not both resume the same review follow-up
-  - Dispatch, lease refresh, and lease release keep persisted run-state ownership aligned with the live lease file
+  - Acquired lease generation tokens retain local custody across admission, running work and retries; stale cleanup cannot release a successor
+  - Lease sync records generation metadata; v2 cleanup preserves historical snapshots and the operator projection distinguishes live from historical ownership
   - Issue dispatch respects the target runner channel so stable and canary pools do not steal each other's work
   - High token-pressure review retries shrink to a single accepted claim and avoid duplicating review feedback in the implement prompt so PR-comment work can continue under the per-turn input budget
   - Repeated high-pressure review retries can relax the implement stage token budget modestly only after the first soft-budget retry has already been observed for accepted PR claims

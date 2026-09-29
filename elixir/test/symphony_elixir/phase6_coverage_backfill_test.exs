@@ -530,13 +530,13 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
 
     try do
       assert {:error, :missing} = LeaseManager.refresh(issue_id, "owner-a")
-      assert :ok = LeaseManager.acquire(issue_id, "MT-1", "owner-a")
+      assert {:ok, acquired} = LeaseManager.acquire(issue_id, "MT-1", "owner-a")
       assert {:ok, lease} = LeaseManager.read(issue_id)
       assert lease["issue_identifier"] == "MT-1"
       assert lease["owner"] == "owner-a"
       assert lease["epoch"] == 1
       assert match?({:ok, _, _}, DateTime.from_iso8601(lease["acquired_at"]))
-      assert :ok = LeaseManager.refresh(issue_id, "owner-a")
+      assert {:ok, _refreshed} = LeaseManager.refresh_token(acquired.token)
 
       File.write!(
         path,
@@ -551,7 +551,8 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
         })
       )
 
-      assert :ok = LeaseManager.acquire(issue_id, "MT-1", "owner-a", ttl_ms: 60_000)
+      assert {:ok, adopted} = LeaseManager.acquire(issue_id, "MT-1", "owner-a", ttl_ms: 60_000)
+      assert adopted.lease["lease_version"] == 2
       assert {:ok, same_owner_lease} = LeaseManager.read(issue_id)
       assert same_owner_lease["epoch"] == 4
       assert same_owner_lease["acquired_at"] == "2024-01-01T00:00:00Z"
@@ -596,13 +597,30 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
         })
       )
 
-      assert :ok = LeaseManager.acquire(issue_id, "MT-2", "owner-c", ttl_ms: 1)
+      malformed_bytes = File.read!(path)
+      assert {:error, :invalid_lease} = LeaseManager.acquire(issue_id, "MT-2", "owner-c", ttl_ms: 1)
+      assert File.read!(path) == malformed_bytes
+
+      File.write!(
+        path,
+        Jason.encode!(%{
+          issue_id: issue_id,
+          issue_identifier: "MT-2",
+          owner: "owner-a",
+          lease_version: 1,
+          epoch: 5,
+          acquired_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-01T00:00:00Z"
+        })
+      )
+
+      assert {:ok, acquired} = LeaseManager.acquire(issue_id, "MT-2", "owner-c", ttl_ms: 1)
       assert {:ok, taken_over_lease} = LeaseManager.read(issue_id)
       assert taken_over_lease["owner"] == "owner-c"
       assert taken_over_lease["epoch"] == 6
       assert match?({:ok, _, _}, DateTime.from_iso8601(taken_over_lease["acquired_at"]))
 
-      assert :ok = LeaseManager.release(issue_id, "owner-a")
+      assert {:error, :lease_token_required} = LeaseManager.release(issue_id, "owner-a")
       assert File.exists?(path)
 
       File.write!(path, "{not-json")
@@ -616,7 +634,7 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
       refute File.exists?(path <> ".lock")
 
       File.write!(path, Jason.encode!(taken_over_lease))
-      assert :ok = LeaseManager.release(issue_id)
+      assert {:ok, :released} = LeaseManager.release_token(acquired.token)
       refute File.exists?(path)
       assert :ok = LeaseManager.release(unique_issue_id("lease-release-missing"))
     after
@@ -624,7 +642,7 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
     end
   end
 
-  test "LeaseManager treats nil updated_at as stale" do
+  test "LeaseManager rejects nil updated_at and takes over a valid expired legacy lease" do
     issue_id = unique_issue_id("lease-nil-updated-at")
     path = LeaseManager.lease_path(issue_id)
 
@@ -644,7 +662,24 @@ defmodule SymphonyElixir.Phase6CoverageBackfillTest do
         })
       )
 
-      assert :ok = LeaseManager.acquire(issue_id, "MT-3", "owner-z", ttl_ms: 1)
+      nil_timestamp_bytes = File.read!(path)
+      assert {:error, :invalid_lease} = LeaseManager.acquire(issue_id, "MT-3", "owner-z", ttl_ms: 1)
+      assert File.read!(path) == nil_timestamp_bytes
+
+      File.write!(
+        path,
+        Jason.encode!(%{
+          issue_id: issue_id,
+          issue_identifier: "MT-3",
+          owner: "owner-a",
+          lease_version: 1,
+          epoch: 7,
+          acquired_at: "2024-01-01T00:00:00Z",
+          updated_at: "2024-01-01T00:00:00Z"
+        })
+      )
+
+      assert {:ok, _acquired} = LeaseManager.acquire(issue_id, "MT-3", "owner-z", ttl_ms: 1)
       assert {:ok, lease} = LeaseManager.read(issue_id)
       assert lease["owner"] == "owner-z"
       assert lease["epoch"] == 8
