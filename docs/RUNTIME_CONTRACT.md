@@ -176,3 +176,98 @@ recompute a value that would be discarded. Creating a snapshot and filling legac
 metadata still use the current getters; no cross-operation cache is introduced.
 This metadata remains historical context, not proof of the code currently loaded.
 Workspace locking, run identity guards and monotonic token usage are unchanged.
+
+## Build provenance and loaded code (E1-build)
+
+`mix build` evaluates `scripts/build-with-identity.exs` from source in a new Mix
+process without starting Symphony. It refuses an already loaded Symphony runtime,
+forces compilation once, and compares source captures before/after compilation and
+packaging. Only Elixir/Mix 1.19.5 and OTP 28 are supported by this identity format.
+The trusted bootstrap includes MixProject evaluation and the source driver before
+capture. The evaluated Mix project must be inside the Git root and match the working
+project directory. Exclusions are derived from that project: its `_build/`, `deps/`,
+`bin/` and exact generated `priv/build_identity.json`, recorded verbatim relative to
+Git root. A similarly named tree elsewhere remains source. Build/app/consolidation
+outputs must stay under that project's `_build`, dependencies under its `deps`, and
+the escript at its `bin/symphony`; unbounded paths or output ancestor symlinks are
+rejected. A file still listed by Git but absent from disk (for example an unstaged deletion)
+makes source unavailable. Dirty support requires readable listed inputs; the driver
+does not synthesize missing-file tombstones. No Symphony BEAM helper, including BuildIdentity, participates in building.
+
+Source content is hashed incrementally in 64 KiB blocks, with a 64 MiB aggregate
+budget per capture across all source files (at most 192 MiB over the three captures).
+The budget counts actual bytes read as well as checking declared sizes; one extra
+byte may be read to detect growth beyond the remaining budget. Source files are not
+subject to the separate 16 MiB BEAM/ZIP decode limit. The runtime validates both
+individual source sizes and their aggregate against the same source budget. No
+large tracked media is silently excluded. Each source read compares its open handle
+and path metadata before/after, excluding access time, and checks the observed byte
+count; read/close errors and changes fail the build. This bounds source buffer memory,
+not total build memory or filesystem latency, and is not an atomic filesystem snapshot.
+
+The three dependency JavaScript inputs embedded by StaticAssets are declared explicitly
+as app/priv-path pairs in Mix's `build_identity_resources`. The `mix build` alias runs
+`deps.compile` before invoking the source driver, so dependency resources and application
+paths exist before source capture even in a fresh checkout after `mix setup`. This
+preparation does not compile Symphony or start the application. The driver neither downloads dependencies nor fabricates
+missing build aliases. It resolves each declared app through `Mix.Project.deps_paths`,
+requires its source under the project's `deps/<app>/priv`, and checks Application.app_dir
+against the expected `_build/.../lib/<app>/priv` alias. Only that priv symlink to the exact
+declared dependency is allowed. Both paths must identify the same physical file; copied
+priv trees, other destinations and arbitrary symlink chains are unsupported and rejected.
+
+The manifest keeps Git entries and `source.external_resources` distinct; their combined
+canonical fingerprint and build_id cover app, source/compile paths, sizes and hashes.
+Declarations are captured before the single forced project compilation and compared after
+compilation and final packaging. Every external_resource attribute in newly compiled own
+modules must belong to the Git inventory or an explicit declaration. Unknown inputs fail.
+Git entries and declared resources share the 64 MiB/50,000-file capture budget. Alias/target
+metadata is checked before/after, but content is hashed once from their verified common
+file, with the same open-handle checks. No extra resource read escapes the 192 MiB bound.
+These observations still do not provide an atomic snapshot or confinement against a
+concurrent process with write access. Dependency compilation is a prerequisite, not a
+claim that this driver rebuilt dependency sources under that capture.
+
+Two invocations of the existing Mix escript packer produce a temporary probe and
+final archive. The probe supplies the actual module inventory, including consolidated
+protocols and the generated launcher. The final must preserve code MD5 for every
+module and packaged SHA-256 except launcher metadata. Raw compiled input SHA-256,
+packaged SHA-256, code MD5 and full archive SHA-256 are distinct fields. The generated
+`priv/build_identity.json` is embedded via `include_priv_for`; `bin/symphony.build.json`
+binds it to the archive. The final archive and receipt use two renames, not an atomic
+pair: missing/mismatched pairs are visible failures. Interrupted builds do not turn
+an earlier receipt into evidence for newer source. Dirty builds retain a fingerprint;
+promotion requires the expected clean commit and checks the pair before/after copy.
+Legacy inspect/rollback never fabricate a receipt.
+
+Application startup explicitly captures local provenance before starting children.
+That baseline remains immutable across application restarts in the same VM. RunnerRuntime
+`loaded_build` and dispatch `metadata.runtime_build` contain only a precomputed summary
+(up to 2 KiB), `basis=startup_capture` and capture time. Their getter does not read,
+hash, enumerate modules, write or initialize missing identity. Metadata is runtime-owned;
+caller payloads cannot override it. Missing identity is diagnostic and does not change
+existing dispatch/lease authorization. Existing events/snapshots remain unchanged.
+Legacy `runtime_version` and `runner_runtime_version` describe disk-derived context,
+not loaded-code authority.
+
+Fresh `BuildIdentity.inspect_loaded(required_modules)` and `inspect_artifact()` are
+explicit worker/local inspection operations outside the coordinator. The former accepts
+at most 256 distinct known module atoms, never interns names from JSON or loads/purges
+code. It compares memory code MD5, reports not_loaded/old_code/mismatch/unstable states,
+and cannot establish which old code a process is still executing. The latter revisits
+the captured resolved artifact location and receipt, without adopting a moved `current`
+link or new disk bytes. A file location or `code.get_object_code` alone does not prove
+memory identity. BEAM mode is distinct from escript mode and has no invented escript hash.
+
+Archive checks are bounded at 64 MiB compressed, 128 MiB expanded, 16 MiB per entry,
+4 MiB per manifest/receipt, 10,000 modules and 4,096 bytes per path. Duplicate JSON keys,
+paths/modules, invalid types, unsupported versions and inconsistent receipts are rejected.
+Limits are failures, never silent truncation. Startup may perform this work once;
+ordinary control/snapshot/dispatch reads do not.
+
+This is unsigned local provenance under operator control. Source before/after equality
+is not an atomic snapshot or anti-ABA proof, and module samples do not catch every
+transient reload. No diagnostic says current_verified. E1 acceptance still requires an
+authorized independent checker, an explicit module scope, fresh observations bound to
+I2 run/dispatch validity, and a common publication gate. E1-build alone accepts no task,
+promotes no release and reconciles no deployment.

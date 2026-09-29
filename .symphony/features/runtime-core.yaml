@@ -84,6 +84,10 @@ acceptance_signals:
   - Replay refresh drains GitHub inbox work even when runner metadata disables normal tracker dispatch
   - Seeded manual continuation retries can reuse the persisted issue envelope and workspace branch identity so local stable-ingress replays survive the `review_verification` to `implement` handoff
   - CLI preparation and report failures preserve their cause and stop plan/implement before subsequent effects; partial workspace/index/commit changes remain visible without rollback or internal retry
+  - Source-driven builds bind stable source, actual Mix-packed module code MD5 and archive SHA-256 in separate inventories and receipts
+  - Runtime and dispatch expose immutable startup build diagnostics through a constant-time getter without new filesystem or module scans
+  - Explicit worker inspections distinguish changed disk artifacts, mismatched loaded code, old code and modules not loaded without changing admission policy
+  - Promotion checks the clean build receipt before and after copying a release without treating it as task acceptance or canary proof
 dependencies:
   - harness
-last_updated_by_issue: architecture-P3b2
+last_updated_by_issue: architecture-E1-build

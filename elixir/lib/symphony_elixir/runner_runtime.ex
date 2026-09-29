@@ -39,6 +39,7 @@ defmodule SymphonyElixir.RunnerRuntime do
     canary_evidence = canary_evidence(metadata)
 
     %{
+      loaded_build: SymphonyElixir.BuildIdentity.summary(),
       instance_id: Config.runner_instance_id(),
       instance_name: Config.runner_instance_name(),
       channel: Config.runner_channel(),

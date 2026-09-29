@@ -72,6 +72,10 @@ defmodule SymphonyElixir.RunnerRuntimeTest do
 
       info = RunnerRuntime.info()
 
+      assert info.loaded_build == SymphonyElixir.BuildIdentity.summary()
+      assert info.loaded_build["basis"] == "startup_capture"
+      refute Map.has_key?(info.loaded_build, "current_verified")
+      assert byte_size(Jason.encode!(info.loaded_build)) <= 2048
       assert info.instance_id == "canary:dogfood-runner"
       assert info.instance_name == "dogfood-runner"
       assert info.channel == "canary"

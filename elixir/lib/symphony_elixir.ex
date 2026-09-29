@@ -21,6 +21,7 @@ defmodule SymphonyElixir.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = SymphonyElixir.BuildIdentity.capture_startup()
     :ok = SymphonyElixir.LogFile.configure()
 
     children = [

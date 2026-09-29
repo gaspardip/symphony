@@ -492,3 +492,51 @@ An uncertain failure can redeliver events. The live coordinator retries a retain
 ack without replaying its already applied prefix, while restart remains at-least-once.
 Errors expose sanitized phases/codes, not raw event payloads. Event draining remains
 synchronous; this storage change does not provide C4b reader availability.
+
+### Build identity diagnostics
+
+`mix build` first compiles dependencies, then runs the source driver in the same fresh
+Mix process, forces compilation of Symphony and
+creates `bin/symphony` plus `bin/symphony.build.json`. It also generates the ignored
+`priv/build_identity.json` embedded in the escript. Do not use a long-lived development
+VM or call `escript.build` directly when a provenance receipt is required. The driver
+uses the pinned Elixir/Mix 1.19.5 and OTP 28 APIs; it neither starts Symphony nor calls
+compiled Symphony helpers. Readable dirty inputs are identified as dirty; a file still listed by Git but missing
+from disk, such as an unstaged deletion, is rejected as source unavailable. Exclusions are confined to the actual Mix project
+and recorded in the manifest; similarly named folders elsewhere in Git remain inputs.
+Custom outputs outside the project's bounded `_build`, `deps` and `bin/symphony`
+layout, or symlinked output ancestors, are rejected. Release promotion requires the expected clean source and checks both copied files before switching current.
+
+Tracked source inputs, including media larger than 16 MiB, are hashed in 64 KiB
+blocks without retaining full file contents. A 64 MiB aggregate budget per capture
+bounds source IO (three captures per build); exceeding it fails explicitly. Path and
+open-handle metadata plus actual byte counts are checked before/after reads. The
+16 MiB limit for decoded BEAM/ZIP entries remains separate and unchanged.
+
+After `mix setup` fetches dependencies, the `mix build` alias materializes them with
+`deps.compile` before the driver captures source. The explicit
+`build_identity_resources` list in mix.exs declares the three dependency JS files
+embedded by StaticAssets. Their inputs are captured before compilation and compared
+after compilation and packaging, alongside the Git source inventory. Both inventories
+share the 64 MiB limit; the fingerprint includes the declaration, paths and bytes.
+An undeclared external_resource attribute blocks the build.
+
+This initial layout supports dependency resources in `deps/<app>/priv` with Mix's
+`_build/.../lib/<app>/priv` symlink to that exact directory. The compiler alias and
+source must identify the same physical file, checked before/after its single hash.
+Missing prerequisites, copied priv directories, paths outside this layout or other
+symlinks fail explicitly. The driver does not prepare/download deps or repair aliases.
+
+`SymphonyElixir.BuildIdentity.summary()` is a small immutable startup diagnostic, also
+available as RunnerRuntime `loaded_build`. It performs no IO and does not claim current
+verification. For an explicit inspection in a worker/local process, use
+`inspect_loaded([SymphonyElixir.BuildIdentity, SymphonyElixir.Application])` and
+`inspect_artifact()`. These report incomplete/missing/changed evidence without updating
+the baseline, loading code or changing dispatch eligibility. The module scope is bounded
+at 256 and must be chosen by the authorized checker, not untrusted payloads.
+
+See `../docs/RUNTIME_CONTRACT.md` for file/module limits, local trust assumptions,
+MD5 versus artifact SHA-256, and the separate E1 acceptance requirements. Integration
+fixtures use real temporary Mix builds and escripts without network/dependencies;
+watchdogs terminate their process groups. Test fixture receipts used by the promotion
+shell tests are only orchestration evidence, not loaded-code identity evidence.

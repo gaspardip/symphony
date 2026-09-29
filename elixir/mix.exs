@@ -41,6 +41,11 @@ defmodule SymphonyElixir.MixProject do
       dialyzer: [
         plt_add_apps: [:mix]
       ],
+      build_identity_resources: [
+        phoenix_html: "priv/static/phoenix_html.js",
+        phoenix: "priv/static/phoenix.js",
+        phoenix_live_view: "priv/static/phoenix_live_view.js"
+      ],
       escript: escript(),
       cli: cli(),
       aliases: aliases(),
@@ -89,7 +94,7 @@ defmodule SymphonyElixir.MixProject do
   defp aliases do
     [
       setup: ["deps.get"],
-      build: ["escript.build"],
+      build: ["deps.compile", "run --no-start --no-compile scripts/build-with-identity.exs"],
       lint: ["specs.check", "credo --strict"]
     ]
   end
@@ -107,6 +112,7 @@ defmodule SymphonyElixir.MixProject do
       app: nil,
       main_module: SymphonyElixir.CLI,
       name: "symphony",
+      include_priv_for: [:symphony_elixir],
       path: "bin/symphony"
     ]
   end

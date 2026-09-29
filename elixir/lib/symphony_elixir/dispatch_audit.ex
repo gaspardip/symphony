@@ -135,7 +135,7 @@ defmodule SymphonyElixir.DispatchAudit do
 
   defp prepare_dispatch(workspace, attrs) do
     dispatch_id = SymphonyElixir.Util.generate_id("dispatch_")
-    metadata = Map.merge(attrs.metadata, %{dispatch_id: dispatch_id, run_id: attrs.run_id, workspace: workspace})
+    metadata = Map.merge(Map.delete(attrs.metadata, "runtime_build"), %{dispatch_id: dispatch_id, run_id: attrs.run_id, workspace: workspace, runtime_build: SymphonyElixir.BuildIdentity.summary()})
     attrs = attrs |> Map.put(:metadata, metadata) |> Map.put(:actor_type, "runtime") |> Map.put(:actor_id, attrs.metadata.owner)
 
     with {:ok, ledger_path} <- RunLedger.ledger_file_path_checked(),

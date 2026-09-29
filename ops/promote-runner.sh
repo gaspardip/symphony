@@ -144,6 +144,97 @@ with open(path, "a", encoding="utf-8") as handle:
 PY
 }
 
+# Checks the builder's local receipt; this does not prove loaded code or canary acceptance.
+verify_build_pair() {
+  python3 - "$1" "$2" <<'PYVERIFY'
+import hashlib
+import json
+import pathlib
+import sys
+import zipfile
+
+root, expected_commit = pathlib.Path(sys.argv[1]), sys.argv[2]
+archive = root / "elixir/bin/symphony"
+receipt_path = archive.with_name("symphony.build.json")
+
+def fail(message):
+    raise SystemExit("build identity: " + message)
+
+def pairs(items):
+    value = {}
+    for key, item in items:
+        if key in value:
+            fail("duplicate JSON key")
+        value[key] = item
+    return value
+
+def read_bounded(path, limit):
+    before = path.stat()
+    if not path.is_file() or path.is_symlink() or before.st_size > limit:
+        fail("invalid or oversized file")
+    with path.open("rb") as handle:
+        data = handle.read(limit + 1)
+    after = path.stat()
+    if len(data) != before.st_size or len(data) > limit or (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+        fail("file changed while reading")
+    return data
+
+def sha(data):
+    return hashlib.sha256(data).hexdigest()
+
+try:
+    receipt_bytes = read_bounded(receipt_path, 4 * 1024 * 1024)
+    receipt = json.loads(receipt_bytes, object_pairs_hook=pairs)
+    archive_bytes = read_bounded(archive, 64 * 1024 * 1024)
+    import io
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zipped:
+        entries = zipped.infolist()
+        names = [item.filename for item in entries]
+        if len(names) > 20000 or len(set(names)) != len(names):
+            fail("duplicate or excessive archive entries")
+        if sum(item.file_size for item in entries) > 128 * 1024 * 1024 or any(item.file_size > 16 * 1024 * 1024 for item in entries):
+            fail("expanded archive too large")
+        if any(len(name.encode()) > 4096 or name.startswith("/") or ".." in name.split("/") or "\\" in name for name in names):
+            fail("invalid archive path")
+        entry = zipped.getinfo("symphony_elixir/priv/build_identity.json")
+        if entry.file_size > 4 * 1024 * 1024:
+            fail("manifest too large")
+        manifest_bytes = zipped.read(entry)
+        manifest = json.loads(manifest_bytes, object_pairs_hook=pairs)
+        source = manifest["source"]
+        def canonical(value):
+            return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode()
+        if manifest["build_id"] != sha(canonical({key: manifest[key] for key in ("source", "toolchain", "modules", "scope")})):
+            fail("build id mismatch")
+        if source["fingerprint"] != sha(canonical({key: source[key] for key in ("entries", "external_resources")})) or receipt["compiled_inputs_sha256"] != sha(canonical(manifest["compiled_inputs"])):
+            fail("input inventory mismatch")
+        if receipt["version"] != 1 or manifest["version"] != 1 or receipt["status"] != "compared":
+            fail("unsupported receipt")
+        if source["status"] != "clean" or source["base_commit"] != expected_commit:
+            fail("source is not the expected clean commit")
+        if receipt["source"] != {key: source[key] for key in ("base_commit", "tree_oid", "status", "fingerprint")}:
+            fail("source receipt mismatch")
+        if receipt["embedded_manifest_sha256"] != sha(manifest_bytes) or receipt["escript_sha256"] != sha(archive_bytes) or receipt["build_id"] != manifest["build_id"]:
+            fail("artifact receipt mismatch")
+        modules = receipt["modules"]
+        if len(modules) > 10000 or len({item["name"] for item in modules}) != len(modules):
+            fail("invalid module inventory")
+        if sorted(item["path"] for item in modules) != sorted(name for name in names if name.endswith(".beam")):
+            fail("module inventory mismatch")
+        if sorted(({key: value for key, value in item.items() if key != "packaged_beam_sha256"} for item in modules), key=lambda item: item["name"]) != sorted(manifest["modules"], key=lambda item: item["name"]):
+            fail("module receipt mismatch")
+        for item in modules:
+            if sha(zipped.read(item["path"])) != item["packaged_beam_sha256"]:
+                fail("packaged module changed")
+except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
+    fail(str(error))
+
+print(json.dumps({"build_receipt_sha256": sha(receipt_bytes), "build_id": receipt["build_id"],
+                  "embedded_manifest_sha256": receipt["embedded_manifest_sha256"],
+                  "escript_sha256": receipt["escript_sha256"]}, sort_keys=True, separators=(",", ":")))
+PYVERIFY
+}
+
 write_release_manifest() {
   local manifest_path="$1"
   local commit_sha="$2"
@@ -155,14 +246,15 @@ write_release_manifest() {
   local preflight_completed_at="$8"
   local smoke_completed_at="$9"
   local build_tool_versions="${10}"
+  local build_identity="${11}"
 
-  python3 - "$manifest_path" "$commit_sha" "$git_ref" "$REPO_URL" "$promoted_at" "$install_root" "$preflight_command" "$smoke_command" "$preflight_completed_at" "$smoke_completed_at" "$build_tool_versions" <<'PY'
+  python3 - "$manifest_path" "$commit_sha" "$git_ref" "$REPO_URL" "$promoted_at" "$install_root" "$preflight_command" "$smoke_command" "$preflight_completed_at" "$smoke_completed_at" "$build_tool_versions" "$build_identity" <<'PY'
 import json
 import os
 import sys
 
 (manifest_path, commit_sha, git_ref, repo_url, promoted_at, install_root, preflight_command, smoke_command,
- preflight_completed_at, smoke_completed_at, build_tool_versions_raw) = sys.argv[1:12]
+ preflight_completed_at, smoke_completed_at, build_tool_versions_raw, build_identity_raw) = sys.argv[1:13]
 
 payload = {
     "commit_sha": commit_sha,
@@ -176,6 +268,8 @@ payload = {
     "smoke_completed_at": smoke_completed_at,
     "tool_versions": json.loads(build_tool_versions_raw),
 }
+
+payload.update(json.loads(build_identity_raw))
 
 os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
 with open(manifest_path, "w", encoding="utf-8") as handle:
@@ -240,7 +334,7 @@ promote_runner() {
 
   local commit_sha promoted_at release_dir release_manifest_path current_target previous_metadata
   local preflight_command smoke_command preflight_completed_at smoke_completed_at build_tool_versions
-  local promotion_host promotion_user metadata_payload history_metadata
+  local promotion_host promotion_user metadata_payload history_metadata build_identity copied_identity
 
   commit_sha="$(git -C "$tmp_root/repo" rev-parse HEAD)"
   promoted_at="$(now_utc)"
@@ -256,6 +350,7 @@ promote_runner() {
 
   "$tmp_root/repo/scripts/symphony-smoke.sh"
   smoke_completed_at="$(now_utc)"
+  build_identity="$(verify_build_pair "$tmp_root/repo" "$commit_sha")"
 
   build_tool_versions="$(build_tool_versions_json)"
   promotion_host="$(hostname 2>/dev/null || uname -n)"
@@ -264,6 +359,11 @@ promote_runner() {
   rm -rf "$release_dir"
   mkdir -p "$release_dir"
   rsync -a --delete --exclude '.git' "$tmp_root/repo/" "$release_dir/"
+  copied_identity="$(verify_build_pair "$release_dir" "$commit_sha")"
+  if [[ "$copied_identity" != "$build_identity" ]]; then
+    echo "build identity changed during release copy" >&2
+    return 1
+  fi
   write_release_manifest \
     "$release_manifest_path" \
     "$commit_sha" \
@@ -274,7 +374,8 @@ promote_runner() {
     "$smoke_command" \
     "$preflight_completed_at" \
     "$smoke_completed_at" \
-    "$build_tool_versions"
+    "$build_tool_versions" \
+    "$build_identity"
   atomic_update_current_link "$release_dir"
 
   metadata_payload="$(

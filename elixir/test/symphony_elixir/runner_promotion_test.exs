@@ -41,6 +41,12 @@ defmodule SymphonyElixir.RunnerPromotionTest do
     assert read_release_manifest(install_root, first_sha)["commit_sha"] == first_sha
     assert read_release_manifest(install_root, first_sha)["repo_url"] == repo_root
 
+    for key <- ["build_id", "build_receipt_sha256", "embedded_manifest_sha256", "escript_sha256"] do
+      assert read_release_manifest(install_root, first_sha)[key] =~ ~r/^[0-9a-f]{64}$/
+    end
+
+    refute File.exists?(Path.join([install_root, "releases", first_sha, ".git"]))
+
     assert {inspect_output, 0} = run_promotion_command(["inspect"])
     inspect_payload = Jason.decode!(inspect_output)
     assert inspect_payload["promoted_release_sha"] == first_sha
@@ -108,6 +114,41 @@ defmodule SymphonyElixir.RunnerPromotionTest do
     assert Enum.any?(history_entries, &(&1["event_type"] == "runner.rollback.completed"))
   end
 
+  test "E1-B14 altered copy is rejected before current changes", _context do
+    root = Path.join(System.tmp_dir!(), "identity-promotion-copy-#{System.unique_integer([:positive])}")
+    repo = Path.join(root, "repo")
+    install = Path.join(root, "install")
+    old_repo = System.get_env("SYMPHONY_RUNNER_REPO_URL")
+    old_install = System.get_env("SYMPHONY_RUNNER_INSTALL_ROOT")
+    old_path = System.get_env("PATH")
+    real_rsync = System.find_executable("rsync")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_RUNNER_REPO_URL", old_repo)
+      restore_env("SYMPHONY_RUNNER_INSTALL_ROOT", old_install)
+      restore_env("PATH", old_path)
+      File.rm_rf!(root)
+    end)
+
+    {sha, _} = seed_runner_repo!(repo)
+    previous = Path.join(install, "previous")
+    File.mkdir_p!(previous)
+    File.ln_s!(previous, Path.join(install, "current"))
+    bin = Path.join(root, "bin")
+    File.mkdir_p!(bin)
+    executable = Path.join(bin, "rsync")
+    File.write!(executable, "#!/bin/bash\nset -euo pipefail\n#{inspect(real_rsync)} \"$@\"\ndestination=\"${@: -1}\"\nprintf corrupted >> \"$destination/elixir/bin/symphony.build.json\"\n")
+    File.chmod!(executable, 0o755)
+    System.put_env("PATH", bin <> ":" <> old_path)
+    System.put_env("SYMPHONY_RUNNER_REPO_URL", repo)
+    System.put_env("SYMPHONY_RUNNER_INSTALL_ROOT", install)
+    assert {output, status} = run_promotion_command(["promote", sha])
+    assert status != 0
+    assert output =~ "build identity:"
+    assert File.read_link!(Path.join(install, "current")) == previous
+    refute File.exists?(Path.join(install, "metadata.json"))
+  end
+
   test "rollback fails cleanly when no previous release exists" do
     root = Path.join(System.tmp_dir!(), "symphony-runner-rollback-#{System.unique_integer([:positive])}")
     install_root = Path.join(root, "install")
@@ -146,11 +187,12 @@ defmodule SymphonyElixir.RunnerPromotionTest do
       ["symphony-preflight.sh", "symphony-smoke.sh"],
       fn name ->
         path = Path.join(repo_root, "scripts/#{name}")
-        File.write!(path, script_body)
+        File.write!(path, if(name == "symphony-smoke.sh", do: shell_receipt_fixture(), else: script_body))
         File.chmod!(path, 0o755)
       end
     )
 
+    File.write!(Path.join(repo_root, ".gitignore"), "/elixir/bin/\n")
     run_git!(repo_root, ["init", "-b", "main"])
     run_git!(repo_root, ["config", "user.name", "Symphony Tests"])
     run_git!(repo_root, ["config", "user.email", "tests@example.com"])
@@ -166,12 +208,58 @@ defmodule SymphonyElixir.RunnerPromotionTest do
     {first_sha, second_sha}
   end
 
+  # Synthetic archive/receipt ONLY for shell orchestration. It is not executable
+  # code provenance. BuildIdentityIntegrationTest exercises the actual builder.
+  defp shell_receipt_fixture do
+    ~S"""
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "$(dirname "$0")/.."
+    python3 <<'PYFIXTURE'
+    import hashlib, json, pathlib, subprocess, zipfile
+    def canonical(value):
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    def sha(value):
+        return hashlib.sha256(value).hexdigest()
+    source = {"status": "clean", "base_commit": subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip(),
+              "tree_oid": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"]).decode().strip(),
+              "entries": [], "external_resources": [], "fingerprint": sha(canonical({"entries": [], "external_resources": []}))}
+    module = {"name": "Fixture", "app": "symphony_elixir", "path": "symphony_elixir/ebin/Fixture.beam", "code_md5": "0" * 32}
+    manifest = {"version": 1, "source": source, "toolchain": {}, "scope": {"fixture": "shell_orchestration_only"}, "modules": [module], "compiled_inputs": []}
+    manifest["build_id"] = sha(canonical({key: manifest[key] for key in ("source", "toolchain", "modules", "scope")}))
+    embedded = canonical(manifest)
+    archive = pathlib.Path("elixir/bin/symphony")
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("symphony_elixir/priv/build_identity.json", embedded)
+        zipped.writestr(module["path"], b"shell fixture; not a BEAM")
+    receipt = {"version": 1, "status": "compared", "build_id": manifest["build_id"],
+               "source": {key: source[key] for key in ("base_commit", "tree_oid", "status", "fingerprint")},
+               "embedded_manifest_sha256": sha(embedded), "escript_sha256": sha(archive.read_bytes()),
+               "compiled_inputs_sha256": sha(canonical([])), "modules": [dict(module, packaged_beam_sha256=sha(b"shell fixture; not a BEAM"))]}
+    archive.with_name("symphony.build.json").write_bytes(canonical(receipt))
+    PYFIXTURE
+    """
+  end
+
   defp run_promotion_command(args) do
-    System.cmd(
-      "bash",
-      [promotion_script() | args],
-      stderr_to_stdout: true
-    )
+    # Bound the script and its version-probe children, including failures during copy.
+    watchdog = ~S"""
+    import os, signal, subprocess, sys
+    child = subprocess.Popen(sys.argv[1:], start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        output, _ = child.communicate(timeout=45)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, signal.SIGKILL)
+        output, _ = child.communicate()
+        sys.stdout.buffer.write(output)
+        print("PROMOTION WATCHDOG TIMEOUT", flush=True)
+        raise SystemExit(124)
+    sys.stdout.buffer.write(output)
+    raise SystemExit(child.returncode)
+    """
+
+    System.cmd("python3", ["-c", watchdog, "bash", promotion_script() | args], stderr_to_stdout: true)
   end
 
   defp run_git!(repo_root, args) do

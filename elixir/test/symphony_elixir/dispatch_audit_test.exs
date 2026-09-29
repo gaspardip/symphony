@@ -25,6 +25,20 @@ defmodule SymphonyElixir.DispatchAuditTest do
     }
   end
 
+  test "E1-B13 dispatch metadata uses the startup diagnostic and preserves historical event bytes", context do
+    attrs = put_in(context.attrs, [:metadata, :runtime_build], %{build_id: "spoofed"})
+    attrs = put_in(attrs, [:metadata, "runtime_build"], %{build_id: "also-spoofed"})
+    assert {:ok, ticket} = DispatchAudit.begin(context.workspace, attrs)
+    events = rows() |> Enum.filter(&(&1["event_type"] in ["dispatch.requested", "dispatch.started"]))
+    expected = SymphonyElixir.BuildIdentity.summary() |> Jason.encode!() |> Jason.decode!()
+    assert length(events) == 2
+    assert Enum.all?(events, &(&1["metadata"]["runtime_build"] == expected))
+    prefix = File.read!(ticket.ledger_path)
+    assert :ok = DispatchAudit.finish(ticket, :not_started)
+    assert String.starts_with?(File.read!(ticket.ledger_path), prefix)
+    refute Enum.any?(events, &Map.has_key?(&1["metadata"]["runtime_build"], "current_verified"))
+  end
+
   test "checked admission precedes workspace access and survives workspace deletion", context do
     assert {:ok, ticket} = DispatchAudit.begin(context.workspace, context.attrs)
     assert File.ls!(context.workspace) == [".symphony"]
