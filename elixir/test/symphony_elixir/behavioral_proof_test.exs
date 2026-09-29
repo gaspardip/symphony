@@ -80,6 +80,32 @@ defmodule SymphonyElixir.BehavioralProofTest do
     assert result.satisfied?
   end
 
+  test "disabled behavioral proof preserves source changes without claiming proof exists" do
+    result =
+      BehavioralProof.evaluate(
+        System.tmp_dir!(),
+        %{
+          behavioral_proof: %{
+            required: false,
+            mode: "unit_first",
+            source_paths: ["lib"],
+            test_paths: ["test"],
+            artifact_path: nil
+          }
+        },
+        ["lib/feature.ex"]
+      )
+
+    refute result.required?
+    assert result.satisfied?
+    assert result.mode == "unit_first"
+    assert result.behavior_paths == ["lib/feature.ex"]
+    assert result.proof_paths == []
+    assert result.artifact_path == nil
+    refute result.artifact_present?
+    assert result.reason == "Behavioral proof is disabled by the repo harness configuration."
+  end
+
   test "artifact-only mode accepts the configured proof artifact" do
     workspace =
       Path.join(

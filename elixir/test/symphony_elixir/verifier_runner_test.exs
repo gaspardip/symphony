@@ -45,6 +45,90 @@ defmodule SymphonyElixir.VerifierRunnerTest do
     assert result.summary =~ "smoke command is unavailable"
   end
 
+  test "disabled behavioral proof still runs the verifier and preserves its rejection for source changes" do
+    workspace = git_workspace!("verifier-disabled-proof-source")
+    on_exit(fn -> File.rm_rf!(workspace) end)
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    source_path = Path.join(workspace, "lib/feature.ex")
+    source = "defmodule Feature do\n  def enabled?, do: true\nend\n"
+    File.write!(source_path, source)
+
+    issue = %Issue{id: "disabled-proof-source", identifier: "PROOF-01", title: "Review source", description: "## Acceptance Criteria\n- review the behavior"}
+
+    harness = %RepoHarness{
+      smoke_command: "true",
+      behavioral_proof: %{required: false, mode: "unit_first", source_paths: ["lib"], test_paths: ["test"], artifact_path: nil}
+    }
+
+    inspection = %RunInspector.Snapshot{workspace: workspace, harness: harness}
+    caller = self()
+    verifier_ref = make_ref()
+
+    result =
+      VerifierRunner.verify(workspace, issue, %{}, inspection,
+        include_pr_details: false,
+        verifier_session_runner: fn _workspace, _issue, _state, opts ->
+          send(caller, {verifier_ref, :verifier_called})
+          context = Keyword.fetch!(opts, :verification_context)
+          assert context.smoke_result.status == :passed
+          refute context.behavioral_proof.required?
+          assert context.behavioral_proof.satisfied?
+          assert context.behavioral_proof.behavior_paths == ["lib/feature.ex"]
+          assert context.behavioral_proof.proof_paths == []
+          refute context.behavioral_proof.artifact_present?
+
+          {:ok,
+           %VerifierResult{
+             verdict: :unsafe_to_merge,
+             summary: "The behavior is unsafe",
+             acceptance_gaps: [],
+             risky_areas: ["Unvalidated behavior"],
+             evidence: ["Reviewed the source change"],
+             raw_output: "unsafe"
+           }}
+        end
+      )
+
+    assert_receive {^verifier_ref, :verifier_called}
+    refute_receive {^verifier_ref, :verifier_called}
+    assert result.verdict == "unsafe_to_merge"
+    assert result.summary == "The behavior is unsafe"
+    assert result.smoke.status == :passed
+    refute result.behavioral_proof.required
+    assert result.behavioral_proof.behavior_paths == ["lib/feature.ex"]
+    assert File.read!(source_path) == source
+  end
+
+  test "disabled behavioral proof preserves smoke failure for source changes without invoking the verifier" do
+    workspace = git_workspace!("verifier-disabled-proof-smoke-failure")
+    on_exit(fn -> File.rm_rf!(workspace) end)
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join(workspace, "lib/feature.ex"), "defmodule Feature do\nend\n")
+
+    issue = %Issue{id: "disabled-proof-smoke", identifier: "PROOF-02", title: "Review source", description: "## Acceptance Criteria\n- smoke must pass"}
+
+    harness = %RepoHarness{
+      smoke_command: "exit 1",
+      behavioral_proof: %{required: false, mode: "unit_first", source_paths: ["lib"], test_paths: ["test"], artifact_path: nil}
+    }
+
+    inspection = %RunInspector.Snapshot{workspace: workspace, harness: harness}
+
+    result =
+      VerifierRunner.verify(workspace, issue, %{}, inspection,
+        include_pr_details: false,
+        verifier_session_runner: fn _workspace, _issue, _state, _opts ->
+          flunk("The verifier must not run after a failed smoke command")
+        end
+      )
+
+    assert result.verdict == "needs_more_work"
+    assert result.summary =~ "smoke verification command failed"
+    assert result.smoke.status == :failed
+    refute result.behavioral_proof.required
+    assert result.behavioral_proof.behavior_paths == ["lib/feature.ex"]
+  end
+
   test "maps model verifier pass to pass" do
     workspace = git_workspace!("verifier-pass")
     issue = %Issue{id: "issue-verify-3", identifier: "MT-403", title: "Verify", description: "## Acceptance Criteria\n- pass"}

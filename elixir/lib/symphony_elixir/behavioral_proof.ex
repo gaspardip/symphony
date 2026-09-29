@@ -143,6 +143,10 @@ defmodule SymphonyElixir.BehavioralProof do
     "No behavior-changing source files were modified, so behavioral proof is not required."
   end
 
+  defp reason(false, _satisfied, _mode, _behavior_paths, _proof_paths, _artifact_path, _artifact_present?) do
+    "Behavioral proof is disabled by the repo harness configuration."
+  end
+
   defp reason(true, true, "harness_artifact_only", _behavior_paths, _proof_paths, artifact_path, true) do
     "Behavioral proof is satisfied by the configured artifact at `#{artifact_path}`."
   end
