@@ -412,7 +412,9 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
   end
 
   defp idle?(state),
-    do: is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and state.tracker_poll_pending == [] and not state.poll_check_in_progress and not state.github_webhook_check_in_progress
+    do:
+      is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and state.tracker_poll_pending == [] and not state.poll_check_in_progress and not state.github_webhook_check_in_progress and
+        is_nil(state.tracker_inbox_batch) and is_nil(state.inbox_ack_pending)
 
   defp idle!(pid), do: wait_state!(pid, fn state -> idle?(state) and state.first_poll_completed end)
   defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 2_000)

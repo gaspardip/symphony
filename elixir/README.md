@@ -234,17 +234,17 @@ capacity, budget and audit checks. Stale data cannot clean newer work.
 
 Retries now share that admission reader. Timers identify their generation, and
 lookup/refresh preserve attempt and budget context until a current dispatch or
-explicit reschedule. Ready retries alternate with poll admissions; ordinary retries
+explicit reschedule. Ready retries rotate with poll admissions and ready Linear
+inbox heads; ordinary retries
 query candidates and passive continuations query their issue. Stale callbacks
 cannot consume a newer retry, and refresh errors explicitly reschedule instead of
 abandoning the entry. Current identity, capacity, ownership and audit checks still
 apply before worker authorization.
 
-This is a partial availability boundary. Webhook/GitHub processing,
-immediate controls, their pre-dispatch reads, promotion after lease acquisition
-and tracker writes remain synchronous;
-applying a result may still invoke those paths. The next phase must address them
-before claiming general coordinator availability. See [the phase contract and
+This is a partial availability boundary. C3 promotion and C4b Linear inbox reads
+use the shared readers described below. GitHub processing, immediate controls,
+their pre-dispatch reads, tracker writes and local effects remain synchronous;
+applying a result may still invoke those paths. See [the phase contract and
 regressions](../docs/tracker-poll-async.md).
 
 ## Bounded retries during implementation
@@ -490,8 +490,8 @@ It refuses corrupt or partial queues and is not a repair or compaction command.
 State uses atomic rename; append and state publication are not a single transaction.
 An uncertain failure can redeliver events. The live coordinator retries a retained
 ack without replaying its already applied prefix, while restart remains at-least-once.
-Errors expose sanitized phases/codes, not raw event payloads. Event draining remains
-synchronous; this storage change does not provide C4b reader availability.
+Errors expose sanitized phases/codes, not raw event payloads. Storage checks alone
+do not establish availability; C4b supplies the Linear read continuation below.
 
 ### Build identity diagnostics
 
@@ -597,3 +597,21 @@ one transaction: if the latter fails, local custody is retired and
 `lease_release_audit_failed` remains explicit; operator retry does not report
 success or recreate the lease. Generic runtime events and post-gate provider effects
 are not covered by this storage guarantee.
+
+
+## Linear inbox continuation (C4b)
+
+Linear lookup uses the polling reader, and active revalidation shares one admission
+reader with poll candidates, retries and existing C3 promotion. One bounded batch
+and one head preserve physical order. The inbox phase is visible in snapshots;
+held remote reads do not occupy the coordinator. Synchronous local effects and
+GitHub/control operations retain their existing limits.
+
+The head completes at a local reconciliation/rejection or real gate authorization,
+not when a worker is merely queued. Its cache projection stays private until that
+decision. One correlated continuation then confirms the captured prefix. Failed
+ack retries only confirmation on the next drain; current 429 schedules one wakeup.
+Failed release/audit remains explicit and cannot become success by observing a
+missing lease. Restart retains at-least-once delivery without recovering volatile
+custody. See [the full contract](../docs/RUNTIME_CONTRACT.md#linear-inbox-continuation-c4b)
+and [reader lifecycle](../docs/tracker-poll-async.md#linear-inbox-reads-and-completion-c4b).

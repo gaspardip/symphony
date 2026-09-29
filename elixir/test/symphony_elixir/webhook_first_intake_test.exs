@@ -1674,7 +1674,7 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
 
     on_exit(fn ->
       if Process.alive?(pid) do
-        Process.exit(pid, :normal)
+        GenServer.stop(pid, :normal)
       end
     end)
 
@@ -1703,6 +1703,8 @@ defmodule SymphonyElixir.WebhookFirstIntakeTest do
     assert_eventually(fn ->
       next_state = :sys.get_state(pid)
       assert next_state.tracker_backoff_rule_id == "tracker.rate_limited"
+      assert next_state.inbox_ack_pending == nil
+      assert next_state.tracker_inbox_batch.head.phase == :backoff
 
       assert [%{"event" => payload}] = TrackerEventInbox.pending_events(10)
       assert payload["issue_identifier"] == "MT-RATE"

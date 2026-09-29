@@ -159,13 +159,13 @@ are limited to 4 MiB; ordinary drains also stop at 100 physical rows. Oversize i
 is rejected before append. Logical reset preserves history and changes generation,
 sets the offset to EOF and clears dedupe. It is not corruption repair or compaction.
 
-Both event drains remain synchronous. After applying a prefix, the coordinator
+GitHub business processing remains synchronous. After applying a prefix, the coordinator
 retains an unconfirmed cursor on storage failure and retries only that ack at the
 next drain opportunity. The cursor keeps its original location across configuration
 changes. A reset invalidates it; other mismatches remain blocked and visible.
 Owner restart can replay effects: delivery is at least once, not exactly once.
-No autonomous wakeup, reader slot or async admission routing is introduced here.
-Those remain C4b work after C3.
+The storage layer introduces no autonomous wakeup or reader. The Linear continuation
+below supplies those coordinator behaviors without changing the cursor contract.
 
 
 ## Snapshot metadata reads
@@ -316,3 +316,43 @@ one transaction: if the latter fails, local custody is retired and
 `lease_release_audit_failed` remains explicit; operator retry does not report
 success or recreate the lease. Generic runtime events and post-gate provider effects
 are not covered by this storage guarantee.
+
+
+## Linear inbox continuation (C4b)
+
+The coordinator retains one captured physical batch (100 rows, 4 MiB) and one
+head. Tracker lookup uses B; active revalidation shares the admission reader with
+poll candidates and ready retries, rotating poll → retry → inbox over ready
+classes. An existing C3 promotion keeps its physical slot and acquisition deadline.
+Waiting for admission or backoff releases B. Appends do not extend the original
+batch. A cancelled reader keeps its physical slot until guardian DOWN.
+
+The head is bound to physical location, generation, cursor, configuration,
+worker/custody identity and observed routing cache. The coordinator recaptures the
+prefix before applying a retained result or authorizing its gate. This check does
+not hold an inbox lock across tracker, lease, audit or workspace I/O and is not a
+transaction with reset. Invalid raw identities cannot update another issue.
+
+Accepted lookup knowledge immediately invalidates older C1/C2/C3 decisions. Its
+own Issue projection stays private until the local decision completes. Correlated
+completion follows actual custody through promotion and the gated worker. Only
+successful gate authorization completes an accepted dispatch; queueing a reader or
+worker does not. Local reconciliation or a definitive rejection can complete the
+row without a provider run. The worker's eventual outcome is a separate concern.
+
+Applied rows accumulate a captured cursor. One correlated local callback confirms
+that prefix after application. Ack failure retains the cursor and subsequent drain
+opportunities retry only confirmation, including across a root change. An obsolete
+ack cannot confirm a new generation. A current 429 preserves the unprocessed head
+and schedules one correlated wakeup; it confirms only the preceding applied prefix.
+Old transport success cannot clear newer backoff. Reader/storage failures have no
+new autonomous retry loop. Explicit release or release-audit debt remains blocked
+for that owner, even if a later observation sees a missing lease; no repair of that
+audit is implied. No incomplete head publishes its own cache projection.
+
+The contract assumes one consuming coordinator and retains at-least-once delivery
+after owner restart. GitHub, controls, tracker writes and local business effects
+retain their existing availability limits. This change does not establish I2
+post-gate validity, I3 recovery, distributed exactly-once processing or acceptance
+against an external provider. Verification results belong to the frozen validation
+record, not the existence of these test cases.

@@ -1191,7 +1191,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     on_exit(fn ->
       if Process.alive?(pid) do
-        Process.exit(pid, :normal)
+        GenServer.stop(pid, :normal)
       end
 
       SymphonyElixir.TrackerEventInbox.reset()
@@ -1214,8 +1214,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       assert next_state.current_poll_mode == nil
       assert next_state.issue_routing_cache[issue.id].state == "Todo"
       assert next_state.issue_routing_cache[issue.id].assignee_id == "worker-1"
-      assert SymphonyElixir.TrackerEventInbox.pending_events(10) == []
+      assert is_nil(next_state.tracker_inbox_batch)
+      assert is_nil(next_state.inbox_ack_pending)
+      assert is_nil(next_state.inbox_storage_error)
+      refute is_nil(next_state.inbox_last_drained_at)
     end)
+
+    assert :ok = GenServer.stop(pid, :normal)
+    assert SymphonyElixir.TrackerEventInbox.pending_events(10) == []
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do

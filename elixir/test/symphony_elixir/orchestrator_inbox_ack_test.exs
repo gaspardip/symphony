@@ -15,7 +15,6 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
       if id == "RATE" do
         {:error, {:linear_rate_limited, %{retry_after_ms: 60_000}}}
       else
-        if fixture.block_ack, do: File.mkdir!(fixture.location.lock_path)
         {:ok, %Issue{id: id, identifier: "ISSUE-#{id}", state: "Done", source: :tracker, title: "Inbox fixture", labels: [], assigned_to_worker: true}}
       end
     end
@@ -27,6 +26,13 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     @impl true
     def init(state), do: {:ok, state}
     @impl true
+    def handle_info({:tracker_inbox_ack, _cursor} = message, state) do
+      fixture = Application.fetch_env!(:symphony_elixir, :inbox_ack_fixture)
+      # The actual ack continuation runs after the decision/cache mutation.
+      if fixture.block_ack, do: File.mkdir!(fixture.location.lock_path)
+      Orchestrator.handle_info(message, state)
+    end
+
     def handle_info(message, state), do: Orchestrator.handle_info(message, state)
     @impl true
     def handle_call(:state, _from, state), do: {:reply, state, state}
@@ -94,7 +100,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     assert {:ok, _} = TrackerEventInbox.enqueue([event("A")])
     send(ctx.pid, :run_webhook_cycle)
     assert_receive {:lookup, "A"}, 2_000
-    state = wait_state!(ctx.pid, &(&1.inbox_ack_pending != nil and idle?(&1)))
+    state = wait_state!(ctx.pid, &(&1.inbox_ack_pending != nil and &1.inbox_storage_error != nil and idle?(&1)))
     assert state.issue_routing_cache["A"].state == "Done"
     assert state.inbox_storage_error.phase == :lock
     assert state.inbox_last_drained_at == nil
@@ -120,7 +126,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     assert {:ok, _} = TrackerEventInbox.enqueue([event("A")])
     send(ctx.pid, :run_webhook_cycle)
     assert_receive {:lookup, "A"}, 2_000
-    wait_state!(ctx.pid, &(&1.inbox_ack_pending != nil and idle?(&1)))
+    wait_state!(ctx.pid, &(&1.inbox_ack_pending != nil and &1.inbox_storage_error != nil and idle?(&1)))
     File.rmdir!(ctx.location.lock_path)
     assert :ok = TrackerEventInbox.reset(ctx.location)
     assert {:ok, _} = TrackerEventInbox.enqueue([event("A")])
@@ -182,7 +188,20 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
   end
 
   defp event(id), do: %TrackerEvent{provider: "linear", event_id: id, entity_type: "Issue", entity_id: id, issue_identifier: "ISSUE-#{id}", action: "update", raw: %{}}
-  defp idle?(state), do: is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and not state.poll_check_in_progress
+
+  defp idle?(state) do
+    inbox_settled =
+      case state.tracker_inbox_batch do
+        nil -> true
+        %{head: %{phase: :backoff}} -> is_nil(state.inbox_ack_pending)
+        %{head: %{phase: :blocked}} -> true
+        %{head: nil} -> not is_nil(state.inbox_ack_pending) and not is_nil(state.inbox_storage_error)
+        _ -> false
+      end
+
+    is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and not state.poll_check_in_progress and inbox_settled
+  end
+
   defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 2_000)
 
   defp wait_state!(pid, predicate, deadline) do

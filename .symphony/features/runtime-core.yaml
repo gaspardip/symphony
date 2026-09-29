@@ -14,6 +14,9 @@ source_paths:
   - elixir/lib/symphony_elixir/orchestrator.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
 acceptance_signals:
+  - Linear inbox reads retain one bounded physical head through asynchronous lookup, shared admission and real gate authorization; correlated ack confirms only completed decisions
+  - Inbox cache publication waits for completed decisions; root, generation, custody, worker and external knowledge changes invalidate held responses before effects
+  - Current tracker throttling wakes one retained inbox head; failed ack retries only confirmation and failed release audit stays explicitly blocked
   - Snapshot reads and writes preserve existing runner metadata without redundant Git lookups; absent, nil and empty fields still use current getters, with identity and consumption guards unchanged
   - Tracker and GitHub inboxes acknowledge captured physical prefixes under a shared filesystem lock; corruption and uncertain persistence remain visible, legacy migration is explicit, and logical reset invalidates older generations
   - CLI adapters return transport observations; delivery applies local effects after transport, verification skips them, failed transport skips preparation, and progress evidence is never fabricated
@@ -91,4 +94,4 @@ acceptance_signals:
   - Promotion checks the clean build receipt before and after copying a release without treating it as task acceptance or canary proof
 dependencies:
   - harness
-last_updated_by_issue: architecture-E1-build
+last_updated_by_issue: architecture-C4b

@@ -63,9 +63,9 @@ in `retry_attempts` through lookup and refresh, preserving attempt, issue envelo
 and budget resume context. A successful worker consumes its entry; errors replace
 only the current generation. Metadata cannot overwrite scheduler-owned fields.
 
-Ready retries share C1's single admission reader. The coordinator alternates one
-logical poll admission and one ready retry, ordered by due time and issue ID within
-retries. An ordinary retry performs candidate lookup followed by active pre-lease
+Ready retries share C1's single admission reader. With C4b, the coordinator rotates
+one logical poll admission, one ready retry and one ready inbox head, skipping
+empty classes. Retries remain ordered by due time and issue ID. An ordinary retry performs candidate lookup followed by active pre-lease
 refresh in the same logical turn. A passive continuation uses an individual lookup.
 The two phases are serial, and the existing B reader remains independent: at most
 one admission/retry reader plus one polling reader. Waiting for this slot does not
@@ -109,7 +109,7 @@ compatibility path or unversioned-message executor.
 
 ## Remaining synchronous work
 
-Webhook/GitHub event processing, immediate controls, pre-dispatch revalidation from those entry points, tracker mutations and local business effects still use their existing paths. Applying read results can call those paths. An injected slow operation there can still occupy the coordinator. Configuration lookup remains a WorkflowStore call; an invalid file that WorkflowStore has not adopted is not a new active configuration. This phase establishes availability during the selected reads only.
+GitHub event processing, immediate controls and their pre-dispatch revalidation, tracker mutations and local business effects still use their existing paths. Applying read results can call those paths. An injected slow operation there can still occupy the coordinator. Configuration lookup remains a WorkflowStore call; an invalid file that WorkflowStore has not adopted is not a new active configuration. This phase establishes availability during the selected reads only.
 
 The new tests use closed tracker callbacks, local manual issues, real leases and controlled TaskSupervisor children. No external tracker, provider, Git operation or publication is needed. The backoff status test observes the real coordinator with its existing assertions and deadline. Manual submissions accepted during a held cycle queue discovery so that the accepted task is not delayed until the next polling interval.
 
@@ -128,9 +128,9 @@ The retained location prevents confirming another root. Reset changes generation
 and retires the old cursor without touching the new queue. After restart this
 volatile evidence is absent, so processing remains at least once.
 
-No C4b availability claim follows from this storage change. Webhook tracker lookup,
-its second pre-dispatch validation, GitHub work and local effects remain synchronous;
-429 retry wakeups and shared reader arbitration still require C4b after C3.
+Storage tests alone establish no availability claim. The C4b continuation below
+uses the existing checked capture and ack APIs; GitHub work and local effects
+retain their prior synchronous behavior.
 
 
 ## Lease custody and passive promotion (C3)
@@ -177,3 +177,40 @@ one transaction: if the latter fails, local custody is retired and
 `lease_release_audit_failed` remains explicit; operator retry does not report
 success or recreate the lease. Generic runtime events and post-gate provider effects
 are not covered by this storage guarantee.
+
+
+## Linear inbox reads and completion (C4b)
+
+A captured batch owns a single head through lookup, admission, optional C3
+promotion and gate. `tracker_poll_read` owns the first `fetch_issue` read. The
+head releases B while waiting for the poll/retry/inbox admission rotation and uses
+`admission_read` for active revalidation. Each closure captures read inputs and a
+validated context, never State. Snapshot exposes phase and sanitized error codes.
+
+The owner validates the physical prefix, location, fingerprint, worker/custody
+and cache observation before applying data. Controls and external knowledge changes
+invalidate the head; its own accepted lookup invalidates older admission work
+without cancelling itself. Cache publication waits for a completed local decision.
+Root/config changes discard incomplete private knowledge, so returning to the
+same event timestamp requires a new lookup. C3's manual empty/Blocked fallback
+and three-field preadmission identity comparison remain intact.
+
+The dispatch completion binds head and decision references to the actual custody
+reference. Transfer to a gated worker preserves that correlation; gate authorization
+consumes it once. Timeout, cancellation and DOWN before authorization resolve their
+own cleanup outcomes. Successor-token mismatch requests reevaluation; failed release,
+uncertain ownership or failed release audit prevents ack and cannot be erased by a
+late reader callback. A physically removed lease is not evidence of successful audit.
+
+One local ack callback follows a completed decision. A retained cursor blocks other
+heads until confirmation succeeds; failure does not replay the decision or schedule
+an immediate retry. A later drain retries the same cursor. Successful confirmation
+resumes a waiting admission, but does not automatically retry a blocked read. A 429
+is the only new autonomous wakeup, and keeps later rows behind its head. Batch limits
+remain those of the initial capture even when events are appended during a read.
+
+`orchestrator_tracker_inbox_async_test.exs` uses persistent drivers, real reader
+callbacks, gate/ack message barriers, temporary checked storage and bounded hooks.
+Existing inbox ack fixtures now obstruct the real ack continuation after the effect;
+their equality, replay and error assertions remain. These are local regressions,
+not an external-provider run or a general latency guarantee for synchronous effects.

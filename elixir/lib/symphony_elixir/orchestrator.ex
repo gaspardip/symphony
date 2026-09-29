@@ -127,6 +127,8 @@ defmodule SymphonyElixir.Orchestrator do
       inbox_last_drained_at: nil,
       inbox_ack_pending: nil,
       inbox_storage_error: nil,
+      tracker_inbox_batch: nil,
+      tracker_inbox_wakeup: nil,
       github_webhook_last_accepted_at: nil,
       github_webhook_last_ignored_at: nil,
       github_webhook_last_ignored_reason: nil,
@@ -270,6 +272,68 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(:run_webhook_cycle, state), do: {:noreply, enqueue_tracker_poll(refresh_runtime_config(state), :webhook)}
   def handle_info(:run_github_webhook_cycle, state), do: {:noreply, enqueue_tracker_poll(refresh_runtime_config(state), :github_webhook)}
 
+  def handle_info({:tracker_inbox_continue, ref}, %{tracker_inbox_batch: %{ref: ref}} = state) do
+    state =
+      cond do
+        state.inbox_ack_pending -> state
+        state.tracker_inbox_batch.rows == [] -> yield_tracker_inbox(state)
+        tracker_inbox_reader_active?(state) -> state
+        true -> enqueue_tracker_poll(state, :webhook)
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:tracker_inbox_continue, _obsolete}, state), do: {:noreply, state}
+
+  def handle_info({:tracker_inbox_ack, cursor}, %{inbox_ack_pending: cursor} = state) when not is_nil(cursor),
+    do: {:noreply, confirm_tracker_inbox_prefix(state)}
+
+  def handle_info({:tracker_inbox_ack, _obsolete}, state), do: {:noreply, state}
+
+  def handle_info({:tracker_inbox_wakeup, ref, location, generation}, %{tracker_inbox_wakeup: %{ref: ref, location: location, generation: generation} = wakeup} = state) do
+    state = %{state | tracker_inbox_wakeup: nil}
+    head_ref = wakeup.head_ref
+
+    state =
+      case state.tracker_inbox_batch do
+        %{location: ^location, generation: ^generation, head: %{ref: ^head_ref, phase: :backoff}} ->
+          if tracker_backoff_active?(state) or tracker_poll_backoff_identity(state) != wakeup.backoff,
+            do: backoff_tracker_inbox(state),
+            else: enqueue_tracker_poll(state, :webhook)
+
+        _ ->
+          state
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:tracker_inbox_wakeup, _ref, _location, _generation}, state), do: {:noreply, state}
+
+  def handle_info({:tracker_read_result, ref, result}, %{tracker_poll_read: %{purpose: :inbox_lookup, invalidated: true, ref: ref} = operation} = state) do
+    {state, _result} = observe_tracker_inbox_transport(state, operation, result)
+    {:noreply, state}
+  end
+
+  def handle_info({:tracker_read_result, ref, result}, %{tracker_poll_read: %{purpose: :inbox_lookup, ref: ref} = operation} = state) do
+    Process.demonitor(operation.monitor, [:flush])
+    state = receive_tracker_inbox_result(%{state | tracker_poll_read: nil}, operation, result)
+    {:noreply, state |> finish_tracker_poll() |> advance_admission()}
+  end
+
+  def handle_info({:tracker_read_result, ref, result}, %{admission_read: %{purpose: :inbox_admission, invalidated: true, ref: ref} = operation} = state) do
+    {state, _result} = observe_tracker_inbox_transport(state, operation, result)
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, ref, :process, pid, reason}, %{tracker_poll_read: %{purpose: :inbox_lookup, monitor: ref, pid: pid} = operation} = state) do
+    state = receive_tracker_inbox_result(%{state | tracker_poll_read: nil}, operation, {:error, {:tracker_reader_down, reason}})
+    state = state |> finish_tracker_poll() |> advance_admission()
+    state = if operation.invalidated and state.tracker_inbox_batch, do: enqueue_tracker_poll(state, :webhook), else: state
+    {:noreply, state}
+  end
+
   def handle_info({:tracker_read_result, ref, result}, %{tracker_poll_read: %{ref: expected} = operation} = state) when ref == expected do
     Process.demonitor(operation.monitor, [:flush])
     state = %{state | tracker_poll_read: nil}
@@ -283,9 +347,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:promotion_timeout, id, promotion_ref}, state) do
     case Map.get(state.lease_claims, id) do
-      %{promotion_ref: ^promotion_ref, deadline: deadline} when is_integer(deadline) ->
+      %{promotion_ref: ^promotion_ref, deadline: deadline} = claim when is_integer(deadline) ->
         if System.monotonic_time(:millisecond) >= deadline do
-          next = if Map.has_key?(state.running, id), do: terminate_running_issue(state, id, false), else: release_issue_claim(state, id)
+          completion = Map.get(claim, :completion)
+          outcome = tracker_inbox_cleanup_outcome(state, completion)
+          next = if Map.has_key?(state.running, id), do: do_terminate_running_issue(state, id, false), else: release_issue_claim(state, id)
+          next = next |> tracker_inbox_outcome(id, outcome) |> finish_tracker_inbox_action(completion, nil)
 
           case next.candidate_fetch_error do
             {tag, ^id, _reason} when tag in [:lease_release_failed, :lease_release_audit_failed] -> {:noreply, next}
@@ -323,24 +390,34 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info({:authorize_dispatch, issue_id, dispatch_id, pid}, state) do
     case Map.get(state.running, issue_id) do
       %{pid: ^pid, dispatch_ticket: %{dispatch_id: ^dispatch_id} = ticket} = entry ->
+        completion = Map.get(entry, :completion)
+
         with {:ok, %{holder: :gated} = claim} <- current_issue_custody(state, issue_id, entry.custody_ref),
+             :ok <- tracker_inbox_boundary(state, completion),
              {:ok, _workspace} <- current_custody_workspace(state, entry.issue),
              :ok <- DispatchAudit.with_authorization(ticket, fn -> DispatchAudit.ensure_workspace_access(ticket.workspace) end),
              :ok <- LeaseManager.activate_dispatch(claim.token, claim.deadline, pid, dispatch_id) do
           state = transfer_issue_custody(state, issue_id, :running)
           claim = Map.fetch!(state.lease_claims, issue_id)
           if is_reference(claim.timer), do: Process.cancel_timer(claim.timer)
-          claim = %{claim | promotion_ref: nil, timer: nil}
+          claim = %{claim | promotion_ref: nil, timer: nil} |> Map.put(:completion, nil)
           state = put_in(state.lease_claims[issue_id], claim)
-          entry = %{entry | custody_ref: claim.custody_ref}
-          {:noreply, %{state | running: Map.put(state.running, issue_id, entry)}}
+          entry = %{entry | custody_ref: claim.custody_ref} |> Map.put(:completion, nil)
+          state = %{state | running: Map.put(state.running, issue_id, entry)}
+          state = tracker_inbox_outcome(state, issue_id, {:applied, :dispatch_authorized})
+          {:noreply, finish_tracker_inbox_action(state, completion, nil)}
         else
           {:ok, _already_transferred_claim} ->
             {:noreply, state}
 
+          {kind, reason} when kind in [:blocked, :recheck] ->
+            state = do_terminate_running_issue(state, issue_id, false)
+            state = tracker_inbox_outcome(state, issue_id, {kind, reason})
+            {:noreply, finish_tracker_inbox_action(state, completion, nil)}
+
           {:error, reason} ->
-            stopped = terminate_running_issue(state, issue_id, false)
-            {:noreply, halt_dispatch_audit(stopped, issue_id, reason)}
+            stopped = state |> do_terminate_running_issue(issue_id, false) |> halt_dispatch_audit(issue_id, reason)
+            {:noreply, finish_tracker_inbox_action(stopped, completion, nil)}
         end
 
       _ ->
@@ -357,6 +434,8 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       issue_id ->
+        completion = Map.get(Map.fetch!(state.running, issue_id), :completion)
+        completion_outcome = tracker_inbox_cleanup_outcome(state, completion)
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
@@ -367,6 +446,7 @@ defmodule SymphonyElixir.Orchestrator do
           case finish_completed_dispatch(running_entry, reason) do
             {:ownership_uncertain, ownership_reason} ->
               state
+              |> tracker_inbox_failure(issue_id, {:lease_ownership_uncertain, ownership_reason})
               |> cancel_dispatch_retry(issue_id)
               |> Map.put(:candidate_fetch_error, {:lease_ownership_uncertain, issue_id, ownership_reason})
 
@@ -434,6 +514,7 @@ defmodule SymphonyElixir.Orchestrator do
               |> halt_dispatch_audit(issue_id, audit_reason)
           end
 
+        state = state |> tracker_inbox_outcome(issue_id, completion_outcome) |> finish_tracker_inbox_action(completion, nil)
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
         notify_dashboard()
@@ -491,6 +572,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp enqueue_tracker_poll(state, mode) do
+    state = reconcile_tracker_inbox_context(state)
     state = queue_tracker_poll(state, mode)
     state = if is_nil(state.tracker_poll_cycle), do: begin_next_tracker_poll(state), else: state
     sync_tracker_poll_flags(state)
@@ -687,9 +769,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp advance_tracker_poll(%{tracker_poll_cycle: %{phase: :approval, mode: mode}} = state, context) do
     cond do
-      mode == :github_webhook -> state |> drain_github_events() |> finish_tracker_poll()
-      mode == :webhook and not tracker_backoff_active?(state) -> state |> drain_tracker_events() |> finish_tracker_poll()
-      true -> state |> put_in([Access.key(:tracker_poll_cycle), :phase], :candidates) |> start_tracker_poll_read(context)
+      mode == :github_webhook ->
+        state |> drain_github_events() |> finish_tracker_poll()
+
+      mode == :webhook ->
+        state = drain_tracker_events(state)
+        if state.tracker_poll_read, do: state, else: finish_tracker_poll(state)
+
+      true ->
+        state |> put_in([Access.key(:tracker_poll_cycle), :phase], :candidates) |> start_tracker_poll_read(context)
     end
   end
 
@@ -810,6 +898,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_current_terminal_issue(_state, _issue), do: :ok
 
   defp process_candidate_issues(%State{} = state, issues) when is_list(issues) do
+    state = invalidate_tracker_inbox_cache(state, issues, nil)
     {state, candidate_issues} = block_candidate_policy_conflicts(state, issues)
     policy_blocked_count = length(issues) - length(candidate_issues)
     {eligible_issues, skipped_issues} = partition_issues_by_label_gate(candidate_issues, state)
@@ -877,20 +966,35 @@ defmodule SymphonyElixir.Orchestrator do
       |> Enum.filter(fn {_id, entry} -> Map.get(entry, :status) == :ready end)
       |> Enum.min_by(fn {id, entry} -> {entry.due_at_ms, id} end, fn -> nil end)
 
-    poll? = match?(%{issues: [_ | _]}, state.admission_batch)
+    ready = %{
+      poll: match?(%{issues: [_ | _]}, state.admission_batch),
+      retry: retry != nil,
+      inbox: match?(%{head: %{phase: :admission_ready}}, state.tracker_inbox_batch) and is_nil(state.inbox_ack_pending)
+    }
 
-    cond do
-      retry != nil and (state.next_admission_kind == :retry or not poll?) ->
+    order =
+      case state.next_admission_kind do
+        :poll -> [:poll, :retry, :inbox]
+        :retry -> [:retry, :inbox, :poll]
+        :inbox -> [:inbox, :poll, :retry]
+      end
+
+    case Enum.find(order, &Map.fetch!(ready, &1)) do
+      :retry ->
         {id, entry} = retry
-        state = start_retry_lookup(%{state | next_admission_kind: :poll}, id, entry, context)
+        state = start_retry_lookup(%{state | next_admission_kind: :inbox}, id, entry, context)
         advance_admission(state, context)
 
-      poll? ->
+      :poll ->
         state = advance_admission_batch(%{state | next_admission_kind: :retry}, context)
         advance_admission(state, context)
 
-      true ->
-        %{state | admission_batch: nil}
+      :inbox ->
+        state = select_tracker_inbox_admission(%{state | next_admission_kind: :poll}, context)
+        advance_admission(state, context)
+
+      nil ->
+        %{state | admission_batch: if(ready.poll, do: state.admission_batch, else: nil)}
     end
   end
 
@@ -928,6 +1032,108 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp select_tracker_inbox_admission(state, context) do
+    head = state.tracker_inbox_batch.head
+
+    case tracker_inbox_current(state, head.ref) do
+      :ok ->
+        state = %{state | max_concurrent_agents: Config.max_concurrent_agents()}
+
+        cond do
+          tracker_backoff_active?(state) ->
+            backoff_tracker_inbox(state)
+
+          tracker_inbox_issue_current?(state, head.issue) ->
+            state = begin_tracker_inbox_decision(state)
+            state = dispatch_runtime_issue(state, head.issue, nil, fn current, issue, _attempt -> start_tracker_inbox_admission(current, issue, context) end, &dispatch_passive_issue/3)
+            settle_tracker_inbox_decision(state)
+
+          true ->
+            apply_tracker_inbox_head(state, :not_eligible)
+        end
+
+      {:blocked, reason} ->
+        block_tracker_inbox(state, reason)
+
+      {:recheck, reason} ->
+        recheck_tracker_inbox(state, reason)
+    end
+  end
+
+  defp tracker_inbox_issue_current?(state, issue) do
+    not Map.has_key?(state.retry_attempts, issue.id) and not tracker_backoff_active?(state) and
+      Map.get(RunnerRuntime.runner_health(), :dispatch_enabled, true) and is_nil(dispatch_skip_reason(issue, state)) and
+      should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
+  end
+
+  defp start_tracker_inbox_admission(state, issue, context) do
+    id = issue.id
+    head = state.tracker_inbox_batch.head
+
+    case TrackerReader.start(fn -> IssueSource.fetch_issue_states_by_ids([id], context) end) do
+      {:ok, reader} ->
+        operation =
+          Map.merge(reader, %{
+            purpose: :inbox_admission,
+            head_ref: head.ref,
+            completion: head.completion,
+            issue: issue,
+            fingerprint: context.fingerprint,
+            backoff: tracker_poll_backoff_identity(state),
+            invalidated: false
+          })
+
+        %{state | admission_read: operation} |> tracker_inbox_outcome(id, {:wait, :admission})
+
+      {:error, reason} ->
+        block_tracker_inbox(state, {:tracker_reader_start_failed, reason})
+    end
+  end
+
+  defp receive_tracker_inbox_admission(state, operation, result) do
+    state = refresh_runtime_config(state)
+    {state, result} = observe_tracker_inbox_transport(state, operation, result)
+
+    case state.tracker_inbox_batch do
+      %{head: %{completion: completion}} when completion == operation.completion ->
+        cond do
+          operation.invalidated ->
+            recheck_tracker_inbox(state, :tracker_inbox_invalidated)
+
+          tracker_reader_failure?(result) ->
+            block_tracker_inbox(state, elem(result, 1))
+
+          true ->
+            case tracker_inbox_current(state, operation.head_ref) do
+              :ok -> apply_tracker_inbox_admission(state, operation, result)
+              {:blocked, reason} -> block_tracker_inbox(state, reason)
+              {:recheck, reason} -> recheck_tracker_inbox(state, reason)
+            end
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp apply_tracker_inbox_admission(state, _operation, {:error, {:linear_rate_limited, _}}), do: backoff_tracker_inbox(state)
+  defp apply_tracker_inbox_admission(state, _operation, {:error, :tracker_inbox_backoff_changed}), do: backoff_tracker_inbox(state)
+
+  defp apply_tracker_inbox_admission(state, operation, {:ok, [%Issue{id: id, identifier: identifier} = refreshed]})
+       when id == operation.issue.id and identifier == operation.issue.identifier do
+    refreshed = merge_dispatch_refresh_issue(operation.issue, refreshed)
+
+    if tracker_inbox_issue_current?(state, refreshed) do
+      state
+      |> dispatch_runtime_issue(refreshed, nil, &do_dispatch_issue/3, &dispatch_passive_issue/3)
+      |> settle_tracker_inbox_decision()
+    else
+      apply_tracker_inbox_head(state, :not_eligible)
+    end
+  end
+
+  defp apply_tracker_inbox_admission(state, _operation, _ordinary_rejection), do: apply_tracker_inbox_head(state, :discarded)
+
   defp start_promotion_read(state, issue, attempt, recipient, start_child_fun, initial_stage, stage) do
     with {:ok, claim} <- current_issue_custody(state, issue.id),
          {:ok, context} <- capture_tracker_poll_context(),
@@ -958,29 +1164,96 @@ defmodule SymphonyElixir.Orchestrator do
                 run_identity: run_identity,
                 token: claim.token,
                 custody_ref: claim.custody_ref,
+                completion: Map.get(claim, :completion),
+                head_ref: Map.get(Map.get(claim, :completion) || %{}, :head_ref),
                 deadline: deadline,
                 fingerprint: context.fingerprint,
                 backoff: tracker_poll_backoff_identity(state),
                 invalidated: false
               })
 
-            %{state | admission_read: operation}
+            %{state | admission_read: operation} |> tracker_inbox_wait(issue.id, :promotion)
 
           {:error, reason} ->
-            stop_terminal_dispatch(state, issue, {:promotion_reader_failed, reason})
+            state |> stop_terminal_dispatch(issue, {:promotion_reader_failed, reason}) |> tracker_inbox_outcome(issue.id, {:blocked, {:promotion_reader_failed, reason}})
         end
       else
-        stop_terminal_dispatch(state, issue, :promotion_unavailable)
+        outcome =
+          cond do
+            System.monotonic_time(:millisecond) >= deadline -> {:applied, :dispatch_rejected}
+            tracker_backoff_active?(state) -> {:backoff, :transport_changed}
+            true -> {:recheck, :promotion_unavailable}
+          end
+
+        state |> stop_terminal_dispatch(issue, :promotion_unavailable) |> tracker_inbox_outcome(issue.id, outcome)
       end
     else
-      {:error, reason} -> stop_terminal_dispatch(state, issue, reason)
-      {:mismatch, _snapshot} -> stop_terminal_dispatch(state, issue, :promotion_identity_mismatch)
+      {:error, reason} -> state |> stop_terminal_dispatch(issue, reason) |> tracker_inbox_outcome(issue.id, tracker_inbox_validation_outcome(reason))
+      {:mismatch, _snapshot} -> state |> stop_terminal_dispatch(issue, :promotion_identity_mismatch) |> tracker_inbox_outcome(issue.id, {:recheck, :promotion_identity_mismatch})
     end
   end
 
   defp receive_admission_result(state, %{purpose: :promotion} = operation, result) do
-    id = operation.issue.id
     {state, result} = observe_promotion_result(state, operation, result)
+    completion = Map.get(operation, :completion)
+
+    state =
+      case tracker_inbox_boundary(state, completion) do
+        :ok ->
+          cond do
+            not is_nil(completion) and tracker_reader_failure?(result) ->
+              state |> stop_terminal_dispatch(operation.issue, elem(result, 1)) |> tracker_inbox_outcome(operation.issue.id, {:blocked, elem(result, 1)})
+
+            not is_nil(completion) and (match?({:error, {:linear_rate_limited, _}}, result) or result == :discarded) ->
+              state |> release_issue_claim(operation.issue.id) |> tracker_inbox_outcome(operation.issue.id, {:backoff, :transport_changed})
+
+            true ->
+              apply_promotion_result(state, operation, result)
+          end
+
+        {kind, reason} when kind in [:blocked, :recheck] ->
+          state = release_tracker_inbox_operation(state, operation)
+          tracker_inbox_outcome(state, operation.issue.id, {kind, reason})
+      end
+
+    state |> finish_tracker_inbox_action(completion, nil) |> advance_admission() |> resume_tracker_inbox_after_reader()
+  end
+
+  defp receive_admission_result(state, %{purpose: :inbox_admission} = operation, result) do
+    state = receive_tracker_inbox_admission(state, operation, result)
+    state = if operation.invalidated and state.tracker_inbox_batch, do: enqueue_tracker_poll(state, :webhook), else: state
+    advance_admission(state)
+  end
+
+  defp receive_admission_result(state, %{purpose: :retry} = operation, result) do
+    state |> receive_retry_result(operation, result) |> advance_admission()
+  end
+
+  defp receive_admission_result(state, operation, result) do
+    state = refresh_runtime_config(state)
+
+    with :ok <- validate_dispatch_configuration(operation.issue),
+         {:ok, context} <- capture_tracker_poll_context(),
+         true <- context.fingerprint == operation.fingerprint or {:error, :admission_context_changed} do
+      state = apply_admission_result(state, operation, result)
+      state = advance_admission(state, context)
+      notify_dashboard()
+      state
+    else
+      {:error, reason} ->
+        state |> admission_discard(operation.issue, reason) |> Map.put(:admission_batch, nil) |> advance_admission()
+    end
+  end
+
+  defp release_tracker_inbox_operation(state, operation) do
+    case current_issue_custody(state, operation.issue.id, operation.custody_ref) do
+      {:ok, claim} when claim.token == operation.token -> release_issue_claim(state, operation.issue.id)
+      _ -> state
+    end
+  end
+
+  defp apply_promotion_result(state, operation, result) do
+    id = operation.issue.id
 
     next =
       with false <- operation.invalidated,
@@ -1008,7 +1281,8 @@ defmodule SymphonyElixir.Orchestrator do
         else
           {:error, :promotion_ineligible} -> stop_terminal_dispatch(state, operation.issue, {:dispatch_no_longer_eligible, id})
           {:skip, _reason} -> stop_terminal_dispatch(state, operation.issue, {:dispatch_no_longer_eligible, id})
-          {:error, reason} -> stop_terminal_dispatch(state, operation.issue, {:promotion_failed, reason})
+          {:error, reason} -> state |> stop_terminal_dispatch(operation.issue, {:promotion_failed, reason}) |> tracker_inbox_outcome(id, tracker_inbox_promotion_outcome(reason))
+          {:mismatch, _snapshot} -> state |> stop_terminal_dispatch(operation.issue, :promotion_run_changed) |> tracker_inbox_outcome(id, {:recheck, :promotion_run_changed})
           _ -> stop_terminal_dispatch(state, operation.issue, :promotion_refresh_ineligible)
         end
       else
@@ -1018,29 +1292,7 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, reason} -> stop_terminal_dispatch(state, operation.issue, reason)
       end
 
-    advance_admission(next)
-  end
-
-  defp receive_admission_result(state, %{purpose: :retry} = operation, result) do
-    state
-    |> receive_retry_result(operation, result)
-    |> advance_admission()
-  end
-
-  defp receive_admission_result(state, operation, result) do
-    state = refresh_runtime_config(state)
-
-    with :ok <- validate_dispatch_configuration(operation.issue),
-         {:ok, context} <- capture_tracker_poll_context(),
-         true <- context.fingerprint == operation.fingerprint or {:error, :admission_context_changed} do
-      state = apply_admission_result(state, operation, result)
-      state = advance_admission(state, context)
-      notify_dashboard()
-      state
-    else
-      {:error, reason} ->
-        state |> admission_discard(operation.issue, reason) |> Map.put(:admission_batch, nil) |> advance_admission()
-    end
+    next
   end
 
   defp observe_promotion_result(state, operation, result) do
@@ -1118,8 +1370,9 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | candidate_fetch_error: reason}
   end
 
-  defp invalidate_admission_issue(state, identifier) do
+  defp invalidate_admission_issue(state, identifier, origin \\ nil) do
     identifier = String.trim(identifier)
+    state = invalidate_tracker_inbox_issue(state, identifier, origin)
 
     state =
       if state.admission_batch,
@@ -1185,23 +1438,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp block_candidate_policy_conflicts(%State{} = state, _issues), do: {state, []}
 
   defp drain_tracker_events(%State{} = state) do
-    fields = %{pending: :inbox_ack_pending, error: :inbox_storage_error, drained: :inbox_last_drained_at}
-    drain_inbox(state, TrackerEventInbox, fields, &process_tracker_inbox_row/2)
+    cond do
+      state.inbox_ack_pending -> confirm_tracker_inbox_prefix(state)
+      state.tracker_inbox_batch -> resume_tracker_inbox(state)
+      true -> capture_tracker_inbox(state)
+    end
   end
 
   defp drain_github_events(%State{} = state) do
     fields = %{pending: :github_inbox_ack_pending, error: :github_inbox_storage_error, drained: :github_inbox_last_drained_at}
     drain_inbox(state, GitHubEventInbox, fields, &process_github_inbox_row/2)
   end
-
-  defp process_tracker_inbox_row(state, {:ok, record}) do
-    case decode_tracker_event_record(record) do
-      %TrackerEvent{} = event -> maybe_process_tracker_event(state, event)
-      _ -> {:drop, state}
-    end
-  end
-
-  defp process_tracker_inbox_row(state, {:invalid, _reason}), do: {:drop, state}
 
   defp process_github_inbox_row(state, {:ok, record}) do
     case decode_github_event_record(record) do
@@ -1220,11 +1467,10 @@ defmodule SymphonyElixir.Orchestrator do
       case inbox.capture(inbox.location(), %{max_rows: 100, max_bytes: 4 * 1024 * 1024}) do
         {:ok, batch} ->
           {state, cursor} =
-            Enum.reduce_while(batch.rows, {state, nil}, fn row, {acc, cursor} ->
+            Enum.reduce_while(batch.rows, {state, nil}, fn row, {acc, _cursor} ->
               case process_row.(acc, row.record) do
                 {:ok, next} -> {:cont, {next, row.cursor}}
                 {:drop, next} -> {:cont, {next, row.cursor}}
-                {:rate_limited, next} -> {:halt, {next, cursor}}
               end
             end)
 
@@ -2514,75 +2760,702 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp review_feedback_summary(_review_threads), do: nil
 
-  defp maybe_process_tracker_event(%State{} = state, %TrackerEvent{} = event) do
-    cond do
-      not TrackerEvent.schedule_affecting?(event) ->
-        {:drop, state}
+  # One physical batch and one head survive asynchronous lookup, admission and gate.
+  # Only the checked cursor returned by capture can become an ack intention.
+  defp tracker_inbox_phase(%{tracker_inbox_batch: %{head: %{phase: phase}}}), do: phase
+  defp tracker_inbox_phase(%{inbox_ack_pending: cursor}) when not is_nil(cursor), do: :ack_pending
+  defp tracker_inbox_phase(_state), do: :idle
 
-      stale_tracker_event?(state, event) ->
+  defp tracker_inbox_limits, do: %{max_rows: 100, max_bytes: 4 * 1024 * 1024}
+
+  defp reconcile_tracker_inbox_context(%{tracker_inbox_batch: nil} = state), do: state
+  defp reconcile_tracker_inbox_context(%{tracker_inbox_batch: %{head: %{phase: :blocked, retryable: false}}} = state), do: state
+
+  defp reconcile_tracker_inbox_context(state) do
+    case capture_tracker_poll_context() do
+      {:ok, context} ->
+        if state.tracker_inbox_batch.location == TrackerEventInbox.location() and state.tracker_inbox_batch.fingerprint == context.fingerprint,
+          do: state,
+          else: retire_tracker_inbox(state, :tracker_inbox_context_changed)
+
+      {:error, reason} ->
+        retire_tracker_inbox(state, reason)
+    end
+  end
+
+  defp capture_tracker_inbox(state) do
+    with {:ok, context} <- capture_tracker_poll_context(),
+         {:ok, captured} <- TrackerEventInbox.capture(TrackerEventInbox.location(), tracker_inbox_limits()) do
+      case captured.rows do
+        [] ->
+          if captured.tail == :none and not captured.limit_reached,
+            do: %{state | inbox_storage_error: nil, inbox_last_drained_at: DateTime.utc_now()},
+            else: %{state | inbox_storage_error: nil}
+
+        rows ->
+          batch = Map.merge(captured, %{ref: make_ref(), fingerprint: context.fingerprint, head: nil, applied_cursor: nil, end_offset: List.last(rows).cursor.end_offset})
+          resume_tracker_inbox(%{state | tracker_inbox_batch: batch, inbox_storage_error: nil})
+      end
+    else
+      {:error, reason} -> block_tracker_inbox(state, reason)
+    end
+  end
+
+  defp resume_tracker_inbox(%{tracker_inbox_batch: %{head: %{phase: :blocked, retryable: false}}} = state), do: state
+
+  defp resume_tracker_inbox(state) do
+    with {:ok, context} <- capture_tracker_poll_context(),
+         true <- TrackerEventInbox.location() == state.tracker_inbox_batch.location and context.fingerprint == state.tracker_inbox_batch.fingerprint,
+         {:ok, state} <- rebind_tracker_inbox_prefix(state) do
+      state = ensure_tracker_inbox_head(state, context)
+
+      case state.tracker_inbox_batch do
+        %{head: nil} -> yield_tracker_inbox(state)
+        %{head: %{phase: :blocked, retryable: true}} -> start_tracker_inbox_lookup(reset_tracker_inbox_head(state), context)
+        %{head: %{phase: phase}} when phase in [:lookup_ready, :backoff] -> start_tracker_inbox_lookup(state, context)
+        %{head: %{phase: :admission_ready}} -> advance_admission(state, context)
+        _ -> state
+      end
+    else
+      false -> retire_tracker_inbox(state, :tracker_inbox_context_changed)
+      {:retired, state} -> state
+      {:error, reason} -> block_tracker_inbox(state, reason)
+    end
+  end
+
+  defp rebind_tracker_inbox_prefix(state, acknowledged_end \\ nil) do
+    batch = state.tracker_inbox_batch
+
+    case TrackerEventInbox.capture(batch.location, tracker_inbox_limits()) do
+      {:ok, %{generation: generation}} when generation != batch.generation ->
+        {:retired, retire_tracker_inbox_generation(state)}
+
+      {:ok, captured} ->
+        applied_end = if batch.applied_cursor, do: batch.applied_cursor.end_offset, else: captured.start_offset
+        rows = Enum.filter(captured.rows, &(&1.cursor.end_offset <= batch.end_offset and &1.cursor.end_offset > applied_end))
+        expected_start = acknowledged_end || batch.start_offset
+
+        same_rows =
+          if is_nil(acknowledged_end) do
+            rows == batch.rows
+          else
+            Enum.map(rows, &{&1.cursor.end_offset, &1.record}) == Enum.map(batch.rows, &{&1.cursor.end_offset, &1.record})
+          end
+
+        if captured.start_offset == expected_start and same_rows do
+          head = if batch.head, do: %{batch.head | row: hd(rows)}, else: nil
+          {:ok, %{state | tracker_inbox_batch: %{batch | rows: rows, head: head, start_offset: captured.start_offset}}}
+        else
+          {:error, :tracker_inbox_prefix_changed}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp ensure_tracker_inbox_head(%{tracker_inbox_batch: %{head: head}} = state, _context) when not is_nil(head), do: state
+  defp ensure_tracker_inbox_head(%{tracker_inbox_batch: %{rows: []}} = state, _context), do: state
+
+  defp ensure_tracker_inbox_head(state, context) do
+    row = hd(state.tracker_inbox_batch.rows)
+
+    event =
+      case row.record do
+        {:ok, record} -> decode_tracker_event_record(record)
+        {:invalid, _reason} -> nil
+      end
+
+    head = %{
+      ref: make_ref(),
+      row: row,
+      event: event,
+      phase: :lookup_ready,
+      issue: nil,
+      observation: nil,
+      fingerprint: context.fingerprint,
+      completion: nil,
+      outcome: nil,
+      errors: [],
+      invalidated: false,
+      retryable: true
+    }
+
+    put_in(state.tracker_inbox_batch.head, head)
+  end
+
+  defp start_tracker_inbox_lookup(state, context) do
+    head = state.tracker_inbox_batch.head
+
+    cond do
+      tracker_inbox_reader_active?(state) ->
+        state
+
+      not match?(%TrackerEvent{}, head.event) ->
+        apply_tracker_inbox_head(state, :discarded)
+
+      not TrackerEvent.schedule_affecting?(head.event) ->
+        apply_tracker_inbox_head(state, :discarded)
+
+      not is_binary(head.event.entity_id) or head.event.entity_id == "" ->
+        apply_tracker_inbox_head(state, :discarded)
+
+      stale_tracker_event?(state, head.event) ->
         RunLedger.record("dispatch.skipped", %{
-          issue_id: event.entity_id,
-          issue_identifier: event.issue_identifier,
+          issue_id: head.event.entity_id,
+          issue_identifier: head.event.issue_identifier,
           actor_type: "system",
           actor_id: "tracker_event_inbox",
           rule_id: "tracker.event_replayed",
           summary: "Ignored a stale tracker event during replay.",
-          metadata: %{provider: event.provider, action: event.action}
+          metadata: %{provider: head.event.provider, action: head.event.action}
         })
 
-        {:drop, state}
+        apply_tracker_inbox_head(state, :discarded)
+
+      tracker_backoff_active?(state) ->
+        backoff_tracker_inbox(state)
 
       true ->
-        handle_tracker_issue_fetch(state, event)
+        cancel_tracker_inbox_wakeup(state)
+        state = %{state | tracker_inbox_wakeup: nil}
+        event = head.event
+        input = %{source: :tracker, id: event.entity_id, canonical_identifier: event.issue_identifier}
+
+        case TrackerReader.start(fn -> IssueSource.fetch_issue(input, context) end) do
+          {:ok, reader} ->
+            operation =
+              Map.merge(reader, %{
+                purpose: :inbox_lookup,
+                phase: :tracker_inbox,
+                head_ref: head.ref,
+                fingerprint: context.fingerprint,
+                backoff: tracker_poll_backoff_identity(state),
+                invalidated: false
+              })
+
+            head = %{head | phase: :lookup, observation: tracker_inbox_observation(state, event.entity_id), fingerprint: context.fingerprint, invalidated: false}
+            state = put_in(state.tracker_inbox_batch.head, head)
+            %{state | tracker_poll_read: operation}
+
+          {:error, reason} ->
+            block_tracker_inbox(state, {:tracker_reader_start_failed, reason})
+        end
     end
   end
 
-  defp handle_tracker_issue_fetch(%State{} = state, %TrackerEvent{entity_id: entity_id} = event)
-       when is_binary(entity_id) and entity_id != "" do
-    case tracker_read(state, fn ->
-           IssueSource.fetch_issue(%{
-             source: :tracker,
-             id: entity_id,
-             canonical_identifier: event.issue_identifier
-           })
-         end) do
-      {%State{} = next_state, {:ok, %Issue{} = issue}} ->
-        next_state = invalidate_admission_issue(next_state, entity_id)
+  defp tracker_inbox_observation(state, id) do
+    worker =
+      case Map.get(state.running, id) do
+        nil -> nil
+        entry -> {tracker_poll_worker_identity(entry), Map.get(entry, :custody_ref), Map.get(entry, :lease_token)}
+      end
 
-        next_state = %{
-          next_state
-          | issue_routing_cache: remember_issue_cache_entry(next_state.issue_routing_cache, issue)
-        }
+    claim =
+      case Map.get(state.lease_claims, id) do
+        nil -> nil
+        custody -> {custody.custody_ref, custody.token}
+      end
 
-        next_state =
+    {worker, claim, Map.get(state.issue_routing_cache, id), Map.get(state.paused_issue_states, id)}
+  end
+
+  defp resume_tracker_inbox_after_reader(%{tracker_inbox_batch: %{head: %{phase: :lookup_ready}}} = state) do
+    if tracker_inbox_reader_active?(state), do: state, else: enqueue_tracker_poll(state, :webhook)
+  end
+
+  defp resume_tracker_inbox_after_reader(state), do: state
+
+  defp tracker_inbox_reader_active?(state) do
+    match?(%{purpose: :inbox_lookup}, state.tracker_poll_read) or
+      match?(%{purpose: :inbox_admission}, state.admission_read) or
+      match?(%{purpose: :promotion, completion: %{purpose: :tracker_inbox}}, state.admission_read)
+  end
+
+  defp tracker_inbox_current(state, head_ref) do
+    with %{head: %{ref: ^head_ref, invalidated: false} = head} = batch <- state.tracker_inbox_batch,
+         true <- TrackerEventInbox.location() == batch.location,
+         {:ok, context} <- capture_tracker_poll_context(),
+         true <- context.fingerprint == head.fingerprint,
+         true <- tracker_inbox_observation(state, head.event.entity_id) == head.observation,
+         {:ok, captured} <- TrackerEventInbox.capture(batch.location, tracker_inbox_limits()),
+         true <- captured.generation == batch.generation and captured.start_offset == batch.start_offset,
+         true <- Enum.any?(captured.rows, &(&1 == head.row)) do
+      :ok
+    else
+      {:error, reason} -> {:blocked, reason}
+      _ -> {:recheck, :tracker_inbox_changed}
+    end
+  end
+
+  defp receive_tracker_inbox_result(state, operation, result) do
+    {state, result} = observe_tracker_inbox_transport(state, operation, result)
+
+    case state.tracker_inbox_batch do
+      %{head: %{ref: ref}} when ref == operation.head_ref ->
+        cond do
+          operation.invalidated ->
+            reset_tracker_inbox_head(state)
+
+          tracker_reader_failure?(result) ->
+            block_tracker_inbox(state, elem(result, 1))
+
+          true ->
+            case tracker_inbox_current(state, operation.head_ref) do
+              :ok -> apply_tracker_inbox_lookup(state, result)
+              {:blocked, reason} -> block_tracker_inbox(state, reason)
+              {:recheck, reason} -> recheck_tracker_inbox(state, reason)
+            end
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp observe_tracker_inbox_transport(state, operation, result) do
+    case capture_tracker_poll_context() do
+      {:ok, context} when context.fingerprint == operation.fingerprint ->
+        if tracker_poll_backoff_identity(state) == operation.backoff,
+          do: tracker_read(state, fn -> result end),
+          else: {state, {:error, :tracker_inbox_backoff_changed}}
+
+      _ ->
+        {state, {:error, :tracker_inbox_context_changed}}
+    end
+  end
+
+  defp tracker_reader_failure?({:error, {tag, _}}) when tag in [:tracker_reader_down, :tracker_reader_exit, :tracker_reader_start_failed], do: true
+  defp tracker_reader_failure?({:error, {:tracker_read_exception, _, _}}), do: true
+  defp tracker_reader_failure?({:error, :invalid_tracker_read_result}), do: true
+  defp tracker_reader_failure?(_result), do: false
+
+  defp apply_tracker_inbox_lookup(state, {:error, {:linear_rate_limited, _}}), do: backoff_tracker_inbox(state)
+  defp apply_tracker_inbox_lookup(state, {:error, :tracker_inbox_backoff_changed}), do: backoff_tracker_inbox(state)
+
+  defp apply_tracker_inbox_lookup(state, {:ok, %Issue{} = issue}) do
+    head = state.tracker_inbox_batch.head
+
+    if issue.id == head.event.entity_id and is_binary(issue.identifier) and issue.identifier != "" do
+      state = state |> begin_tracker_inbox_decision() |> invalidate_admission_issue(head.event.entity_id, head.ref)
+      # Invalidation may release a previous C3 promotion. Keep its explicit
+      # outcome/debt; a saved pre-cleanup head would lose that information.
+      head = state.tracker_inbox_batch.head
+
+      cond do
+        head.errors != [] or not is_nil(head.outcome) ->
+          settle_tracker_inbox_decision(state)
+
+        true ->
+          head = %{head | issue: issue, observation: tracker_inbox_observation(state, issue.id)}
+          state = put_in(state.tracker_inbox_batch.head, head)
+
           cond do
-            Map.has_key?(next_state.running, issue.id) ->
-              reconcile_issue_state(issue, next_state, active_state_set(), terminal_state_set())
+            Map.has_key?(state.running, issue.id) ->
+              state = reconcile_issue_state(issue, state, active_state_set(), terminal_state_set(), head.ref)
+              settle_tracker_inbox_decision(state, {:applied, :reconciled})
 
-            retry_candidate_issue?(issue, terminal_state_set()) and
-                dispatch_slots_available?(issue, next_state) ->
-              dispatch_runtime_issue(next_state, issue, nil)
+            retry_candidate_issue?(issue, terminal_state_set()) and dispatch_slots_available?(issue, state) ->
+              head = %{head | phase: :admission_ready, completion: nil, outcome: nil}
+              state |> put_in([Access.key(:tracker_inbox_batch), :head], head) |> yield_tracker_inbox()
 
             true ->
-              next_state
+              settle_tracker_inbox_decision(state, {:applied, :not_eligible})
           end
-
-        {:ok, next_state}
-
-      {%State{} = next_state, {:ok, nil}} ->
-        {:drop, invalidate_admission_issue(next_state, entity_id)}
-
-      {%State{} = next_state, {:error, {:linear_rate_limited, _meta}}} ->
-        {:rate_limited, next_state}
-
-      {%State{} = next_state, {:error, reason}} ->
-        Logger.warning("Failed to fetch tracker issue from webhook event issue_id=#{inspect(entity_id)} issue_identifier=#{inspect(event.issue_identifier)}: #{inspect(reason)}")
-
-        {:drop, next_state}
+      end
+    else
+      apply_tracker_inbox_head(state, :discarded)
     end
   end
 
-  defp handle_tracker_issue_fetch(%State{} = state, _event), do: {:drop, state}
+  defp apply_tracker_inbox_lookup(state, {:ok, nil}) do
+    head = state.tracker_inbox_batch.head
+    state |> begin_tracker_inbox_decision() |> invalidate_admission_issue(head.event.entity_id, head.ref) |> settle_tracker_inbox_decision({:applied, :discarded})
+  end
+
+  defp apply_tracker_inbox_lookup(state, {:error, reason}) do
+    Logger.warning("Tracker inbox lookup failed reason=#{inspect(reason)}")
+    apply_tracker_inbox_head(state, :discarded)
+  end
+
+  defp begin_tracker_inbox_decision(state) do
+    head = state.tracker_inbox_batch.head
+    completion = %{purpose: :tracker_inbox, head_ref: head.ref, decision_ref: make_ref(), custody_ref: nil}
+    put_in(state.tracker_inbox_batch.head, %{head | phase: :admission, completion: completion, outcome: nil, errors: []})
+  end
+
+  defp invalidate_tracker_inbox_cache(state, issues, origin) do
+    Enum.reduce(issues, state, fn issue, current ->
+      if remember_issue_cache_entry(current.issue_routing_cache, issue) != current.issue_routing_cache,
+        do: invalidate_tracker_inbox_issue(current, issue.id, origin),
+        else: current
+    end)
+  end
+
+  defp tracker_inbox_boundary(_state, nil), do: :ok
+
+  defp tracker_inbox_boundary(state, completion) do
+    case state.tracker_inbox_batch do
+      %{head: %{completion: ^completion, errors: []}} -> tracker_inbox_current(state, completion.head_ref)
+      %{head: %{completion: ^completion, errors: errors}} -> {:blocked, {:tracker_inbox_cleanup_failed, errors}}
+      _ -> {:recheck, :tracker_inbox_completion_changed}
+    end
+  end
+
+  defp tracker_inbox_cleanup_outcome(state, completion) do
+    case tracker_inbox_boundary(state, completion) do
+      :ok -> {:applied, :dispatch_rejected}
+      {kind, reason} when kind in [:blocked, :recheck] -> {kind, reason}
+    end
+  end
+
+  defp bind_tracker_inbox_custody(state, id, previous, claim) do
+    case tracker_inbox_completion(state, id) do
+      %{custody_ref: expected} = completion when expected == previous ->
+        completion = %{completion | custody_ref: claim.custody_ref}
+        claim = Map.put(claim, :completion, completion)
+        state = put_in(state.lease_claims[id], claim)
+        head = state.tracker_inbox_batch.head
+        put_in(state.tracker_inbox_batch.head, %{head | completion: completion, observation: tracker_inbox_observation(state, id)})
+
+      _ ->
+        state
+    end
+  end
+
+  defp tracker_inbox_wait(state, id, phase) do
+    case tracker_inbox_completion(state, id) do
+      nil ->
+        state
+
+      _ ->
+        head = state.tracker_inbox_batch.head
+        put_in(state.tracker_inbox_batch.head, %{head | phase: phase, outcome: {:wait, phase}, observation: tracker_inbox_observation(state, id)})
+    end
+  end
+
+  defp tracker_inbox_origin(state, id) do
+    case tracker_inbox_completion(state, id) do
+      %{head_ref: ref} -> ref
+      nil -> nil
+    end
+  end
+
+  defp tracker_inbox_worker_start_failure(state, _id, {:dispatch_worker_start_failed, reason}), do: {state, reason}
+  defp tracker_inbox_worker_start_failure(state, id, reason), do: {tracker_inbox_outcome(state, id, {:blocked, {:worker_start_validation_failed, reason}}), reason}
+
+  defp tracker_inbox_validation_outcome({:persisted_stage_requires_explicit_resume, _}), do: {:applied, :not_eligible}
+  defp tracker_inbox_validation_outcome({:token_budget_exhausted, _}), do: {:applied, :not_eligible}
+  defp tracker_inbox_validation_outcome(reason) when reason in [:lease_workspace_changed, :lease_location_changed], do: {:recheck, reason}
+  defp tracker_inbox_validation_outcome(reason), do: {:blocked, reason}
+
+  defp tracker_inbox_promotion_outcome(reason) when reason in [:promotion_context_changed, :promotion_run_changed], do: {:recheck, reason}
+  defp tracker_inbox_promotion_outcome(:promotion_backoff_changed), do: {:backoff, :transport_changed}
+  defp tracker_inbox_promotion_outcome({:token_budget_exhausted, _}), do: {:applied, :not_eligible}
+  defp tracker_inbox_promotion_outcome(reason) when reason in [:promotion_deadline_expired, :promotion_capacity_changed, :promotion_ineligible], do: {:applied, :dispatch_rejected}
+  defp tracker_inbox_promotion_outcome({tag, _}) when tag in [:linear_api_status, :linear_graphql_errors, :linear_api_error], do: {:applied, :dispatch_rejected}
+  defp tracker_inbox_promotion_outcome(reason), do: {:blocked, reason}
+
+  defp tracker_inbox_completion(state, id) do
+    case state.tracker_inbox_batch do
+      %{head: %{event: %{entity_id: ^id}, completion: %{purpose: :tracker_inbox} = completion}} -> completion
+      _ -> nil
+    end
+  end
+
+  defp tracker_inbox_outcome(state, id, outcome) do
+    case tracker_inbox_completion(state, id) do
+      nil ->
+        state
+
+      _ ->
+        previous = state.tracker_inbox_batch.head.outcome
+
+        outcome =
+          case previous do
+            {:blocked, _} -> previous
+            {:recheck, _} -> previous
+            {:backoff, _} when elem(outcome, 0) in [:applied, :wait] -> previous
+            _ -> outcome
+          end
+
+        put_in(state.tracker_inbox_batch.head.outcome, outcome)
+    end
+  end
+
+  defp tracker_inbox_failure(state, id, reason) do
+    case tracker_inbox_completion(state, id) do
+      nil -> state
+      _ -> update_in(state.tracker_inbox_batch.head.errors, &Enum.uniq(&1 ++ [reason]))
+    end
+  end
+
+  defp finish_tracker_inbox_action(state, nil, _fallback), do: state
+
+  defp finish_tracker_inbox_action(state, completion, fallback) do
+    case state.tracker_inbox_batch do
+      %{head: %{completion: %{head_ref: head_ref, decision_ref: decision_ref}}}
+      when head_ref == completion.head_ref and decision_ref == completion.decision_ref ->
+        settle_tracker_inbox_decision(state, fallback)
+
+      _ ->
+        state
+    end
+  end
+
+  defp settle_tracker_inbox_decision(state, fallback \\ nil) do
+    case state.tracker_inbox_batch do
+      %{head: %{completion: completion, outcome: outcome, errors: errors}} when not is_nil(completion) ->
+        outcome =
+          cond do
+            errors != [] -> {:blocked, {:tracker_inbox_cleanup_failed, errors}}
+            not is_nil(fallback) and match?({:wait, _}, outcome) -> fallback
+            true -> outcome || fallback
+          end
+
+        complete_tracker_inbox_decision(state, completion, outcome)
+
+      _ ->
+        state
+    end
+  end
+
+  defp complete_tracker_inbox_decision(state, nil, _outcome), do: state
+  defp complete_tracker_inbox_decision(state, _completion, nil), do: state
+
+  defp complete_tracker_inbox_decision(state, completion, outcome) do
+    case state.tracker_inbox_batch do
+      %{head: %{completion: ^completion} = head} ->
+        cond do
+          head.errors != [] -> block_tracker_inbox(state, {:tracker_inbox_cleanup_failed, head.errors}, false)
+          head.invalidated -> recheck_tracker_inbox(state, :tracker_inbox_invalidated)
+          true -> resolve_tracker_inbox_decision(state, outcome)
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp resolve_tracker_inbox_decision(state, {:applied, reason}), do: apply_tracker_inbox_head(state, reason)
+  defp resolve_tracker_inbox_decision(state, {:wait, phase}), do: put_in(state.tracker_inbox_batch.head.phase, phase)
+  defp resolve_tracker_inbox_decision(state, {:recheck, reason}), do: recheck_tracker_inbox(state, reason)
+  defp resolve_tracker_inbox_decision(state, {:blocked, reason}), do: block_tracker_inbox(state, reason)
+  defp resolve_tracker_inbox_decision(state, {:backoff, _metadata}), do: backoff_tracker_inbox(state)
+
+  defp apply_tracker_inbox_head(state, _reason) do
+    batch = state.tracker_inbox_batch
+    head = batch.head
+    cache = if head.issue, do: remember_issue_cache_entry(state.issue_routing_cache, head.issue), else: state.issue_routing_cache
+    batch = %{batch | head: nil, rows: tl(batch.rows), applied_cursor: head.row.cursor}
+    send(self(), {:tracker_inbox_continue, batch.ref})
+    %{state | tracker_inbox_batch: batch, issue_routing_cache: cache}
+  end
+
+  defp yield_tracker_inbox(%{tracker_inbox_batch: %{applied_cursor: nil}} = state), do: state
+  defp yield_tracker_inbox(%{inbox_ack_pending: pending} = state) when not is_nil(pending), do: state
+
+  defp yield_tracker_inbox(state) do
+    cursor = state.tracker_inbox_batch.applied_cursor
+    send(self(), {:tracker_inbox_ack, cursor})
+    %{state | inbox_ack_pending: cursor}
+  end
+
+  defp resume_tracker_inbox_after_ack(%{tracker_inbox_batch: %{head: %{phase: :admission_ready}}} = state), do: advance_admission(state)
+  defp resume_tracker_inbox_after_ack(state), do: state
+
+  defp confirm_tracker_inbox_prefix(state) do
+    cursor = state.inbox_ack_pending
+
+    case TrackerEventInbox.ack(cursor) do
+      {:ok, _confirmation} ->
+        state = %{state | inbox_ack_pending: nil, inbox_storage_error: nil, inbox_last_drained_at: DateTime.utc_now()}
+
+        case state.tracker_inbox_batch do
+          %{rows: []} ->
+            send(self(), :run_webhook_cycle)
+            %{state | tracker_inbox_batch: nil}
+
+          nil ->
+            state
+
+          batch ->
+            state = %{state | tracker_inbox_batch: %{batch | applied_cursor: nil}}
+
+            case rebind_tracker_inbox_prefix(state, cursor.end_offset) do
+              {:ok, next} -> resume_tracker_inbox_after_ack(next)
+              {:retired, next} -> next
+              {:error, reason} -> block_tracker_inbox(state, reason)
+            end
+        end
+
+      {:error, %{reason_code: :generation_changed} = error} ->
+        retire_tracker_inbox_generation(state) |> tracker_inbox_storage_failed(error)
+
+      {:error, error} ->
+        tracker_inbox_storage_failed(state, error)
+    end
+  end
+
+  defp block_tracker_inbox(state, reason, retryable \\ true) do
+    cancel_tracker_inbox_wakeup(state)
+    state = tracker_inbox_storage_failed(%{state | tracker_inbox_wakeup: nil}, reason)
+
+    state =
+      case state.tracker_inbox_batch do
+        %{head: head} when not is_nil(head) ->
+          put_in(state.tracker_inbox_batch.head, %{head | phase: :blocked, completion: nil, outcome: nil, retryable: retryable})
+
+        _ ->
+          state
+      end
+
+    if state.tracker_inbox_batch, do: yield_tracker_inbox(state), else: state
+  end
+
+  defp tracker_inbox_storage_failed(state, %SymphonyElixir.EventInbox.Error{} = error) do
+    inbox_storage_failed(state, %{error: :inbox_storage_error}, error)
+  end
+
+  defp tracker_inbox_storage_failed(state, reason) do
+    %{state | inbox_storage_error: %{phase: :continuation, reason_code: tracker_inbox_reason_code(reason), confirmation: :not_applied}, candidate_fetch_error: reason}
+  end
+
+  defp tracker_inbox_reason_code(reason) when is_atom(reason), do: reason
+  defp tracker_inbox_reason_code(reason) when is_tuple(reason), do: elem(reason, 0)
+
+  defp reset_tracker_inbox_head(%{tracker_inbox_batch: %{head: %{phase: :blocked, retryable: false}}} = state), do: state
+
+  defp reset_tracker_inbox_head(state) do
+    case state.tracker_inbox_batch do
+      %{head: head} when not is_nil(head) ->
+        put_in(state.tracker_inbox_batch.head, %{head | phase: :lookup_ready, completion: nil, outcome: nil, issue: nil, observation: nil, invalidated: false, errors: [], retryable: true})
+
+      _ ->
+        state
+    end
+  end
+
+  defp recheck_tracker_inbox(state, reason) do
+    case capture_tracker_poll_context() do
+      {:ok, context} when context.fingerprint == state.tracker_inbox_batch.fingerprint ->
+        if TrackerEventInbox.location() == state.tracker_inbox_batch.location do
+          state = reset_tracker_inbox_head(state)
+          send(self(), {:tracker_inbox_continue, state.tracker_inbox_batch.ref})
+          state
+        else
+          retire_tracker_inbox(state, reason)
+        end
+
+      _ ->
+        retire_tracker_inbox(state, reason)
+    end
+  end
+
+  defp retire_tracker_inbox_generation(state) do
+    # Cursors from a retired generation must never be offered for ack again,
+    # including when cleanup leaves a blocked head with known release debt.
+    state = %{state | inbox_ack_pending: nil}
+
+    state =
+      case state.tracker_inbox_batch do
+        nil -> state
+        batch -> %{state | tracker_inbox_batch: %{batch | applied_cursor: nil}}
+      end
+
+    retire_tracker_inbox(state, :tracker_inbox_generation_changed)
+  end
+
+  defp retire_tracker_inbox(state, reason) do
+    case state.tracker_inbox_batch do
+      nil ->
+        state
+
+      batch ->
+        state = if batch.head, do: cancel_tracker_inbox_head(state, reason), else: state
+
+        case state.tracker_inbox_batch do
+          %{head: %{phase: :blocked, retryable: false}} ->
+            state
+
+          _ ->
+            state = yield_tracker_inbox(state)
+            cancel_tracker_inbox_wakeup(state)
+            %{state | tracker_inbox_batch: nil, tracker_inbox_wakeup: nil}
+        end
+    end
+  end
+
+  defp backoff_tracker_inbox(state) do
+    state = reset_tracker_inbox_head(state)
+    state = put_in(state.tracker_inbox_batch.head.phase, :backoff)
+    state = yield_tracker_inbox(state)
+    cancel_tracker_inbox_wakeup(state)
+    batch = state.tracker_inbox_batch
+    ref = make_ref()
+    delay = max(0, (state.tracker_backoff_until_ms || System.monotonic_time(:millisecond)) - System.monotonic_time(:millisecond))
+    timer = Process.send_after(self(), {:tracker_inbox_wakeup, ref, batch.location, batch.generation}, delay)
+    %{state | tracker_inbox_wakeup: %{ref: ref, timer: timer, location: batch.location, generation: batch.generation, head_ref: batch.head.ref, backoff: tracker_poll_backoff_identity(state)}}
+  end
+
+  defp cancel_tracker_inbox_wakeup(%{tracker_inbox_wakeup: %{timer: timer}}), do: Process.cancel_timer(timer)
+  defp cancel_tracker_inbox_wakeup(_state), do: false
+
+  defp invalidate_tracker_inbox_issue(state, identifier, origin) do
+    case state.tracker_inbox_batch do
+      %{head: %{ref: ref, event: %TrackerEvent{} = event}} when ref != origin and identifier in [event.entity_id, event.issue_identifier] ->
+        cancel_tracker_inbox_head(state, :tracker_inbox_knowledge_changed)
+
+      _ ->
+        state
+    end
+  end
+
+  defp cancel_tracker_inbox_head(state, reason) do
+    head = state.tracker_inbox_batch.head
+    state = put_in(state.tracker_inbox_batch.head.invalidated, true)
+
+    state =
+      Enum.reduce([:tracker_poll_read, :admission_read], state, fn field, acc ->
+        case Map.get(acc, field) do
+          %{head_ref: ref} = reader when ref == head.ref ->
+            :ok = TrackerReader.cancel(Map.take(reader, [:owner, :pid, :monitor, :ref]))
+            Map.put(acc, field, Map.put(reader, :invalidated, true))
+
+          _ ->
+            acc
+        end
+      end)
+
+    state =
+      case head.completion do
+        %{custody_ref: ref} when not is_nil(ref) ->
+          case current_issue_custody(state, head.event.entity_id, ref) do
+            {:ok, claim} ->
+              case Map.get(state.running, head.event.entity_id) do
+                %{custody_ref: ^ref, lease_token: token} when token == claim.token -> do_terminate_running_issue(state, head.event.entity_id, false)
+                nil -> release_issue_claim(state, head.event.entity_id)
+                _successor -> state
+              end
+
+            {:error, _changed_or_missing} ->
+              state
+          end
+
+        _ ->
+          state
+      end
+
+    case state.tracker_inbox_batch.head.errors do
+      [] ->
+        state = reset_tracker_inbox_head(state)
+        send(self(), {:tracker_inbox_continue, state.tracker_inbox_batch.ref})
+        state
+
+      errors ->
+        block_tracker_inbox(state, {reason, errors}, false)
+    end
+  end
 
   defp decode_tracker_event_record(%{"event" => payload}) when is_map(payload) do
     %TrackerEvent{
@@ -3236,7 +4109,9 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
-  defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
+  defp reconcile_issue_state(issue, state, active_states, terminal_states, origin \\ nil)
+
+  defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states, origin) do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{SymphonyElixir.Util.issue_log_context(issue)} state=#{issue.state}; stopping active agent")
@@ -3266,7 +4141,7 @@ defmodule SymphonyElixir.Orchestrator do
         terminate_running_issue(state, issue.id, false)
 
       active_issue_state?(issue.state, active_states) ->
-        refresh_running_issue_state(state, issue)
+        refresh_running_issue_state(state, issue, origin)
 
       true ->
         Logger.info("Issue moved to non-active state: #{SymphonyElixir.Util.issue_log_context(issue)} state=#{issue.state}; stopping active agent")
@@ -3275,9 +4150,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
+  defp reconcile_issue_state(_issue, state, _active_states, _terminal_states, _origin), do: state
 
-  defp refresh_running_issue_state(%State{} = state, %Issue{} = issue) do
+  defp refresh_running_issue_state(%State{} = state, %Issue{} = issue, origin) do
+    state = invalidate_tracker_inbox_cache(state, [issue], origin)
     issue_routing_cache = remember_issue_cache_entry(state.issue_routing_cache, issue)
 
     case Map.get(state.running, issue.id) do
@@ -3296,6 +4172,12 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec terminate_running_issue(State.t(), String.t(), boolean()) :: State.t()
   def terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+    completion = Map.get(Map.get(state.running, issue_id) || Map.get(state.lease_claims, issue_id) || %{}, :completion)
+    outcome = tracker_inbox_cleanup_outcome(state, completion)
+    state |> do_terminate_running_issue(issue_id, cleanup_workspace) |> tracker_inbox_outcome(issue_id, outcome) |> finish_tracker_inbox_action(completion, nil)
+  end
+
+  defp do_terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
     case Map.get(state.running, issue_id) do
       %{lease_ownership_uncertain: reason} ->
         stop_for_uncertain_lease(state, issue_id, reason)
@@ -3748,7 +4630,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp do_dispatch_issue(%State{admission_read: %{purpose: :promotion, issue: %{id: id}}} = state, %{id: id}, _attempt, _acquire_fun, _spawn_fun), do: state
 
   defp do_dispatch_issue(%State{admission_read: reader} = state, issue, attempt, _acquire_fun, _spawn_fun) when not is_nil(reader) do
-    schedule_issue_retry(state, issue.id, attempt, %{identifier: issue.identifier, issue: issue, delay_type: :passive_continuation, error: "admission reader occupied"})
+    if tracker_inbox_completion(state, issue.id),
+      do: tracker_inbox_outcome(state, issue.id, {:recheck, :admission_reader_occupied}),
+      else: schedule_issue_retry(state, issue.id, attempt, %{identifier: issue.identifier, issue: issue, delay_type: :passive_continuation, error: "admission reader occupied"})
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, acquire_fun, spawn_fun)
@@ -3762,22 +4646,21 @@ defmodule SymphonyElixir.Orchestrator do
           case persist_dispatchable_issue_lease(state, workspace, issue) do
             {:ok, _run_state} ->
               state = spawn_fun.(state, issue, attempt, recipient)
-              if Map.has_key?(state.running, issue.id), do: invalidate_admission_issue(state, issue.id), else: state
+              if Map.has_key?(state.running, issue.id), do: invalidate_admission_issue(state, issue.id, tracker_inbox_origin(state, issue.id)), else: state
 
             {:error, reason} ->
               Logger.warning("Skipping dispatch; failed to persist lease state for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
-              release_issue_claim(state, issue.id)
+              state |> release_issue_claim(issue.id) |> tracker_inbox_outcome(issue.id, {:blocked, {:lease_snapshot_failed, reason}})
           end
 
         {:error, :claimed} ->
           Logger.info("Skipping dispatch; lease already held for #{SymphonyElixir.Util.issue_log_context(issue)}")
-          state
+          tracker_inbox_outcome(state, issue.id, {:applied, :dispatch_rejected})
 
         {:error, reason} ->
           Logger.warning("Skipping dispatch; failed to acquire lease for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
-
-          state
+          tracker_inbox_outcome(state, issue.id, {:blocked, {:lease_acquire_failed, reason}})
       end
     else
       {:error, reason} -> halt_dispatch_audit(state, issue.id, reason)
@@ -3881,6 +4764,7 @@ defmodule SymphonyElixir.Orchestrator do
           dispatch_ticket: ticket,
           lease_token: claim.token,
           custody_ref: claim.custody_ref,
+          completion: Map.get(claim, :completion),
           promotion_deadline: claim.deadline,
           started_at: DateTime.utc_now()
         })
@@ -3893,6 +4777,7 @@ defmodule SymphonyElixir.Orchestrator do
           claimed: MapSet.put(state.claimed, issue.id),
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
+      |> tracker_inbox_wait(issue.id, :gate)
     else
       {:error, {tag, _} = reason} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
         halt_dispatch_audit(state, issue.id, reason)
@@ -3909,7 +4794,9 @@ defmodule SymphonyElixir.Orchestrator do
         stop_terminal_dispatch(state, issue, reason)
 
       {:error, reason} ->
+        {state, reason} = tracker_inbox_worker_start_failure(state, issue.id, reason)
         Logger.error("Unable to spawn agent for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
+        state = tracker_inbox_outcome(state, issue.id, {:applied, :dispatch_rejected})
         state = release_issue_claim(state, issue.id)
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
@@ -3945,6 +4832,7 @@ defmodule SymphonyElixir.Orchestrator do
             stop_terminal_dispatch(state, issue, reason)
 
           {:error, reason} ->
+            state = tracker_inbox_outcome(state, issue.id, tracker_inbox_validation_outcome(reason))
             %{state | candidate_fetch_error: reason}
         end
 
@@ -4047,6 +4935,7 @@ defmodule SymphonyElixir.Orchestrator do
           dispatch_ticket: ticket,
           lease_token: claim.token,
           custody_ref: claim.custody_ref,
+          completion: Map.get(claim, :completion),
           promotion_deadline: claim.deadline,
           passive?: true,
           started_at: DateTime.utc_now()
@@ -4060,6 +4949,7 @@ defmodule SymphonyElixir.Orchestrator do
           claimed: MapSet.put(state.claimed, issue.id),
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
+      |> tracker_inbox_wait(issue.id, :gate)
     else
       {:error, {tag, _} = reason} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
         halt_dispatch_audit(state, issue.id, reason)
@@ -4076,8 +4966,9 @@ defmodule SymphonyElixir.Orchestrator do
         stop_terminal_dispatch(state, issue, reason)
 
       {:error, reason} ->
+        {state, reason} = tracker_inbox_worker_start_failure(state, issue.id, reason)
         Logger.error("Unable to spawn passive runtime worker for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
-
+        state = tracker_inbox_outcome(state, issue.id, {:applied, :dispatch_rejected})
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
@@ -4118,7 +5009,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         {:error, reason} ->
           case DispatchAudit.finish(ticket, :not_started) do
-            :ok -> {:error, reason}
+            :ok -> {:error, {:dispatch_worker_start_failed, reason}}
             {:error, audit_reason} -> {:error, {:dispatch_audit_failed, audit_reason}}
           end
       end
@@ -4173,6 +5064,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp halt_dispatch_audit(state, issue_id, reason) do
     Logger.error("Dispatch audit blocked issue_id=#{issue_id}; preserve its journal: #{inspect(reason)}")
     state = cancel_dispatch_retry(state, issue_id)
+    state = tracker_inbox_failure(state, issue_id, {:dispatch_audit_failed, reason})
     %{state | candidate_fetch_error: {:dispatch_audit_failed, issue_id, reason}}
   end
 
@@ -4849,17 +5741,22 @@ defmodule SymphonyElixir.Orchestrator do
             if outcome == :released, do: record_released_custody(released, issue_id, claim), else: released
 
           {:error, :lease_token_mismatch} ->
-            state |> drop_issue_custody(issue_id) |> Map.put(:candidate_fetch_error, {:lease_ownership_changed, issue_id})
+            state |> tracker_inbox_outcome(issue_id, {:recheck, :lease_ownership_changed}) |> drop_issue_custody(issue_id) |> Map.put(:candidate_fetch_error, {:lease_ownership_changed, issue_id})
 
           {:error, reason} ->
             Logger.error("Lease release failed issue_id=#{issue_id}; persisted ownership was preserved: #{inspect(reason)}")
+            state = tracker_inbox_failure(state, issue_id, {:lease_release_failed, reason})
             %{state | claimed: MapSet.put(state.claimed, issue_id), candidate_fetch_error: {:lease_release_failed, issue_id, reason}}
         end
 
       {:error, :lease_custody_missing} ->
         case LeaseManager.read(issue_id) do
-          {:error, :missing} -> drop_issue_custody(state, issue_id)
-          result -> %{state | candidate_fetch_error: {:lease_custody_missing, issue_id, result}}
+          {:error, :missing} ->
+            drop_issue_custody(state, issue_id)
+
+          result ->
+            state = tracker_inbox_failure(state, issue_id, {:lease_custody_missing, result})
+            %{state | candidate_fetch_error: {:lease_custody_missing, issue_id, result}}
         end
     end
   end
@@ -4875,6 +5772,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Lease physically released but its audit was not confirmed issue_id=#{issue_id}: #{inspect(reason)}")
+        state = tracker_inbox_failure(state, issue_id, {:lease_release_audit_failed, reason})
         %{state | candidate_fetch_error: {:lease_release_audit_failed, issue_id, reason}}
     end
   end
@@ -4928,7 +5826,8 @@ defmodule SymphonyElixir.Orchestrator do
             next
           end
 
-        %{state | lease_claims: Map.put(state.lease_claims, issue_id, next)}
+        state = %{state | lease_claims: Map.put(state.lease_claims, issue_id, next)}
+        bind_tracker_inbox_custody(state, issue_id, claim.custody_ref, next)
 
       :error ->
         state
@@ -4977,7 +5876,9 @@ defmodule SymphonyElixir.Orchestrator do
           timer: nil
         }
 
-        {:ok, %{state | lease_claims: Map.put(state.lease_claims, issue.id, claim), claimed: MapSet.put(state.claimed, issue.id)}}
+        state = %{state | lease_claims: Map.put(state.lease_claims, issue.id, claim), claimed: MapSet.put(state.claimed, issue.id)}
+        previous_ref = if existing, do: existing.custody_ref, else: nil
+        {:ok, bind_tracker_inbox_custody(state, issue.id, previous_ref, claim)}
 
       {:error, _reason} = error ->
         error
@@ -5583,7 +6484,7 @@ defmodule SymphonyElixir.Orchestrator do
          last_rejected_reason: Map.get(state, :github_webhook_last_rejected_reason),
          last_rejected_rule_id: Map.get(state, :github_webhook_last_rejected_rule_id)
        },
-       tracker_inbox: inbox_snapshot(TrackerEventInbox, state.inbox_ack_pending, state.inbox_storage_error, state.inbox_last_drained_at),
+       tracker_inbox: inbox_snapshot(TrackerEventInbox, state.inbox_ack_pending, state.inbox_storage_error, state.inbox_last_drained_at) |> Map.put(:phase, tracker_inbox_phase(state)),
        github_inbox:
          inbox_snapshot(GitHubEventInbox, state.github_inbox_ack_pending, state.github_inbox_storage_error, state.github_inbox_last_drained_at)
          |> Map.put(:last_assignment, Map.get(state, :github_last_assignment)),
@@ -6072,6 +6973,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Dispatch blocked by runtime validation issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+        state = tracker_inbox_outcome(state, issue.id, tracker_inbox_validation_outcome(reason))
         %{state | candidate_fetch_error: reason}
     end
   end
@@ -6083,6 +6985,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp stop_terminal_dispatch(state, issue, reason) do
+    state = tracker_inbox_outcome(state, issue.id, {:applied, :dispatch_rejected})
     released = release_issue_claim(state, issue.id)
 
     case released.candidate_fetch_error do
@@ -6714,6 +7617,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp stop_for_uncertain_lease(state, issue_id, reason) do
+    completion = Map.get(Map.get(state.running, issue_id) || %{}, :completion)
+    state |> do_stop_for_uncertain_lease(issue_id, reason) |> finish_tracker_inbox_action(completion, {:blocked, {:lease_ownership_uncertain, reason}})
+  end
+
+  defp do_stop_for_uncertain_lease(state, issue_id, reason) do
+    state = tracker_inbox_failure(state, issue_id, {:lease_ownership_uncertain, reason})
     Logger.error("Lease ownership uncertain for issue_id=#{issue_id}; terminating worker and preserving its audit: #{inspect(reason)}")
     running_entry = state.running |> Map.fetch!(issue_id) |> Map.put(:lease_ownership_uncertain, reason)
     state = %{state | running: Map.put(state.running, issue_id, running_entry)}
