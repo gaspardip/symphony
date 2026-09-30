@@ -1267,7 +1267,7 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:policy, :token_budget, :per_issue_total_output])
   end
 
-  @spec policy_stage_token_budget(String.t() | atom()) :: map()
+  @spec policy_stage_token_budget(String.t() | atom()) :: map() | nil
   def policy_stage_token_budget(stage) when is_binary(stage) do
     validated_workflow_options()
     |> get_in([:policy, :token_budget, :stages, String.to_existing_atom(stage)])

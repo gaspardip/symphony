@@ -14,30 +14,18 @@ defmodule SymphonyElixir.Workspace do
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
   @bootstrap_metadata_entries MapSet.new([".symphony"])
 
-  @spec create_for_issue(map() | String.t() | nil) :: {:ok, Path.t()} | {:error, term()}
+  @spec create_for_issue(map() | String.t() | nil) :: {:ok, Path.t()} | {:error, term()} | AgentExecution.terminal()
   def create_for_issue(issue_or_identifier) do
     issue_context = issue_context(issue_or_identifier)
 
     try do
-      safe_id = safe_identifier(issue_context.issue_identifier)
+      workspace = workspace_path_for_issue(safe_identifier(issue_context.issue_identifier))
 
-      workspace = workspace_path_for_issue(safe_id)
-
-      with :ok <- validate_workspace_path(workspace) do
-        RunStateStore.with_readable_snapshot(workspace, fn ->
-          with :ok <- DispatchAudit.ensure_workspace_access(workspace),
-               {:ok, lifecycle} <- ensure_workspace(workspace) do
-            case maybe_run_after_create_hook(workspace, issue_context, lifecycle) do
-              :ok ->
-                :ok = restore_preserved_workspace_state(workspace, lifecycle)
-                {:ok, workspace}
-
-              {:error, _reason} = error ->
-                :ok = restore_preserved_workspace_state(workspace, lifecycle)
-                error
-            end
-          end
-        end)
+      with :ok <- validate_workspace_path(workspace),
+           {:ok, precondition} <- creation_precondition(workspace, issue_or_identifier) do
+        # All owner confirmation finishes before the lifecycle acquires the lock.
+        result = create_with_precondition(workspace, issue_context, precondition)
+        lifecycle_result(result, precondition)
       end
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
@@ -45,6 +33,67 @@ defmodule SymphonyElixir.Workspace do
         {:error, error}
     end
   end
+
+  defp creation_precondition(workspace, issue) do
+    case AgentExecution.current_context() do
+      {:ok, _context} ->
+        AgentExecution.workspace_precondition(workspace, issue)
+
+      {:error, :execution_context_missing} ->
+        with :ok <- RunStateStore.ensure_readable(workspace),
+             do: AgentExecution.workspace_precondition(workspace, issue)
+    end
+  end
+
+  defp create_with_precondition(workspace, issue_context, :legacy) do
+    RunStateStore.with_readable_snapshot(workspace, fn ->
+      with :ok <- DispatchAudit.ensure_workspace_access(workspace) do
+        create_readable_workspace(workspace, issue_context)
+      end
+    end)
+  end
+
+  defp create_with_precondition(workspace, issue_context, precondition) do
+    RunStateStore.with_readable_snapshot(workspace, precondition, fn ->
+      create_readable_workspace(workspace, issue_context)
+    end)
+  end
+
+  defp create_readable_workspace(workspace, issue_context) do
+    with {:ok, lifecycle} <- ensure_workspace(workspace) do
+      hook = lifecycle_outcome(fn -> maybe_run_after_create_hook(workspace, issue_context, lifecycle) end)
+      restore = lifecycle_outcome(fn -> restore_preserved_workspace_state(workspace, lifecycle) end)
+
+      result =
+        case {hook, restore} do
+          {{:returned, :ok}, {:returned, :ok}} -> {:ok, workspace}
+          {{:returned, result}, {:returned, :ok}} -> result
+          {{:raised, kind, reason, stacktrace}, {:returned, :ok}} -> {:lifecycle_raised, kind, reason, stacktrace}
+          _ -> {:error, {:workspace_lifecycle_failed, %{hook: hook, restore: restore}}}
+        end
+
+      {:workspace_lifecycle_result, result}
+    end
+  end
+
+  defp lifecycle_outcome(fun) do
+    {:returned, fun.()}
+  catch
+    kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+  end
+
+  defp lifecycle_result({:workspace_lifecycle_result, {:lifecycle_raised, kind, reason, stacktrace}}, _precondition),
+    do: :erlang.raise(kind, reason, stacktrace)
+
+  defp lifecycle_result({:workspace_lifecycle_result, result}, :legacy), do: result
+
+  defp lifecycle_result({:workspace_lifecycle_result, {:error, {:workspace_lifecycle_failed, _} = reason}}, _precondition),
+    do: AgentExecution.fail(reason)
+
+  defp lifecycle_result({:workspace_lifecycle_result, result}, _precondition), do: result
+  defp lifecycle_result(result, :legacy), do: result
+  defp lifecycle_result({:error, {:stale_execution, cause}}, _precondition), do: AgentExecution.stale(cause)
+  defp lifecycle_result({:error, reason}, _precondition), do: AgentExecution.fail(reason)
 
   @spec path_for_issue(map() | String.t() | nil) :: Path.t()
   def path_for_issue(issue_or_identifier) do
@@ -138,28 +187,29 @@ defmodule SymphonyElixir.Workspace do
     with {:ok, _context} <- AgentExecution.entry_context(workspace, issue_or_identifier) do
       issue_context = issue_context(issue_or_identifier)
 
-      case Config.workspace_hooks()[:before_run] do
-        nil ->
-          :ok
+      result =
+        case Config.workspace_hooks()[:before_run] do
+          nil -> :ok
+          command -> run_hook(command, workspace, issue_context, "before_run")
+        end
 
-        command ->
-          run_hook(command, workspace, issue_context, "before_run")
-      end
+      with {:ok, _context} <- AgentExecution.entry_context(workspace, issue_or_identifier), do: result
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil) :: :ok | AgentExecution.terminal()
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil) :: :ok | {:error, term()} | AgentExecution.terminal()
   def run_after_run_hook(workspace, issue_or_identifier) when is_binary(workspace) do
-    with {:ok, _context} <- AgentExecution.entry_context(workspace, issue_or_identifier) do
+    with {:ok, context} <- AgentExecution.entry_context(workspace, issue_or_identifier) do
       issue_context = issue_context(issue_or_identifier)
 
-      case Config.workspace_hooks()[:after_run] do
-        nil ->
-          :ok
+      result =
+        case Config.workspace_hooks()[:after_run] do
+          nil -> :ok
+          command -> run_hook(command, workspace, issue_context, "after_run")
+        end
 
-        command ->
-          run_hook(command, workspace, issue_context, "after_run")
-          |> ignore_hook_failure()
+      with {:ok, _context} <- AgentExecution.entry_context(workspace, issue_or_identifier) do
+        if context == :legacy, do: ignore_hook_failure(result), else: result
       end
     end
   end

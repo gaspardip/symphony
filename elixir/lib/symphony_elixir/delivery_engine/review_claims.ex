@@ -7,6 +7,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   # credo:disable-for-this-file
 
+  alias SymphonyElixir.AgentExecution
   alias SymphonyElixir.Config
   alias SymphonyElixir.PolicyPack
   alias SymphonyElixir.PRWatcher
@@ -184,7 +185,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   # Autonomous review posting
   # ---------------------------------------------------------------------------
 
-  @spec maybe_post_autonomous_review_replies(map(), String.t(), String.t() | nil, map(), keyword()) :: map()
+  @spec maybe_post_autonomous_review_replies(map(), String.t(), String.t() | nil, map(), keyword()) :: map() | AgentExecution.terminal()
   def maybe_post_autonomous_review_replies(review_threads, workspace, pr_url, state, opts)
       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
     pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
@@ -206,10 +207,14 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
           |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
           |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
 
-        case PRWatcher.post_approved_drafts(workspace, pr_url, prepared_threads, watcher_opts) do
-          {:ok, updated_threads, _stats} -> updated_threads
-          {:error, :no_postable_review_threads} -> prepared_threads
-          {:error, _reason} -> prepared_threads
+        with :ok <- execution_guard(workspace),
+             result = PRWatcher.post_approved_drafts(workspace, pr_url, prepared_threads, watcher_opts),
+             :ok <- execution_guard(workspace) do
+          case result do
+            {:ok, updated_threads, _stats} -> updated_threads
+            {:error, :no_postable_review_threads} -> prepared_threads
+            {:error, _reason} -> prepared_threads
+          end
         end
     end
   end
@@ -328,7 +333,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def finalize_published_review_thread(thread_state), do: thread_state
 
-  @spec maybe_resolve_autonomous_review_threads(map(), String.t(), String.t() | nil, map(), keyword()) :: map()
+  @spec maybe_resolve_autonomous_review_threads(map(), String.t(), String.t() | nil, map(), keyword()) :: map() | AgentExecution.terminal()
   def maybe_resolve_autonomous_review_threads(review_threads, workspace, pr_url, state, opts)
       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
     pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
@@ -349,10 +354,14 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
           |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
           |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
 
-        case PRWatcher.resolve_posted_threads(pr_url, review_threads, watcher_opts) do
-          {:ok, updated_threads, _stats} -> updated_threads
-          {:error, :no_resolvable_review_threads} -> review_threads
-          {:error, _reason} -> review_threads
+        with :ok <- execution_guard(workspace),
+             result = PRWatcher.resolve_posted_threads(pr_url, review_threads, watcher_opts),
+             :ok <- execution_guard(workspace) do
+          case result do
+            {:ok, updated_threads, _stats} -> updated_threads
+            {:error, :no_resolvable_review_threads} -> review_threads
+            {:error, _reason} -> review_threads
+          end
         end
     end
   end
@@ -399,7 +408,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   # Merge readiness feedback
   # ---------------------------------------------------------------------------
 
-  @spec maybe_refresh_preflight_review_claims(map(), String.t()) :: map()
+  @spec maybe_refresh_preflight_review_claims(map(), String.t()) :: map() | AgentExecution.terminal()
   def maybe_refresh_preflight_review_claims(review_claims, workspace)
       when is_map(review_claims) and is_binary(workspace) do
     pending_verification_claims =
@@ -413,62 +422,60 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
     if map_size(pending_verification_claims) == 0 do
       review_claims
     else
-      {refreshed_claims, _stats} =
-        ReviewEvidenceCollector.collect(pending_verification_claims, workspace)
-
-      Map.merge(review_claims, refreshed_claims)
+      with :ok <- execution_guard(workspace),
+           {refreshed_claims, _stats} = ReviewEvidenceCollector.collect(pending_verification_claims, workspace),
+           :ok <- execution_guard(workspace) do
+        Map.merge(review_claims, refreshed_claims)
+      end
     end
   end
 
   def maybe_refresh_preflight_review_claims(review_claims, _workspace), do: review_claims
 
-  @spec maybe_maintain_merge_readiness(String.t(), map(), map(), map(), keyword()) :: map()
+  @spec maybe_maintain_merge_readiness(String.t(), map(), map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | AgentExecution.terminal()
   def maybe_maintain_merge_readiness(workspace, issue, state, inspection, opts)
       when is_binary(workspace) and is_map(issue) and is_map(state) and is_map(inspection) do
-    if merge_readiness_maintenance_needed?(state, inspection) do
-      reconciled_state = maybe_reconcile_live_review_feedback(state, workspace, opts)
+    with :ok <- execution_guard(workspace) do
+      if merge_readiness_maintenance_needed?(state, inspection) do
+        with %{} = reconciled_state <- maybe_reconcile_live_review_feedback(state, workspace, opts),
+             {:ok, pr_url, pr_body_validation} <-
+               maybe_refresh_merge_readiness_pr_body(workspace, issue, reconciled_state, inspection, opts),
+             threads = reconciled_state |> Map.get(:review_threads, %{}) |> finalize_published_review_threads(),
+             %{} = posted <- maybe_post_autonomous_review_replies(threads, workspace, pr_url, reconciled_state, opts),
+             %{} = resolved <- maybe_resolve_autonomous_review_threads(posted, workspace, pr_url, reconciled_state, opts),
+             :ok <- execution_guard(workspace) do
+          updated_state =
+            reconciled_state
+            |> Map.put(:pr_url, pr_url || Map.get(reconciled_state, :pr_url))
+            |> Map.put(:review_threads, resolved)
+            |> Map.put(:last_merge_readiness, merge_readiness_summary(pr_body_validation, resolved))
+            |> maybe_put_pr_body_validation(pr_body_validation)
+            |> Map.update(:resume_context, %{}, fn context ->
+              context
+              |> Map.put(:review_feedback_summary, review_feedback_summary(resolved))
+              |> maybe_put_review_feedback_pr_url(pr_url)
+            end)
 
-      with {:ok, pr_url, pr_body_validation} <-
-             maybe_refresh_merge_readiness_pr_body(
-               workspace,
-               issue,
-               reconciled_state,
-               inspection,
-               opts
-             ) do
-        updated_review_threads =
-          reconciled_state
-          |> Map.get(:review_threads, %{})
-          |> finalize_published_review_threads()
-          |> maybe_post_autonomous_review_replies(workspace, pr_url, reconciled_state, opts)
-          |> maybe_resolve_autonomous_review_threads(workspace, pr_url, reconciled_state, opts)
+          if updated_state != state and Keyword.get(opts, :persist_merge_readiness, true) do
+            attrs =
+              updated_state
+              |> Map.take([:review_claims, :review_threads, :last_review_decision, :pr_url, :last_merge_readiness, :last_pr_body_validation])
+              |> Enum.reject(fn {key, value} -> Map.fetch(state, key) == {:ok, value} end)
+              |> Map.new()
 
-        updated_state =
-          reconciled_state
-          |> Map.put(:pr_url, pr_url || Map.get(reconciled_state, :pr_url))
-          |> Map.put(:review_threads, updated_review_threads)
-          |> Map.put(
-            :last_merge_readiness,
-            merge_readiness_summary(pr_body_validation, updated_review_threads)
-          )
-          |> maybe_put_pr_body_validation(pr_body_validation)
-          |> Map.update(:resume_context, %{}, fn context ->
-            context
-            |> Map.put(:review_feedback_summary, review_feedback_summary(updated_review_threads))
-            |> maybe_put_review_feedback_pr_url(pr_url)
-          end)
+            resume_delta =
+              %{review_feedback_summary: review_feedback_summary(resolved)}
+              |> maybe_put_review_feedback_pr_url(pr_url)
 
-        if updated_state != state and Keyword.get(opts, :persist_merge_readiness, true) do
-          {:ok, persisted_state} =
-            RunStateStore.update(workspace, fn _persisted -> updated_state end)
-
-          {:ok, persisted_state}
-        else
-          {:ok, updated_state}
+            persist_review_attrs(workspace, attrs, resume_delta)
+          else
+            {:ok, updated_state}
+          end
         end
+      else
+        {:ok, state}
       end
-    else
-      {:ok, state}
     end
   end
 
@@ -512,18 +519,23 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
       check_name in ["validate-pr-description", "pr-description-lint"]
   end
 
-  @spec maybe_refresh_merge_readiness_pr_body(String.t(), map(), map(), map(), keyword()) :: map()
+  @spec maybe_refresh_merge_readiness_pr_body(String.t(), map(), map(), map(), keyword()) ::
+          {:ok, String.t() | nil, term()} | {:error, term()} | AgentExecution.terminal()
   def maybe_refresh_merge_readiness_pr_body(workspace, issue, state, inspection, opts)
       when is_binary(workspace) and is_map(state) and is_map(inspection) do
     pr_url = Map.get(state, :pr_url) || Map.get(inspection, :pr_url)
 
     if pr_body_refresh_needed?(state) and merge_readiness_pr_body_supported?(workspace) do
-      case PullRequestManager.ensure_pull_request(workspace, issue, state, opts) do
-        {:ok, pr} ->
-          {:ok, Map.get(pr, :url) || pr_url, Map.get(pr, :body_validation)}
+      with :ok <- execution_guard(workspace),
+           result = PullRequestManager.ensure_pull_request(workspace, issue, state, opts),
+           :ok <- execution_guard(workspace) do
+        case result do
+          {:ok, pr} ->
+            {:ok, Map.get(pr, :url) || pr_url, Map.get(pr, :body_validation)}
 
-        {:error, reason} ->
-          {:error, reason}
+          {:error, reason} ->
+            {:error, reason}
+        end
       end
     else
       {:ok, pr_url, Map.get(state, :last_pr_body_validation)}
@@ -576,35 +588,29 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   def merge_readiness_validation_status(%{"status" => status}) when is_binary(status), do: status
   def merge_readiness_validation_status(_validation), do: "unknown"
 
-  @spec maybe_persist_reconciled_review_feedback(map(), String.t(), keyword()) :: map()
+  @spec maybe_persist_reconciled_review_feedback(map(), String.t(), keyword()) ::
+          map() | {:error, term()} | AgentExecution.terminal()
   def maybe_persist_reconciled_review_feedback(state, workspace, opts)
       when is_map(state) and is_binary(workspace) do
-    reconciled_state = maybe_reconcile_live_review_feedback(state, workspace, opts)
+    with :ok <- execution_guard(workspace),
+         %{} = reconciled_state <- maybe_reconcile_live_review_feedback(state, workspace, opts) do
+      if review_feedback_state_changed?(state, reconciled_state) do
+        resume_delta = %{
+          review_feedback_summary: review_feedback_summary(Map.get(reconciled_state, :review_threads, %{})),
+          review_claim_summary: ReviewEvidenceCollector.summary(Map.get(reconciled_state, :review_claims, %{})),
+          review_feedback_pr_url: Map.get(reconciled_state, :pr_url)
+        }
 
-    if review_feedback_state_changed?(state, reconciled_state) do
-      {:ok, persisted_state} =
-        RunStateStore.update(workspace, fn persisted ->
-          persisted
-          |> Map.put(:review_claims, Map.get(reconciled_state, :review_claims, %{}))
-          |> Map.put(:review_threads, Map.get(reconciled_state, :review_threads, %{}))
-          |> Map.put(:last_review_decision, Map.get(reconciled_state, :last_review_decision))
-          |> Map.update(:resume_context, %{}, fn context ->
-            context
-            |> Map.put(
-              :review_feedback_summary,
-              review_feedback_summary(Map.get(reconciled_state, :review_threads, %{}))
-            )
-            |> Map.put(
-              :review_claim_summary,
-              ReviewEvidenceCollector.summary(Map.get(reconciled_state, :review_claims, %{}))
-            )
-            |> Map.put(:review_feedback_pr_url, Map.get(reconciled_state, :pr_url))
-          end)
-        end)
+        attrs = %{
+          review_claims: Map.get(reconciled_state, :review_claims, %{}),
+          review_threads: Map.get(reconciled_state, :review_threads, %{}),
+          last_review_decision: Map.get(reconciled_state, :last_review_decision)
+        }
 
-      persisted_state
-    else
-      state
+        with {:ok, persisted_state} <- persist_review_attrs(workspace, attrs, resume_delta), do: persisted_state
+      else
+        state
+      end
     end
   end
 
@@ -620,7 +626,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
 
   def review_feedback_state_changed?(_state, _reconciled_state), do: false
 
-  @spec maybe_reconcile_live_review_feedback(map(), String.t(), keyword()) :: map()
+  @spec maybe_reconcile_live_review_feedback(map(), String.t(), keyword()) :: map() | AgentExecution.terminal()
   def maybe_reconcile_live_review_feedback(state, workspace, opts)
       when is_map(state) and is_binary(workspace) do
     pr_url = Map.get(state, :pr_url)
@@ -644,24 +650,50 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
           |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
           |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
 
-        case PRWatcher.review_feedback(workspace, watcher_opts) do
-          %{status: "ok", items: items} = feedback when is_list(items) ->
-            if items == [] do
-              state
-            else
-              state
-              |> Map.put(:review_claims, refreshed_review_claims(items, review_claims, pr_url))
-              |> Map.put(:review_threads, refreshed_review_threads(items, review_threads, pr_url))
-              |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
-            end
+        with :ok <- execution_guard(workspace),
+             feedback_result = PRWatcher.review_feedback(workspace, watcher_opts),
+             :ok <- execution_guard(workspace) do
+          case feedback_result do
+            %{status: "ok", items: items} = feedback when is_list(items) ->
+              if items == [] do
+                state
+              else
+                state
+                |> Map.put(:review_claims, refreshed_review_claims(items, review_claims, pr_url))
+                |> Map.put(:review_threads, refreshed_review_threads(items, review_threads, pr_url))
+                |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
+              end
 
-          _ ->
-            state
+            _ ->
+              state
+          end
         end
     end
   end
 
   def maybe_reconcile_live_review_feedback(state, _workspace, _opts), do: state
+
+  defp execution_guard(workspace) do
+    with {:ok, _context} <- AgentExecution.entry_context(workspace, nil), do: :ok
+  end
+
+  defp persist_review_attrs(workspace, attrs, resume_delta) do
+    case AgentExecution.entry_context(workspace, nil) do
+      {:ok, :legacy} ->
+        RunStateStore.update(workspace, fn current ->
+          current |> Map.merge(attrs) |> Map.update(:resume_context, resume_delta, &Map.merge(&1, resume_delta))
+        end)
+
+      {:ok, _context} ->
+        with {:ok, current} <- AgentExecution.ensure_current() do
+          resume = Map.merge(Map.get(current, :resume_context, %{}), resume_delta)
+          AgentExecution.update_current(Map.put(attrs, :resume_context, resume))
+        end
+
+      {:stop, _} = terminal ->
+        terminal
+    end
+  end
 
   @spec refreshed_review_claims(term(), map(), String.t() | nil) :: map()
   def refreshed_review_claims(items, persisted_claims, pr_url)

@@ -474,7 +474,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       callback when is_function(callback, 1) ->
         case callback.(payload) do
-          {:stop, {:accounting_uncertain, _}} = terminal -> throw({:agent_execution_halt, terminal})
+          {:stop, {kind, _}} = terminal when kind in [:accounting_uncertain, :execution_stopped] -> throw({:agent_execution_halt, terminal})
+          {:stop, {:stale_execution, _, _}} = terminal -> throw({:agent_execution_halt, terminal})
           result -> result
         end
     end

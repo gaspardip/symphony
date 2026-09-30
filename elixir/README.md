@@ -641,3 +641,25 @@ Identified snapshots require execution context; direct legacy transport calls
 retain their narrower contract. These checks do not roll back remote effects,
 provide distributed atomicity or implement uncertain-run recovery. See
 [the admitted execution contract](../docs/RUNTIME_CONTRACT.md#admitted-execution-and-usage-i2a).
+
+## Current material state during execution (I2b)
+
+Audited admission captures the canonical raw snapshot once. Each controlled
+operation must still match that admitted material state and the original
+dispatch/lease authority. A checked write changes only its declared attributes;
+its successful return and owner acknowledgment establish the next witness.
+Concurrent review, stage or policy changes cannot be adopted by a later read.
+
+A precondition conflict retains `stale_execution` with the captured run/dispatch
+IDs; persistence or confirmation uncertainty retains `accounting_uncertain`.
+Either stops continuation and keeps the claim/journal available for explicit
+inspection. Own blocked/done writes retain their domain result, deny later hooks
+and turns, and close through the real worker DOWN without an automatic retry.
+Audited cleanup errors stay visible. Legacy transport behavior retains its
+existing contract.
+
+The material projection, stop notifications, final-usage receipt and lifecycle lock
+order are specified in [the runtime contract](../docs/RUNTIME_CONTRACT.md#current-execution-and-material-state-i2b).
+These are cooperating local checks; remote effects are not transactional and
+restarting does not authorize uncertain work to replay. I2c/P2/I3 and academic
+acceptance require their own evidence.

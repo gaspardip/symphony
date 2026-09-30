@@ -106,6 +106,7 @@ defmodule SymphonyElixir.Orchestrator do
       lease_claims: %{},
       retry_attempts: %{},
       token_usage_errors: %{},
+      stale_execution_errors: %{},
       paused_issue_states: %{},
       skipped_issues: [],
       last_candidate_issues: [],
@@ -441,11 +442,17 @@ defmodule SymphonyElixir.Orchestrator do
           entry.pid != pid ->
             {:noreply, state}
 
-          accounting_down_cause(entry, reason) != nil ->
-            {:noreply, finish_uncertain_worker_down(state, issue_id, entry, accounting_down_cause(entry, reason))}
+          execution_down_terminal(entry, reason) != nil ->
+            {:noreply, finish_terminal_worker_down(state, issue_id, entry, execution_down_terminal(entry, reason))}
+
+          get_in(entry, [:agent_execution, :known_terminal]) != nil ->
+            {:noreply, finish_known_terminal_worker_down(state, issue_id, entry, reason)}
 
           Map.has_key?(entry, :execution_stop_requested) ->
-            {:noreply, finish_requested_worker_down(state, issue_id, entry)}
+            {:noreply, finish_requested_worker_down(state, issue_id, entry, reason)}
+
+          Map.has_key?(entry, :agent_execution) ->
+            {:noreply, finish_current_worker_down(state, issue_id, entry, reason)}
 
           true ->
             completion = Map.get(Map.fetch!(state.running, issue_id), :completion)
@@ -537,10 +544,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  def handle_info({:agent_execution_usage, %{context: context} = invocation, observation}, state) do
-    {:noreply, receive_execution_usage(state, context, invocation, observation)}
+  def handle_info({:agent_execution_usage, %{context: context} = invocation, expected, observation}, state) do
+    {:noreply, receive_execution_usage(state, context, invocation, expected, observation)}
   end
 
+  def handle_info({:agent_execution_usage, _invocation, _expected, _observation}, state), do: {:noreply, state}
   def handle_info({:agent_execution_usage, _invocation, _observation}, state), do: {:noreply, state}
 
   def handle_info({:agent_execution_uncertain, context, cause}, state) do
@@ -550,19 +558,41 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  def handle_info({:agent_worker_update, %{context: context} = invocation, %{event: _, timestamp: _} = update}, state) do
-    case authorized_execution_invocation(state, context, invocation) do
+  def handle_info({:agent_execution_stale, context, ids, cause}, state) do
+    case matching_execution_entry(state, context) do
       {:ok, issue_id, entry} ->
-        zero = %{input_tokens: 0, output_tokens: 0, total_tokens: 0, input_reported: 0, output_reported: 0, total_reported: 0}
-        {updated, _delta} = integrate_agent_update(entry, update, zero)
-        next = state |> Map.put(:running, Map.put(state.running, issue_id, updated)) |> apply_agent_rate_limits(update)
-        notify_dashboard()
+        next = if ids == execution_ids(entry), do: mark_execution_stale(state, issue_id, cause), else: mark_accounting_uncertain(state, issue_id, :execution_terminal_identity_mismatch)
         {:noreply, next}
 
-      _ ->
+      :error ->
         {:noreply, state}
     end
   end
+
+  def handle_info({:agent_worker_update, %{context: context} = invocation, expected, %{event: _, timestamp: _} = update}, state) do
+    case matching_execution_invocation(state, context, invocation) do
+      {:ok, issue_id, entry} ->
+        case execution_current_precondition(state, issue_id, entry, expected) do
+          {:ok, _current} ->
+            zero = %{input_tokens: 0, output_tokens: 0, total_tokens: 0, input_reported: 0, output_reported: 0, total_reported: 0}
+            {updated, _delta} = integrate_agent_update(entry, update, zero)
+            next = state |> Map.put(:running, Map.put(state.running, issue_id, updated)) |> apply_agent_rate_limits(update)
+            notify_dashboard()
+            {:noreply, next}
+
+          {:stop, _terminal} ->
+            {:noreply, state}
+
+          {:error, reason} ->
+            {:noreply, mark_execution_failure(state, issue_id, reason)}
+        end
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:agent_worker_update, _invocation, _expected, _update}, state), do: {:noreply, state}
 
   def handle_info({:agent_worker_update, %{}, _update}, state), do: {:noreply, state}
 
@@ -4300,6 +4330,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp restart_stalled_issue(state, _issue_id, %{agent_execution: %{terminal: terminal}}, _now, _timeout_ms) when not is_nil(terminal), do: state
+  defp restart_stalled_issue(state, _issue_id, %{agent_execution: %{known_terminal: known}}, _now, _timeout_ms) when not is_nil(known), do: state
   defp restart_stalled_issue(state, _issue_id, %{execution_stop_requested: _request}, _now, _timeout_ms), do: state
 
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
@@ -4769,20 +4801,17 @@ defmodule SymphonyElixir.Orchestrator do
 
     retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
 
-    run_state =
-      workspace
-      |> RunStateStore.load_or_default(issue)
-      |> merge_retry_budget_resume_context(retry_metadata)
-
-    with :ok <- RunStateStore.ensure_readable(workspace),
-         {:ok, _stage} <- persisted_dispatch_stage(issue, workspace),
-         stage <- Map.get(run_state, :stage),
-         {:ok, pid, ticket} <-
+    with {:ok, source, view} <- RunStateStore.read_admission_source(workspace, issue),
+         true <- view.stage == dispatch_stage or {:error, :admission_stage_changed},
+         run_state = merge_retry_budget_resume_context(view, retry_metadata),
+         stage = view.stage,
+         {:ok, pid, ticket, admitted_raw} <-
            start_audited_worker(
              state,
              issue,
              attempt,
              run_state,
+             source,
              start_child_fun,
              fn ->
                AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
@@ -4826,9 +4855,16 @@ defmodule SymphonyElixir.Orchestrator do
           workspace: workspace,
           stage: stage,
           resume_context: Map.get(run_state, :resume_context, %{}),
-          last_ledger_event_id: ticket.entry_event_id,
+          last_ledger_event_id: admitted_raw["last_ledger_event_id"],
           dispatch_ticket: ticket,
-          agent_execution: %{context: execution_context(ticket, claim.token, self(), pid), registry: AgentExecution.new_registry()},
+          agent_execution: %{
+            context: execution_context(ticket, claim.token, self(), pid),
+            registry: AgentExecution.new_registry(),
+            expected: RunStateStore.material_projection(admitted_raw),
+            terminal: nil,
+            known_terminal: nil,
+            final_usage_receipt: nil
+          },
           lease_token: claim.token,
           custody_ref: claim.custody_ref,
           completion: Map.get(claim, :completion),
@@ -4924,27 +4960,40 @@ defmodule SymphonyElixir.Orchestrator do
 
     retry_metadata = Map.get(state.retry_attempts, issue.id, %{})
 
-    with {:ok, _stage} <- persisted_dispatch_stage(issue, workspace),
-         {:ok, run_state} <- ensure_dispatch_run_state(state, workspace, issue),
-         run_state <- merge_retry_budget_resume_context(run_state, retry_metadata),
-         stage <- Map.get(run_state, :stage),
-         {:ok, pid, ticket} <-
+    with {:ok, source, view} <- RunStateStore.read_admission_source(workspace, issue),
+         true <- source != :missing or {:error, :passive_admission_state_missing},
+         true <- view.stage == dispatch_stage or {:error, :admission_stage_changed},
+         run_state = merge_retry_budget_resume_context(view, retry_metadata),
+         stage = view.stage,
+         {:ok, pid, ticket, admitted_raw} <-
            start_audited_worker(
              state,
              issue,
              attempt,
              run_state,
+             source,
              start_child_fun,
              fn ->
                case AgentExecution.entry_context(Workspace.path_for_issue(issue), issue) do
                  {:ok, _context} -> :ok
                  {:stop, {:accounting_uncertain, cause}} -> exit({:accounting_uncertain, cause})
+                 {:stop, {:stale_execution, ids, cause}} -> exit({:stale_execution, ids, cause})
+                 {:stop, {:execution_stopped, _stop}} -> exit(:normal)
                end
 
                workspace =
                  case Workspace.create_for_issue(issue) do
                    {:ok, path} ->
                      path
+
+                   {:stop, {:accounting_uncertain, cause}} ->
+                     exit({:accounting_uncertain, cause})
+
+                   {:stop, {:stale_execution, ids, cause}} ->
+                     exit({:stale_execution, ids, cause})
+
+                   {:stop, {:execution_stopped, _stop}} ->
+                     exit(:normal)
 
                    {:error, reason} ->
                      raise RuntimeError, "Passive worker setup failed: #{inspect(reason)}"
@@ -4961,6 +5010,8 @@ defmodule SymphonyElixir.Orchestrator do
                  :ok -> :ok
                  {:done, _issue} -> :ok
                  {:stop, {:accounting_uncertain, _cause}} = terminal -> terminal
+                 {:stop, {:stale_execution, _ids, _cause}} = terminal -> terminal
+                 {:stop, {:execution_stopped, _stop}} -> :ok
                  {:stop, _reason} -> :ok
                  {:error, reason} -> raise RuntimeError, "Passive worker failed: #{inspect(reason)}"
                end
@@ -5004,9 +5055,16 @@ defmodule SymphonyElixir.Orchestrator do
           workspace: workspace,
           stage: stage,
           resume_context: Map.get(run_state, :resume_context, %{}),
-          last_ledger_event_id: ticket.entry_event_id,
+          last_ledger_event_id: admitted_raw["last_ledger_event_id"],
           dispatch_ticket: ticket,
-          agent_execution: %{context: execution_context(ticket, claim.token, self(), pid), registry: AgentExecution.new_registry()},
+          agent_execution: %{
+            context: execution_context(ticket, claim.token, self(), pid),
+            registry: AgentExecution.new_registry(),
+            expected: RunStateStore.material_projection(admitted_raw),
+            terminal: nil,
+            known_terminal: nil,
+            final_usage_receipt: nil
+          },
           lease_token: claim.token,
           custody_ref: claim.custody_ref,
           completion: Map.get(claim, :completion),
@@ -5054,35 +5112,41 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp start_audited_worker(state, issue, attempt, run_state, start_child_fun, worker_fun, passive?) do
+  defp start_audited_worker(state, issue, attempt, run_state, source, start_child_fun, worker_fun, passive?) do
     workspace = workspace_for_issue_id(state, issue.id)
     owner = self()
     {policy_class, policy_source, _override} = policy_snapshot_values(issue, state, run_state)
 
     with {:ok, claim} <- current_issue_custody(state, issue.id),
          lease = claim.lease,
-         {:ok, ticket} <-
-           DispatchAudit.begin(workspace, %{
-             issue_id: issue.id,
-             issue_identifier: issue.identifier,
-             actor_type: "runtime",
-             actor_id: state.lease_owner,
-             policy_class: policy_class,
-             metadata: %{owner: state.lease_owner, epoch: lease["epoch"], passive: passive?, policy_source: policy_source, retry_attempt: normalize_retry_attempt(attempt)}
-           }) do
+         {:ok, ticket, admitted_raw} <-
+           DispatchAudit.begin(
+             workspace,
+             %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               actor_type: "runtime",
+               actor_id: state.lease_owner,
+               policy_class: policy_class,
+               metadata: %{owner: state.lease_owner, epoch: lease["epoch"], passive: passive?, policy_source: policy_source, retry_attempt: normalize_retry_attempt(attempt)}
+             },
+             source
+           ) do
       case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
              DispatchGate.run(owner, ticket.dispatch_id, fn ->
                case DispatchAudit.with_authorization(ticket, fn ->
-                      {:executed, AgentExecution.with_context(ticket, claim.token, owner, worker_fun)}
+                      {:executed, AgentExecution.with_context(ticket, claim.token, owner, admitted_raw, worker_fun)}
                     end) do
                  {:executed, {:stop, {:accounting_uncertain, cause}}} -> exit({:accounting_uncertain, cause})
+                 {:executed, {:stop, {:stale_execution, ids, cause}}} -> exit({:stale_execution, ids, cause})
+                 {:executed, {:stop, {:execution_stopped, _stop}}} -> :ok
                  {:executed, result} -> result
                  {:error, reason} -> exit({:accounting_uncertain, {:dispatch_authorization_failed, reason}})
                end
              end)
            end) do
         {:ok, pid} ->
-          {:ok, pid, ticket}
+          {:ok, pid, ticket, admitted_raw}
 
         {:error, reason} ->
           case DispatchAudit.finish(ticket, :not_started) do
@@ -5143,38 +5207,6 @@ defmodule SymphonyElixir.Orchestrator do
     state = cancel_dispatch_retry(state, issue_id)
     state = tracker_inbox_failure(state, issue_id, {:dispatch_audit_failed, reason})
     %{state | candidate_fetch_error: {:dispatch_audit_failed, issue_id, reason}}
-  end
-
-  defp ensure_dispatch_run_state(%State{} = state, workspace, issue)
-       when is_binary(workspace) and is_map(issue) do
-    case RunStateStore.load(workspace) do
-      {:ok, run_state} ->
-        {:ok, run_state}
-
-      {:error, :missing} ->
-        case persist_live_issue_lease(state, workspace, issue) do
-          {:ok, run_state} ->
-            {:ok, run_state}
-
-          {:error, :missing} ->
-            persist_issue_run_state(workspace, issue)
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp persist_issue_run_state(workspace, issue) when is_binary(workspace) and is_map(issue) do
-    run_state = RunStateStore.load_or_default(workspace, issue)
-
-    case RunStateStore.save(workspace, run_state) do
-      :ok -> {:ok, run_state}
-      {:error, reason} -> {:error, reason}
-    end
   end
 
   @doc false
@@ -5255,12 +5287,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
-    case Map.get(state.running, issue_id) do
-      %{execution_stop_requested: request, agent_execution: %{registry: %{uncertain: nil}}} = entry ->
+    case {execution_hold?(state, issue_id), Map.get(state.running, issue_id)} do
+      {true, _entry} ->
+        state
+
+      {false, %{agent_execution: %{known_terminal: known}}} when not is_nil(known) ->
+        state
+
+      {false, %{execution_stop_requested: request, agent_execution: %{registry: %{uncertain: nil}}} = entry} ->
         request = Map.put(request, :retry, %{attempt: attempt, metadata: metadata})
         %{state | running: Map.put(state.running, issue_id, %{entry | execution_stop_requested: request})}
 
-      %{execution_stop_requested: _request, agent_execution: _execution} ->
+      {false, %{execution_stop_requested: _request, agent_execution: _execution}} ->
         state
 
       _ ->
@@ -5816,7 +5854,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
-    if accounting_hold?(state, issue_id), do: state, else: release_healthy_issue_claim(state, issue_id)
+    if execution_hold?(state, issue_id), do: state, else: release_healthy_issue_claim(state, issue_id)
   end
 
   defp release_healthy_issue_claim(%State{} = state, issue_id) do
@@ -6018,7 +6056,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp continuation_metadata_for_running_entry(%{identifier: identifier})
        when is_binary(identifier) do
-    case issue_run_state(identifier) do
+    continuation_metadata_for_run_state(issue_run_state(identifier))
+  end
+
+  defp continuation_metadata_for_running_entry(_running_entry), do: %{delay_type: :continuation}
+
+  defp continuation_metadata_for_run_state(run_state) do
+    case run_state do
       %{stage: "merge_readiness"} = run_state ->
         %{
           delay_type: :passive_continuation,
@@ -6057,8 +6101,6 @@ defmodule SymphonyElixir.Orchestrator do
         %{delay_type: :continuation}
     end
   end
-
-  defp continuation_metadata_for_running_entry(_running_entry), do: %{delay_type: :continuation}
 
   defp auto_continue_review_fix_budget_stop?(run_state) when is_map(run_state) do
     blocked_review_fix_budget_stop?(run_state) and
@@ -6511,20 +6553,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def handle_call({:agent_execution, %{worker: worker} = context, action}, {caller, _tag}, state) when caller == worker do
-    case matching_execution_entry(state, context) do
+  def handle_call({:agent_execution, %{context: %{worker: worker} = context} = invocation, expected, action}, {caller, _tag}, state) when caller == worker do
+    case matching_execution_invocation(state, context, invocation) do
       {:ok, issue_id, entry} ->
-        case execution_owner_action(state, issue_id, entry, action) do
-          {:ok, registry} ->
-            entry = put_in(entry.agent_execution.registry, registry)
-            {:reply, :ok, %{state | running: Map.put(state.running, issue_id, entry)}}
+        case execution_owner_action(state, issue_id, entry, expected, action) do
+          {:ok, reply, updated} ->
+            {:reply, reply, %{state | running: Map.put(state.running, issue_id, updated)}}
 
-          {:error, {:accounting_uncertain, cause}} ->
-            {:reply, {:stop, {:accounting_uncertain, cause}}, state}
+          {:stop, terminal} ->
+            {:reply, {:stop, terminal}, state}
 
-          {:error, cause} ->
-            next = mark_accounting_uncertain(state, issue_id, cause)
-            {:reply, {:stop, {:accounting_uncertain, cause}}, next}
+          {:error, reason} ->
+            next = mark_execution_failure(state, issue_id, reason)
+            {:reply, {:stop, execution_terminal(Map.fetch!(next.running, issue_id))}, next}
         end
 
       :error ->
@@ -6532,8 +6573,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  def handle_call({:agent_execution, _context, _action}, _from, state),
+  def handle_call({:agent_execution, _invocation, _expected, _action}, _from, state),
     do: {:reply, {:stop, {:accounting_uncertain, :execution_sender_mismatch}}, state}
+
+  def handle_call({:agent_execution, _old_context, _old_action}, _from, state),
+    do: {:reply, {:stop, {:accounting_uncertain, :execution_precondition_missing}}, state}
 
   def handle_call(:snapshot, _from, state) do
     state = refresh_runtime_config(state)
@@ -7185,9 +7229,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp token_usage_dispatch_guard(state, issue_id) do
-    case Map.fetch(state.token_usage_errors, issue_id) do
-      {:ok, reason} -> {:error, {:token_usage_persistence_failed, reason}}
-      :error -> :ok
+    case Map.fetch(state.stale_execution_errors, issue_id) do
+      {:ok, error} ->
+        {:error, {:stale_execution, error.ids, error.cause}}
+
+      :error ->
+        case Map.fetch(state.token_usage_errors, issue_id) do
+          {:ok, reason} -> {:error, {:token_usage_persistence_failed, reason}}
+          :error -> :ok
+        end
     end
   end
 
@@ -7683,6 +7733,9 @@ defmodule SymphonyElixir.Orchestrator do
             %{lease_ownership_uncertain: reason} ->
               {:error, reason}
 
+            %{agent_execution: %{terminal: terminal}} when not is_nil(terminal) ->
+              :pending
+
             %{agent_execution: %{registry: %{uncertain: cause}}} when not is_nil(cause) ->
               :pending
 
@@ -7812,7 +7865,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp matching_execution_entry(state, %{owner: owner, worker: worker, issue_id: issue_id, ticket: ticket, lease_token: token} = context)
        when owner == self() and is_pid(worker) and is_binary(issue_id) do
     case Map.get(state.running, issue_id) do
-      %{pid: ^worker, dispatch_ticket: ^ticket, lease_token: ^token, agent_execution: %{context: ^context}} = entry ->
+      %{pid: ^worker, ref: ref, dispatch_ticket: ^ticket, lease_token: ^token, agent_execution: %{context: ^context}} = entry when is_reference(ref) ->
         {:ok, issue_id, entry}
 
       _ ->
@@ -7829,40 +7882,110 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp execution_owner_action(state, issue_id, entry, action) do
-    registry = entry.agent_execution.registry
+  defp execution_authority(entry), do: %{ticket: entry.dispatch_ticket, lease_token: entry.lease_token}
+  defp execution_ids(entry), do: %{run_id: entry.dispatch_ticket.run_id, dispatch_id: entry.dispatch_ticket.dispatch_id}
 
-    with nil <- registry.uncertain,
-         :ok <- execution_custody(state, issue_id, entry) do
-      case action do
-        {:register, binding, purpose} ->
-          AgentExecution.register_binding(registry, binding, purpose)
+  defp execution_terminal(%{agent_execution: %{terminal: terminal}}) when not is_nil(terminal), do: terminal
+  defp execution_terminal(%{agent_execution: %{registry: %{uncertain: cause}}}) when not is_nil(cause), do: {:accounting_uncertain, cause}
+  defp execution_terminal(_entry), do: nil
 
-        {:begin, binding, ordinal} ->
-          AgentExecution.begin_binding(registry, binding, ordinal)
+  defp execution_permission(entry) do
+    cond do
+      execution_terminal(entry) != nil ->
+        {:stop, execution_terminal(entry)}
 
-        {:retire, binding, ordinal} when ordinal == registry.ordinal ->
-          AgentExecution.retire_binding(registry, binding)
+      get_in(entry, [:agent_execution, :known_terminal]) != nil ->
+        {:stop, {:execution_stopped, %{stage: entry.agent_execution.known_terminal.stage}}}
 
-        {:confirm, binding, ordinal} ->
-          if current_execution_invocation?(registry, binding, ordinal), do: {:ok, registry}, else: {:error, :obsolete_invocation}
+      Map.has_key?(entry, :execution_stop_requested) ->
+        {:stop, {:execution_stopped, %{stage: entry.agent_execution.expected["stage"]}}}
 
-        _ ->
-          {:error, :invalid_execution_action}
-      end
-    else
-      {:error, _} = error -> error
-      cause -> {:error, {:accounting_uncertain, cause}}
+      true ->
+        :ok
     end
   end
+
+  defp matching_execution_expected(entry, expected) do
+    if expected === entry.agent_execution.expected, do: :ok, else: {:error, {:stale_execution, :execution_expected_changed}}
+  end
+
+  defp execution_current_precondition(state, issue_id, entry, expected) do
+    with :ok <- execution_permission(entry),
+         :ok <- execution_custody(state, issue_id, entry),
+         :ok <- matching_execution_expected(entry, expected),
+         do: RunStateStore.ensure_current(execution_authority(entry), expected)
+  end
+
+  defp execution_owner_action(state, issue_id, entry, expected, :confirm_stop_notification) do
+    case execution_terminal(entry) do
+      nil ->
+        with :ok <- execution_custody(state, issue_id, entry),
+             :ok <- matching_execution_expected(entry, expected),
+             %{stage: "blocked", next: ^expected} <- entry.agent_execution.known_terminal,
+             :ok <- RunStateStore.confirm_terminal_current(execution_authority(entry), expected) do
+          {:ok, :ok, entry}
+        else
+          {:error, _} = error -> error
+          _ -> {:error, :stop_notification_not_authorized}
+        end
+
+      terminal ->
+        {:stop, terminal}
+    end
+  end
+
+  defp execution_owner_action(state, issue_id, entry, expected, {kind, previous, next})
+       when kind in [:advance_current, :confirm_own_terminal] do
+    with :ok <- execution_permission(entry),
+         :ok <- execution_custody(state, issue_id, entry),
+         :ok <- matching_execution_expected(entry, expected),
+         true <- previous === expected or {:error, :invalid_execution_advance},
+         :ok <- confirm_execution_successor(entry, kind, next) do
+      execution = %{entry.agent_execution | expected: next}
+
+      {reply, execution} =
+        if kind == :confirm_own_terminal do
+          {{:ok, :terminal_confirmed}, %{execution | known_terminal: %{previous: previous, next: next, stage: next["stage"]}}}
+        else
+          {:ok, execution}
+        end
+
+      {:ok, reply, %{entry | agent_execution: execution, stage: Map.get(next, "stage"), last_ledger_event_id: Map.get(next, "last_ledger_event_id")}}
+    else
+      {:error, _} = error -> error
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp execution_owner_action(state, issue_id, entry, expected, action) do
+    with {:ok, _current} <- execution_current_precondition(state, issue_id, entry, expected),
+         {:ok, registry} <- execution_registry_action(entry.agent_execution.registry, action) do
+      {:ok, :ok, put_in(entry.agent_execution.registry, registry)}
+    end
+  end
+
+  defp confirm_execution_successor(entry, :confirm_own_terminal, next),
+    do: RunStateStore.confirm_terminal_current(execution_authority(entry), next)
+
+  defp confirm_execution_successor(entry, :advance_current, next) do
+    with {:ok, _current} <- RunStateStore.ensure_current(execution_authority(entry), next), do: :ok
+  end
+
+  defp execution_registry_action(registry, {:register, binding, purpose}), do: AgentExecution.register_binding(registry, binding, purpose)
+  defp execution_registry_action(registry, {:begin, binding, ordinal}), do: AgentExecution.begin_binding(registry, binding, ordinal)
+  defp execution_registry_action(registry, {:retire, binding, ordinal}) when ordinal == registry.ordinal, do: AgentExecution.retire_binding(registry, binding)
+
+  defp execution_registry_action(registry, {:confirm, binding, ordinal}) do
+    if current_execution_invocation?(registry, binding, ordinal), do: {:ok, registry}, else: {:error, :obsolete_invocation}
+  end
+
+  defp execution_registry_action(_registry, _action), do: {:error, :invalid_execution_action}
 
   defp current_execution_invocation?(registry, binding, ordinal),
     do: registry.current == binding and registry.ordinal == ordinal and (is_nil(binding) or Map.has_key?(registry.live, binding))
 
-  defp authorized_execution_invocation(state, context, %{binding: binding, ordinal: ordinal}) do
+  defp matching_execution_invocation(state, context, %{binding: binding, ordinal: ordinal}) do
     with {:ok, issue_id, entry} <- matching_execution_entry(state, context),
-         nil <- entry.agent_execution.registry.uncertain,
-         :ok <- execution_custody(state, issue_id, entry),
          true <- current_execution_invocation?(entry.agent_execution.registry, binding, ordinal) do
       {:ok, issue_id, entry}
     else
@@ -7870,15 +7993,42 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp authorized_execution_invocation(_state, _context, _invocation), do: :error
+  defp matching_execution_invocation(_state, _context, _invocation), do: :error
 
-  defp receive_execution_usage(state, context, invocation, observation) do
-    case authorized_execution_invocation(state, context, invocation) do
+  defp execution_usage_precondition(state, issue_id, entry, invocation, expected) do
+    with nil <- execution_terminal(entry),
+         :ok <- execution_custody(state, issue_id, entry) do
+      case entry.agent_execution.final_usage_receipt do
+        %{previous: ^expected, next: next, binding: binding, ordinal: ordinal} = receipt
+        when binding == invocation.binding and ordinal == invocation.ordinal ->
+          with true <- Map.has_key?(entry, :execution_stop_requested) or {:error, :final_usage_stop_missing},
+               true <- entry.agent_execution.expected === next or {:error, {:stale_execution, :execution_expected_changed}},
+               :ok <- RunStateStore.confirm_terminal_current(execution_authority(entry), next),
+               do: {:ok, {:final, receipt}}
+
+        nil ->
+          with true <- is_nil(entry.agent_execution.known_terminal) or {:stop, {:execution_stopped, %{stage: entry.agent_execution.known_terminal.stage}}},
+               :ok <- matching_execution_expected(entry, expected),
+               {:ok, _current} <- RunStateStore.ensure_current(execution_authority(entry), expected),
+               do: {:ok, :ordinary}
+
+        _receipt ->
+          {:error, {:stale_execution, :final_usage_receipt_mismatch}}
+      end
+    else
+      {:error, _} = error -> error
+      terminal -> {:stop, terminal}
+    end
+  end
+
+  defp receive_execution_usage(state, context, invocation, expected, observation) do
+    case matching_execution_invocation(state, context, invocation) do
       {:ok, issue_id, entry} ->
-        with {:ok, registry, delta} <- AgentExecution.apply_usage(entry.agent_execution.registry, invocation.binding, invocation.ordinal, observation),
+        with {:ok, mode} <- execution_usage_precondition(state, issue_id, entry, invocation, expected),
+             {:ok, registry, delta} <- AgentExecution.apply_usage(entry.agent_execution.registry, invocation.binding, invocation.ordinal, observation),
              totals = AgentExecution.total_usage(registry),
              {:ok, usage} <- execution_usage_with_baseline(entry.issue_token_usage_base, totals),
-             {:ok, persisted} <- RunStateStore.record_token_usage(entry.workspace_path, entry.issue, usage, context) do
+             {:ok, persisted} <- persist_execution_usage(entry, expected, usage, mode) do
           base = Map.new(totals, fn {dimension, value} -> {dimension, Map.fetch!(persisted.token_usage, dimension) - value} end)
 
           proposed =
@@ -7892,13 +8042,20 @@ defmodule SymphonyElixir.Orchestrator do
           notify_dashboard()
           next
         else
-          {:error, cause} -> mark_accounting_uncertain(state, issue_id, cause)
+          {:error, reason} -> mark_execution_failure(state, issue_id, reason)
+          {:stop, _terminal} -> state
         end
 
       :error ->
         state
     end
   end
+
+  defp persist_execution_usage(entry, expected, usage, :ordinary),
+    do: RunStateStore.record_token_usage_current(entry.workspace_path, entry.issue, usage, execution_authority(entry), expected)
+
+  defp persist_execution_usage(entry, _expected, usage, {:final, receipt}),
+    do: RunStateStore.record_final_token_usage_current(entry.workspace_path, entry.issue, usage, execution_authority(entry), receipt)
 
   defp execution_usage_with_baseline(base, totals) when is_map(base) do
     dimensions = [:input_tokens, :output_tokens, :total_tokens]
@@ -7908,30 +8065,82 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp execution_usage_with_baseline(_base, _totals), do: {:error, :invalid_token_usage}
 
+  defp mark_execution_failure(state, issue_id, {:stale_execution, cause}), do: mark_execution_stale(state, issue_id, cause)
+  defp mark_execution_failure(state, issue_id, {:accounting_uncertain, cause}), do: mark_accounting_uncertain(state, issue_id, cause)
+  defp mark_execution_failure(state, issue_id, cause), do: mark_accounting_uncertain(state, issue_id, cause)
+
   defp mark_accounting_uncertain(state, issue_id, cause) do
     entry = Map.fetch!(state.running, issue_id)
-    registry = AgentExecution.mark_uncertain(entry.agent_execution.registry, cause)
-    first = registry.uncertain
-    entry = put_in(entry.agent_execution.registry, registry)
-    error = %{context: entry.agent_execution.context, cause: first}
-    next = cancel_dispatch_retry(state, issue_id)
 
-    %{
-      next
-      | running: Map.put(next.running, issue_id, entry),
-        token_usage_errors: Map.put(next.token_usage_errors, issue_id, {:accounting_uncertain, error}),
-        candidate_fetch_error: {:accounting_uncertain, issue_id, first}
-    }
+    case execution_terminal(entry) do
+      nil ->
+        registry = AgentExecution.mark_uncertain(entry.agent_execution.registry, cause)
+        first = registry.uncertain
+        execution = %{entry.agent_execution | registry: registry, terminal: {:accounting_uncertain, first}}
+        error = %{context: execution.context, cause: first}
+        next = cancel_dispatch_retry(state, issue_id)
+
+        %{
+          next
+          | running: Map.put(next.running, issue_id, %{entry | agent_execution: execution}),
+            token_usage_errors: Map.put(next.token_usage_errors, issue_id, {:accounting_uncertain, error}),
+            candidate_fetch_error: {:accounting_uncertain, issue_id, first}
+        }
+
+      _terminal ->
+        state
+    end
   end
 
-  defp accounting_down_cause(%{agent_execution: %{registry: %{uncertain: cause}}}, _reason) when not is_nil(cause), do: cause
-  defp accounting_down_cause(%{agent_execution: _execution}, {:accounting_uncertain, cause}), do: if(is_nil(cause), do: :invalid_uncertainty_cause, else: cause)
-  defp accounting_down_cause(_entry, _reason), do: nil
+  defp mark_execution_stale(state, issue_id, cause) do
+    entry = Map.fetch!(state.running, issue_id)
 
-  defp finish_uncertain_worker_down(state, issue_id, entry, cause) do
-    next = mark_accounting_uncertain(state, issue_id, cause)
+    case execution_terminal(entry) do
+      nil ->
+        ids = execution_ids(entry)
+        execution = %{entry.agent_execution | terminal: {:stale_execution, ids, cause}}
+        error = %{context: execution.context, ids: ids, cause: cause}
+        next = cancel_dispatch_retry(state, issue_id)
+
+        %{
+          next
+          | running: Map.put(next.running, issue_id, %{entry | agent_execution: execution}),
+            stale_execution_errors: Map.put(next.stale_execution_errors, issue_id, error),
+            candidate_fetch_error: {:stale_execution, issue_id, ids, cause}
+        }
+
+      _terminal ->
+        state
+    end
+  end
+
+  defp execution_down_terminal(entry, reason) do
+    case execution_terminal(entry) do
+      nil -> execution_exit_terminal(entry, reason)
+      terminal -> terminal
+    end
+  end
+
+  defp execution_exit_terminal(%{agent_execution: _execution}, {:accounting_uncertain, cause}),
+    do: {:accounting_uncertain, if(is_nil(cause), do: :invalid_uncertainty_cause, else: cause)}
+
+  defp execution_exit_terminal(%{agent_execution: _execution} = entry, {:stale_execution, ids, cause}) do
+    if ids == execution_ids(entry), do: {:stale_execution, ids, cause}, else: {:accounting_uncertain, :execution_terminal_identity_mismatch}
+  end
+
+  defp execution_exit_terminal(_entry, _reason), do: nil
+
+  defp finish_terminal_worker_down(state, issue_id, entry, terminal) do
+    next =
+      case terminal do
+        {:accounting_uncertain, cause} -> mark_accounting_uncertain(state, issue_id, cause)
+        {:stale_execution, _ids, cause} -> mark_execution_stale(state, issue_id, cause)
+      end
+
     next = record_session_completion_totals(next, entry)
-    Logger.error("Accounting uncertain issue_id=#{issue_id}; worker stopped and captured lease/journal preserved: #{inspect(cause)}")
+    completion = Map.get(entry, :completion)
+    next = next |> tracker_inbox_failure(issue_id, terminal) |> finish_tracker_inbox_action(completion, nil)
+    Logger.error("Execution held issue_id=#{issue_id}; worker stopped and captured lease/journal preserved: #{inspect(terminal)}")
     notify_dashboard()
     %{next | running: Map.delete(next.running, issue_id)}
   end
@@ -7946,34 +8155,160 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp finish_requested_worker_down(state, issue_id, entry) do
+  defp finish_known_terminal_worker_down(state, issue_id, entry, reason) do
+    next = entry.agent_execution.known_terminal.next
+
+    with :ok <- execution_custody(state, issue_id, entry),
+         :ok <- RunStateStore.confirm_terminal_current(execution_authority(entry), next),
+         :ok <- finish_completed_dispatch(entry, reason) do
+      state = completed_worker_bookkeeping(state, issue_id, entry)
+      state = release_issue_claim(state, issue_id)
+      state = if entry.agent_execution.known_terminal.stage == "done" and reason == :normal and not Map.has_key?(state.lease_claims, issue_id), do: complete_issue(state, issue_id), else: state
+      Logger.info("Known terminal worker finished issue_id=#{issue_id} reason=#{inspect(reason)} stage=#{entry.agent_execution.known_terminal.stage}")
+      finish_worker_inbox(state, issue_id, entry)
+    else
+      {:error, reason} -> finish_failed_current_worker_down(state, issue_id, entry, reason)
+      {:ownership_uncertain, reason} -> finish_failed_current_worker_down(state, issue_id, entry, reason)
+    end
+  end
+
+  defp finish_requested_worker_down(state, issue_id, entry, reason) do
+    with :ok <- execution_custody(state, issue_id, entry),
+         {:ok, _current} <- RunStateStore.ensure_current(execution_authority(entry), entry.agent_execution.expected),
+         :ok <- finish_completed_dispatch(entry, reason) do
+      next = completed_worker_bookkeeping(state, issue_id, entry)
+
+      next =
+        case entry.execution_stop_requested do
+          %{retry: %{attempt: attempt, metadata: metadata}} -> schedule_issue_retry(next, issue_id, attempt, metadata)
+          _ -> stop_terminal_dispatch(next, %{id: issue_id}, next.candidate_fetch_error)
+        end
+
+      finish_worker_inbox(next, issue_id, entry)
+    else
+      {:error, reason} -> finish_failed_current_worker_down(state, issue_id, entry, reason)
+      {:ownership_uncertain, reason} -> finish_failed_current_worker_down(state, issue_id, entry, reason)
+    end
+  end
+
+  defp finish_current_worker_down(state, issue_id, entry, reason) do
+    case checked_running_policy(state, issue_id, entry) do
+      {:ok, next, updated, {:stop, _violation}, _persisted} ->
+        finish_known_terminal_worker_down(next, issue_id, updated, reason)
+
+      {:ok, next, updated, policy_result, persisted} ->
+        continuation = continuation_metadata_for_run_state(persisted)
+
+        with :ok <- execution_custody(next, issue_id, updated),
+             {:ok, _current} <- RunStateStore.ensure_current(execution_authority(updated), updated.agent_execution.expected),
+             :ok <- finish_completed_dispatch(updated, reason) do
+          next = completed_worker_bookkeeping(next, issue_id, updated)
+          next = finish_current_policy_result(next, issue_id, updated, reason, policy_result, continuation)
+          finish_worker_inbox(next, issue_id, updated)
+        else
+          {:error, failure} -> finish_failed_current_worker_down(next, issue_id, updated, failure)
+          {:ownership_uncertain, failure} -> finish_failed_current_worker_down(next, issue_id, updated, failure)
+        end
+
+      {:error, failure} ->
+        finish_failed_current_worker_down(state, issue_id, entry, failure)
+
+      {:stop, terminal} ->
+        finish_terminal_worker_down(state, issue_id, entry, terminal)
+    end
+  end
+
+  defp completed_worker_bookkeeping(state, issue_id, entry) do
+    next = state |> record_session_completion_totals(entry) |> cancel_dispatch_retry(issue_id)
+    %{next | running: Map.delete(next.running, issue_id)}
+  end
+
+  defp finish_worker_inbox(state, issue_id, entry) do
     completion = Map.get(entry, :completion)
     outcome = tracker_inbox_cleanup_outcome(state, completion)
-    next = state |> record_session_completion_totals(entry) |> cancel_dispatch_retry(issue_id)
-    next = %{next | running: Map.delete(next.running, issue_id)}
-
-    finish = with :ok <- execution_custody(next, issue_id, entry), do: finish_running_dispatch(entry, :shutdown)
-
-    next =
-      case finish do
-        :ok ->
-          case entry.execution_stop_requested do
-            %{retry: %{attempt: attempt, metadata: metadata}} -> schedule_issue_retry(next, issue_id, attempt, metadata)
-            _ -> stop_terminal_dispatch(next, %{id: issue_id}, next.candidate_fetch_error)
-          end
-
-        {:ownership_uncertain, reason} ->
-          %{next | candidate_fetch_error: {:lease_ownership_uncertain, issue_id, reason}}
-
-        {:error, reason} when reason in [:lease_custody_missing, :lease_custody_changed, :execution_custody_changed] ->
-          %{next | candidate_fetch_error: {:lease_ownership_uncertain, issue_id, reason}}
-
-        {:error, reason} ->
-          next |> stop_terminal_dispatch(%{id: issue_id}, reason) |> halt_dispatch_audit(issue_id, reason)
-      end
-
-    next |> tracker_inbox_outcome(issue_id, outcome) |> finish_tracker_inbox_action(completion, nil)
+    next = state |> tracker_inbox_outcome(issue_id, outcome) |> finish_tracker_inbox_action(completion, nil)
+    notify_dashboard()
+    next
   end
+
+  defp finish_failed_current_worker_down(state, issue_id, entry, reason) do
+    next = mark_execution_failure(state, issue_id, reason)
+    terminal = execution_terminal(Map.fetch!(next.running, issue_id))
+    finish_terminal_worker_down(next, issue_id, entry, terminal)
+  end
+
+  defp finish_current_policy_result(state, issue_id, entry, :normal, {:retry, metadata}, _continuation) do
+    schedule_issue_retry(state, issue_id, next_retry_attempt_from_running(entry) || 1, budget_retry_metadata(entry, metadata))
+  end
+
+  defp finish_current_policy_result(state, issue_id, entry, :normal, :ok, continuation) do
+    state = complete_issue(state, issue_id)
+
+    case Map.get(continuation, :delay_type, :continuation) do
+      :none ->
+        release_issue_claim(state, issue_id)
+
+      delay_type ->
+        metadata = %{identifier: entry.identifier, delay_type: delay_type, issue: entry.issue} |> Map.merge(Map.drop(continuation, [:delay_type]))
+        schedule_issue_retry(state, issue_id, 1, metadata)
+    end
+  end
+
+  defp finish_current_policy_result(state, issue_id, entry, reason, _policy_result, _continuation) do
+    Logger.warning("Agent task exited for issue_id=#{issue_id} reason=#{inspect(reason)}; scheduling retry")
+    schedule_issue_retry(state, issue_id, next_retry_attempt_from_running(entry) || 1, %{identifier: entry.identifier, error: "agent exited: #{inspect(reason)}"})
+  end
+
+  defp checked_running_policy(state, issue_id, entry) do
+    previous = entry.agent_execution.expected
+
+    with :ok <- execution_permission(entry),
+         :ok <- execution_custody(state, issue_id, entry),
+         {:ok, result, persisted} <- RunPolicy.maybe_stop_for_token_budget(entry.issue, entry, %{authority: execution_authority(entry), expected: previous}),
+         next = RunStateStore.material_projection(persisted),
+         {:ok, execution} <- policy_execution_successor(entry.agent_execution, previous, next, result) do
+      updated = %{
+        entry
+        | agent_execution: execution,
+          stage: Map.get(persisted, :stage),
+          resume_context: Map.get(persisted, :resume_context, %{}),
+          last_ledger_event_id: Map.get(persisted, :last_ledger_event_id)
+      }
+
+      {:ok, %{state | running: Map.put(state.running, issue_id, updated)}, updated, result, persisted}
+    end
+  end
+
+  defp policy_execution_successor(execution, previous, next, {:stop, _violation} = result) do
+    if next["stage"] == "blocked" do
+      known = %{previous: previous, next: next, stage: "blocked"}
+      receipt = %{previous: previous, next: next, binding: execution.registry.current, ordinal: execution.registry.ordinal, outcome: result}
+      {:ok, %{execution | expected: next, known_terminal: known, final_usage_receipt: receipt}}
+    else
+      {:error, :policy_terminal_state_mismatch}
+    end
+  end
+
+  defp policy_execution_successor(execution, previous, next, result) when result == :ok or (is_tuple(result) and tuple_size(result) == 2 and elem(result, 0) == :retry) do
+    if next === previous, do: {:ok, execution}, else: {:error, :policy_material_changed_without_stop}
+  end
+
+  defp policy_execution_successor(_execution, _previous, _next, _result), do: {:error, :invalid_policy_result}
+
+  defp budget_retry_metadata(entry, metadata) do
+    %{
+      identifier: Map.get(entry, :identifier) || entry.issue.id,
+      delay_type: :continuation,
+      issue: entry.issue,
+      error: Map.get(metadata, :summary, "adaptive token retry"),
+      budget_retry: true,
+      budget_mode: Map.get(metadata, :budget_mode, "review_fix"),
+      budget_retry_count: Map.get(metadata, :retry_count),
+      budget_resume_context: Map.get(metadata, :resume_context)
+    }
+  end
+
+  defp execution_hold?(state, issue_id), do: accounting_hold?(state, issue_id) or Map.has_key?(state.stale_execution_errors, issue_id)
 
   defp accounting_hold?(state, issue_id) do
     case Map.get(state.token_usage_errors, issue_id) do
@@ -8011,10 +8346,33 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_stop_issue_for_token_budget(%State{} = state, issue_id, running_entry) do
-    if Map.has_key?(Map.get(state.running, issue_id, %{}), :execution_stop_requested) do
-      state
-    else
-      apply_running_token_budget(state, issue_id, running_entry)
+    current = Map.get(state.running, issue_id, %{})
+
+    cond do
+      Map.has_key?(current, :execution_stop_requested) -> state
+      execution_terminal(current) != nil -> state
+      get_in(current, [:agent_execution, :known_terminal]) != nil -> state
+      Map.has_key?(current, :agent_execution) -> apply_current_running_token_budget(state, issue_id, running_entry)
+      true -> apply_running_token_budget(state, issue_id, running_entry)
+    end
+  end
+
+  defp apply_current_running_token_budget(state, issue_id, entry) do
+    case checked_running_policy(state, issue_id, entry) do
+      {:ok, next, _updated, :ok, _persisted} ->
+        next
+
+      {:ok, next, updated, {:retry, metadata}, _persisted} ->
+        next |> request_accounted_worker_stop(issue_id, updated, false) |> schedule_issue_retry(issue_id, next_retry_attempt_from_running(updated) || 1, budget_retry_metadata(updated, metadata))
+
+      {:ok, next, updated, {:stop, _violation}, _persisted} ->
+        request_accounted_worker_stop(next, issue_id, updated, false)
+
+      {:error, reason} ->
+        mark_execution_failure(state, issue_id, reason)
+
+      {:stop, _terminal} ->
+        state
     end
   end
 

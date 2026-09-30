@@ -6,7 +6,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
 
   defmodule Driver do
     use GenServer
-    alias SymphonyElixir.{AgentExecution, DispatchAudit, DispatchGate, Orchestrator}
+    alias SymphonyElixir.{AgentExecution, DispatchAudit, DispatchGate, Orchestrator, RunStateStore, Workspace}
 
     def start_link(observer), do: GenServer.start_link(__MODULE__, observer)
     @impl true
@@ -50,6 +50,9 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
           Orchestrator.dispatch_runtime_issue(state.runtime, issue, nil)
         else
           start_child = fn supervisor, job ->
+            # Capture before returning the child; never recapture after a test control.
+            admitted_raw = issue |> Workspace.path_for_issue() |> RunStateStore.state_path() |> File.read!() |> Jason.decode!()
+
             Task.Supervisor.start_child(supervisor, fn ->
               case mode do
                 :held ->
@@ -59,12 +62,14 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
 
                 :controlled ->
                   receive do
-                    {:captured, context} ->
+                    {:captured, context, expected} ->
+                      true = RunStateStore.material_projection(admitted_raw) === expected
+
                       result =
                         DispatchGate.run(owner, context.ticket.dispatch_id, fn ->
                           DispatchAudit.with_authorization(context.ticket, fn ->
-                            AgentExecution.with_context(context.ticket, context.lease_token, owner, fn ->
-                              send(observer, {:worker_ready, self(), context})
+                            AgentExecution.with_context(context.ticket, context.lease_token, owner, admitted_raw, fn ->
+                              send(observer, {:worker_ready, self(), context, RunStateStore.material_projection(admitted_raw)})
                               worker_loop()
                             end)
                           end)
@@ -72,6 +77,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
 
                       case result do
                         {:stop, {:accounting_uncertain, cause}} -> exit({:accounting_uncertain, cause})
+                        {:stop, {:stale_execution, ids, cause}} -> exit({:stale_execution, ids, cause})
                         other -> other
                       end
                   end
@@ -87,7 +93,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
         end
 
       entry = Map.get(runtime.running, issue.id)
-      if mode == :controlled and entry, do: send(entry.pid, {:captured, entry.agent_execution.context})
+      if mode == :controlled and entry, do: send(entry.pid, {:captured, entry.agent_execution.context, entry.agent_execution.expected})
       {:reply, entry, %{state | runtime: runtime}}
     end
 
@@ -109,7 +115,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
       {:reply, :ok, state}
     end
 
-    def handle_call({:agent_execution, _context, {:confirm, _, _}} = message, from, %{usage: usage} = state) when not is_nil(usage),
+    def handle_call({:agent_execution, _invocation, _expected, {:confirm, _, _}} = message, from, %{usage: usage} = state) when not is_nil(usage),
       do: {:noreply, %{state | confirmation: {message, from}}}
 
     def handle_call(message, from, state) do
@@ -118,7 +124,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     end
 
     @impl true
-    def handle_info({:agent_execution_usage, invocation, observation} = message, %{hold_usage?: true} = state) do
+    def handle_info({:agent_execution_usage, invocation, _expected, observation} = message, %{hold_usage?: true} = state) do
       send(state.observer, {:usage_held, self(), invocation, observation})
       {:noreply, %{state | usage: message}}
     end
@@ -248,12 +254,15 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
 
     for key <- [:worker, :owner, :issue_id, :ticket, :lease_token] do
       forged = put_in(invocation, [:context, key], :forged)
-      send(owner, {:agent_execution_usage, forged, {:ok, :invocation_absolute, counters(100)}})
-      send(owner, {:agent_worker_update, forged, %{event: :notification, timestamp: DateTime.utc_now(), usage: counters(100), rate_limits: %{remaining: 0}}})
+      send(owner, {:agent_execution_usage, forged, entry.agent_execution.expected, {:ok, :invocation_absolute, counters(100)}})
+      send(owner, {:agent_worker_update, forged, entry.agent_execution.expected, %{event: :notification, timestamp: DateTime.utc_now(), usage: counters(100), rate_limits: %{remaining: 0}}})
     end
 
     send(owner, {:agent_worker_update, c.issue.id, %{event: :notification, timestamp: DateTime.utc_now(), usage: counters(100)}})
-    assert {:stop, {:accounting_uncertain, :execution_sender_mismatch}} = GenServer.call(owner, {:agent_execution, entry.agent_execution.context, {:confirm, invocation.binding, invocation.ordinal}})
+
+    assert {:stop, {:accounting_uncertain, :execution_sender_mismatch}} =
+             GenServer.call(owner, {:agent_execution, invocation, entry.agent_execution.expected, {:confirm, invocation.binding, invocation.ordinal}})
+
     after_state = GenServer.call(owner, :runtime)
     assert after_state.running == before.running
     assert after_state.agent_totals == before.agent_totals
@@ -388,11 +397,19 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     journal = journal_bytes(entry)
     path = RunStateStore.state_path(c.workspace)
     File.write!(path, "unreadable-snapshot")
-    assert {:stop, {:accounting_uncertain, %Jason.DecodeError{}}} = in_worker(worker, fn -> AgentExecution.observe_usage(invocation, %{usage: counters(100)}) end)
+    ids = execution_ids(entry)
+    assert {:error, %Jason.DecodeError{} = cause} = Jason.decode("unreadable-snapshot")
+    assert {:stop, {:stale_execution, ^ids, ^cause}} = in_worker(worker, fn -> AgentExecution.observe_usage(invocation, %{usage: counters(100)}) end)
     after_state = GenServer.call(owner, :runtime)
     assert after_state.agent_totals == before.agent_totals
     assert after_state.running[c.issue.id].agent_input_tokens == 0
     assert AgentExecution.total_usage(after_state.running[c.issue.id].agent_execution.registry) == counters(0)
+    assert after_state.running[c.issue.id].agent_execution.registry.uncertain == nil
+    assert after_state.running[c.issue.id].agent_execution.terminal == {:stale_execution, ids, cause}
+    assert after_state.stale_execution_errors[c.issue.id] == %{context: entry.agent_execution.context, ids: ids, cause: cause}
+    assert after_state.token_usage_errors == %{}
+    assert after_state.lease_claims[c.issue.id] == before.lease_claims[c.issue.id]
+    refute Map.has_key?(after_state.retry_attempts, c.issue.id)
     assert File.read!(path) == "unreadable-snapshot"
     assert journal_bytes(entry) == journal
   end
@@ -406,14 +423,30 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     bytes = File.read!(successor.token.storage.lease_path)
     snapshot = File.read!(RunStateStore.state_path(c.workspace))
     forged = put_in(invocation, [:context, :lease_token], successor.token)
-    send(owner, {:agent_execution_usage, forged, {:ok, :invocation_absolute, counters(99)}})
+    send(owner, {:agent_execution_usage, forged, entry.agent_execution.expected, {:ok, :invocation_absolute, counters(99)}})
     assert GenServer.call(owner, :runtime).agent_totals.total_tokens == 0
-    assert {:stop, {:accounting_uncertain, :lease_token_mismatch}} = in_worker(worker, fn -> AgentExecution.observe_usage(invocation, %{usage: counters(100)}) end)
+    ids = execution_ids(entry)
+    journal = journal_bytes(entry)
+    assert {:stop, {:stale_execution, ^ids, :lease_token_mismatch}} = in_worker(worker, fn -> AgentExecution.observe_usage(invocation, %{usage: counters(100)}) end)
+    held = GenServer.call(owner, :runtime)
+    assert held.agent_totals.total_tokens == 0
+    assert AgentExecution.total_usage(held.running[c.issue.id].agent_execution.registry) == counters(0)
+    assert held.running[c.issue.id].agent_execution.registry.uncertain == nil
+    assert held.stale_execution_errors[c.issue.id] == %{context: entry.agent_execution.context, ids: ids, cause: :lease_token_mismatch}
+    assert held.token_usage_errors == %{}
     assert File.read!(successor.token.storage.lease_path) == bytes
     assert File.read!(RunStateStore.state_path(c.workspace)) == snapshot
     send(worker, :finish)
-    assert_receive {:worker_down, ^owner, _, runtime}, 5_000
+    assert_receive {:worker_down, ^owner, {:DOWN, ref, :process, ^worker, {:stale_execution, ^ids, :lease_token_mismatch}}, runtime}, 5_000
+    assert ref == entry.ref
     assert runtime.lease_claims[c.issue.id].token == entry.lease_token
+    assert runtime.lease_claims[c.issue.id] == held.lease_claims[c.issue.id]
+    assert runtime.stale_execution_errors == held.stale_execution_errors
+    assert runtime.token_usage_errors == %{}
+    assert runtime.agent_totals.total_tokens == 0
+    refute Map.has_key?(runtime.retry_attempts, c.issue.id)
+    assert File.read!(RunStateStore.state_path(c.workspace)) == snapshot
+    assert journal_bytes(entry) == journal
     assert File.read!(successor.token.storage.lease_path) == bytes
   end
 
@@ -426,7 +459,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     replacement = controlled_dispatch(owner, c.issue)
     snapshot = File.read!(RunStateStore.state_path(c.workspace))
     send(owner, {:DOWN, old.ref, :process, worker, {:accounting_uncertain, :old}})
-    send(owner, {:agent_execution_usage, invocation, {:ok, :invocation_absolute, counters(99)}})
+    send(owner, {:agent_execution_usage, invocation, old.agent_execution.expected, {:ok, :invocation_absolute, counters(99)}})
     send(owner, {:agent_execution_uncertain, old.agent_execution.context, :old})
     runtime = GenServer.call(owner, :runtime)
     assert runtime.running[c.issue.id].pid == replacement.pid
@@ -522,8 +555,10 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     consumer_cli!(c, "claude", %{"input_tokens" => 7, "output_tokens" => 3})
     {owner, worker, entry} = start_controlled(c)
     snapshot_path = RunStateStore.state_path(c.workspace)
+    ids = execution_ids(entry)
+    assert {:error, %Jason.DecodeError{} = cause} = Jason.decode("corrupt-before-return")
 
-    assert {:stop, {:accounting_uncertain, %Jason.DecodeError{}}} =
+    assert {:stop, {:stale_execution, ^ids, ^cause}} =
              in_worker(worker, fn ->
                {:ok, session, binding} = AgentProvider.open_session(Claude, c.workspace, c.issue, :main)
 
@@ -551,8 +586,9 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     ["accounting-fault-boundary" | after_fault] = Enum.drop_while(commands, &(&1 != "accounting-fault-boundary"))
     assert after_fault == []
     assert File.read!(snapshot_path) == "corrupt-before-return"
+    assert GenServer.call(owner, :runtime).agent_totals.total_tokens == 10
     before = consumer_evidence(c)
-    consumer_assert_uncertain_down!(c, owner, worker, entry, before)
+    consumer_assert_stale_down!(c, owner, worker, entry, before, cause)
   end
 
   test "I2a-17 owner death stops its admitted worker before another continuation", c do
@@ -575,7 +611,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
 
     deploy_ticket =
       in_worker(worker, fn ->
-        assert {:ok, _state} = RunStateStore.transition(c.workspace, "deploy_preview", %{})
+        assert {:ok, _state} = AgentExecution.transition_current("deploy_preview", %{})
 
         assert {:ok, ticket} =
                  SymphonyElixir.DeployAudit.begin(c.workspace, %{
@@ -864,16 +900,22 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
       backup = ledger <> ".consumer-before-fault"
       File.rename!(ledger, backup)
       File.mkdir!(ledger)
+      ids = execution_ids(entry)
+      requested_event_id = before.marker |> Jason.decode!() |> get_in(["requested", "event_id"])
 
       try do
         :ok = GenServer.call(owner, :release_usage)
-        assert {:stop, {:accounting_uncertain, _cause}} = Task.await(task, 7_000)
+
+        assert {:stop, {:stale_execution, ^ids, %SymphonyElixir.RunLedger.PersistenceError{phase: :read, reason: :eisdir, confirmation: :uncertain, event_id: ^requested_event_id} = cause}} =
+                 Task.await(task, 7_000)
+
         assert consumer_commands_after_transport(c) == []
         assert File.read!(before.snapshot_path) == before.snapshot
         assert File.read!(before.marker_path) == before.marker
         assert consumer_head(c) == before.head
         refute File.exists?(Path.join(c.root, "after-run"))
-        consumer_assert_uncertain_down!(c, owner, worker, entry, before)
+        assert GenServer.call(owner, :runtime).agent_totals.total_tokens == 0
+        consumer_assert_stale_down!(c, owner, worker, entry, before, cause)
       after
         if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker)
         File.rmdir!(ledger)
@@ -1120,6 +1162,36 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     assert File.read!(before.marker_path) == before.marker
   end
 
+  defp consumer_assert_stale_down!(c, owner, worker, entry, before, cause) do
+    ids = execution_ids(entry)
+    runtime = GenServer.call(owner, :runtime)
+    assert runtime.running[c.issue.id].pid == worker
+    assert runtime.running[c.issue.id].agent_execution.registry.uncertain == nil
+    assert runtime.running[c.issue.id].agent_execution.terminal == {:stale_execution, ids, cause}
+    assert runtime.stale_execution_errors[c.issue.id] == %{context: entry.agent_execution.context, ids: ids, cause: cause}
+    assert runtime.token_usage_errors == %{}
+    assert runtime.running[c.issue.id].dispatch_ticket == entry.dispatch_ticket
+    claim = runtime.lease_claims[c.issue.id]
+    assert claim.holder == :running
+    assert claim.token == entry.lease_token
+    refute Map.has_key?(runtime.retry_attempts, c.issue.id)
+    totals = Map.take(runtime.agent_totals, [:input_tokens, :output_tokens, :total_tokens])
+    lease = File.read!(entry.lease_token.storage.lease_path)
+    send(worker, :finish)
+    assert_receive {:worker_down, ^owner, {:DOWN, ref, :process, ^worker, {:stale_execution, ^ids, ^cause}}, stopped}, 2_000
+    assert ref == entry.ref
+    refute Map.has_key?(stopped.running, c.issue.id)
+    assert stopped.lease_claims[c.issue.id] == claim
+    assert stopped.stale_execution_errors == runtime.stale_execution_errors
+    assert stopped.token_usage_errors == %{}
+    assert Map.take(stopped.agent_totals, [:input_tokens, :output_tokens, :total_tokens]) == totals
+    refute Map.has_key?(stopped.retry_attempts, c.issue.id)
+    refute Map.has_key?(stopped.completed, c.issue.id)
+    assert File.read!(entry.lease_token.storage.lease_path) == lease
+    assert File.read!(before.snapshot_path) == before.snapshot
+    assert File.read!(before.marker_path) == before.marker
+  end
+
   defp consumer_await_file!(path, deadline) do
     unless File.exists?(path) do
       assert System.monotonic_time(:millisecond) < deadline, "AppServer did not queue approval/tool"
@@ -1201,11 +1273,11 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
       )
 
       assert_mailbox_contains(owner, fn message ->
-        match?({:agent_execution_usage, ^invocation, {:ok, :invocation_absolute, _}}, message)
+        match?({:agent_execution_usage, ^invocation, _, {:ok, :invocation_absolute, _}}, message)
       end)
 
       assert_mailbox_contains(owner, fn message ->
-        match?({:"$gen_call", _, {:agent_execution, _, {:confirm, _, _}}}, message)
+        match?({:"$gen_call", _, {:agent_execution, _, _, {:confirm, _, _}}}, message)
       end)
     after
       :ok = :sys.resume(owner)
@@ -1457,8 +1529,9 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     entry = GenServer.call(owner, {:dispatch, issue, :controlled}, 10_000)
     assert is_map(entry)
     worker = entry.pid
-    assert_receive {:worker_ready, ^worker, context}, 5_000
+    assert_receive {:worker_ready, ^worker, context, expected}, 5_000
     assert context == entry.agent_execution.context
+    assert expected === entry.agent_execution.expected
     on_exit(fn -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
     entry
   end
@@ -1500,6 +1573,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
         )
   end
 
+  defp execution_ids(entry), do: %{run_id: entry.dispatch_ticket.run_id, dispatch_id: entry.dispatch_ticket.dispatch_id}
   defp journal_bytes(entry), do: File.read!(Path.join(DispatchAudit.marker_directory(entry.workspace_path), "marker.json"))
   defp counters(value), do: %{input_tokens: value, output_tokens: 0, total_tokens: value}
 

@@ -8,6 +8,7 @@ defmodule SymphonyElixir.RunPolicy do
   require Logger
 
   alias SymphonyElixir.{
+    AgentExecution,
     Config,
     IssueSource,
     RepoCompatibility,
@@ -45,8 +46,14 @@ defmodule SymphonyElixir.RunPolicy do
           target_state: String.t()
         }
 
-  @spec enforce_pre_run(map(), Path.t(), keyword()) :: :ok | {:stop, violation()}
+  @spec enforce_pre_run(map(), Path.t(), keyword()) :: :ok | {:stop, violation()} | AgentExecution.terminal()
   def enforce_pre_run(issue, workspace, opts \\ []) do
+    with {:ok, _entry} <- AgentExecution.entry_context(workspace, issue) do
+      do_enforce_pre_run(issue, workspace, opts)
+    end
+  end
+
+  defp do_enforce_pre_run(issue, workspace, opts) do
     inspection = RunInspector.inspect(workspace, opts)
 
     cond do
@@ -72,12 +79,14 @@ defmodule SymphonyElixir.RunPolicy do
       true ->
         case workload_violation(issue) do
           nil ->
-            case RepoCompatibility.compatible?(workspace, opts) do
-              {:ok, true, _report} ->
-                run_preflight_or_promote(issue, workspace, inspection, opts)
+            with {:ok, _entry} <- AgentExecution.entry_context(workspace, issue) do
+              case RepoCompatibility.compatible?(workspace, opts) do
+                {:ok, true, _report} ->
+                  run_preflight_or_promote(issue, workspace, inspection, opts)
 
-              {:ok, false, report} ->
-                stop_issue(issue, repo_not_compatible_violation(report), workspace)
+                {:ok, false, report} ->
+                  stop_issue(issue, repo_not_compatible_violation(report), workspace)
+              end
             end
 
           %Violation{} = violation ->
@@ -87,15 +96,17 @@ defmodule SymphonyElixir.RunPolicy do
   end
 
   defp run_preflight_or_promote(issue, workspace, inspection, opts) do
-    case RunInspector.run_preflight(workspace, inspection.harness, opts) do
-      %{status: :failed, output: output} ->
-        stop_issue(issue, preflight_failed_violation(output), workspace)
+    with {:ok, _entry} <- AgentExecution.entry_context(workspace, issue) do
+      case RunInspector.run_preflight(workspace, inspection.harness, opts) do
+        %{status: :failed, output: output} ->
+          stop_issue(issue, preflight_failed_violation(output), workspace)
 
-      %{status: :unavailable, output: output} ->
-        stop_issue(issue, preflight_failed_violation(output), workspace)
+        %{status: :unavailable, output: output} ->
+          stop_issue(issue, preflight_failed_violation(output), workspace)
 
-      _ ->
-        promote_todo_issue(issue)
+        _ ->
+          promote_todo_issue(issue, workspace)
+      end
     end
   end
 
@@ -269,17 +280,28 @@ defmodule SymphonyElixir.RunPolicy do
 
   @spec maybe_stop_for_token_budget(map(), map()) :: :ok | {:retry, map()} | {:stop, violation()}
   def maybe_stop_for_token_budget(issue, running_entry) do
+    {:ok, result, :legacy} = evaluate_token_budget(issue, running_entry, :legacy)
+    result
+  end
+
+  @spec maybe_stop_for_token_budget(map(), map(), %{authority: RunStateStore.authority(), expected: map()}) ::
+          {:ok, :ok | {:retry, map()} | {:stop, violation()}, map()} | {:error, term()}
+  def maybe_stop_for_token_budget(issue, running_entry, %{authority: authority, expected: expected} = precondition) do
+    with {:ok, state} <- RunStateStore.ensure_current(authority, expected),
+         :ok <- matching_policy_issue(issue, state),
+         {:ok, result, checked} <- evaluate_token_budget(issue, running_entry, %{precondition: precondition, state: state}) do
+      {:ok, result, checked.state}
+    end
+  end
+
+  defp evaluate_token_budget(issue, running_entry, policy) do
     token_budget = Config.policy_token_budget()
     review_fix_budget = Config.policy_review_fix_token_budget()
     broad_implement_budget = Config.policy_broad_implement_token_budget()
 
-    workspace =
-      Map.get(running_entry, :workspace_path) ||
-        Map.get(running_entry, :workspace) ||
-        Workspace.path_for_issue(Map.get(issue, :identifier) || Map.get(issue, "identifier"))
-
-    run_state = RunStateStore.load_or_default(workspace, issue)
-    stage_budget = current_stage_token_budget(issue, running_entry, workspace, run_state)
+    workspace = policy_workspace(issue, running_entry, policy)
+    run_state = policy_run_state(workspace, issue, policy)
+    stage_budget = policy_stage_token_budget(issue, running_entry, workspace, run_state, policy)
     total_budget = current_total_token_budget(token_budget, issue, running_entry, run_state)
     input_total = Map.get(running_entry, :agent_input_tokens, 0)
     issue_usage = issue_token_usage(running_entry)
@@ -287,9 +309,9 @@ defmodule SymphonyElixir.RunPolicy do
     total_tokens = issue_usage.total_tokens
     turn_started_input = Map.get(running_entry, :turn_started_input_tokens, 0)
     current_turn_input = max(0, input_total - turn_started_input)
-    resume_context = effective_resume_context(run_state, running_entry)
+    resume_context = policy_resume_context(run_state, running_entry, policy)
 
-    if review_fix_budget_mode?(running_entry, resume_context, review_fix_budget) do
+    if policy_review_fix_budget_mode?(running_entry, resume_context, review_fix_budget, run_state, policy) do
       maybe_enforce_review_fix_token_budget(
         issue,
         running_entry,
@@ -299,131 +321,211 @@ defmodule SymphonyElixir.RunPolicy do
         token_budget,
         current_turn_input,
         total_tokens,
-        output_total
+        output_total,
+        policy
       )
     else
       stage =
         Map.get(running_entry, :dispatch_stage) ||
           Map.get(running_entry, :stage) ||
-          current_stage(issue, workspace, run_state)
+          policy_stage(issue, workspace, run_state, policy)
 
-      maybe_record_soft_budget_pressure(
-        issue,
-        running_entry,
-        current_turn_input,
-        stage_budget,
-        workspace,
-        run_state
-      )
+      with {:ok, policy} <-
+             maybe_record_soft_budget_pressure(
+               issue,
+               running_entry,
+               current_turn_input,
+               stage_budget,
+               workspace,
+               run_state,
+               policy
+             ) do
+        refreshed_run_state = policy_run_state(workspace, issue, policy)
 
-      refreshed_run_state = RunStateStore.load_or_default(workspace, issue)
+        refreshed_resume_context = policy_resume_context(refreshed_run_state, running_entry, policy)
 
-      refreshed_resume_context = effective_resume_context(refreshed_run_state, running_entry)
+        broad_admission =
+          broad_implement_admission_state(
+            issue,
+            running_entry,
+            refreshed_resume_context,
+            broad_implement_budget,
+            stage,
+            stage_budget,
+            current_turn_input,
+            workspace,
+            refreshed_run_state
+          )
 
-      broad_admission =
-        broad_implement_admission_state(
-          issue,
-          running_entry,
-          refreshed_resume_context,
-          broad_implement_budget,
-          stage,
-          stage_budget,
-          current_turn_input,
-          workspace,
-          refreshed_run_state
-        )
+        case maybe_enforce_broad_implement_token_budget(
+               issue,
+               running_entry,
+               workspace,
+               refreshed_resume_context,
+               broad_implement_budget,
+               current_turn_input,
+               broad_admission,
+               policy
+             ) do
+          {:ok, :pass_through, policy} ->
+            cond do
+              budget_exceeded?(
+                stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
+                current_turn_input
+              ) ->
+                persisted_resume_context =
+                  generic_budget_resume_context_for_stop(
+                    refreshed_resume_context,
+                    broad_admission,
+                    current_turn_input
+                  )
 
-      case maybe_enforce_broad_implement_token_budget(
-             issue,
-             running_entry,
-             workspace,
-             refreshed_resume_context,
-             broad_implement_budget,
-             current_turn_input,
-             broad_admission
-           ) do
-        :pass_through ->
-          cond do
-            budget_exceeded?(
-              stage_budget[:per_turn_input_hard] || token_budget[:per_turn_input],
-              current_turn_input
-            ) ->
-              persisted_resume_context =
-                generic_budget_resume_context_for_stop(
-                  refreshed_resume_context,
-                  broad_admission,
-                  current_turn_input
+                stop_issue(
+                  issue,
+                  token_budget_violation(
+                    :per_turn_input,
+                    current_turn_input,
+                    %{
+                      budget_admission_reason: Map.get(broad_admission, :admission_reason),
+                      resume_context: persisted_resume_context,
+                      target_paths: Map.get(persisted_resume_context, :target_paths, []),
+                      next_required_path: Map.get(persisted_resume_context, :next_required_path),
+                      budget_expansion_used: SymphonyElixir.Util.truthy?(Map.get(persisted_resume_context, :budget_expansion_used))
+                    }
+                  ),
+                  workspace,
+                  policy
                 )
 
-              stop_issue(
-                issue,
-                token_budget_violation(
-                  :per_turn_input,
-                  current_turn_input,
-                  %{
-                    budget_admission_reason: Map.get(broad_admission, :admission_reason),
-                    resume_context: persisted_resume_context,
-                    target_paths: Map.get(persisted_resume_context, :target_paths, []),
-                    next_required_path: Map.get(persisted_resume_context, :next_required_path),
-                    budget_expansion_used: SymphonyElixir.Util.truthy?(Map.get(persisted_resume_context, :budget_expansion_used))
-                  }
-                ),
-                workspace
-              )
+              budget_exceeded?(total_budget, total_tokens) ->
+                stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace, policy)
 
-            budget_exceeded?(total_budget, total_tokens) ->
-              stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+              budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
+                stop_issue(
+                  issue,
+                  token_budget_violation(:per_issue_total_output, output_total),
+                  workspace,
+                  policy
+                )
 
-            budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-              stop_issue(
-                issue,
-                token_budget_violation(:per_issue_total_output, output_total),
-                workspace
-              )
+              true ->
+                {:ok, :ok, policy}
+            end
 
-            true ->
-              :ok
-          end
+          {:ok, {:retry, _metadata} = retry, policy} ->
+            cond do
+              budget_exceeded?(total_budget, total_tokens) ->
+                stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace, policy)
 
-        {:retry, _metadata} = retry ->
-          cond do
-            budget_exceeded?(total_budget, total_tokens) ->
-              stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+              budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
+                stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace, policy)
 
-            budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-              stop_issue(issue, token_budget_violation(:per_issue_total_output, output_total), workspace)
+              true ->
+                {:ok, retry, policy}
+            end
 
-            true ->
-              retry
-          end
-
-        result ->
-          result
+          result ->
+            result
+        end
       end
     end
   end
 
-  defp promote_todo_issue(%{id: issue_id, state: state} = issue)
+  defp matching_policy_issue(issue, state) do
+    if (Map.get(issue, :id) || Map.get(issue, "id")) == state[:issue_id] and
+         (Map.get(issue, :identifier) || Map.get(issue, "identifier")) == state[:issue_identifier],
+       do: :ok,
+       else: {:error, {:stale_execution, :execution_issue_mismatch}}
+  end
+
+  defp policy_workspace(issue, entry, :legacy), do: workspace_for_issue(issue, entry)
+  defp policy_workspace(_issue, _entry, %{precondition: %{authority: authority}}), do: authority.ticket.workspace
+  defp policy_run_state(workspace, issue, :legacy), do: RunStateStore.load_or_default(workspace, issue)
+  defp policy_run_state(_workspace, _issue, %{state: state}), do: state
+  defp policy_resume_context(state, entry, :legacy), do: effective_resume_context(state, entry)
+  defp policy_resume_context(state, _entry, _policy), do: normalize_resume_context(Map.get(state, :resume_context, %{}))
+  defp policy_stage(issue, workspace, state, :legacy), do: current_stage(issue, workspace, state)
+  defp policy_stage(_issue, _workspace, state, _policy), do: Map.get(state, :stage, "checkout")
+
+  defp policy_stage_token_budget(issue, entry, workspace, state, :legacy),
+    do: current_stage_token_budget(issue, entry, workspace, state)
+
+  defp policy_stage_token_budget(issue, entry, workspace, state, policy) do
+    stage = Map.get(entry, :dispatch_stage) || Map.get(entry, :stage) || policy_stage(issue, workspace, state, policy)
+    budget = Config.policy_stage_token_budget(stage)
+    maybe_relax_review_fix_budget(if(is_map(budget), do: budget, else: %{}), issue, stage, workspace, state)
+  end
+
+  defp policy_review_fix_budget_mode?(entry, resume, budget, _state, :legacy),
+    do: review_fix_budget_mode?(entry, resume, budget)
+
+  defp policy_review_fix_budget_mode?(entry, resume, budget, state, _policy) do
+    stage = Map.get(entry, :stage) || Map.get(entry, :dispatch_stage) || Map.get(state, :stage, "checkout")
+    Map.get(budget, :enabled, true) and stage == "implement" and Map.get(resume, :budget_mode) == "review_fix"
+  end
+
+  defp persist_resume_context(issue, entry, resume, :legacy) do
+    :ok = persist_resume_context(issue, entry, resume)
+    {:ok, :legacy}
+  end
+
+  defp persist_resume_context(_issue, _entry, resume, %{precondition: precondition} = policy) do
+    with {:ok, state} <- RunStateStore.update_current(precondition.authority, precondition.expected, %{resume_context: resume}) do
+      {:ok, %{policy | state: state}}
+    end
+  end
+
+  defp persist_soft_resume_context(workspace, state, resume, :legacy) do
+    _ = RunStateStore.transition(workspace, Map.get(state, :stage, "checkout"), %{resume_context: resume})
+    {:ok, :legacy}
+  end
+
+  defp persist_soft_resume_context(_workspace, _state, resume, policy),
+    do: persist_resume_context(nil, nil, resume, policy)
+
+  defp stop_issue(issue, violation, workspace, :legacy),
+    do: {:ok, stop_issue_legacy(issue, violation, workspace), :legacy}
+
+  defp stop_issue(issue, violation, _workspace, %{precondition: precondition} = policy) do
+    with {:ok, current} <- RunStateStore.ensure_current(precondition.authority, precondition.expected) do
+      {identifier, comment, event} = policy_stop_details(issue, violation)
+      attrs = policy_stop_attrs(violation, event, current_resume_context(violation, current))
+
+      with {:ok, blocked} <- RunStateStore.transition_current(precondition.authority, precondition.expected, "blocked", attrs),
+           next = RunStateStore.material_projection(blocked),
+           :ok <- RunStateStore.confirm_terminal_current(precondition.authority, next),
+           :ok <- notify_policy_comment(issue, identifier, comment),
+           :ok <- RunStateStore.confirm_terminal_current(precondition.authority, next),
+           :ok <- notify_policy_state(issue, identifier, violation.target_state) do
+        {:ok, {:stop, violation}, %{policy | state: blocked}}
+      end
+    end
+  end
+
+  defp promote_todo_issue(%{id: issue_id, state: state} = issue, workspace)
        when is_binary(issue_id) and is_binary(state) do
     if SymphonyElixir.Util.normalize_state(state) == SymphonyElixir.Util.normalize_state(@in_progress_state) do
       :ok
     else
       if SymphonyElixir.Util.normalize_state(state) == "todo" do
-        case IssueSource.update_issue_state(
-               %{id: issue_id, source: Map.get(issue, :source)},
-               @in_progress_state
-             ) do
-          :ok ->
-            :ok
+        with {:ok, _entry} <- AgentExecution.entry_context(workspace, issue) do
+          case IssueSource.update_issue_state(
+                 %{id: issue_id, source: Map.get(issue, :source)},
+                 @in_progress_state
+               ) do
+            :ok ->
+              :ok
 
-          {:error, {:tracker_mutation_forbidden, _pack}} ->
-            :ok
+            {:error, {:tracker_mutation_forbidden, _pack}} ->
+              :ok
 
-          {:error, reason} ->
-            stop_issue(
-              %{id: issue_id},
-              preflight_failed_violation("Unable to move issue to In Progress: #{inspect(reason)}")
-            )
+            {:error, reason} ->
+              stop_issue(
+                issue,
+                preflight_failed_violation("Unable to move issue to In Progress: #{inspect(reason)}"),
+                workspace
+              )
+          end
         end
       else
         :ok
@@ -431,7 +533,7 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp promote_todo_issue(_issue), do: :ok
+  defp promote_todo_issue(_issue, _workspace), do: :ok
 
   defp evaluate_noop(issue, before_snapshot, after_snapshot, noop_turns) do
     noop_turns =
@@ -518,18 +620,56 @@ defmodule SymphonyElixir.RunPolicy do
       normalize_repo_url(expected) != normalize_repo_url(origin_url)
   end
 
-  defp stop_issue(issue, %Violation{} = violation, workspace \\ nil) do
+  defp stop_issue(issue, violation, workspace \\ nil)
+  defp stop_issue(issue, violation, nil), do: stop_issue_legacy(issue, violation, nil)
+
+  defp stop_issue(issue, violation, workspace) do
+    case AgentExecution.entry_context(workspace, issue) do
+      {:ok, :legacy} -> stop_issue_legacy(issue, violation, workspace)
+      {:ok, _context} -> stop_issue_worker(issue, violation)
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp stop_issue_worker(issue, violation) do
+    with {:ok, current} <- AgentExecution.ensure_current() do
+      {identifier, comment, event} = policy_stop_details(issue, violation)
+      attrs = policy_stop_attrs(violation, event, current_resume_context(violation, current))
+
+      with {:ok, _blocked} <- AgentExecution.transition_current("blocked", attrs),
+           :ok <- AgentExecution.confirm_stop_notification(),
+           :ok <- notify_policy_comment(issue, identifier, comment),
+           :ok <- AgentExecution.confirm_stop_notification(),
+           :ok <- notify_policy_state(issue, identifier, violation.target_state) do
+        {:stop, violation}
+      end
+    end
+  end
+
+  defp stop_issue_legacy(issue, violation, workspace) do
+    {identifier, comment, event} = policy_stop_details(issue, violation)
+
+    if is_binary(workspace) do
+      resume = persisted_resume_context_from_violation(violation, workspace)
+      _ = RunStateStore.transition(workspace, "blocked", policy_stop_attrs(violation, event, resume))
+    end
+
+    if is_binary(Map.get(issue, :id) || Map.get(issue, "id")) do
+      :ok = notify_policy_comment(issue, identifier, comment)
+      :ok = notify_policy_state(issue, identifier, violation.target_state)
+    end
+
+    {:stop, violation}
+  end
+
+  defp policy_stop_details(issue, violation) do
     issue_id = Map.get(issue, :id) || Map.get(issue, "id")
+    identifier = Map.get(issue, :identifier) || Map.get(issue, "identifier") || issue_id || "unknown"
 
-    issue_identifier =
-      Map.get(issue, :identifier) || Map.get(issue, "identifier") || issue_id || "unknown"
-
-    comment = violation_comment(issue_identifier, violation)
-
-    ledger_event =
+    event =
       RunLedger.record("runtime.stopped", %{
         issue_id: issue_id,
-        issue_identifier: issue_identifier,
+        issue_identifier: identifier,
         actor_type: "runtime",
         actor_id: "run_policy",
         failure_class: violation.failure_class,
@@ -544,56 +684,60 @@ defmodule SymphonyElixir.RunPolicy do
         }
       })
 
-    if is_binary(workspace) do
-      persisted_resume_context = persisted_resume_context_from_violation(violation, workspace)
+    {identifier, violation_comment(identifier, violation), event}
+  end
 
-      _ =
-        RunStateStore.transition(workspace, "blocked", %{
-          resume_context: persisted_resume_context,
-          stop_reason: %{
-            code: Atom.to_string(violation.code),
-            rule_id: violation.rule_id,
-            failure_class: violation.failure_class,
-            summary: violation.summary,
-            details: violation.details,
-            human_action: violation.human_action
-          },
-          last_decision: %{
-            rule_id: violation.rule_id,
-            failure_class: violation.failure_class,
-            summary: violation.summary,
-            details: violation.details,
-            human_action: violation.human_action,
-            target_state: violation.target_state,
-            ledger_event_id: Map.get(ledger_event, :event_id),
-            metadata: violation.metadata
-          },
-          last_rule_id: violation.rule_id,
-          last_failure_class: violation.failure_class,
-          last_decision_summary: violation.summary,
-          next_human_action: violation.human_action
-        })
+  defp policy_stop_attrs(violation, event, resume) do
+    %{
+      resume_context: resume,
+      stop_reason: %{
+        code: Atom.to_string(violation.code),
+        rule_id: violation.rule_id,
+        failure_class: violation.failure_class,
+        summary: violation.summary,
+        details: violation.details,
+        human_action: violation.human_action
+      },
+      last_decision: %{
+        rule_id: violation.rule_id,
+        failure_class: violation.failure_class,
+        summary: violation.summary,
+        details: violation.details,
+        human_action: violation.human_action,
+        target_state: violation.target_state,
+        ledger_event_id: Map.get(event, :event_id),
+        metadata: violation.metadata
+      },
+      last_rule_id: violation.rule_id,
+      last_failure_class: violation.failure_class,
+      last_decision_summary: violation.summary,
+      next_human_action: violation.human_action
+    }
+  end
+
+  defp current_resume_context(%Violation{metadata: metadata}, state) do
+    case Map.get(metadata, :resume_context) || Map.get(metadata, "resume_context") do
+      resume when is_map(resume) -> resume
+      _ -> Map.get(state, :resume_context, %{})
+    end
+  end
+
+  defp notify_policy_comment(issue, identifier, comment) do
+    case IssueSource.create_comment(issue, comment) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Failed to create policy comment for #{identifier}: #{inspect(reason)}")
     end
 
-    if is_binary(issue_id) do
-      case IssueSource.create_comment(issue, comment) do
-        :ok ->
-          :ok
+    :ok
+  end
 
-        {:error, reason} ->
-          Logger.warning("Failed to create policy comment for #{issue_identifier}: #{inspect(reason)}")
-      end
-
-      case IssueSource.update_issue_state(issue, violation.target_state) do
-        :ok ->
-          :ok
-
-        {:error, reason} ->
-          Logger.warning("Failed to move #{issue_identifier} to #{violation.target_state}: #{inspect(reason)}")
-      end
+  defp notify_policy_state(issue, identifier, target) do
+    case IssueSource.update_issue_state(issue, target) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Failed to move #{identifier} to #{target}: #{inspect(reason)}")
     end
 
-    {:stop, violation}
+    :ok
   end
 
   defp persisted_resume_context_from_violation(%Violation{metadata: metadata}, workspace)
@@ -905,63 +1049,72 @@ defmodule SymphonyElixir.RunPolicy do
          token_budget,
          current_turn_input,
          total_tokens,
-         output_total
+         output_total,
+         policy
        ) do
     adaptive_budget = adaptive_review_fix_budget(review_fix_budget, resume_context)
 
-    maybe_record_review_fix_budget_pressure(
-      issue,
-      running_entry,
-      resume_context,
-      current_turn_input,
-      adaptive_budget
-    )
+    with {:ok, policy} <-
+           maybe_record_review_fix_budget_pressure(
+             issue,
+             running_entry,
+             resume_context,
+             current_turn_input,
+             adaptive_budget,
+             policy
+           ) do
+      resume_context = if policy == :legacy, do: resume_context, else: policy_resume_context(policy.state, running_entry, policy)
 
-    cond do
-      review_fix_total_budget_exceeded?(
-        token_budget,
-        review_fix_budget,
-        resume_context,
-        total_tokens
-      ) ->
-        handle_review_fix_total_budget_stop(
-          issue,
-          running_entry,
-          workspace,
-          resume_context,
-          review_fix_budget,
+      cond do
+        review_fix_total_budget_exceeded?(
           token_budget,
-          total_tokens
-        )
-
-      budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
-        stop_issue(
-          issue,
-          token_budget_violation(:per_issue_total_output, output_total),
-          workspace
-        )
-
-      budget_exceeded?(adaptive_budget.per_turn_input_hard, current_turn_input) ->
-        handle_review_fix_turn_budget_stop(
-          issue,
-          running_entry,
-          workspace,
-          resume_context,
           review_fix_budget,
-          current_turn_input,
-          adaptive_budget
-        )
-
-      true ->
-        maybe_activate_review_fix_total_extension(
-          issue,
-          running_entry,
-          workspace,
           resume_context,
-          review_fix_budget,
-          token_budget,
           total_tokens
-        )
+        ) ->
+          handle_review_fix_total_budget_stop(
+            issue,
+            running_entry,
+            workspace,
+            resume_context,
+            review_fix_budget,
+            token_budget,
+            total_tokens,
+            policy
+          )
+
+        budget_exceeded?(token_budget[:per_issue_total_output], output_total) ->
+          stop_issue(
+            issue,
+            token_budget_violation(:per_issue_total_output, output_total),
+            workspace,
+            policy
+          )
+
+        budget_exceeded?(adaptive_budget.per_turn_input_hard, current_turn_input) ->
+          handle_review_fix_turn_budget_stop(
+            issue,
+            running_entry,
+            workspace,
+            resume_context,
+            review_fix_budget,
+            current_turn_input,
+            adaptive_budget,
+            policy
+          )
+
+        true ->
+          maybe_activate_review_fix_total_extension(
+            issue,
+            running_entry,
+            workspace,
+            resume_context,
+            review_fix_budget,
+            token_budget,
+            total_tokens,
+            policy
+          )
+      end
     end
   end
 
@@ -1024,26 +1177,27 @@ defmodule SymphonyElixir.RunPolicy do
          resume_context,
          review_fix_budget,
          token_budget,
-         total_tokens
+         total_tokens,
+         policy
        ) do
     base_budget = token_budget[:per_issue_total]
     extension_budget = review_fix_budget[:per_issue_total_extension]
 
     cond do
       not is_integer(base_budget) ->
-        :ok
+        {:ok, :ok, policy}
 
       not is_integer(extension_budget) ->
-        :ok
+        {:ok, :ok, policy}
 
       total_tokens <= base_budget ->
-        :ok
+        {:ok, :ok, policy}
 
       SymphonyElixir.Util.truthy?(Map.get(resume_context, :budget_total_extension_used)) ->
-        :ok
+        {:ok, :ok, policy}
 
       not review_fix_total_extension_eligible?(resume_context, extension_budget) ->
-        stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+        stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace, policy)
 
       true ->
         persisted_resume_context =
@@ -1058,8 +1212,9 @@ defmodule SymphonyElixir.RunPolicy do
             }
           )
 
-        persist_resume_context(issue, running_entry, persisted_resume_context)
-        :ok
+        with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+          {:ok, :ok, policy}
+        end
     end
   end
 
@@ -1070,14 +1225,15 @@ defmodule SymphonyElixir.RunPolicy do
          resume_context,
          broad_implement_budget,
          current_turn_input,
-         broad_admission
+         broad_admission,
+         policy
        ) do
     cond do
       not Map.get(broad_admission, :enter_retry_lane?, false) ->
-        :pass_through
+        {:ok, :pass_through, policy}
 
       not Map.get(broad_admission, :budget_exceeded?, false) ->
-        :pass_through
+        {:ok, :pass_through, policy}
 
       true ->
         handle_broad_implement_turn_budget_stop(
@@ -1087,7 +1243,8 @@ defmodule SymphonyElixir.RunPolicy do
           resume_context,
           broad_implement_budget,
           current_turn_input,
-          broad_admission
+          broad_admission,
+          policy
         )
     end
   end
@@ -1102,7 +1259,8 @@ defmodule SymphonyElixir.RunPolicy do
          resume_context,
          broad_implement_budget,
          current_turn_input,
-         broad_admission
+         broad_admission,
+         policy
        ) do
     retry_count = broad_implement_retry_count(resume_context)
     can_retry? = retry_count < (broad_implement_budget[:auto_retry_limit] || 0)
@@ -1136,17 +1294,18 @@ defmodule SymphonyElixir.RunPolicy do
             }
           )
 
-        persist_resume_context(issue, running_entry, persisted_resume_context)
-
-        {:retry,
-         %{
-           kind: :broad_implement_budget_retry,
-           summary: "Adaptive broad-implement retry scheduled with one focused file.",
-           budget_mode: "broad_implement",
-           resume_context: persisted_resume_context,
-           observed_input_tokens: current_turn_input,
-           retry_count: retry_count + 1
-         }}
+        with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+          {:ok,
+           {:retry,
+            %{
+              kind: :broad_implement_budget_retry,
+              summary: "Adaptive broad-implement retry scheduled with one focused file.",
+              budget_mode: "broad_implement",
+              resume_context: persisted_resume_context,
+              observed_input_tokens: current_turn_input,
+              retry_count: retry_count + 1
+            }}, policy}
+        end
 
       retry_count >= 1 and not expansion_used? and is_binary(primary_target_path) and
           is_binary(next_required_path) ->
@@ -1167,17 +1326,18 @@ defmodule SymphonyElixir.RunPolicy do
             }
           )
 
-        persist_resume_context(issue, running_entry, persisted_resume_context)
-
-        {:retry,
-         %{
-           kind: :broad_implement_budget_expansion_retry,
-           summary: "Adaptive broad-implement retry scheduled with one explicit expansion file.",
-           budget_mode: "broad_implement",
-           resume_context: persisted_resume_context,
-           observed_input_tokens: current_turn_input,
-           retry_count: retry_count + 1
-         }}
+        with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+          {:ok,
+           {:retry,
+            %{
+              kind: :broad_implement_budget_expansion_retry,
+              summary: "Adaptive broad-implement retry scheduled with one explicit expansion file.",
+              budget_mode: "broad_implement",
+              resume_context: persisted_resume_context,
+              observed_input_tokens: current_turn_input,
+              retry_count: retry_count + 1
+            }}, policy}
+        end
 
       retry_count >= 1 and not expansion_used? and is_binary(primary_target_path) ->
         persisted_resume_context =
@@ -1195,21 +1355,22 @@ defmodule SymphonyElixir.RunPolicy do
             }
           )
 
-        persist_resume_context(issue, running_entry, persisted_resume_context)
+        with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+          metadata =
+            broad_implement_budget_metadata(running_entry, persisted_resume_context)
+            |> Map.put(:resume_context, persisted_resume_context)
 
-        metadata =
-          broad_implement_budget_metadata(running_entry, persisted_resume_context)
-          |> Map.put(:resume_context, persisted_resume_context)
-
-        stop_issue(
-          issue,
-          broad_implement_focus_insufficient_violation(
-            current_turn_input,
-            metadata,
-            next_required_path
-          ),
-          workspace
-        )
+          stop_issue(
+            issue,
+            broad_implement_focus_insufficient_violation(
+              current_turn_input,
+              metadata,
+              next_required_path
+            ),
+            workspace,
+            policy
+          )
+        end
 
       expansion_used? ->
         persisted_resume_context =
@@ -1225,17 +1386,18 @@ defmodule SymphonyElixir.RunPolicy do
             }
           )
 
-        persist_resume_context(issue, running_entry, persisted_resume_context)
+        with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+          metadata =
+            broad_implement_budget_metadata(running_entry, persisted_resume_context)
+            |> Map.put(:resume_context, persisted_resume_context)
 
-        metadata =
-          broad_implement_budget_metadata(running_entry, persisted_resume_context)
-          |> Map.put(:resume_context, persisted_resume_context)
-
-        stop_issue(
-          issue,
-          broad_implement_expansion_exhaustion_violation(current_turn_input, metadata),
-          workspace
-        )
+          stop_issue(
+            issue,
+            broad_implement_expansion_exhaustion_violation(current_turn_input, metadata),
+            workspace,
+            policy
+          )
+        end
 
       true ->
         persisted_resume_context =
@@ -1250,17 +1412,18 @@ defmodule SymphonyElixir.RunPolicy do
             }
           )
 
-        persist_resume_context(issue, running_entry, persisted_resume_context)
+        with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+          metadata =
+            broad_implement_budget_metadata(running_entry, persisted_resume_context)
+            |> Map.put(:resume_context, persisted_resume_context)
 
-        metadata =
-          broad_implement_budget_metadata(running_entry, persisted_resume_context)
-          |> Map.put(:resume_context, persisted_resume_context)
-
-        stop_issue(
-          issue,
-          broad_implement_exhaustion_violation(current_turn_input, metadata),
-          workspace
-        )
+          stop_issue(
+            issue,
+            broad_implement_exhaustion_violation(current_turn_input, metadata),
+            workspace,
+            policy
+          )
+        end
     end
   end
 
@@ -1295,7 +1458,8 @@ defmodule SymphonyElixir.RunPolicy do
          resume_context,
          review_fix_budget,
          token_budget,
-         total_tokens
+         total_tokens,
+         policy
        ) do
     base_budget = token_budget[:per_issue_total]
     extension_budget = review_fix_budget[:per_issue_total_extension]
@@ -1317,15 +1481,16 @@ defmodule SymphonyElixir.RunPolicy do
           %{budget_pressure_level: "critical"}
         )
 
-      persist_resume_context(issue, running_entry, persisted_resume_context)
-
-      stop_issue(
-        issue,
-        review_fix_exhaustion_violation(:total_extension_exhausted, total_tokens, metadata),
-        workspace
-      )
+      with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+        stop_issue(
+          issue,
+          review_fix_exhaustion_violation(:total_extension_exhausted, total_tokens, metadata),
+          workspace,
+          policy
+        )
+      end
     else
-      stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace)
+      stop_issue(issue, token_budget_violation(:per_issue_total, total_tokens), workspace, policy)
     end
   end
 
@@ -1336,7 +1501,8 @@ defmodule SymphonyElixir.RunPolicy do
          resume_context,
          review_fix_budget,
          current_turn_input,
-         adaptive_budget
+         adaptive_budget,
+         policy
        ) do
     retry_count = review_fix_retry_count(resume_context)
     can_retry? = retry_count < (review_fix_budget[:auto_retry_limit] || 0)
@@ -1362,41 +1528,44 @@ defmodule SymphonyElixir.RunPolicy do
         }
       )
 
-    persist_resume_context(issue, running_entry, persisted_resume_context)
+    with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+      cond do
+        can_retry? and turns_in_window < adaptive_budget.max_turns_in_window and
+            review_fix_retry_continues?(retry_count, can_narrow_scope?) ->
+          {:ok,
+           {:retry,
+            %{
+              kind: :review_fix_budget_retry,
+              summary: "Adaptive review-fix retry scheduled after token budget pressure.",
+              resume_context: persisted_resume_context,
+              observed_input_tokens: current_turn_input,
+              retry_count: retry_count + 1,
+              max_turns_in_window: adaptive_budget.max_turns_in_window
+            }}, policy}
 
-    cond do
-      can_retry? and turns_in_window < adaptive_budget.max_turns_in_window and
-          review_fix_retry_continues?(retry_count, can_narrow_scope?) ->
-        {:retry,
-         %{
-           kind: :review_fix_budget_retry,
-           summary: "Adaptive review-fix retry scheduled after token budget pressure.",
-           resume_context: persisted_resume_context,
-           observed_input_tokens: current_turn_input,
-           retry_count: retry_count + 1,
-           max_turns_in_window: adaptive_budget.max_turns_in_window
-         }}
+        turns_in_window >= adaptive_budget.max_turns_in_window ->
+          metadata =
+            review_fix_budget_metadata(running_entry, persisted_resume_context, %{
+              turns_in_window: turns_in_window
+            })
 
-      turns_in_window >= adaptive_budget.max_turns_in_window ->
-        metadata =
-          review_fix_budget_metadata(running_entry, persisted_resume_context, %{
-            turns_in_window: turns_in_window
-          })
+          stop_issue(
+            issue,
+            review_fix_exhaustion_violation(:turn_window_exhausted, current_turn_input, metadata),
+            workspace,
+            policy
+          )
 
-        stop_issue(
-          issue,
-          review_fix_exhaustion_violation(:turn_window_exhausted, current_turn_input, metadata),
-          workspace
-        )
+        true ->
+          metadata = review_fix_budget_metadata(running_entry, persisted_resume_context, %{})
 
-      true ->
-        metadata = review_fix_budget_metadata(running_entry, persisted_resume_context, %{})
-
-        stop_issue(
-          issue,
-          review_fix_exhaustion_violation(:scope_exhausted, current_turn_input, metadata),
-          workspace
-        )
+          stop_issue(
+            issue,
+            review_fix_exhaustion_violation(:scope_exhausted, current_turn_input, metadata),
+            workspace,
+            policy
+          )
+      end
     end
   end
 
@@ -1408,7 +1577,8 @@ defmodule SymphonyElixir.RunPolicy do
          running_entry,
          resume_context,
          current_turn_input,
-         adaptive_budget
+         adaptive_budget,
+         policy
        ) do
     soft_budget = adaptive_budget.per_turn_input_soft
 
@@ -1426,27 +1596,27 @@ defmodule SymphonyElixir.RunPolicy do
           }
         )
 
-      persist_resume_context(issue, running_entry, persisted_resume_context)
+      with {:ok, policy} <- persist_resume_context(issue, running_entry, persisted_resume_context, policy) do
+        _ =
+          RunLedger.record("policy.decided", %{
+            issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+            issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
+            actor_type: "runtime",
+            actor_id: "run_policy",
+            summary: "Scoped review-fix turn entered soft token pressure.",
+            details: "Observed input tokens #{current_turn_input} above scoped soft budget #{soft_budget}.",
+            metadata: %{
+              stage: Map.get(running_entry, :stage),
+              observed: current_turn_input,
+              soft_budget: soft_budget,
+              budget_mode: "review_fix"
+            }
+          })
 
-      _ =
-        RunLedger.record("policy.decided", %{
-          issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
-          issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
-          actor_type: "runtime",
-          actor_id: "run_policy",
-          summary: "Scoped review-fix turn entered soft token pressure.",
-          details: "Observed input tokens #{current_turn_input} above scoped soft budget #{soft_budget}.",
-          metadata: %{
-            stage: Map.get(running_entry, :stage),
-            observed: current_turn_input,
-            soft_budget: soft_budget,
-            budget_mode: "review_fix"
-          }
-        })
-
-      :ok
+        {:ok, policy}
+      end
     else
-      :ok
+      {:ok, policy}
     end
   end
 
@@ -2045,7 +2215,8 @@ defmodule SymphonyElixir.RunPolicy do
          current_turn_input,
          stage_budget,
          workspace,
-         run_state
+         run_state,
+         policy
        ) do
     soft_budget = stage_budget[:per_turn_input_soft]
 
@@ -2059,7 +2230,7 @@ defmodule SymphonyElixir.RunPolicy do
           needs_retry_count? = retry_tracking? and existing_retry_count == 0
 
           if review_token_pressure_high?(state) and not needs_retry_count? do
-            :ok
+            {:ok, policy}
           else
             review_fix_retry_count =
               cond do
@@ -2075,35 +2246,32 @@ defmodule SymphonyElixir.RunPolicy do
               |> Map.put(:token_pressure, "high")
               |> maybe_put_review_fix_retry_count(review_fix_retry_count)
 
-            _ =
-              RunStateStore.transition(workspace, Map.get(state, :stage, "checkout"), %{
-                resume_context: resume_context
-              })
+            with {:ok, policy} <- persist_soft_resume_context(workspace, state, resume_context, policy) do
+              _ =
+                RunLedger.record("policy.decided", %{
+                  issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+                  issue_identifier: issue_identifier,
+                  actor_type: "runtime",
+                  actor_id: "run_policy",
+                  summary: "Turn entered soft token pressure.",
+                  details: "Observed implement/verify input tokens #{current_turn_input} above soft budget #{soft_budget}.",
+                  metadata: %{
+                    stage: stage,
+                    observed: current_turn_input,
+                    soft_budget: soft_budget,
+                    review_fix_budget_retry_count: review_fix_retry_count
+                  }
+                })
 
-            _ =
-              RunLedger.record("policy.decided", %{
-                issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
-                issue_identifier: issue_identifier,
-                actor_type: "runtime",
-                actor_id: "run_policy",
-                summary: "Turn entered soft token pressure.",
-                details: "Observed implement/verify input tokens #{current_turn_input} above soft budget #{soft_budget}.",
-                metadata: %{
-                  stage: stage,
-                  observed: current_turn_input,
-                  soft_budget: soft_budget,
-                  review_fix_budget_retry_count: review_fix_retry_count
-                }
-              })
-
-            :ok
+              {:ok, policy}
+            end
           end
 
         _ ->
-          :ok
+          {:ok, policy}
       end
     else
-      :ok
+      {:ok, policy}
     end
   end
 

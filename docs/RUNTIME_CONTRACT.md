@@ -439,3 +439,80 @@ guarantees. Audited custom providers require an explicit accounting contract;
 implementing the transport behaviour alone is insufficient. I2a cannot prevent
 effects a remote provider already performed before reporting usage. I2b material
 validity, I2c operation binding, I3 recovery and final acceptance remain separate.
+
+## Current execution and material state (I2b)
+
+Admission captures one canonical raw source before reserving its dispatch marker.
+The source distinguishes a present snapshot from an absent one; a derived view
+may supply legacy defaults for policy decisions, but those defaults never become
+the admitted material witness. Active admission may create a legitimate missing
+snapshot through the existing path; passive admission cannot bootstrap one. The
+admitted raw snapshot returned by checked admission initializes both owner and
+worker. Neither a provider result nor a later read replaces that witness.
+
+Material comparison preserves field presence as well as value. Its finite set is
+`stage`, `last_ledger_event_id`, `review_claims`, `review_threads`, `pr_url`,
+`repo_url`, `policy_pack`, `effective_policy_class`, `stop_reason`,
+`implementation_turns`, `policy_override` and `review_return_stage`. Usage, lease
+renewal timestamps, diagnostics and resume context are excluded. Raw absence is
+therefore different from a stored default. An ordinary check reads current state
+while requiring the captured ticket, complete lease token and unchanged material
+projection; it does not adopt a control change or infer authority from a header.
+
+Workers send their material witness separately from the immutable invocation
+envelope. The owner authenticates PID, monitor/custody, context, binding and ordinal
+before interpreting that witness. Foreign or obsolete callbacks cannot mark or
+write the successor. A proven precondition failure becomes `stale_execution` with
+the captured run/dispatch IDs and original cause, including a conflict proved
+during a checkpoint or owner confirmation. A persistence failure or uncertain
+confirmation becomes `accounting_uncertain`. The first retained cause survives later
+callbacks and DOWN; a later success cannot clear it. Both hold the captured claim
+and pending journal without ordinary finish, automatic retry or workspace cleanup.
+
+Checked writes apply finite attribute deltas to fresh state inside the existing
+snapshot lock. They preserve current usage, lease and unrelated fields. Only a
+successful own compare-and-set followed by owner acknowledgment advances the
+worker's material witness. Reading a newer snapshot never grants that advance.
+Usage validates current authority before proposing its arithmetic and again in
+the checkpoint; counters and telemetry are installed only after persistence.
+
+Own `blocked` or `done` transitions have a separate terminal acknowledgment. They
+retain the caller's domain stop or done result and immediately deny new tools,
+turns, writes and hooks. The existing blocked-stop comment and tracker movement
+use a specific confirmation before each notification, preserving their order
+after the successful blocked write. That confirmation grants no other execution.
+Done retains the existing tracker movement before its terminal write. DOWN checks
+that exact terminal state under captured custody before finishing once with the
+actual exit reason; it does not run policy or schedule a retry again.
+
+A policy stop performed by the owner may retain a narrowly bound final-usage
+receipt for observations already belonging to its captured invocation. The receipt
+is bound to previous/next material state, binding, ordinal and stop outcome. It
+does not permit another invocation, repeat policy or authorize a different run.
+
+Workspace confirmation finishes before the lifecycle acquires the snapshot lock.
+The checked lifecycle validates before metadata relocation/hooks and again after
+restoration, without calling the owner under that lock. Restoration is attempted
+even if the hook failed; both failures remain visible. An audited `after_run`
+shell failure is an error, while legacy callers retain their existing warning
+behavior. Runner cleanup preserves the primary stop, done result or exception.
+It logs an unexpected secondary cleanup failure; expected `execution_stopped`
+cleanup denial after an acknowledged terminal does not become a second failure.
+After ordinary nonterminal success, cleanup failure is propagated. Closing a local
+transport remains possible after execution stops.
+
+Delivery, review reconciliation and verifier consumers check before controlled
+operations and after waits before consuming results or continuing. They propagate
+execution terminals before ordinary network fallback, retry or verdict handling.
+Review persistence uses finite deltas rather than replacing the complete snapshot.
+Initial policy override is applied once at entry; recursive continuation cannot
+reimpose an old override over an operator control.
+
+These checks coordinate cooperating local code. A check followed by a remote call
+is not a distributed transaction: an observed reply, publication or deploy command
+is not rolled back after a subsequent conflict, and no automatic replay is
+authorized. Existing bulk GitHub calls are guarded at their consumer boundary.
+Deploy uses the checked state/continuation bridge; versioned operation binding is
+I2c work. Sessions, uncertain-run inspection/reconciliation and final thesis
+acceptance remain P2/I3/E1 requirements. Test and integration results belong to
+the frozen validation records, not this description of the implemented contract.

@@ -15,6 +15,247 @@ defmodule SymphonyElixir.RunStateStore do
   @filename "run_state.json"
   @stage_history_limit 25
 
+  @material_fields ~w(stage last_ledger_event_id review_claims review_threads pr_url repo_url policy_pack effective_policy_class stop_reason implementation_turns policy_override review_return_stage)
+  @current_stages ~w(checkout initialize_harness plan implement validate review_verification verify publish merge_readiness await_checks merge post_merge deploy_preview deploy_production post_deploy_verify done blocked)
+  @current_counter_attrs ~w(implementation_turns validation_attempts verification_attempts publish_attempts await_checks_polls merge_attempts harness_attempts ci_fix_attempts)a
+  @current_attrs @current_counter_attrs ++
+                   ~w(issue_source branch base_branch harness_version progress_path effective_policy_class effective_policy_source policy_override
+                      last_harness_init last_harness_check harness_status plan_completed resume_context review_claims review_threads last_turn_result
+                      pr_url last_validation last_decision_summary next_human_action last_verifier last_verifier_verdict acceptance_summary ui_proof_required_checks
+                      last_commit_sha last_pr_body_validation last_ci_failure last_pr_state last_review_decision last_check_statuses last_required_checks_state
+                      last_missing_required_checks last_pending_required_checks last_failing_required_checks last_cancelled_required_checks merge_window_wait
+                      last_merge last_merge_readiness last_post_deploy_verify last_decision deploy_approved last_post_merge current_deploy_target stop_reason
+                      last_implementation_error reason last_rule_id last_failure_class deploy_window_wait)a
+
+  @type authority :: %{ticket: DispatchAudit.ticket(), lease_token: LeaseManager.token()}
+  @type admission_source :: :missing | {:present, map()}
+
+  @doc "Keeps canonical material values and real field presence, without defaults or usage metadata."
+  @spec material_projection(map()) :: map()
+  def material_projection(state) when is_map(state) do
+    state |> Jason.encode!() |> Jason.decode!() |> Map.take(@material_fields)
+  end
+
+  @doc "Reads the canonical admission witness and its derived view from one snapshot read."
+  @spec read_admission_source(Path.t(), map()) :: {:ok, admission_source(), map()} | {:error, term()}
+  def read_admission_source(workspace, %{id: id, identifier: identifier} = issue)
+      when is_binary(workspace) and is_binary(id) and id != "" and is_binary(identifier) and identifier != "" do
+    with :ok <- DeployAudit.ensure_available(workspace) do
+      case read_canonical_snapshot(workspace) do
+        {:ok, raw} ->
+          if raw["issue_id"] == id and raw["issue_identifier"] == identifier,
+            do: {:ok, {:present, raw}, merge_defaults(atomize(raw), issue)},
+            else: {:error, :run_identity_issue_mismatch}
+
+        {:error, :missing} ->
+          with :ok <- ensure_no_bootstrap_admission(workspace), do: {:ok, :missing, default_state(issue)}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  def read_admission_source(_workspace, _issue), do: {:error, :invalid_admission_issue}
+
+  defp ensure_no_bootstrap_admission(workspace) do
+    parent = Path.dirname(workspace)
+    prefix = ".#{Path.basename(workspace)}.bootstrap-"
+
+    case File.ls(parent) do
+      {:ok, entries} ->
+        entries
+        |> Enum.filter(&String.starts_with?(&1, prefix))
+        |> Enum.reduce_while(:ok, fn entry, :ok ->
+          case File.lstat(Path.join([parent, entry, @filename])) do
+            {:ok, _stat} -> {:halt, {:error, :admission_bootstrap_present}}
+            {:error, reason} when reason in [:enoent, :enotdir] -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, {:admission_bootstrap_unreadable, reason}}}
+          end
+        end)
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:admission_bootstrap_unreadable, reason}}
+    end
+  end
+
+  @doc "Checks the captured authority and material state without adopting a later snapshot."
+  @spec ensure_current(authority(), map()) :: {:ok, map()} | {:error, term()}
+  def ensure_current(authority, expected) do
+    with {:ok, workspace} <- authority_workspace(authority) do
+      with_workspace_lock(workspace, fn -> current_state_unlocked(authority, expected) end)
+    end
+  end
+
+  @doc "Confirms an owner-authenticated terminal CAS result without granting permission to execute."
+  @spec confirm_terminal_current(authority(), map()) :: :ok | {:error, term()}
+  def confirm_terminal_current(authority, expected) do
+    with {:ok, workspace} <- authority_workspace(authority) do
+      with_workspace_lock(workspace, fn ->
+        with {:ok, _state} <- terminal_state_unlocked(authority, expected), do: :ok
+      end)
+    end
+  end
+
+  @doc "Applies a finite attribute delta to the fresh state under its material precondition."
+  @spec update_current(authority(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def update_current(authority, expected, attrs) do
+    with {:ok, workspace} <- authority_workspace(authority) do
+      with_workspace_lock(workspace, fn ->
+        with {:ok, state} <- current_state_unlocked(authority, expected),
+             {:ok, attrs} <- validate_current_attrs(attrs, state),
+             updated = Map.merge(state, attrs),
+             :ok <- write_json_atomically(state_path(workspace), updated) do
+          {:ok, updated}
+        end
+      end)
+    end
+  end
+
+  @doc "Transitions only from the checked fresh state; a conflict precedes audit intent."
+  @spec transition_current(authority(), map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def transition_current(authority, expected, stage, attrs) when stage in @current_stages do
+    with {:ok, workspace} <- authority_workspace(authority) do
+      with_workspace_lock(workspace, fn ->
+        with {:ok, state} <- current_state_unlocked(authority, expected),
+             {:ok, attrs} <- validate_current_attrs(attrs, state) do
+          transition_from_state(workspace, stage, attrs, ensure_runner_metadata(state))
+        end
+      end)
+    end
+  end
+
+  def transition_current(_authority, _expected, _stage, _attrs), do: {:error, :invalid_current_stage}
+
+  @doc "Records usage only if captured material is still current inside the checkpoint lock."
+  @spec record_token_usage_current(Path.t(), map(), map(), authority(), map()) :: {:ok, map()} | {:error, term()}
+  def record_token_usage_current(workspace, issue, usage, authority, expected) do
+    with {:ok, captured_workspace} <- authority_workspace(authority),
+         :ok <- matching_usage_workspace(workspace, captured_workspace) do
+      with_workspace_lock(captured_workspace, fn ->
+        with {:ok, state} <- current_state_unlocked(authority, expected),
+             :ok <- stale_check(matching_token_usage_context(workspace, issue, state, authority.ticket, authority.lease_token)) do
+          persist_current_usage(workspace, state, usage)
+        end
+      end)
+    end
+  end
+
+  @doc "Records only final usage for an owner-authenticated receipt of its own checked stop."
+  @spec record_final_token_usage_current(Path.t(), map(), map(), authority(), map()) :: {:ok, map()} | {:error, term()}
+  def record_final_token_usage_current(workspace, issue, usage, authority, receipt) do
+    with {:ok, captured_workspace} <- authority_workspace(authority),
+         :ok <- matching_usage_workspace(workspace, captured_workspace),
+         :ok <- validate_stop_receipt(receipt) do
+      with_workspace_lock(captured_workspace, fn ->
+        with {:ok, state} <- terminal_state_unlocked(authority, receipt.next),
+             :ok <- stale_check(matching_token_usage_context(workspace, issue, state, authority.ticket, authority.lease_token)) do
+          persist_current_usage(workspace, state, usage)
+        end
+      end)
+    end
+  end
+
+  defp authority_workspace(%{ticket: %{workspace: workspace}, lease_token: _token}) when is_binary(workspace) and workspace != "",
+    do: {:ok, Path.expand(workspace)}
+
+  defp authority_workspace(_authority), do: {:error, {:stale_execution, :invalid_execution_authority}}
+
+  defp matching_usage_workspace(workspace, captured) when is_binary(workspace) do
+    if Path.expand(workspace) == captured, do: :ok, else: {:error, {:stale_execution, :execution_workspace_mismatch}}
+  end
+
+  defp matching_usage_workspace(_workspace, _captured), do: {:error, {:stale_execution, :execution_workspace_mismatch}}
+
+  defp read_canonical_snapshot(workspace) do
+    with {:ok, raw} <- read_token_usage_snapshot(state_path(workspace)),
+         :ok <- ensure_audit_complete(raw),
+         :ok <- SymphonyElixir.RunIdentity.validate_snapshot(raw),
+         do: {:ok, raw}
+  end
+
+  defp authority_snapshot_unlocked(%{ticket: ticket, lease_token: token}) do
+    with :ok <- LeaseManager.ensure_current(token),
+         {:ok, raw} <- read_canonical_snapshot(ticket.workspace),
+         state = atomize(raw),
+         issue = %{id: token.storage.issue_id, identifier: state[:issue_identifier]},
+         :ok <- matching_token_usage_context(ticket.workspace, issue, state, ticket, token),
+         do: {:ok, state}
+  end
+
+  defp current_state_unlocked(authority, expected) do
+    result =
+      with {:ok, state} <- authority_snapshot_unlocked(authority) do
+        DispatchAudit.with_authorization(authority.ticket, fn ->
+          with :ok <- DispatchAudit.ensure_workspace_access(authority.ticket.workspace),
+               :ok <- matching_material(state, expected),
+               do: {:ok, state}
+        end)
+      end
+
+    stale_check(result)
+  end
+
+  defp terminal_state_unlocked(authority, %{"stage" => stage} = expected) when stage in ["blocked", "done"] do
+    result =
+      with {:ok, state} <- authority_snapshot_unlocked(authority) do
+        DispatchAudit.with_authorization(authority.ticket, fn ->
+          with :ok <- matching_material(state, expected), do: {:ok, state}
+        end)
+      end
+
+    stale_check(result)
+  end
+
+  defp terminal_state_unlocked(_authority, _expected), do: {:error, {:stale_execution, :invalid_terminal_precondition}}
+
+  defp matching_material(state, expected) when is_map(expected) do
+    if expected == material_projection(state), do: :ok, else: {:error, :material_state_changed}
+  end
+
+  defp matching_material(_state, _expected), do: {:error, :invalid_material_precondition}
+
+  defp stale_check({:error, reason}), do: {:error, {:stale_execution, reason}}
+  defp stale_check(result), do: result
+
+  defp validate_current_attrs(attrs, state) when is_map(attrs) do
+    identities_match = Enum.all?([:issue_id, :issue_identifier], &(not Map.has_key?(attrs, &1) or attrs[&1] == state[&1]))
+    attrs = Map.drop(attrs, [:issue_id, :issue_identifier])
+    valid_counters = Enum.all?(@current_counter_attrs, &(not Map.has_key?(attrs, &1) or (is_integer(attrs[&1]) and attrs[&1] >= 0)))
+    valid_maps = Enum.all?([:review_claims, :review_threads, :resume_context], &(not Map.has_key?(attrs, &1) or is_map(attrs[&1])))
+
+    if identities_match and valid_counters and valid_maps and Enum.all?(Map.keys(attrs), &(&1 in @current_attrs)) do
+      case Jason.encode(attrs) do
+        {:ok, _encoded} -> {:ok, attrs}
+        {:error, _reason} -> {:error, :invalid_current_attrs}
+      end
+    else
+      {:error, :invalid_current_attrs}
+    end
+  end
+
+  defp validate_current_attrs(_attrs, _state), do: {:error, :invalid_current_attrs}
+
+  defp validate_stop_receipt(%{previous: previous, next: %{"stage" => "blocked", "stop_reason" => stop_reason} = next, binding: {provider, kind, id}, ordinal: ordinal, outcome: {:stop, _violation}})
+       when is_map(previous) and is_map(stop_reason) and map_size(stop_reason) > 0 and is_atom(provider) and
+              kind in [:session, :thread] and is_binary(id) and id != "" and is_integer(ordinal) and ordinal > 0 do
+    if previous == material_projection(previous) and next == material_projection(next) and previous["stage"] not in ["blocked", "done"],
+      do: :ok,
+      else: {:error, :invalid_stop_receipt}
+  end
+
+  defp validate_stop_receipt(_receipt), do: {:error, :invalid_stop_receipt}
+
+  defp persist_current_usage(workspace, state, usage) do
+    with {:ok, usage} <- monotonic_token_usage(state, usage),
+         updated = Map.put(state, :token_usage, usage),
+         :ok <- write_json_atomically(state_path(workspace), updated),
+         do: {:ok, updated}
+  end
+
   @spec state_path(Path.t()) :: Path.t()
   def state_path(workspace) when is_binary(workspace) do
     Path.join([workspace, @relative_dir, @filename])
@@ -139,6 +380,41 @@ defmodule SymphonyElixir.RunStateStore do
     with_workspace_lock(workspace, fn ->
       with :ok <- ensure_readable(workspace), do: fun.()
     end)
+  end
+
+  @doc "Checks captured material before lifecycle movement and again after its existing restore."
+  @spec with_readable_snapshot(Path.t(), %{authority: authority(), expected: map()}, (-> result)) :: result | {:error, term()} when result: var
+  def with_readable_snapshot(workspace, %{authority: authority, expected: expected}, fun)
+      when is_binary(workspace) and is_function(fun, 0) do
+    with {:ok, captured_workspace} <- authority_workspace(authority),
+         :ok <- matching_usage_workspace(workspace, captured_workspace) do
+      with_workspace_lock(captured_workspace, fn ->
+        with :ok <- stale_check(DeployAudit.ensure_available(workspace)),
+             {:ok, _state} <- current_state_unlocked(authority, expected) do
+          authorized_result =
+            DispatchAudit.with_authorization(authority.ticket, fn ->
+              result = fun.()
+
+              postcheck =
+                with :ok <- stale_check(DeployAudit.ensure_available(workspace)),
+                     do: current_state_unlocked(authority, expected)
+
+              checked_result =
+                case postcheck do
+                  {:ok, _state} -> result
+                  {:error, {:stale_execution, reason}} -> {:error, {:stale_execution, {:lifecycle_result, result, reason}}}
+                end
+
+              {:checked_lifecycle, checked_result}
+            end)
+
+          case authorized_result do
+            {:checked_lifecycle, result} -> result
+            {:error, _reason} = error -> stale_check(error)
+          end
+        end
+      end)
+    end
   end
 
   defp load_for_update(workspace, issue) do
@@ -377,6 +653,29 @@ defmodule SymphonyElixir.RunStateStore do
   end
 
   def transition_deploy(_ticket, _stage, _attrs), do: {:error, :invalid_deploy_transition}
+
+  @doc "Checks dispatch material inside the existing deploy continuation lock and returns its persisted state."
+  @spec transition_deploy(DeployAudit.ticket(), String.t(), map(), %{authority: authority(), expected: map()}) ::
+          {:ok, map(), DeployAudit.continuation()} | {:error, term()}
+  def transition_deploy(%{workspace: workspace} = ticket, stage, attrs, %{authority: authority, expected: expected})
+      when is_binary(workspace) and is_map(attrs) and stage in ["post_deploy_verify", "done"] do
+    with {:ok, captured_workspace} <- authority_workspace(authority),
+         :ok <- matching_usage_workspace(workspace, captured_workspace) do
+      with_workspace_lock(captured_workspace, fn ->
+        with {:ok, previous_state} <- current_state_unlocked(authority, expected),
+             {:ok, context} <- stale_check(DeployAudit.continuation_context(ticket)),
+             :ok <- stale_check(matching_deploy_snapshot(previous_state, context)),
+             :ok <- validate_deploy_attrs(attrs),
+             {:ok, state} <- transition_from_state(workspace, stage, deploy_attrs(attrs, context), previous_state, deploy_metadata(context)),
+             :ok <- DeployAudit.ensure_ledger_path(context.ledger_path),
+             {:ok, event} <- RunLedger.fetch_entry_checked(state.last_ledger_event_id) do
+          {:ok, state, %{stage: stage, event: event}}
+        end
+      end)
+    end
+  end
+
+  def transition_deploy(_ticket, _stage, _attrs, _precondition), do: {:error, :invalid_deploy_transition}
 
   defp matching_deploy_snapshot(state, context) do
     if state[:issue_id] == context.issue_id and state[:issue_identifier] == context.issue_identifier and state[:stage] == context.stage and

@@ -27,31 +27,45 @@ defmodule SymphonyElixir.AgentExecution do
   @type binding :: {module(), :session | :thread, String.t()}
   @type context :: %{ticket: DispatchAudit.ticket(), lease_token: map(), owner: pid(), worker: pid(), issue_id: String.t()}
   @type invocation :: %{context: context(), binding: binding() | nil, ordinal: non_neg_integer()}
-  @type terminal :: {:stop, {:accounting_uncertain, term()}}
+  @type terminal :: {:stop, {:accounting_uncertain, term()} | {:stale_execution, %{run_id: String.t(), dispatch_id: String.t()}, term()} | {:execution_stopped, %{stage: String.t() | nil}}}
   @type registry :: %{live: map(), retired: %{optional(binding()) => true}, retired_usage: counters(), current: binding() | nil, ordinal: non_neg_integer(), uncertain: term() | nil}
   @type observation :: :no_usage | {:ok, :thread_absolute | :invocation_absolute, counters()}
 
+  @doc "The compatibility arity cannot manufacture an admission precondition."
   @spec with_context(DispatchAudit.ticket(), map(), pid(), (-> result)) :: result | terminal() when result: var
-  def with_context(ticket, token, owner, fun) when is_pid(owner) and is_function(fun, 0) do
+  def with_context(_ticket, _token, _owner, _fun) do
+    case Process.get(@context_key) do
+      nil -> fail(:execution_precondition_missing)
+      %{context: _context} -> fail(:execution_context_already_present)
+    end
+  end
+
+  @doc "Installs only the raw state returned by the captured dispatch admission."
+  @spec with_context(DispatchAudit.ticket(), map(), pid(), map(), (-> result)) :: result | terminal() when result: var
+  def with_context(ticket, token, owner, admitted_raw, fun) when is_pid(owner) and is_function(fun, 0) do
     with nil <- Process.get(@context_key),
          {:ok, ^ticket} <- DispatchAudit.current_ticket(),
-         :ok <- validate_context_token(ticket, token) do
+         :ok <- validate_context_token(ticket, token),
+         :ok <- validate_admitted_raw(admitted_raw, ticket, token) do
       context = %{ticket: ticket, lease_token: token, owner: owner, worker: self(), issue_id: token.storage.issue_id}
-      Process.put(@context_key, %{context: context, registry: new_registry(), handles: %{}})
+      expected = RunStateStore.material_projection(admitted_raw)
+      issue_identity = %{issue_id: admitted_raw["issue_id"], issue_identifier: admitted_raw["issue_identifier"]}
+
+      Process.put(@context_key, %{context: context, issue_identity: issue_identity, expected: expected, registry: new_registry(), handles: %{}, terminal: nil, known_terminal: nil, execution_stop: nil})
 
       try do
-        result = fun.()
+        result = with {:ok, _state} <- ensure_current(), do: fun.()
 
-        case Process.get(@context_key).registry.uncertain do
+        case Process.get(@context_key).terminal do
           nil -> result
-          cause -> {:stop, {:accounting_uncertain, cause}}
+          terminal -> {:stop, terminal}
         end
       after
         Process.delete(@context_key)
       end
     else
-      {:error, reason} -> {:stop, {:accounting_uncertain, reason}}
-      {:ok, _other_ticket} -> {:stop, {:accounting_uncertain, :dispatch_context_mismatch}}
+      {:error, reason} -> fail(reason)
+      {:ok, _other_ticket} -> fail(:dispatch_context_mismatch)
       %{context: _context} -> fail(:execution_context_already_present)
     end
   end
@@ -64,17 +78,30 @@ defmodule SymphonyElixir.AgentExecution do
     end
   end
 
-  @doc "Requires captured authority for identified entries while preserving direct legacy entry."
+  @doc "Checks captured material after confirming the original owner and invocation."
+  @spec ensure_current() :: {:ok, map()} | terminal()
+  def ensure_current do
+    with {:ok, state} <- worker_state(),
+         :ok <- confirm_invocation(current_invocation(state)),
+         {:ok, current} <- RunStateStore.ensure_current(authority(state), state.expected) do
+      {:ok, current}
+    else
+      {:error, reason} -> storage_failure(reason)
+      {:stop, _} = terminal -> terminal
+      {:discard, reason} -> fail(reason)
+    end
+  end
+
+  @doc "Requires captured authority for identified entries while preserving proven legacy entry."
   @spec entry_context(Path.t(), map() | String.t() | nil) :: {:ok, :legacy | context()} | terminal()
   def entry_context(workspace, issue) when is_binary(workspace) do
     case worker_state() do
       {:ok, state} ->
         with {:ok, ticket} <- DispatchAudit.current_ticket(),
              true <- (ticket == state.context.ticket and Path.expand(workspace) == ticket.workspace) or {:error, :execution_context_mismatch},
-             {:ok, snapshot} <- RunStateStore.load(workspace),
-             true <- (snapshot[:run_id] == ticket.run_id and snapshot[:issue_id] == state.context.issue_id) or {:error, :execution_snapshot_mismatch},
-             :ok <- matching_entry_issue(issue, snapshot),
-             :ok <- confirm_current_invocation() do
+             :ok <- matching_entry_issue(issue, state.issue_identity),
+             {:ok, snapshot} <- ensure_current(),
+             :ok <- matching_entry_issue(issue, snapshot) do
           {:ok, state.context}
         else
           {:error, reason} -> fail(reason)
@@ -83,6 +110,103 @@ defmodule SymphonyElixir.AgentExecution do
 
       {:error, :execution_context_missing} ->
         legacy_entry_context(workspace)
+
+      {:stop, _} = terminal ->
+        terminal
+    end
+  end
+
+  @doc "Captures the existing checked precondition before Workspace acquires its lifecycle lock."
+  @spec workspace_precondition(Path.t(), map() | String.t() | nil) :: {:ok, :legacy | %{authority: RunStateStore.authority(), expected: map()}} | terminal()
+  def workspace_precondition(workspace, issue) do
+    case entry_context(workspace, issue) do
+      {:ok, :legacy} ->
+        {:ok, :legacy}
+
+      {:ok, _context} ->
+        state = Process.get(@context_key)
+        {:ok, %{authority: authority(state), expected: state.expected}}
+
+      {:stop, _} = terminal ->
+        terminal
+    end
+  end
+
+  @doc "Applies only a finite checked delta, then confirms its actual persisted successor."
+  @spec update_current(map()) :: {:ok, map()} | terminal()
+  def update_current(attrs) do
+    with {:ok, state} <- worker_state(),
+         :ok <- confirm_invocation(current_invocation(state)),
+         {:ok, persisted} <- RunStateStore.update_current(authority(state), state.expected, attrs) do
+      advance_persisted(state, persisted)
+    else
+      {:error, reason} -> storage_failure(reason)
+      {:stop, _} = terminal -> terminal
+      {:discard, reason} -> fail(reason)
+    end
+  end
+
+  @doc "Transitions under the captured precondition; a successful own terminal CAS is not execution permission."
+  @spec transition_current(String.t(), map()) :: {:ok, map()} | terminal()
+  def transition_current(stage, attrs) do
+    with {:ok, state} <- worker_state(),
+         :ok <- confirm_invocation(current_invocation(state)),
+         {:ok, persisted} <- RunStateStore.transition_current(authority(state), state.expected, stage, attrs) do
+      advance_persisted(state, persisted)
+    else
+      {:error, reason} -> storage_failure(reason)
+      {:stop, _} = terminal -> terminal
+      {:discard, reason} -> fail(reason)
+    end
+  end
+
+  @doc "Advances only the existing checked deploy bridge and retains its operation continuation."
+  @spec transition_deploy(SymphonyElixir.DeployAudit.ticket(), String.t(), map()) ::
+          {:ok, map(), SymphonyElixir.DeployAudit.continuation()} | terminal()
+  def transition_deploy(ticket, stage, attrs) do
+    with {:ok, state} <- worker_state(),
+         :ok <- confirm_invocation(current_invocation(state)),
+         {:ok, persisted, continuation} <- RunStateStore.transition_deploy(ticket, stage, attrs, %{authority: authority(state), expected: state.expected}),
+         {:ok, confirmed} <- advance_persisted(state, persisted) do
+      {:ok, confirmed, continuation}
+    else
+      {:error, reason} -> storage_failure(reason)
+      {:stop, _} = terminal -> terminal
+      {:discard, reason} -> fail(reason)
+    end
+  end
+
+  defp advance_persisted(state, persisted) do
+    next = RunStateStore.material_projection(persisted)
+
+    if next["stage"] in ["blocked", "done"] do
+      action = {:confirm_own_terminal, state.expected, next}
+
+      with {:ok, :terminal_confirmed} <- call_owner(current_invocation(state), state.expected, action) do
+        known = %{previous: state.expected, next: next, stage: next["stage"]}
+        Process.put(@context_key, %{state | expected: next, known_terminal: known})
+        {:ok, persisted}
+      end
+    else
+      with :ok <- call_owner(current_invocation(state), state.expected, {:advance_current, state.expected, next}) do
+        Process.put(@context_key, %{state | expected: next})
+        {:ok, persisted}
+      end
+    end
+  end
+
+  @doc "Confirms only an existing own blocked decision before its two explicit closure notifications."
+  @spec confirm_stop_notification() :: :ok | terminal()
+  def confirm_stop_notification do
+    case raw_worker_state() do
+      {:ok, %{terminal: terminal}} when not is_nil(terminal) ->
+        {:stop, terminal}
+
+      {:ok, %{known_terminal: %{stage: "blocked", next: next}, expected: next} = state} ->
+        call_owner(current_invocation(state), next, :confirm_stop_notification)
+
+      {:ok, _state} ->
+        fail(:stop_notification_not_authorized)
 
       {:error, reason} ->
         fail(reason)
@@ -96,6 +220,7 @@ defmodule SymphonyElixir.AgentExecution do
       confirm_invocation(current_invocation(state))
     else
       {:error, reason} -> fail(reason)
+      {:stop, _} = terminal -> terminal
     end
   end
 
@@ -145,10 +270,12 @@ defmodule SymphonyElixir.AgentExecution do
   @doc "Rejects unsupported providers before opening an audited transport."
   @spec ensure_session_capacity(module()) :: :ok | terminal()
   def ensure_session_capacity(provider) do
-    with {:ok, _profile} <- provider_profile(provider) do
+    with {:ok, _state} <- worker_state(),
+         {:ok, _profile} <- provider_profile(provider) do
       ensure_session_capacity()
     else
       {:error, reason} -> fail(reason)
+      {:stop, _} = terminal -> terminal
     end
   end
 
@@ -158,7 +285,7 @@ defmodule SymphonyElixir.AgentExecution do
     with {:ok, state} <- worker_state(),
          {:ok, binding} <- session_binding(provider, handle),
          {:ok, registry} <- register_binding(state.registry, binding, purpose),
-         :ok <- call_owner(state.context, {:register, binding, purpose}) do
+         :ok <- call_owner(current_invocation(state), state.expected, {:register, binding, purpose}) do
       Process.put(@context_key, %{state | registry: registry, handles: Map.put(state.handles, binding, handle)})
       {:ok, binding}
     else
@@ -173,7 +300,7 @@ defmodule SymphonyElixir.AgentExecution do
     with {:ok, state} <- worker_state(),
          ordinal = state.registry.ordinal + 1,
          {:ok, registry} <- begin_binding(state.registry, binding, ordinal),
-         :ok <- call_owner(state.context, {:begin, binding, ordinal}) do
+         :ok <- call_owner(current_invocation(state), state.expected, {:begin, binding, ordinal}) do
       Process.put(@context_key, %{state | registry: registry})
       {:ok, %{context: state.context, binding: binding, ordinal: ordinal}}
     else
@@ -192,17 +319,18 @@ defmodule SymphonyElixir.AgentExecution do
       begin_invocation(binding)
     else
       {:error, reason} -> fail(reason)
+      {:stop, _} = terminal -> terminal
       _mismatch -> fail(:execution_handle_mismatch)
     end
   end
 
-  @doc "Retires a stopped transport after confirming its last observation."
+  @doc "Retires a stopped transport; a terminal guard returns without authorizing another action."
   @spec retire_session(binding()) :: :ok | terminal()
   def retire_session(binding) do
     with {:ok, state} <- worker_state(),
          :ok <- confirm_invocation(current_invocation(state)),
          {:ok, registry} <- retire_binding(state.registry, binding),
-         :ok <- call_owner(state.context, {:retire, binding, state.registry.ordinal}) do
+         :ok <- call_owner(current_invocation(state), state.expected, {:retire, binding, state.registry.ordinal}) do
       Process.put(@context_key, %{state | registry: registry, handles: Map.delete(state.handles, binding)})
       :ok
     else
@@ -216,27 +344,30 @@ defmodule SymphonyElixir.AgentExecution do
   def guard_invocation(%{context: %{worker: worker}}) when worker != self(), do: {:discard, :foreign_worker}
 
   def guard_invocation(%{context: context, binding: binding, ordinal: ordinal}) do
-    case worker_state() do
-      {:ok, %{context: ^context, registry: registry}} ->
-        if registry.current == binding and registry.ordinal == ordinal and (is_nil(binding) or Map.has_key?(registry.live, binding)),
-          do: :ok,
-          else: {:discard, :obsolete_invocation}
+    case raw_worker_state() do
+      {:ok, %{context: ^context, registry: registry} = state} ->
+        if registry.current == binding and registry.ordinal == ordinal and (is_nil(binding) or Map.has_key?(registry.live, binding)) do
+          case execution_permission(state) do
+            {:ok, _state} -> :ok
+            {:stop, _} = terminal -> terminal
+          end
+        else
+          {:discard, :obsolete_invocation}
+        end
 
       {:ok, _other_context} ->
         {:discard, :execution_context_changed}
 
-      {:error, {:accounting_uncertain, cause}} ->
-        {:stop, {:accounting_uncertain, cause}}
-
       {:error, reason} ->
-        {:stop, {:accounting_uncertain, reason}}
+        fail(reason)
     end
   end
 
   @spec confirm_invocation(invocation()) :: :ok | {:discard, atom()} | terminal()
   def confirm_invocation(invocation) do
     with :ok <- guard_invocation(invocation) do
-      call_owner(invocation.context, {:confirm, invocation.binding, invocation.ordinal})
+      state = Process.get(@context_key)
+      call_owner(invocation, state.expected, {:confirm, invocation.binding, invocation.ordinal})
     end
   end
 
@@ -259,10 +390,8 @@ defmodule SymphonyElixir.AgentExecution do
          {:ok, profile} <- provider_profile(provider),
          :ok <- validate_raw_identity(invocation.binding, payload),
          observation when observation == :no_usage or elem(observation, 0) == :ok <- classify_usage(profile, payload) do
-      if observation != :no_usage do
-        send(invocation.context.owner, {:agent_execution_usage, invocation, observation})
-      end
-
+      state = Process.get(@context_key)
+      if observation != :no_usage, do: send(invocation.context.owner, {:agent_execution_usage, invocation, state.expected, observation})
       confirm_invocation(invocation)
     else
       {:error, reason} -> fail(reason)
@@ -275,7 +404,8 @@ defmodule SymphonyElixir.AgentExecution do
   def forward_update(invocation, update) when is_map(update) do
     with :ok <- guard_invocation(invocation),
          :ok <- validate_runtime_identity(invocation.binding, update) do
-      send(invocation.context.owner, {:agent_worker_update, invocation, update})
+      state = Process.get(@context_key)
+      send(invocation.context.owner, {:agent_worker_update, invocation, state.expected, update})
       confirm_invocation(invocation)
     else
       {:error, reason} -> fail(reason)
@@ -289,18 +419,39 @@ defmodule SymphonyElixir.AgentExecution do
   def fail(nil), do: fail(:invalid_uncertainty_cause)
 
   def fail(cause) do
-    case Process.get(@context_key) do
-      %{registry: %{uncertain: nil}} = state ->
-        registry = mark_uncertain(state.registry, cause)
-        Process.put(@context_key, %{state | registry: registry})
+    case raw_worker_state() do
+      {:ok, %{terminal: terminal}} when not is_nil(terminal) ->
+        {:stop, terminal}
+
+      {:ok, state} ->
+        terminal = {:accounting_uncertain, cause}
+        Process.put(@context_key, %{state | registry: mark_uncertain(state.registry, cause), terminal: terminal})
         send(state.context.owner, {:agent_execution_uncertain, state.context, cause})
-        {:stop, {:accounting_uncertain, cause}}
+        {:stop, terminal}
 
-      %{registry: %{uncertain: previous}} ->
-        {:stop, {:accounting_uncertain, previous}}
-
-      nil ->
+      {:error, :execution_context_missing} ->
         {:stop, {:accounting_uncertain, cause}}
+    end
+  end
+
+  @doc "Latches a material conflict with the captured run/dispatch identity, separately from accounting."
+  @spec stale(term()) :: terminal()
+  def stale(nil), do: stale(:invalid_stale_cause)
+
+  def stale(cause) do
+    case raw_worker_state() do
+      {:ok, %{terminal: terminal}} when not is_nil(terminal) ->
+        {:stop, terminal}
+
+      {:ok, state} ->
+        ids = execution_ids(state.context)
+        terminal = {:stale_execution, ids, cause}
+        Process.put(@context_key, %{state | terminal: terminal})
+        send(state.context.owner, {:agent_execution_stale, state.context, ids, cause})
+        {:stop, terminal}
+
+      {:error, :execution_context_missing} ->
+        fail(:execution_context_missing)
     end
   end
 
@@ -438,31 +589,78 @@ defmodule SymphonyElixir.AgentExecution do
 
   def classify_usage(_profile, _payload), do: {:error, {:accounting_uncertain, :invalid_usage_payload}}
 
-  defp worker_state do
+  defp raw_worker_state do
     case Process.get(@context_key) do
       nil -> {:error, :execution_context_missing}
-      %{registry: %{uncertain: nil}} = state -> {:ok, state}
-      %{registry: %{uncertain: cause}} -> {:error, {:accounting_uncertain, cause}}
+      state -> {:ok, state}
     end
   end
 
-  defp current_invocation(state), do: %{context: state.context, binding: state.registry.current, ordinal: state.registry.ordinal}
+  defp worker_state do
+    with {:ok, state} <- raw_worker_state(), do: execution_permission(state)
+  end
 
-  defp call_owner(context, action) do
+  defp execution_permission(%{terminal: terminal}) when not is_nil(terminal), do: {:stop, terminal}
+  defp execution_permission(%{known_terminal: %{stage: stage}}), do: {:stop, {:execution_stopped, %{stage: stage}}}
+  defp execution_permission(%{execution_stop: stop}) when not is_nil(stop), do: {:stop, {:execution_stopped, stop}}
+  defp execution_permission(state), do: {:ok, state}
+
+  defp current_invocation(state), do: %{context: state.context, binding: state.registry.current, ordinal: state.registry.ordinal}
+  defp authority(state), do: %{ticket: state.context.ticket, lease_token: state.context.lease_token}
+  defp execution_ids(context), do: %{run_id: context.ticket.run_id, dispatch_id: context.ticket.dispatch_id}
+
+  defp validate_admitted_raw(raw, ticket, token) when is_map(raw) do
+    if raw["run_id"] == ticket.run_id and raw["issue_id"] == token.storage.issue_id and is_binary(raw["issue_identifier"]) and raw["issue_identifier"] != "",
+      do: :ok,
+      else: {:error, :invalid_admitted_snapshot}
+  end
+
+  defp validate_admitted_raw(_raw, _ticket, _token), do: {:error, :invalid_admitted_snapshot}
+  defp storage_failure({:stale_execution, cause}), do: stale(cause)
+  defp storage_failure(reason), do: fail(reason)
+
+  defp call_owner(invocation, expected, action) do
     response =
       try do
-        GenServer.call(context.owner, {:agent_execution, context, action}, @confirmation_timeout)
+        GenServer.call(invocation.context.owner, {:agent_execution, invocation, expected, action}, @confirmation_timeout)
       catch
         :exit, {:timeout, _call} -> {:error, :owner_confirmation_timeout}
         :exit, {:noproc, _call} -> {:error, :owner_unavailable}
         :exit, _reason -> {:error, :owner_confirmation_exit}
       end
 
-    case response do
-      :ok -> :ok
-      {:stop, {:accounting_uncertain, cause}} -> fail(cause)
-      {:error, cause} -> fail(cause)
-      _ -> fail(:invalid_owner_confirmation)
+    case {action, response} do
+      {{:confirm_own_terminal, _previous, _next}, {:ok, :terminal_confirmed}} ->
+        {:ok, :terminal_confirmed}
+
+      {{:confirm_own_terminal, _previous, _next}, :ok} ->
+        fail(:invalid_owner_confirmation)
+
+      {_action, :ok} ->
+        :ok
+
+      {_action, {:stop, {:accounting_uncertain, cause}}} ->
+        fail(cause)
+
+      {_action, {:stop, {:stale_execution, ids, cause}}} ->
+        if ids == execution_ids(invocation.context), do: stale(cause), else: fail(:owner_terminal_identity_mismatch)
+
+      {{kind, _previous, _next}, {:stop, {:execution_stopped, _stop}}} when kind in [:advance_current, :confirm_own_terminal] ->
+        fail(:advance_confirmation_stopped)
+
+      {_action, {:stop, {:execution_stopped, %{stage: stage} = stop}}} when map_size(stop) == 1 and (is_binary(stage) or is_nil(stage)) ->
+        state = Process.get(@context_key)
+        Process.put(@context_key, %{state | execution_stop: stop})
+        {:stop, {:execution_stopped, stop}}
+
+      {_action, {:error, {:stale_execution, cause}}} ->
+        stale(cause)
+
+      {_action, {:error, cause}} ->
+        fail(cause)
+
+      _ ->
+        fail(:invalid_owner_confirmation)
     end
   end
 

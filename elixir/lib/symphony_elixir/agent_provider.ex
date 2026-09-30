@@ -97,7 +97,7 @@ defmodule SymphonyElixir.AgentProvider do
       with :ok <- confirm_result(invocation, result),
            :ok <- observe_result(provider, invocation, result) do
         case result do
-          {:stop, {:accounting_uncertain, _}} = terminal ->
+          {:stop, _} = terminal ->
             terminal
 
           _ ->
@@ -106,7 +106,7 @@ defmodule SymphonyElixir.AgentProvider do
         end
       end
     catch
-      :throw, {:agent_execution_halt, {:stop, {:accounting_uncertain, _}} = terminal} -> terminal
+      :throw, {:agent_execution_halt, {:stop, _} = terminal} -> terminal
     end
   end
 
@@ -154,7 +154,8 @@ defmodule SymphonyElixir.AgentProvider do
     end
   end
 
-  defp require_accounting({:stop, {:accounting_uncertain, _}} = terminal), do: throw({:agent_execution_halt, terminal})
+  defp require_accounting({:stop, {kind, _}} = terminal) when kind in [:accounting_uncertain, :execution_stopped], do: throw({:agent_execution_halt, terminal})
+  defp require_accounting({:stop, {:stale_execution, _, _}} = terminal), do: throw({:agent_execution_halt, terminal})
   defp require_accounting(result), do: result
 
   @doc "Resolve the provider module from config or explicit option."

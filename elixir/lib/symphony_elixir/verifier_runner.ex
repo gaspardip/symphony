@@ -3,6 +3,8 @@ defmodule SymphonyElixir.VerifierRunner do
   Runs the hybrid publish gate: deterministic smoke first, then a read-only agent verifier.
   """
 
+  require Logger
+
   alias SymphonyElixir.AgentExecution
   alias SymphonyElixir.AgentProvider
   alias SymphonyElixir.BehavioralProof
@@ -38,141 +40,199 @@ defmodule SymphonyElixir.VerifierRunner do
 
     Observability.with_span("symphony.verifier", metadata, fn ->
       start_time = System.monotonic_time()
-      smoke_result = RunInspector.run_smoke(workspace, inspection.harness, opts)
-      acceptance = IssueAcceptance.from_issue(issue)
-      context = verification_context(workspace, inspection, state, acceptance, smoke_result, opts)
 
-      emit_proof_event(:behavioral, context.behavioral_proof, metadata)
-      emit_proof_event(:ui, context.ui_proof, metadata)
+      with {:ok, smoke_result} <- current_step(workspace, issue, fn -> RunInspector.run_smoke(workspace, inspection.harness, opts) end),
+           acceptance = IssueAcceptance.from_issue(issue),
+           {:ok, context} <- verification_context(workspace, issue, inspection, state, acceptance, smoke_result, opts),
+           {:ok, _} <- current_step(workspace, issue, fn -> emit_proof_event(:behavioral, context.behavioral_proof, metadata) end),
+           {:ok, _} <- current_step(workspace, issue, fn -> emit_proof_event(:ui, context.ui_proof, metadata) end) do
+        result = verifier_verdict(workspace, issue, state, smoke_result, context, metadata, opts)
 
-      result =
-        case smoke_result.status do
-          :unavailable ->
-            blocked_result(
-              "The repo smoke command is unavailable, so Symphony cannot verify this change.",
-              ["Smoke command missing or invalid in `.symphony/harness.yml`."],
-              context
-            )
+        with result when is_map(result) <- result,
+             {:ok, _execution_context} <- AgentExecution.entry_context(workspace, issue) do
+          Observability.emit(
+            [:symphony, :verifier, :completed],
+            %{count: 1, duration: System.monotonic_time() - start_time},
+            metadata
+            |> Map.put(:verdict, Map.get(result, :verdict) || Map.get(result, "verdict"))
+            |> Map.put(:smoke_status, smoke_result.status)
+          )
 
-          :failed ->
-            store_failure_artifact("verify_smoke_failed", smoke_result.output || "", metadata)
-
-            needs_more_work_result(
-              "The smoke verification command failed, so the implementation needs another pass.",
-              context
-            )
-
-          :passed ->
-            cond do
-              context.behavioral_proof.required? and not context.behavioral_proof.satisfied? ->
-                missing_behavioral_proof_result(context)
-
-              context.ui_proof.verify_required? and not context.ui_proof.verify_satisfied? ->
-                missing_ui_proof_result(context)
-
-              true ->
-                before_snapshot = RunInspector.inspect(workspace, opts)
-                verifier_session_runner = Keyword.get(opts, :verifier_session_runner, &run_verifier_session/4)
-
-                case verifier_session_runner.(workspace, issue, state, Keyword.put(opts, :verification_context, context)) do
-                  {:stop, {:accounting_uncertain, _}} = terminal ->
-                    terminal
-
-                  {:ok, %VerifierResult{} = result} ->
-                    after_snapshot = RunInspector.inspect(workspace, opts)
-
-                    if RunInspector.code_changed?(before_snapshot, after_snapshot) do
-                      blocked_result(
-                        "The verifier mutated the workspace, which is forbidden for read-only verification.",
-                        ["Verification must not change files, git state, or PR metadata."],
-                        context
-                      )
-                    else
-                      verifier_result_payload(result, context)
-                    end
-
-                  {:error, :missing_verifier_result} ->
-                    blocked_result(
-                      "The verifier turn completed without reporting `report_verifier_result`.",
-                      ["Verifier tool result missing."],
-                      context
-                    )
-
-                  {:error, {:invalid_verifier_result, reason}} ->
-                    blocked_result(
-                      "The verifier reported an invalid structured result.",
-                      [inspect(reason)],
-                      context
-                    )
-
-                  {:error, reason} ->
-                    blocked_result(
-                      "The verifier session failed before producing a usable result.",
-                      [inspect(reason)],
-                      context
-                    )
-                end
-            end
+          result
         end
-
-      with result when is_map(result) <- result,
-           {:ok, _execution_context} <- AgentExecution.entry_context(workspace, issue) do
-        Observability.emit(
-          [:symphony, :verifier, :completed],
-          %{count: 1, duration: System.monotonic_time() - start_time},
-          metadata
-          |> Map.put(:verdict, Map.get(result, :verdict) || Map.get(result, "verdict"))
-          |> Map.put(:smoke_status, smoke_result.status)
-        )
-
-        result
       end
     end)
   end
 
+  defp verifier_verdict(workspace, issue, state, smoke_result, context, metadata, opts) do
+    case smoke_result.status do
+      :unavailable ->
+        blocked_result(
+          "The repo smoke command is unavailable, so Symphony cannot verify this change.",
+          ["Smoke command missing or invalid in `.symphony/harness.yml`."],
+          context
+        )
+
+      :failed ->
+        with {:ok, _} <- current_step(workspace, issue, fn -> store_failure_artifact("verify_smoke_failed", smoke_result.output || "", metadata) end) do
+          needs_more_work_result("The smoke verification command failed, so the implementation needs another pass.", context)
+        end
+
+      :passed ->
+        cond do
+          context.behavioral_proof.required? and not context.behavioral_proof.satisfied? -> missing_behavioral_proof_result(context)
+          context.ui_proof.verify_required? and not context.ui_proof.verify_satisfied? -> missing_ui_proof_result(context)
+          true -> verify_with_session(workspace, issue, state, context, opts)
+        end
+    end
+  end
+
+  defp verify_with_session(workspace, issue, state, context, opts) do
+    runner = Keyword.get(opts, :verifier_session_runner, &run_verifier_session/4)
+
+    with {:ok, before_snapshot} <- current_step(workspace, issue, fn -> RunInspector.inspect(workspace, opts) end),
+         {:ok, result} <- current_step(workspace, issue, fn -> runner.(workspace, issue, state, Keyword.put(opts, :verification_context, context)) end) do
+      case result do
+        {:ok, %VerifierResult{} = result} ->
+          with {:ok, after_snapshot} <- current_step(workspace, issue, fn -> RunInspector.inspect(workspace, opts) end) do
+            if RunInspector.code_changed?(before_snapshot, after_snapshot) do
+              blocked_result(
+                "The verifier mutated the workspace, which is forbidden for read-only verification.",
+                ["Verification must not change files, git state, or PR metadata."],
+                context
+              )
+            else
+              verifier_result_payload(result, context)
+            end
+          end
+
+        {:error, :missing_verifier_result} ->
+          blocked_result("The verifier turn completed without reporting `report_verifier_result`.", ["Verifier tool result missing."], context)
+
+        {:error, {:invalid_verifier_result, reason}} ->
+          blocked_result("The verifier reported an invalid structured result.", [inspect(reason)], context)
+
+        {:error, reason} ->
+          blocked_result("The verifier session failed before producing a usable result.", [inspect(reason)], context)
+      end
+    end
+  end
+
   @spec post_merge_verify(Path.t(), map() | nil, keyword()) :: RunInspector.command_result() | AgentExecution.terminal()
   def post_merge_verify(workspace, harness, opts \\ []) do
-    with {:ok, _context} <- AgentExecution.entry_context(workspace, nil) do
-      RunInspector.run_post_merge(workspace, harness, opts)
-    end
+    with {:ok, result} <- current_step(workspace, nil, fn -> RunInspector.run_post_merge(workspace, harness, opts) end), do: result
   end
 
   defp run_verifier_session(workspace, issue, state, opts) do
     prompt = verifier_prompt(issue, state, Keyword.fetch!(opts, :verification_context))
-    before_snapshot = RunInspector.inspect(workspace, opts)
-    clear_verifier_result(issue)
 
-    verifier_opts = [
-      effort: Config.agent_turn_effort("verifier"),
-      model: Config.agent_model_for_stage("verifier") || Config.agent_model(),
-      on_message: Keyword.get(opts, :on_message, fn _message -> :ok end),
-      tool_executor: verifier_tool_executor(issue),
-      issue: issue
-    ]
+    with {:ok, before_snapshot} <- current_step(workspace, issue, fn -> RunInspector.inspect(workspace, opts) end) do
+      clear_verifier_result(issue)
 
-    provider = AgentProvider.resolve_for_stage("verifier")
+      verifier_opts = [
+        effort: Config.agent_turn_effort("verifier"),
+        model: Config.agent_model_for_stage("verifier") || Config.agent_model(),
+        on_message: Keyword.get(opts, :on_message, fn _message -> :ok end),
+        tool_executor: verifier_tool_executor(issue),
+        issue: issue
+      ]
 
-    with {:ok, session, binding} <- AgentProvider.open_session(provider, workspace, issue, :verifier, verifier_opts) do
-      try do
-        turn_opts = Keyword.put(verifier_opts, :execution_binding, binding)
-        turn_result = AgentProvider.run_turn(provider, session, workspace, prompt, verifier_issue(issue), turn_opts, :verifier)
+      provider = AgentProvider.resolve_for_stage("verifier")
 
-        with {:ok, _turn_session} <- turn_result,
-             {:ok, result} <- fetch_verifier_result(issue) do
-          after_snapshot = RunInspector.inspect(workspace, opts)
+      with {:ok, session, binding} <- AgentProvider.open_session(provider, workspace, issue, :verifier, verifier_opts) do
+        primary =
+          capture_outcome(fn ->
+            turn_opts = Keyword.put(verifier_opts, :execution_binding, binding)
+            turn_result = AgentProvider.run_turn(provider, session, workspace, prompt, verifier_issue(issue), turn_opts, :verifier)
 
-          if RunInspector.code_changed?(before_snapshot, after_snapshot) do
-            {:error, :verifier_mutated_workspace}
-          else
-            {:ok, result}
-          end
-        end
-      after
-        clear_verifier_result(issue)
-        AgentProvider.close_session(provider, session, binding)
+            with {:ok, _turn_session} <- turn_result,
+                 {:ok, {:ok, result}} <- current_step(workspace, issue, fn -> fetch_verifier_result(issue) end),
+                 {:ok, after_snapshot} <- current_step(workspace, issue, fn -> RunInspector.inspect(workspace, opts) end) do
+              if RunInspector.code_changed?(before_snapshot, after_snapshot), do: {:error, :verifier_mutated_workspace}, else: {:ok, result}
+            else
+              {:ok, {:error, _} = error} -> error
+              other -> other
+            end
+          end)
+
+        cleanup =
+          capture_outcome(fn ->
+            clear_verifier_result(issue)
+            AgentProvider.close_session(provider, session, binding)
+          end)
+
+        finish_with_cleanup(primary, cleanup)
       end
     end
   end
+
+  defp current_step(workspace, issue, fun) do
+    with {:ok, _context} <- AgentExecution.entry_context(workspace, issue) do
+      result = fun.()
+      current_result(workspace, issue, result)
+    end
+  end
+
+  defp current_result(_workspace, _issue, {:stop, {kind, _}} = terminal) when kind in [:accounting_uncertain, :execution_stopped], do: terminal
+  defp current_result(_workspace, _issue, {:stop, {:stale_execution, _, _}} = terminal), do: terminal
+
+  defp current_result(workspace, issue, result) do
+    with {:ok, _context} <- AgentExecution.entry_context(workspace, issue), do: {:ok, result}
+  end
+
+  # Capture only to run cleanup and then return/re-raise the exact selected outcome.
+  defp capture_outcome(fun) do
+    {:returned, fun.()}
+  catch
+    kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+  end
+
+  defp finish_with_cleanup(primary, cleanup) do
+    cond do
+      cleanup == {:returned, :ok} or cleanup == primary ->
+        restore_outcome(primary)
+
+      stopped_cleanup?(cleanup) and retained_primary?(primary) ->
+        restore_outcome(primary)
+
+      retained_primary?(primary) ->
+        Logger.error(
+          "VerifierRunner cleanup failed primary=" <>
+            outcome_diagnostic(primary) <>
+            " cleanup=" <> outcome_diagnostic(cleanup)
+        )
+
+        restore_outcome(primary)
+
+      true ->
+        restore_outcome(cleanup)
+    end
+  end
+
+  defp stopped_cleanup?({:returned, {:stop, {:execution_stopped, _}}}), do: true
+  defp stopped_cleanup?(_outcome), do: false
+  defp retained_primary?({:raised, _, _, _}), do: true
+  defp retained_primary?({:returned, {:stop, _}}), do: true
+  defp retained_primary?({:returned, {:error, _}}), do: true
+  defp retained_primary?(_outcome), do: false
+  defp restore_outcome({:returned, value}), do: value
+  defp restore_outcome({:raised, kind, reason, stacktrace}), do: :erlang.raise(kind, reason, stacktrace)
+
+  defp outcome_diagnostic({:raised, kind, reason, stacktrace}), do: Exception.format(kind, reason, stacktrace)
+
+  defp outcome_diagnostic({:returned, {:stop, {:stale_execution, _ids, cause}}}),
+    do: "stale_execution: " <> inspect(cause, limit: 8, printable_limit: 512)
+
+  defp outcome_diagnostic({:returned, {:stop, {tag, cause}}}) when tag in [:accounting_uncertain, :execution_stopped],
+    do: Atom.to_string(tag) <> ": " <> inspect(cause, limit: 8, printable_limit: 512)
+
+  defp outcome_diagnostic({:returned, {:stop, reason}}), do: "stop: " <> inspect(reason, limit: 8, printable_limit: 512)
+
+  defp outcome_diagnostic({:returned, {:error, {:workspace_hook_failed, hook, status, _output}}}),
+    do: "workspace_hook_failed: hook=#{hook} status=#{status}"
+
+  defp outcome_diagnostic({:returned, {:error, reason}}), do: "error: " <> inspect(reason, limit: 8, printable_limit: 512)
+  defp outcome_diagnostic({:returned, _value}), do: "returned"
 
   defp verifier_prompt(issue, state, context) do
     issue = verifier_issue(issue)
@@ -225,20 +285,24 @@ defmodule SymphonyElixir.VerifierRunner do
     |> String.trim()
   end
 
-  defp verification_context(workspace, inspection, state, acceptance, smoke_result, opts) do
-    changed_files = RunInspector.changed_paths(workspace, opts)
-    behavioral_proof = BehavioralProof.evaluate(workspace, inspection.harness, changed_files)
-
-    %{
-      acceptance: IssueAcceptance.to_prompt_map(acceptance),
-      changed_files: changed_files,
-      diff_summary: RunInspector.diff_summary(workspace, opts),
-      content_evidence: changed_file_content_evidence(workspace, changed_files, behavioral_proof),
-      smoke_result: smoke_result,
-      validation_output: get_in(state, [:last_validation, :output]),
-      behavioral_proof: behavioral_proof,
-      ui_proof: UiProof.evaluate(workspace, inspection.harness, changed_files, inspection, opts)
-    }
+  defp verification_context(workspace, issue, inspection, state, acceptance, smoke_result, opts) do
+    with {:ok, changed_files} <- current_step(workspace, issue, fn -> RunInspector.changed_paths(workspace, opts) end),
+         {:ok, behavioral_proof} <- current_step(workspace, issue, fn -> BehavioralProof.evaluate(workspace, inspection.harness, changed_files) end),
+         {:ok, diff_summary} <- current_step(workspace, issue, fn -> RunInspector.diff_summary(workspace, opts) end),
+         {:ok, content_evidence} <- current_step(workspace, issue, fn -> changed_file_content_evidence(workspace, changed_files, behavioral_proof) end),
+         {:ok, ui_proof} <- current_step(workspace, issue, fn -> UiProof.evaluate(workspace, inspection.harness, changed_files, inspection, opts) end) do
+      {:ok,
+       %{
+         acceptance: IssueAcceptance.to_prompt_map(acceptance),
+         changed_files: changed_files,
+         diff_summary: diff_summary,
+         content_evidence: content_evidence,
+         smoke_result: smoke_result,
+         validation_output: get_in(state, [:last_validation, :output]),
+         behavioral_proof: behavioral_proof,
+         ui_proof: ui_proof
+       }}
+    end
   end
 
   defp verifier_result_payload(%VerifierResult{} = result, context) do

@@ -7,14 +7,16 @@ defmodule SymphonyElixir.AgentExecutionTest do
   defmodule Owner do
     use GenServer
 
-    def start_link(observer), do: GenServer.start_link(__MODULE__, observer)
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
     @impl true
-    def init(observer), do: {:ok, %{observer: observer, registry: AgentExecution.new_registry(), reply: :ok}}
+    def init({observer, raw}), do: {:ok, %{observer: observer, expected: RunStateStore.material_projection(raw), registry: AgentExecution.new_registry(), reply: :ok}}
     @impl true
     def handle_call({:reply, reply}, _from, state), do: {:reply, :ok, %{state | reply: reply}}
     def handle_call(:registry, _from, state), do: {:reply, state.registry, state}
 
-    def handle_call({:agent_execution, context, action}, {caller, _tag}, state) do
+    def handle_call({:agent_execution, invocation, expected, action}, {caller, _tag}, state) do
+      true = expected === state.expected
+      context = invocation.context
       send(state.observer, {:owner_call, caller, context, action})
 
       if caller == context.worker and context.owner == self() do
@@ -43,7 +45,8 @@ defmodule SymphonyElixir.AgentExecutionTest do
     end
 
     @impl true
-    def handle_info({:agent_execution_usage, invocation, observation}, state) do
+    def handle_info({:agent_execution_usage, invocation, expected, observation}, state) do
+      true = expected === state.expected
       {:ok, registry, delta} = AgentExecution.apply_usage(state.registry, invocation.binding, invocation.ordinal, observation)
       send(state.observer, {:usage_before_confirmation, invocation, delta})
       {:noreply, %{state | registry: registry}}
@@ -202,15 +205,16 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "scoped authorization exposes the validated ticket and restores it after an exception", c do
-    {ticket, token} = admission!(c)
+    {ticket, token, raw} = admission!(c)
     assert {:error, :dispatch_context_missing} = DispatchAudit.current_ticket()
-    owner = start_supervised!({Owner, self()})
+    owner = start_supervised!({Owner, {self(), raw}})
 
     DispatchAudit.with_authorization(ticket, fn ->
       assert {:ok, ^ticket} = DispatchAudit.current_ticket()
 
       assert_raise RuntimeError, "controlled", fn ->
-        AgentExecution.with_context(ticket, token, owner, fn ->
+        AgentExecution.with_context(ticket, token, owner, raw, fn ->
+          assert_initial_confirmation!()
           assert {:ok, context} = AgentExecution.current_context()
           assert context.ticket == ticket
           assert context.lease_token == token
@@ -228,11 +232,12 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "usage reaches the owner before confirmation and foreign PID or retired callback has no effects", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     DispatchAudit.with_authorization(ticket, fn ->
-      AgentExecution.with_context(ticket, token, owner, fn ->
+      AgentExecution.with_context(ticket, token, owner, raw, fn ->
+        assert_initial_confirmation!()
         assert :ok = AgentExecution.ensure_session_capacity()
         assert {:ok, session} = Claude.start_session(c.workspace)
         assert {:ok, binding} = AgentExecution.register_session(Claude, session, :main)
@@ -248,19 +253,20 @@ defmodule SymphonyElixir.AgentExecutionTest do
         refute_received {:usage_before_confirmation, ^invocation, _}
         assert :ok = AgentExecution.retire_session(binding)
         assert {:discard, :obsolete_invocation} = AgentExecution.forward_update(invocation, %{event: :turn_completed, timestamp: DateTime.utc_now()})
-        refute_received {:owner_message, {:agent_worker_update, _, _}}
+        refute_received {:owner_message, {:agent_worker_update, _, _, _}}
         assert AgentExecution.total_usage(GenServer.call(owner, :registry)) == counters(100)
       end)
     end)
   end
 
   test "a caught raw-usage failure keeps the first terminal and emits no second diagnostic", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     result =
       DispatchAudit.with_authorization(ticket, fn ->
-        AgentExecution.with_context(ticket, token, owner, fn ->
+        AgentExecution.with_context(ticket, token, owner, raw, fn ->
+          assert_initial_confirmation!()
           {:ok, session} = Claude.start_session(c.workspace)
           {:ok, binding} = AgentExecution.register_session(Claude, session, :main)
           {:ok, invocation} = AgentExecution.begin_invocation(binding)
@@ -278,28 +284,28 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "invalid owner confirmation and owner death do not grant a new session", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
     assert :ok = GenServer.call(owner, {:reply, :unexpected})
-    assert {:stop, {:accounting_uncertain, :invalid_owner_confirmation}} = scoped(c, ticket, token, owner, &AgentExecution.ensure_session_capacity/0)
+    assert {:stop, {:accounting_uncertain, :invalid_owner_confirmation}} = scoped(c, ticket, token, owner, raw, &AgentExecution.ensure_session_capacity/0)
     assert :ok = GenServer.stop(owner)
-    assert {:stop, {:accounting_uncertain, :owner_unavailable}} = scoped(c, ticket, token, owner, &AgentExecution.ensure_session_capacity/0)
+    assert {:stop, {:accounting_uncertain, :owner_unavailable}} = scoped(c, ticket, token, owner, raw, &AgentExecution.ensure_session_capacity/0)
   end
 
   @tag timeout: 10_000
   test "confirmation has one real five-second timeout and no retry", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
     assert :ok = GenServer.call(owner, {:reply, :hold})
     started = System.monotonic_time(:millisecond)
-    assert {:stop, {:accounting_uncertain, :owner_confirmation_timeout}} = scoped(c, ticket, token, owner, &AgentExecution.ensure_session_capacity/0)
+    assert {:stop, {:accounting_uncertain, :owner_confirmation_timeout}} = scoped(c, ticket, token, owner, raw, &AgentExecution.ensure_session_capacity/0)
     assert System.monotonic_time(:millisecond) - started >= 5_000
     assert_receive {:owner_call, _, _, {:confirm, nil, 0}}
     refute_received {:owner_call, _, _, _}
   end
 
   test "audited checkpoints preserve actual maxima and reject legacy writes", c do
-    {ticket, token} = admission!(c)
+    {ticket, token, _raw} = admission!(c)
     context = %{ticket: ticket, lease_token: token}
 
     for {input, persisted} <- [{100, 100}, {20, 100}, {135, 135}] do
@@ -328,7 +334,7 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "invalid input or persisted counters leave the audited snapshot unchanged", c do
-    {ticket, token} = admission!(c)
+    {ticket, token, _raw} = admission!(c)
     context = %{ticket: ticket, lease_token: token}
     path = RunStateStore.state_path(c.workspace)
     original = File.read!(path)
@@ -345,7 +351,7 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "checkpoint rejects wrong ticket, run and issue without touching admission evidence", c do
-    {ticket, token} = admission!(c)
+    {ticket, token, _raw} = admission!(c)
     path = RunStateStore.state_path(c.workspace)
     snapshot = File.read!(path)
     marker = Path.join(DispatchAudit.marker_directory(c.workspace), "marker.json")
@@ -365,7 +371,7 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "same-owner same-epoch successor rejects the captured token without altering either journal", c do
-    {ticket, token} = admission!(c)
+    {ticket, token, _raw} = admission!(c)
     assert :ok = LeaseManager.ensure_current(token)
     before = File.read!(token.storage.lease_path)
     assert :ok = LeaseManager.ensure_current(token)
@@ -383,7 +389,7 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "expired pending corrupt and missing leases fail without renewal", c do
-    {_ticket, token} = admission!(c)
+    {_ticket, token, _raw} = admission!(c)
     path = token.storage.lease_path
     original = path |> File.read!() |> Jason.decode!()
     expired = Map.put(original, "updated_at", DateTime.utc_now() |> DateTime.add(-3600, :second) |> DateTime.to_iso8601())
@@ -416,30 +422,29 @@ defmodule SymphonyElixir.AgentExecutionTest do
     registry = AgentExecution.mark_uncertain(AgentExecution.new_registry(), nil)
     assert registry.uncertain == :invalid_uncertainty_cause
     assert {:error, {:accounting_uncertain, :invalid_uncertainty_cause}} = AgentExecution.session_capacity(registry)
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     assert {:stop, {:accounting_uncertain, :invalid_uncertainty_cause}} =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
                assert {:stop, {:accounting_uncertain, :invalid_uncertainty_cause}} = AgentExecution.fail(nil)
                :provider_continued
              end)
 
-    assert :ok = GenServer.call(owner, {:reply, {:error, nil}})
-
     assert {:stop, {:accounting_uncertain, :invalid_uncertainty_cause}} =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
+               assert :ok = GenServer.call(owner, {:reply, {:error, nil}})
                assert {:stop, {:accounting_uncertain, :invalid_uncertainty_cause}} = AgentExecution.ensure_session_capacity()
                :provider_continued
              end)
   end
 
   test "CLI external raw session id cannot replace the canonical handle identity", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     assert {:stop, {:accounting_uncertain, :session_identity_mismatch}} =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
                {:ok, session} = Claude.start_session(c.workspace)
                {:ok, binding} = AgentExecution.register_session(Claude, session, :main)
                {:ok, invocation} = AgentExecution.begin_invocation(binding)
@@ -447,7 +452,7 @@ defmodule SymphonyElixir.AgentExecutionTest do
                assert AgentExecution.total_usage(GenServer.call(owner, :registry)) == counters(10)
                assert :ok = AgentExecution.confirm_invocation(invocation, %{session_id: session.session_id})
                assert {:stop, {:accounting_uncertain, :session_identity_mismatch}} = AgentExecution.forward_update(invocation, %{session_id: "forged-runtime-id", usage: counters(20)})
-               refute_received {:owner_message, {:agent_worker_update, _, _}}
+               refute_received {:owner_message, {:agent_worker_update, _, _, _}}
                :provider_continued
              end)
 
@@ -455,11 +460,11 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "AppServer explicit foreign thread is rejected before usage or update reaches owner", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     assert {:stop, {:accounting_uncertain, :session_identity_mismatch}} =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
                {:ok, binding} = AgentExecution.register_session(Codex, %{thread_id: "A"}, :main)
                {:ok, invocation} = AgentExecution.begin_invocation(binding)
                assert :ok = AgentExecution.observe_usage(invocation, %{params: %{threadId: "A", tokenUsage: %{total: counters(10)}}})
@@ -468,29 +473,29 @@ defmodule SymphonyElixir.AgentExecutionTest do
                assert {:stop, {:accounting_uncertain, :session_identity_mismatch}} = AgentExecution.observe_usage(invocation, %{thread_id: "B", tokenUsage: %{total: counters(100)}})
                refute_received {:usage_before_confirmation, ^invocation, _}
                assert {:stop, {:accounting_uncertain, :session_identity_mismatch}} = AgentExecution.forward_update(invocation, %{thread_id: "A"})
-               refute_received {:owner_message, {:agent_worker_update, _, _}}
+               refute_received {:owner_message, {:agent_worker_update, _, _, _}}
              end)
 
     assert AgentExecution.total_usage(GenServer.call(owner, :registry)) == counters(10)
   end
 
   test "a canonical result with a foreign identity is rejected without forwarding it", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     assert {:stop, {:accounting_uncertain, :session_identity_mismatch}} =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
                {:ok, session} = CodexCLI.start_session(c.workspace)
                {:ok, binding} = AgentExecution.register_session(CodexCLI, session, :main)
                {:ok, invocation} = AgentExecution.begin_invocation(binding)
                assert {:stop, {:accounting_uncertain, :session_identity_mismatch}} = AgentExecution.confirm_invocation(invocation, %{session_id: "forged", usage: counters(10)})
                refute_received {:usage_before_confirmation, _, _}
-               refute_received {:owner_message, {:agent_worker_update, _, _}}
+               refute_received {:owner_message, {:agent_worker_update, _, _, _}}
              end)
   end
 
   test "audited checkpoint does not create or adopt missing partial or pending snapshots", c do
-    {ticket, token} = admission!(c)
+    {ticket, token, _raw} = admission!(c)
     context = %{ticket: ticket, lease_token: token}
     path = RunStateStore.state_path(c.workspace)
     original = File.read!(path)
@@ -527,7 +532,7 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "captured lease path is stable and changed ledger configuration rejects checkpoint", c do
-    {ticket, token} = admission!(c)
+    {ticket, token, _raw} = admission!(c)
     snapshot_path = RunStateStore.state_path(c.workspace)
     snapshot = File.read!(snapshot_path)
     lease = File.read!(token.storage.lease_path)
@@ -587,16 +592,16 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "nested execution context preserves outer bindings and its first uncertainty", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     assert {:stop, {:accounting_uncertain, :execution_context_already_present}} =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
                {:ok, session} = Claude.start_session(c.workspace)
                {:ok, binding} = AgentExecution.register_session(Claude, session, :main)
                {:ok, invocation} = AgentExecution.begin_invocation(binding)
                {:ok, outer} = AgentExecution.current_context()
-               assert {:stop, {:accounting_uncertain, :execution_context_already_present}} = AgentExecution.with_context(ticket, token, owner, fn -> flunk("nested context executed") end)
+               assert {:stop, {:accounting_uncertain, :execution_context_already_present}} = AgentExecution.with_context(ticket, token, owner, raw, fn -> flunk("nested context executed") end)
                assert {:ok, ^outer} = AgentExecution.current_context()
                assert {:stop, {:accounting_uncertain, :execution_context_already_present}} = AgentExecution.confirm_invocation(invocation)
                assert GenServer.call(owner, :registry).current == binding
@@ -606,21 +611,21 @@ defmodule SymphonyElixir.AgentExecutionTest do
     assert {:error, :execution_context_missing} = AgentExecution.current_context()
 
     assert {:stop, {:accounting_uncertain, :checkpoint_failed}} =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
                AgentExecution.fail(:checkpoint_failed)
-               assert {:stop, {:accounting_uncertain, :checkpoint_failed}} = AgentExecution.with_context(ticket, token, owner, fn -> flunk("nested context executed after failure") end)
+               assert {:stop, {:accounting_uncertain, :checkpoint_failed}} = AgentExecution.with_context(ticket, token, owner, raw, fn -> flunk("nested context executed after failure") end)
                :provider_continued
              end)
   end
 
   test "begin rejects a changed handle with the same ID or a different provider before advancing the owner", c do
-    {ticket, token} = admission!(c)
+    {ticket, token, raw} = admission!(c)
 
     for mismatch <- [:handle, :provider] do
-      owner = start_supervised!(Supervisor.child_spec({Owner, self()}, id: mismatch))
+      owner = start_supervised!(Supervisor.child_spec({Owner, {self(), raw}}, id: mismatch))
 
       assert {:stop, {:accounting_uncertain, :execution_handle_mismatch}} =
-               scoped(c, ticket, token, owner, fn ->
+               scoped(c, ticket, token, owner, raw, fn ->
                  {:ok, session} = Claude.start_session(c.workspace)
                  {:ok, binding} = AgentExecution.register_session(Claude, session, :main)
                  assert {:ok, invocation} = AgentExecution.begin_invocation(Claude, session, binding)
@@ -648,11 +653,11 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "exact handles preserve scoped A verifier B A and confirm the current ordinal before and after retirement", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     assert :ok =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
                assert {:ok, context} = AgentExecution.entry_context(c.workspace, c.issue)
                assert_receive {:owner_call, _, ^context, {:confirm, nil, 0}}
                assert :ok = AgentExecution.confirm_current_invocation()
@@ -692,7 +697,7 @@ defmodule SymphonyElixir.AgentExecutionTest do
     assert {:ok, _} = RunStateStore.record_token_usage(c.workspace, c.issue, counters(7))
     assert {:ok, :legacy} = AgentExecution.entry_context(c.workspace, c.issue.identifier)
     assert {:stop, {:accounting_uncertain, :execution_context_missing}} = AgentExecution.confirm_current_invocation()
-    {ticket, _token} = admission!(c)
+    {ticket, _token, _raw} = admission!(c)
     path = RunStateStore.state_path(c.workspace)
     bytes = File.read!(path)
     assert {:stop, {:accounting_uncertain, :execution_context_missing}} = AgentExecution.entry_context(c.workspace, c.issue)
@@ -702,11 +707,11 @@ defmodule SymphonyElixir.AgentExecutionTest do
   end
 
   test "entry mismatch stays terminal and skips subsequent owner confirmation", c do
-    {ticket, token} = admission!(c)
-    owner = start_supervised!({Owner, self()})
+    {ticket, token, raw} = admission!(c)
+    owner = start_supervised!({Owner, {self(), raw}})
 
     assert {:stop, {:accounting_uncertain, :execution_issue_mismatch}} =
-             scoped(c, ticket, token, owner, fn ->
+             scoped(c, ticket, token, owner, raw, fn ->
                assert {:stop, {:accounting_uncertain, :execution_issue_mismatch}} = AgentExecution.entry_context(c.workspace, %{c.issue | identifier: "OTHER"})
                assert {:stop, {:accounting_uncertain, :execution_issue_mismatch}} = AgentExecution.entry_context(c.workspace, c.issue)
                assert {:stop, {:accounting_uncertain, :execution_issue_mismatch}} = AgentExecution.confirm_current_invocation()
@@ -718,10 +723,32 @@ defmodule SymphonyElixir.AgentExecutionTest do
 
   defp admission!(c) do
     assert {:ok, acquired} = LeaseManager.acquire(c.issue.id, c.issue.identifier, "execution-owner")
-    assert {:ok, ticket} = DispatchAudit.begin(c.workspace, %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}})
-    {ticket, acquired.token}
+    assert {:ok, source, view} = RunStateStore.read_admission_source(c.workspace, c.issue)
+
+    assert {:ok, ticket, raw} =
+             DispatchAudit.begin(
+               c.workspace,
+               %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, stage: view.stage, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}},
+               source
+             )
+
+    {ticket, acquired.token, raw}
   end
 
-  defp scoped(_c, ticket, token, owner, fun), do: DispatchAudit.with_authorization(ticket, fn -> AgentExecution.with_context(ticket, token, owner, fun) end)
+  defp scoped(_c, ticket, token, owner, raw, fun) do
+    DispatchAudit.with_authorization(ticket, fn ->
+      AgentExecution.with_context(ticket, token, owner, raw, fn ->
+        assert_initial_confirmation!()
+        fun.()
+      end)
+    end)
+  end
+
+  defp assert_initial_confirmation! do
+    assert {:ok, context} = AgentExecution.current_context()
+    worker = self()
+    assert_receive {:owner_call, ^worker, ^context, {:confirm, nil, 0}}
+  end
+
   defp counters(value), do: %{input_tokens: value, output_tokens: 0, total_tokens: value}
 end

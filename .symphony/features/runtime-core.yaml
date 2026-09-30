@@ -15,6 +15,9 @@ source_paths:
   - elixir/lib/symphony_elixir/orchestrator.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
 acceptance_signals:
+  - Current raw material state is compared before audited continuation; only an acknowledged own finite CAS advances its witness
+  - First stale or accounting failure preserves captured claim and journal through the original worker DOWN without automatic retry
+  - Own blocked and done results survive cleanup; ordinary tools, turns and hooks remain denied after their terminal acknowledgment
   - Admitted execution captures dispatch ticket, complete physical lease token and owner; callbacks and confirmation cannot adopt provider-supplied identity or a successor
   - Session-scoped usage is persisted before local effects continue; duplicates and verifier session changes preserve prior consumption, with two live and 64 total bindings per dispatch
   - Accounting uncertainty remains terminal through active/passive workers and DOWN, preserving claims and journals without automatic finish, retry or successor cleanup
@@ -98,4 +101,4 @@ acceptance_signals:
   - Promotion checks the clean build receipt before and after copying a release without treating it as task acceptance or canary proof
 dependencies:
   - harness
-last_updated_by_issue: architecture-I2a
+last_updated_by_issue: architecture-I2b

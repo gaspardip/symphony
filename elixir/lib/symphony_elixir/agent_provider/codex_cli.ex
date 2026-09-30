@@ -94,7 +94,7 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
          }
        }}
     catch
-      :throw, {:agent_execution_halt, {:stop, {:accounting_uncertain, _}} = terminal} ->
+      :throw, {:agent_execution_halt, {:stop, _} = terminal} ->
         safe_close_port(port)
         terminal
 
@@ -147,7 +147,8 @@ defmodule SymphonyElixir.AgentProvider.CodexCLI do
     case Jason.decode(line) do
       {:ok, payload} when is_map(payload) ->
         case on_usage.(payload) do
-          {:stop, {:accounting_uncertain, _}} = terminal -> throw({:agent_execution_halt, terminal})
+          {:stop, {kind, _}} = terminal when kind in [:accounting_uncertain, :execution_stopped] -> throw({:agent_execution_halt, terminal})
+          {:stop, {:stale_execution, _, _}} = terminal -> throw({:agent_execution_halt, terminal})
           result -> result
         end
 

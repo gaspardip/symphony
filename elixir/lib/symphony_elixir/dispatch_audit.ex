@@ -45,6 +45,68 @@ defmodule SymphonyElixir.DispatchAudit do
     end
   end
 
+  @doc "Admits only the captured material source and returns the raw snapshot produced by that admission."
+  @spec begin(Path.t(), map(), RunStateStore.admission_source()) :: {:ok, ticket(), map()} | {:error, term()}
+  def begin(workspace, attrs, source) when is_binary(workspace) and is_map(attrs) do
+    workspace = Path.expand(workspace)
+
+    with :ok <- validate_attrs(attrs) do
+      issue = %{id: attrs.issue_id, identifier: attrs.issue_identifier}
+
+      RunStateStore.with_workspace_lock(workspace, fn ->
+        with :ok <- ensure_available(workspace),
+             {:ok, current_source, view} <- RunStateStore.read_admission_source(workspace, issue),
+             :ok <- matching_admission_source(source, current_source),
+             :ok <- valid_admission_stage(view, attrs),
+             :ok <- create_marker_directory(workspace),
+             {:ok, run_id} <- RunIdentity.admit(workspace, attrs),
+             {:ok, admitted_raw} <- read_admitted_snapshot(workspace, issue),
+             :ok <- matching_admitted_material(current_source, admitted_raw),
+             {:ok, ticket} <- prepare_dispatch(workspace, Map.put(attrs, :run_id, run_id)) do
+          {:ok, ticket, admitted_raw}
+        end
+      end)
+    end
+  end
+
+  defp read_admitted_snapshot(workspace, issue) do
+    case RunStateStore.read_admission_source(workspace, issue) do
+      {:ok, {:present, raw}, _view} -> {:ok, raw}
+      {:ok, :missing, _view} -> {:error, {:stale_execution, :admitted_snapshot_missing}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp matching_admission_source(:missing, :missing), do: :ok
+
+  defp matching_admission_source({:present, expected}, {:present, current}) when is_map(expected) and is_map(current) do
+    identity_fields = ~w(issue_id issue_identifier run_id run_identity_event_id run_identity_ledger_path)
+
+    if Map.take(expected, identity_fields) == Map.take(current, identity_fields) and
+         RunStateStore.material_projection(expected) == RunStateStore.material_projection(current),
+       do: :ok,
+       else: {:error, {:stale_execution, :admission_source_changed}}
+  end
+
+  defp matching_admission_source(_expected, _current), do: {:error, {:stale_execution, :admission_source_changed}}
+
+  defp matching_admitted_material(:missing, _admitted_raw), do: :ok
+
+  defp matching_admitted_material({:present, previous}, admitted_raw) do
+    if RunStateStore.material_projection(previous) == RunStateStore.material_projection(admitted_raw),
+      do: :ok,
+      else: {:error, {:stale_execution, :admission_material_changed}}
+  end
+
+  defp valid_admission_stage(%{stage: stage}, _attrs) when stage in ["blocked", "done"],
+    do: {:error, {:persisted_stage_requires_explicit_resume, stage}}
+
+  defp valid_admission_stage(%{stage: stage}, attrs) do
+    if is_nil(attrs[:stage]) or attrs[:stage] == stage,
+      do: :ok,
+      else: {:error, {:stale_execution, :admission_stage_changed}}
+  end
+
   @spec ensure_available(Path.t()) :: :ok | {:error, term()}
   def ensure_available(workspace) when is_binary(workspace) do
     case File.lstat(marker_directory(workspace)) do

@@ -1,7 +1,44 @@
 defmodule SymphonyElixir.RunIdentityTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{DispatchAudit, RunIdentity, RunLedger, RunStateStore}
+  alias SymphonyElixir.{AgentExecution, DispatchAudit, LeaseManager, RunIdentity, RunLedger, RunStateStore}
+
+  # This owner supports only the initial, provider-free invocation. Admission,
+  # physical lease validation and both lifecycle operations use real storage.
+  defmodule BootstrapOwner do
+    use GenServer
+    alias SymphonyElixir.RunStateStore
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts) do
+      context = %{ticket: opts.ticket, lease_token: opts.token, owner: self(), worker: opts.worker, issue_id: opts.issue.id}
+
+      {:ok,
+       %{
+         context: context,
+         authority: %{ticket: opts.ticket, lease_token: opts.token},
+         expected: RunStateStore.material_projection(opts.raw),
+         confirmations: 0
+       }}
+    end
+
+    @impl true
+    def handle_call(:state, _from, state), do: {:reply, state, state}
+
+    def handle_call({:agent_execution, invocation, expected, {:confirm, nil, 0}}, {pid, _tag}, state) do
+      true = pid == state.context.worker
+      true = invocation == %{context: state.context, binding: nil, ordinal: 0}
+      true = expected == state.expected
+
+      reply =
+        with {:ok, _current} <- RunStateStore.ensure_current(state.authority, state.expected),
+             do: :ok
+
+      {:reply, reply, %{state | confirmations: state.confirmations + 1}}
+    end
+  end
 
   setup do
     root = Path.join(System.tmp_dir!(), "run-identity-#{System.unique_integer([:positive])}")
@@ -40,21 +77,29 @@ defmodule SymphonyElixir.RunIdentityTest do
   end
 
   test "I1-02 admission persists identity before bootstrap and executes after-create exactly once", c do
-    assert {:ok, ticket} = DispatchAudit.begin(c.workspace, c.attrs)
+    assert {:ok, acquired} = LeaseManager.acquire(c.issue.id, c.issue.identifier, c.attrs.metadata.owner)
+    on_exit(fn -> assert {:ok, :released} = LeaseManager.release_token(acquired.token) end)
+    assert {:ok, source, _view} = RunStateStore.read_admission_source(c.workspace, c.issue)
+    attrs = %{c.attrs | metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}}
+    assert {:ok, ticket, admitted_raw} = DispatchAudit.begin(c.workspace, attrs, source)
+    owner = start_supervised!({BootstrapOwner, %{ticket: ticket, token: acquired.token, worker: self(), raw: admitted_raw, issue: c.issue}})
     assert {:ok, snapshot} = RunStateStore.load(c.workspace)
     assert snapshot.run_id == ticket.run_id
     assert {:ok, identity_event} = RunLedger.fetch_entry_checked(snapshot.run_identity_event_id)
     raw_snapshot = File.read!(RunStateStore.state_path(c.workspace)) |> Jason.decode!()
+    assert raw_snapshot == admitted_raw
     assert identity_event["metadata"]["snapshot_digest"] == RunStateStore.snapshot_digest(raw_snapshot)
     assert :ok = RunIdentity.verify(c.workspace, ticket.run_id, c.issue.id, c.issue.identifier)
     refute File.exists?(Path.join(c.workspace, "hook-count"))
 
-    assert {:ok, workspace} = DispatchAudit.with_authorization(ticket, fn -> Workspace.create_for_issue(c.issue) end)
+    assert {:ok, workspace} = create_admitted_workspace(c.issue, ticket, acquired.token, owner, admitted_raw)
     assert workspace == c.workspace
-    assert {:ok, ^workspace} = DispatchAudit.with_authorization(ticket, fn -> Workspace.create_for_issue(c.issue) end)
+    assert {:ok, ^workspace} = create_admitted_workspace(c.issue, ticket, acquired.token, owner, admitted_raw)
     assert File.read!(Path.join(workspace, "hook-count")) == "created\n"
     assert {:ok, restored} = RunStateStore.load(workspace)
     assert restored == snapshot
+    expected = RunStateStore.material_projection(admitted_raw)
+    assert %{confirmations: 4, expected: ^expected} = GenServer.call(owner, :state)
     assert :ok = DispatchAudit.finish(ticket, :normal)
   end
 
@@ -125,7 +170,15 @@ defmodule SymphonyElixir.RunIdentityTest do
     test "I1-07 ledger failure after #{event} prevents worker body and hooks", c do
       attach_fault(c.fault_event, :corrupt_ledger)
       assert {:error, _} = DispatchAudit.begin(c.workspace, c.attrs)
-      assert {:error, _} = Workspace.create_for_issue(c.issue)
+
+      case c.fault_event do
+        "run.identity.requested" ->
+          assert {:error, _} = Workspace.create_for_issue(c.issue)
+
+        event when event in ["run.identity.created", "dispatch.requested"] ->
+          assert {:stop, {:accounting_uncertain, :execution_context_missing}} = Workspace.create_for_issue(c.issue)
+      end
+
       assert {:error, {:dispatch_audit_pending, _}} = DispatchAudit.begin(c.workspace, c.attrs)
       refute File.exists?(Path.join(c.workspace, "hook-count"))
       refute Enum.any?(complete_rows(), &(&1["event_type"] == "dispatch.started"))
@@ -330,6 +383,12 @@ defmodule SymphonyElixir.RunIdentityTest do
           Process.exit(self(), :kill)
       end
     end
+  end
+
+  defp create_admitted_workspace(issue, ticket, token, owner, admitted_raw) do
+    DispatchAudit.with_authorization(ticket, fn ->
+      AgentExecution.with_context(ticket, token, owner, admitted_raw, fn -> Workspace.create_for_issue(issue) end)
+    end)
   end
 
   defp attach_fault(event, action) do
