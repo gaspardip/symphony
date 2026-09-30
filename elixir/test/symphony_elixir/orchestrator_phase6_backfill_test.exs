@@ -241,10 +241,15 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     assert :sys.get_state(invalid_turn_sandbox_pid).running == %{}
 
     workflow_store_pid = Process.whereis(WorkflowStore)
+    workflow_path = Workflow.workflow_file_path()
+    workflow_contents = File.read!(workflow_path)
 
     on_exit(fn ->
+      File.write!(workflow_path, workflow_contents)
+      Workflow.set_workflow_file_path(workflow_path)
+
       if is_pid(workflow_store_pid) and is_nil(Process.whereis(WorkflowStore)) do
-        _ = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
       end
     end)
 
@@ -273,10 +278,15 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
   test "direct run_poll_cycle handling logs workflow parse configuration errors" do
     state = Orchestrator.refresh_runtime_config(%Orchestrator.State{lease_owner: "direct-poll-cycle-test"})
     workflow_store_pid = Process.whereis(WorkflowStore)
+    workflow_path = Workflow.workflow_file_path()
+    workflow_contents = File.read!(workflow_path)
 
     on_exit(fn ->
+      File.write!(workflow_path, workflow_contents)
+      Workflow.set_workflow_file_path(workflow_path)
+
       if is_pid(workflow_store_pid) and is_nil(Process.whereis(WorkflowStore)) do
-        _ = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
       end
     end)
 

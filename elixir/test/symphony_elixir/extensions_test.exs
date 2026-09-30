@@ -137,6 +137,15 @@ defmodule SymphonyElixir.ExtensionsTest do
   test "workflow store start_link and poll callback cover missing-file error paths" do
     ensure_workflow_store_running()
     existing_path = Workflow.workflow_file_path()
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(existing_path)
+
+      if is_nil(Process.whereis(WorkflowStore)) do
+        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+      end
+    end)
+
     manual_path = Path.join(Path.dirname(existing_path), "MANUAL_WORKFLOW.md")
     missing_path = Path.join(Path.dirname(existing_path), "MANUAL_MISSING_WORKFLOW.md")
 
@@ -151,6 +160,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     Workflow.set_workflow_file_path(manual_path)
 
     assert {:ok, manual_pid} = WorkflowStore.start_link()
+
+    on_exit(fn ->
+      monitor = Process.monitor(manual_pid)
+      Process.exit(manual_pid, :shutdown)
+      assert_receive {:DOWN, ^monitor, :process, ^manual_pid, _reason}, 1_000
+    end)
+
     assert Process.alive?(manual_pid)
 
     state = :sys.get_state(manual_pid)
@@ -171,14 +187,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert removed_state.workflow.prompt == "Manual workflow prompt"
     assert_receive :poll, 1_100
 
-    Process.exit(manual_pid, :normal)
-    restart_result = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-
-    assert match?({:ok, _pid}, restart_result) or
-             match?({:error, {:already_started, _pid}}, restart_result)
-
+    assert :ok = GenServer.stop(manual_pid, :normal)
     Workflow.set_workflow_file_path(existing_path)
-    WorkflowStore.force_reload()
+    assert {:ok, restarted_pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+    assert Process.whereis(WorkflowStore) == restarted_pid
+    assert :ok = WorkflowStore.force_reload()
   end
 
   test "tracker delegates to memory and linear adapters" do
