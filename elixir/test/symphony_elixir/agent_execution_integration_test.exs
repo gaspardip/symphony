@@ -614,7 +614,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
         assert {:ok, _state} = AgentExecution.transition_current("deploy_preview", %{})
 
         assert {:ok, ticket} =
-                 SymphonyElixir.DeployAudit.begin(c.workspace, %{
+                 AgentExecution.begin_deploy(c.workspace, %{
                    issue_id: c.issue.id,
                    issue_identifier: c.issue.identifier,
                    stage: "deploy_preview",

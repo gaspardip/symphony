@@ -388,8 +388,25 @@ defmodule SymphonyElixir.RunStateCurrentTest do
     test "checked deploy bridge #{if conflict, do: "rejects changed material", else: "retains its state and continuation"}", c do
       assert {:ok, _} = RunStateStore.transition(c.workspace, "deploy_preview", %{})
       {authority, expected} = admit!(%{c | attrs: %{c.attrs | stage: "deploy_preview"}})
-      assert {:ok, deploy} = DeployAudit.begin(c.workspace, %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, stage: "deploy_preview", command: "test-only"})
-      assert :ok = DeployAudit.record_result(deploy, %{status: :passed, command: "test-only", output: "observed"})
+
+      provenance = %{
+        version: 1,
+        actor_role: "runtime",
+        run_id: authority.ticket.run_id,
+        dispatch_id: authority.ticket.dispatch_id,
+        lease_generation: authority.lease_token.lease_generation,
+        agent_session: nil,
+        prior_agent_session: nil
+      }
+
+      assert {:ok, deploy} =
+               DeployAudit.begin(c.workspace, %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, stage: "deploy_preview", command: "test-only"}, %{
+                 authority: authority,
+                 expected: expected,
+                 provenance: provenance
+               })
+
+      assert {:ok, %{authority: :current, persistence: :confirmed, command_status: "passed"}} = DeployAudit.record_result(deploy, %{status: :passed, command: "test-only", output: "observed"})
 
       if c.deploy_conflict do
         assert {:ok, _} = RunStateStore.update(c.workspace, &Map.put(&1, :review_threads, %{"T-1" => %{status: "control"}}))

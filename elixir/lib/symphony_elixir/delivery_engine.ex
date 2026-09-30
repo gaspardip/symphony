@@ -2383,7 +2383,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp run_audited_deploy(workspace, issue, state, harness, target, command, opts) do
     with {:ok, execution_context} <- AgentExecution.entry_context(workspace, issue),
          begin_result <-
-           DeployAudit.begin(workspace, %{
+           begin_deploy(execution_context, workspace, %{
              issue_id: issue.id,
              issue_identifier: issue.identifier,
              stage: "deploy_" <> target,
@@ -2394,7 +2394,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          command_result <- run_deploy_command(target, workspace, harness, opts),
          :ok <- record_deploy_result(execution_context, ticket, issue, command_result),
          {:ok, _persisted_state, continuation, reply} <- continue_audited_deploy(ticket, issue, state, harness, target),
-         :ok <- DeployAudit.finish(ticket, continuation) do
+         :ok <- finish_deploy(execution_context, ticket, continuation) do
       reply
     else
       {:stop, _} = terminal ->
@@ -2416,15 +2416,17 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp record_deploy_result(execution_context, ticket, issue, command_result) when is_map(execution_context) do
-    with :ok <- execution_guard(ticket.workspace, issue),
-         result when is_map(result) <- command_result,
-         recorded <- DeployAudit.record_result(ticket, command_result_to_map(result)),
-         :ok <- execution_guard(ticket.workspace, issue),
-         :ok <- recorded do
+  defp record_deploy_result(execution_context, ticket, _issue, command_result) when is_map(execution_context) do
+    with result when is_map(result) <- command_result,
+         {:ok, _receipt} <- AgentExecution.record_deploy_result(ticket, command_result_to_map(result)) do
       :ok
     end
   end
+
+  defp begin_deploy(:legacy, workspace, attrs), do: DeployAudit.begin(workspace, attrs)
+  defp begin_deploy(context, workspace, attrs) when is_map(context), do: AgentExecution.begin_deploy(workspace, attrs)
+  defp finish_deploy(:legacy, ticket, continuation), do: DeployAudit.finish(ticket, continuation)
+  defp finish_deploy(context, ticket, continuation) when is_map(context), do: AgentExecution.finish_deploy(ticket, continuation)
 
   defp run_deploy_command("preview", workspace, harness, opts),
     do: RunInspector.run_deploy_preview(workspace, harness, opts)

@@ -9,7 +9,9 @@ defmodule SymphonyElixir.AgentExecution do
   storage, identity or fallback admission.
   """
 
-  alias SymphonyElixir.{DispatchAudit, RunStateStore}
+  require Logger
+
+  alias SymphonyElixir.{DeployAudit, DispatchAudit, RunStateStore}
 
   @context_key {__MODULE__, :context}
   @max_live 2
@@ -51,7 +53,17 @@ defmodule SymphonyElixir.AgentExecution do
       expected = RunStateStore.material_projection(admitted_raw)
       issue_identity = %{issue_id: admitted_raw["issue_id"], issue_identifier: admitted_raw["issue_identifier"]}
 
-      Process.put(@context_key, %{context: context, issue_identity: issue_identity, expected: expected, registry: new_registry(), handles: %{}, terminal: nil, known_terminal: nil, execution_stop: nil})
+      Process.put(@context_key, %{
+        context: context,
+        issue_identity: issue_identity,
+        expected: expected,
+        registry: new_registry(),
+        handles: %{},
+        terminal: nil,
+        known_terminal: nil,
+        execution_stop: nil,
+        deploys: %{}
+      })
 
       try do
         result = with {:ok, _state} <- ensure_current(), do: fun.()
@@ -151,7 +163,9 @@ defmodule SymphonyElixir.AgentExecution do
   def transition_current(stage, attrs) do
     with {:ok, state} <- worker_state(),
          :ok <- confirm_invocation(current_invocation(state)),
-         {:ok, persisted} <- RunStateStore.transition_current(authority(state), state.expected, stage, attrs) do
+         {:ok, fresh} <- RunStateStore.ensure_current(authority(state), state.expected),
+         {:ok, provenance} <- execution_provenance(state, fresh),
+         {:ok, persisted} <- RunStateStore.transition_current(authority(state), state.expected, stage, attrs, provenance) do
       advance_persisted(state, persisted)
     else
       {:error, reason} -> storage_failure(reason)
@@ -160,19 +174,227 @@ defmodule SymphonyElixir.AgentExecution do
     end
   end
 
-  @doc "Advances only the existing checked deploy bridge and retains its operation continuation."
-  @spec transition_deploy(SymphonyElixir.DeployAudit.ticket(), String.t(), map()) ::
-          {:ok, map(), SymphonyElixir.DeployAudit.continuation()} | terminal()
+  @doc "Authorizes one deploy with captured material and owner-confirmed provenance."
+  @spec begin_deploy(Path.t(), map()) :: {:ok, DeployAudit.ticket()} | terminal()
+  def begin_deploy(workspace, attrs) do
+    with {:ok, state} <- worker_state(),
+         true <- Path.expand(workspace) == state.context.ticket.workspace or {:error, :execution_context_mismatch},
+         :ok <- confirm_invocation(current_invocation(state)),
+         {:ok, fresh} <- RunStateStore.ensure_current(authority(state), state.expected),
+         {:ok, provenance} <- execution_provenance(state, fresh),
+         {:ok, ticket} <- DeployAudit.begin(workspace, attrs, %{authority: authority(state), expected: state.expected, provenance: provenance}) do
+      deploy = %{ticket: ticket, continuation: nil}
+      Process.put(@context_key, %{state | deploys: Map.put(state.deploys, ticket.live_ref, deploy)})
+      with {:ok, _fresh} <- ensure_current(), do: {:ok, ticket}
+    else
+      {:error, reason} -> storage_failure(reason)
+      {:stop, _} = terminal -> terminal
+      {:discard, reason} -> fail(reason)
+    end
+  end
+
+  @doc "Retains the single observed result even when its captured execution may no longer continue."
+  @spec record_deploy_result(DeployAudit.ticket(), map()) :: {:ok, map()} | {:error, term()} | terminal()
+  def record_deploy_result(ticket, result) do
+    with {:ok, state} <- raw_worker_state(),
+         {:ok, _deploy} <- captured_deploy(state, ticket) do
+      guard = ensure_current()
+
+      decision =
+        case guard do
+          {:ok, _fresh} -> :current
+          {:stop, _} = terminal -> {:denied, terminal}
+        end
+
+      # Custody of the already authorized command permits this one observation,
+      # including after a sticky terminal. It never permits another command.
+      try do
+        observed = DeployAudit.record_result(ticket, result, decision)
+        finish_deploy_observation(guard, observed)
+      rescue
+        exception -> deploy_observation_exception(guard, :error, exception, __STACKTRACE__)
+      catch
+        kind, reason -> deploy_observation_exception(guard, kind, reason, __STACKTRACE__)
+      end
+    else
+      {:error, reason} -> storage_failure(reason)
+    end
+  end
+
+  @doc "Advances only its captured deploy, retaining the exact continuation after owner acknowledgment."
+  @spec transition_deploy(DeployAudit.ticket(), String.t(), map()) ::
+          {:ok, map(), DeployAudit.continuation()} | terminal()
   def transition_deploy(ticket, stage, attrs) do
     with {:ok, state} <- worker_state(),
+         {:ok, _deploy} <- captured_deploy(state, ticket),
          :ok <- confirm_invocation(current_invocation(state)),
          {:ok, persisted, continuation} <- RunStateStore.transition_deploy(ticket, stage, attrs, %{authority: authority(state), expected: state.expected}),
          {:ok, confirmed} <- advance_persisted(state, persisted) do
+      current = Process.get(@context_key)
+      deploy = %{ticket: ticket, continuation: continuation}
+      Process.put(@context_key, %{current | deploys: Map.put(current.deploys, ticket.live_ref, deploy)})
       {:ok, confirmed, continuation}
     else
       {:error, reason} -> storage_failure(reason)
       {:stop, _} = terminal -> terminal
       {:discard, reason} -> fail(reason)
+    end
+  end
+
+  @doc "Closes only its acknowledged exact successor, without reopening execution after own done."
+  @spec finish_deploy(DeployAudit.ticket(), DeployAudit.continuation()) :: :ok | terminal()
+  def finish_deploy(ticket, continuation) do
+    with {:ok, state} <- raw_worker_state(),
+         :ok <- finish_deploy_permission(state),
+         {:ok, %{continuation: ^continuation}} <- captured_deploy(state, ticket),
+         :ok <- acknowledged_deploy_continuation(state, ticket, continuation),
+         :ok <- DeployAudit.finish(ticket, continuation) do
+      Process.put(@context_key, %{state | deploys: Map.delete(state.deploys, ticket.live_ref)})
+      :ok
+    else
+      {:ok, _other_deploy} -> fail(:deploy_continuation_not_acknowledged)
+      {:error, reason} -> storage_failure(reason)
+      {:stop, _} = terminal -> terminal
+      {:discard, reason} -> fail(reason)
+    end
+  end
+
+  defp captured_deploy(state, %{version: 2, live_ref: ref} = ticket) do
+    case Map.fetch(state.deploys, ref) do
+      {:ok, %{ticket: ^ticket} = deploy} -> {:ok, deploy}
+      _ -> {:error, :execution_deploy_ticket_mismatch}
+    end
+  end
+
+  defp captured_deploy(_state, _ticket), do: {:error, :execution_deploy_ticket_mismatch}
+
+  defp finish_deploy_permission(%{terminal: terminal}) when not is_nil(terminal), do: {:stop, terminal}
+  defp finish_deploy_permission(%{execution_stop: stop}) when not is_nil(stop), do: {:stop, {:execution_stopped, stop}}
+  defp finish_deploy_permission(%{known_terminal: %{stage: "done"}}), do: :ok
+  defp finish_deploy_permission(state), do: confirm_invocation(current_invocation(state))
+
+  defp acknowledged_deploy_continuation(state, ticket, %{version: 2, previous: previous, next: next, stage: stage})
+       when stage in ["done", "post_deploy_verify"] do
+    acknowledged =
+      previous === ticket.execution.expected and next === state.expected and next["stage"] == stage and
+        (stage != "done" or state.known_terminal === %{previous: previous, next: next, stage: "done"})
+
+    if acknowledged, do: :ok, else: {:error, :deploy_continuation_not_acknowledged}
+  end
+
+  defp acknowledged_deploy_continuation(_state, _ticket, _continuation), do: {:error, :deploy_continuation_not_acknowledged}
+
+  defp finish_deploy_observation({:stop, _} = terminal, observed) do
+    log_deploy_secondary(terminal, observed)
+    terminal
+  end
+
+  defp finish_deploy_observation({:ok, _fresh}, {:ok, %{authority: {:rejected, reason}} = receipt}) do
+    terminal = storage_failure(reason)
+    log_deploy_secondary(terminal, {:ok, receipt})
+    terminal
+  end
+
+  defp finish_deploy_observation({:ok, _fresh}, {:ok, %{authority: :current, persistence: :confirmed, command_status: "passed"} = receipt}),
+    do: {:ok, receipt}
+
+  defp finish_deploy_observation({:ok, _fresh}, {:ok, %{authority: :current, persistence: :confirmed, command_status: status}}),
+    do: {:error, {:deploy_audit_result_uncertain, status}}
+
+  defp finish_deploy_observation({:ok, _fresh}, {:ok, %{persistence: {kind, reason}} = receipt}) when kind in [:unconfirmed, :marker_only] do
+    terminal = storage_failure(reason)
+    log_deploy_secondary(terminal, {:ok, receipt})
+    terminal
+  end
+
+  defp finish_deploy_observation({:ok, _fresh}, {:error, reason}), do: storage_failure(reason)
+
+  defp deploy_observation_exception({:stop, _} = terminal, kind, reason, stack) do
+    Logger.error(
+      "Deploy observation retained terminal=#{inspect(deploy_diagnostic(terminal))} secondary=#{inspect({kind, deploy_diagnostic(reason)})} stack=#{Exception.format_stacktrace(deploy_stack_diagnostic(stack))}"
+    )
+
+    terminal
+  end
+
+  defp deploy_observation_exception({:ok, _fresh}, kind, reason, stack), do: :erlang.raise(kind, reason, stack)
+
+  defp deploy_stack_diagnostic(stack), do: Enum.map(stack, &deploy_stack_frame/1)
+
+  defp deploy_stack_frame({module, function, arity_or_args, location}) when is_atom(module) and is_atom(function) do
+    {module, function, deploy_stack_arity(arity_or_args), Keyword.take(location, [:file, :line])}
+  end
+
+  defp deploy_stack_frame({fun, arity_or_args, location}) when is_function(fun) do
+    {:module, module} = Function.info(fun, :module)
+    {:name, function} = Function.info(fun, :name)
+    {module, function, deploy_stack_arity(arity_or_args), Keyword.take(location, [:file, :line])}
+  end
+
+  defp deploy_stack_arity(args) when is_list(args), do: length(args)
+  defp deploy_stack_arity(arity) when is_integer(arity), do: arity
+
+  defp log_deploy_secondary(terminal, {:ok, %{persistence: {kind, reason}} = receipt}) when kind in [:unconfirmed, :marker_only] do
+    Logger.error("Deploy observation retained terminal=#{inspect(deploy_diagnostic(terminal))} secondary=#{inspect(deploy_diagnostic(reason))} receipt=#{inspect(deploy_receipt_diagnostic(receipt))}")
+  end
+
+  defp log_deploy_secondary(terminal, {:error, reason}) do
+    Logger.error("Deploy observation retained terminal=#{inspect(deploy_diagnostic(terminal))} secondary=#{inspect(deploy_diagnostic(reason))}")
+  end
+
+  defp log_deploy_secondary(_terminal, {:ok, %{persistence: :confirmed}}), do: :ok
+
+  defp deploy_receipt_diagnostic(receipt) do
+    receipt
+    |> Map.take([:version, :operation_id, :result_event_id, :command_status])
+    |> Map.put(:authority, deploy_diagnostic(receipt.authority))
+    |> Map.put(:persistence, deploy_diagnostic(receipt.persistence))
+  end
+
+  defp deploy_diagnostic(%{phase: phase, receipt: receipt}), do: %{phase: phase, receipt: deploy_receipt_diagnostic(receipt)}
+  defp deploy_diagnostic(%{version: 2, operation_id: _, persistence: _} = receipt), do: deploy_receipt_diagnostic(receipt)
+  defp deploy_diagnostic(%Jason.DecodeError{position: position}), do: {:invalid_json, position}
+  defp deploy_diagnostic(%{run_id: run_id, dispatch_id: dispatch_id}), do: %{run_id: run_id, dispatch_id: dispatch_id}
+  defp deploy_diagnostic(%{stage: stage}) when is_binary(stage) or is_nil(stage), do: %{stage: stage}
+  defp deploy_diagnostic(%{__struct__: module}), do: module
+  defp deploy_diagnostic(value) when is_tuple(value), do: value |> Tuple.to_list() |> Enum.map(&deploy_diagnostic/1) |> List.to_tuple()
+  defp deploy_diagnostic(value) when is_atom(value) or is_number(value), do: value
+  defp deploy_diagnostic(_value), do: :redacted_detail
+
+  defp execution_provenance(state, fresh) do
+    with {:ok, agent_session} <- current_agent_session(state.registry),
+         {:ok, prior_agent_session} <- prior_agent_session(fresh) do
+      {:ok,
+       %{
+         version: 1,
+         actor_role: "runtime",
+         run_id: state.context.ticket.run_id,
+         dispatch_id: state.context.ticket.dispatch_id,
+         lease_generation: state.context.lease_token.lease_generation,
+         agent_session: agent_session,
+         prior_agent_session: prior_agent_session
+       }}
+    end
+  end
+
+  defp current_agent_session(%{current: nil}), do: {:ok, nil}
+
+  defp current_agent_session(%{current: {provider, kind, id}, ordinal: ordinal}) when ordinal > 0 do
+    with {:ok, profile} <- provider_profile(provider) do
+      {:ok, %{provider: Atom.to_string(profile), kind: Atom.to_string(kind), id: id, invocation: ordinal}}
+    end
+  end
+
+  defp prior_agent_session(fresh) do
+    case Map.fetch(fresh, :last_agent_session) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, %{version: 1, event_id: _, run_id: _, dispatch_id: _, agent_session: _} = prior} ->
+        {:ok, Map.take(prior, [:event_id, :run_id, :dispatch_id, :agent_session])}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_last_agent_session}
     end
   end
 

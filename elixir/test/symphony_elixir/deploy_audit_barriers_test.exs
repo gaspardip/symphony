@@ -39,54 +39,94 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
              })
 
     owner = "deploy-barrier-owner"
-    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, owner)
 
-    dispatch_ticket =
-      if context[:dispatch_ticket] do
-        assert {:ok, ticket} = DispatchAudit.begin(workspace, %{issue_id: issue.id, issue_identifier: issue.identifier, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}})
-        ticket
-      end
+    if context[:legacy_workspace] do
+      timestamp = DateTime.utc_now() |> DateTime.to_iso8601()
 
-    if context[:incomplete] do
-      File.mkdir!(DeployAudit.marker_directory(workspace))
+      lease = %{
+        "issue_id" => issue.id,
+        "issue_identifier" => issue.identifier,
+        "owner" => owner,
+        "epoch" => 7,
+        "lease_version" => 1,
+        "acquired_at" => timestamp,
+        "updated_at" => timestamp
+      }
+
+      assert {:ok, storage} = LeaseManager.capture_storage(issue.id)
+      File.mkdir_p!(Path.dirname(storage.lease_path))
+      File.write!(storage.lease_path, Jason.encode!(lease))
+      assert {:ok, ^lease} = LeaseManager.read_at(storage)
+
+      assert {:ok, %{version: 1}} =
+               DeployAudit.begin(workspace, %{issue_id: issue.id, issue_identifier: issue.identifier, stage: "deploy_preview", command: "printf local-deploy"})
+
+      {:ok, root: root, workspace: workspace, issue: issue, before: protected_bytes(workspace, issue)}
     else
-      assert {:ok, _ticket} =
-               DeployAudit.begin(workspace, %{
-                 issue_id: issue.id,
-                 issue_identifier: issue.identifier,
-                 stage: "deploy_preview",
-                 command: "printf local-deploy"
-               })
+      assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, owner)
+
+      dispatch_ticket =
+        if context[:incomplete] do
+          File.mkdir!(DeployAudit.marker_directory(workspace))
+          nil
+        else
+          assert {:ok, source, _view} = RunStateStore.read_admission_source(workspace, issue)
+
+          assert {:ok, ticket, raw} =
+                   DispatchAudit.begin(workspace, %{issue_id: issue.id, issue_identifier: issue.identifier, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}}, source)
+
+          authority = %{ticket: ticket, lease_token: acquired.token}
+          expected = RunStateStore.material_projection(raw)
+
+          provenance = %{
+            version: 1,
+            actor_role: "runtime",
+            run_id: ticket.run_id,
+            dispatch_id: ticket.dispatch_id,
+            lease_generation: acquired.token.lease_generation,
+            agent_session: nil,
+            prior_agent_session: nil
+          }
+
+          assert {:ok, _deploy} =
+                   DeployAudit.begin(workspace, %{issue_id: issue.id, issue_identifier: issue.identifier, stage: "deploy_preview", command: "printf local-deploy"}, %{
+                     authority: authority,
+                     expected: expected,
+                     provenance: provenance
+                   })
+
+          ticket
+        end
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+      timer = Process.send_after(self(), :existing_retry_timer, 60_000)
+      on_exit(fn -> Process.cancel_timer(timer) end)
+
+      state = %State{
+        lease_owner: owner,
+        lease_claims: %{
+          issue.id => %{
+            token: acquired.token,
+            lease: acquired.lease,
+            custody_ref: make_ref(),
+            holder: :retry,
+            workspace: Workspace.path_for_issue(issue),
+            issue: issue,
+            started_at_ms: System.monotonic_time(:millisecond),
+            deadline: :not_pending,
+            promotion_ref: nil,
+            timer: nil
+          }
+        },
+        max_concurrent_agents: 1,
+        agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        claimed: MapSet.new([issue.id]),
+        retry_attempts: %{issue.id => %{identifier: issue.identifier, attempt: 2, retry_ref: make_ref(), status: :scheduled, timer_ref: timer, due_at_ms: System.monotonic_time(:millisecond) + 60_000}}
+      }
+
+      {:ok, root: root, workspace: workspace, issue: issue, state: state, timer: timer, before: protected_bytes(workspace, issue), dispatch_ticket: dispatch_ticket}
     end
-
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
-    timer = Process.send_after(self(), :existing_retry_timer, 60_000)
-    on_exit(fn -> Process.cancel_timer(timer) end)
-
-    state = %State{
-      lease_owner: owner,
-      lease_claims: %{
-        issue.id => %{
-          token: acquired.token,
-          lease: acquired.lease,
-          custody_ref: make_ref(),
-          holder: :retry,
-          workspace: Workspace.path_for_issue(issue),
-          issue: issue,
-          started_at_ms: System.monotonic_time(:millisecond),
-          deadline: :not_pending,
-          promotion_ref: nil,
-          timer: nil
-        }
-      },
-      max_concurrent_agents: 1,
-      agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      claimed: MapSet.new([issue.id]),
-      retry_attempts: %{issue.id => %{identifier: issue.identifier, attempt: 2, retry_ref: make_ref(), status: :scheduled, timer_ref: timer, due_at_ms: System.monotonic_time(:millisecond) + 60_000}}
-    }
-
-    {:ok, root: root, workspace: workspace, issue: issue, state: state, timer: timer, before: protected_bytes(workspace, issue), dispatch_ticket: dispatch_ticket}
   end
 
   for action <- [:retry, :resume, :refresh_merge, :approve_merge, :approve_deploy, :approve_drafts, :post_drafts] do
@@ -251,6 +291,7 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
     refute_received {:memory_tracker_comment, _, _}
   end
 
+  @tag legacy_workspace: true
   test "Workspace refuses lifecycle and hooks while preserving the original worker failure", context do
     assert {:error, {:deploy_audit_pending, _}} = Workspace.create_for_issue(context.issue)
     assert {:error, {:deploy_audit_pending, _}, ""} = Workspace.remove(context.workspace)

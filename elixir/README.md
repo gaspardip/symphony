@@ -661,5 +661,30 @@ existing contract.
 The material projection, stop notifications, final-usage receipt and lifecycle lock
 order are specified in [the runtime contract](../docs/RUNTIME_CONTRACT.md#current-execution-and-material-state-i2b).
 These are cooperating local checks; remote effects are not transactional and
-restarting does not authorize uncertain work to replay. I2c/P2/I3 and academic
-acceptance require their own evidence.
+restarting does not authorize uncertain work to replay. The I2c operation binding
+below, P2/I3 and academic acceptance require their own evidence.
+
+
+## Bound deployment observations (I2c)
+
+Audited deployment binds its reservation to the captured dispatch, physical lease
+and material state. The creating process retains one live ticket. One original
+observation remains possible after a guard denies continuation, but cannot authorize
+another effect. The attempt is consumed before preparation and IO; failures and a
+still-authorized marker never permit observation replay.
+
+Only current, passed, confirmed evidence can reach continuation. Its own checked CAS
+and owner ACK establish the exact successor receipt; unrelated same-stage events or
+restored files after a denial cannot close the operation. Own done permits this
+specific close without reopening tools or turns. A public stop that kills the worker
+before a result leaves the deployment outcome unknown and its reservation retained.
+Dispatch termination is recorded separately from deployment success.
+
+Checked stage transitions may persist last_agent_session as historical diagnostic
+evidence. It is not a live session handle or an input to the material permission guard.
+DeployAudit.inspect_pending returns checked diagnostics without command/output/token
+payloads and never repairs or removes journals. The public shell path still maps
+passed/failed/unavailable; this block adds no distinct public timeout detection.
+See [the operation contract](../docs/RUNTIME_CONTRACT.md#deployment-operation-binding-i2c)
+and [deployment audit](../docs/deploy-audit.md). Source checks, loaded release and thesis
+acceptance remain separate evidence.

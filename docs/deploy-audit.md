@@ -1,43 +1,82 @@
 # Deployment audit
 
-This fork's optional preview and production deployment stages reserve an operation
-before invoking the repository command. The reservation is a sibling directory,
-`.<workspace-name>.deploy-audit`, outside the mutable workspace. Its identity binds
-the workspace, issue, stage, base stage-entry event, command digest and original
-ledger path. A reservation, even incomplete or unreadable, prevents another attempt.
+Preview and production stages reserve a deployment before invoking the repository
+command. A sibling directory, `.<workspace-name>.deploy-audit`, survives workspace
+changes. Any remaining reservation, including unreadable or incomplete evidence,
+blocks another deployment. Opening confirms a checked intent in the original ledger.
 
-The runtime confirms the intent with the checked ledger writer before executing the
-command. The command runs without holding the snapshot lock, so status, lease
-maintenance and token accounting remain available. Its observed result is persisted
-under the same operation identity before continuation. A nonzero or unavailable
-result does not establish that the command had no effects; it remains pending.
+## Captured authority and legacy operations
 
-Successful continuation compares the fresh issue, stage, stage-entry event and lease
-identity under one snapshot lock. It records the deploy result and stage transition
-together, preserving concurrent accounting. The journal closes only after checking
-the exact result and the operation's own continuation event in the original ledger.
-A later unrelated transition to the same stage is insufficient proof.
+An admitted execution opens a version 2 operation bound to its exact dispatch ticket,
+complete physical lease token, canonical material witness and checked stage-entry
+event. The worker derives execution provenance from its confirmed private invocation;
+command output and caller attributes cannot supply authority or session identity.
 
-A pending journal blocks dispatch, direct delivery entry, retry, approvals and
-workspace hooks or cleanup. Stop and status remain available. An after-run hook is
-omitted with an explicit diagnostic when running it could disturb pending evidence.
-A second process or VM sees the reservation even after the first process exits.
+A version 1 operation is permitted only with checked raw absence of run identity and
+C3 ownership. Partial identity, pending evidence and read errors cannot become legacy.
+New version 1 tickets retain the public legacy return shapes and marker format. Both
+versions require the exact ticket, live reference and creating process. Tickets from
+an earlier implementation or a dead process cannot be reconstructed or imported.
 
-No timeout removes the reservation. A storage error, changed ledger, command failure,
-conflicting stop or failed final removal is returned explicitly and preserves the
-remaining evidence. A legacy snapshot lacking its checked stage-entry event cannot
-open a deployment. Missing commands and deferred production windows retain their
-existing behavior before a reservation is opened.
+## One observation, then a separate continuation
 
-The journal records local observations; it does not make shell, tracker and storage
-atomic. A successful exit is not independent proof of the remote deployment. The
-tracker's final Done update occurs outside the snapshot lock and can fail or race
-with an operator action; a conflicting continuation remains pending. Opening uses
-exclusive directory creation across VMs; later ticket operations belong to the
-creating process and use local coordination, not a distributed transaction.
+The command runs outside the workspace lock. The first valid result consumes the
+live ticket's observation attempt before event preparation, locking or writer IO.
+The prepared event and its ID remain retained even if encoding or persistence fails.
+A repeated call never prepares or writes another observation, even when an obstruction
+is removed or the disk marker still says authorized. Death loses the live capability;
+it does not make the durable reservation available for replay.
 
-There is no automatic reconciliation or journal-deletion command in this change.
-Preserve the directory and original ledger while investigating the actual outcome.
-This unit does not establish crash-proof global exactly-once delivery, storage
-survival after power loss, or audited publication and merge. Those contracts require
-separate evidence.
+Custody permits one original result of the already authorized command to be recorded
+when a later guard denies continuation. It does not permit another command, tracker
+update or state transition. Version 2 receipts distinguish authority from persistence:
+current, rejected or not checked; confirmed, marker-only, unconfirmed or not attempted.
+A receipt is diagnostic evidence, never permission to continue. A failed result can
+have partial effects and remains pending. Legacy observation preserves its existing
+ordering before the subsequent raw-state check.
+
+Context and continuation revalidate the original authority under one workspace lock.
+A proven denial is retained as the first cause for that live operation; restoring
+files does not restore permission. Invalid foreign tickets cannot poison its custody.
+Checked CAS preserves fresh accounting and lease fields. Its version 2 receipt contains
+the exact previous and persisted next material state and its own checked event, anchored
+once in the same private operation entry. The worker retains it only after owner ACK.
+
+Finish requires that exact own continuation and current successor, including the
+captured physical lease. An unrelated event at the same destination is insufficient.
+Own done uses terminal confirmation to close its journal; it never reopens execution.
+Owner RPC occurs outside the workspace lock, and locked validators do not reacquire it.
+
+## Pending evidence and inspection
+
+Pending evidence blocks dispatch, retry, approvals, workspace hooks and cleanup.
+A public stop may terminate the worker before it returns a command result; no observed
+result is fabricated after its death. The dispatch journal may record legitimate
+worker termination separately while the deployment reservation remains pending.
+
+`DeployAudit.inspect_pending/1` checks the original marker and ledger and returns a
+finite projection, without commands, output, full tokens or live capabilities.
+Confirmed absence returns none. Corruption or uncertainty returns an explicit error.
+Inspection does not repair files, recover ownership or remove a reservation.
+
+Runtime stage transitions can record a checked `last_agent_session` reference in their
+own confirmation and snapshot. It is historical diagnostic evidence, excluded from
+the material permission witness; it cannot revive a retired session. Secondary error
+logs retain causes and safe stack locations without formatting result or ticket args.
+
+## Limits
+
+The ledger records local observations. Shell, tracker and storage effects are not a
+transaction, and a successful exit is not independent proof of a remote deployment.
+A control can invalidate continuation after an already sent tracker update. No
+compensation, retry, timeout cleanup or automatic reconciliation is introduced.
+
+The public shell result maps success, failure and unavailability. A distinct observed
+timeout is supported at the observation boundary; this change adds no shell deadline
+or public timeout detection. If a worker dies before producing a result, effects may
+remain unknown. Preserve the reservation and original ledger while investigating.
+
+Exclusive directory creation reserves the operation across VMs; later mutations use
+cooperating local locks. Arbitrary filesystem writers, concurrent live coordinators,
+power-loss durability and global exactly-once effects require separate guarantees.
+Test results, loaded builds and thesis acceptance require their own evidence.

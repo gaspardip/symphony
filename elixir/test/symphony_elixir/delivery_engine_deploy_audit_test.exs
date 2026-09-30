@@ -384,7 +384,13 @@ defmodule SymphonyElixir.DeliveryEngineDeployAuditTest do
 
   defp snapshot_bytes(fixture), do: File.read!(RunStateStore.state_path(fixture.workspace))
   defp marker_path(fixture), do: Path.join(DeployAudit.marker_directory(fixture.workspace), "marker.json")
-  defp marker!(fixture), do: fixture |> marker_path() |> File.read!() |> Jason.decode!()
+
+  defp marker!(fixture) do
+    marker = fixture |> marker_path() |> File.read!() |> Jason.decode!()
+    assert marker["version"] == 1
+    refute Map.has_key?(marker, "execution")
+    marker
+  end
 
   defp only_event!(rows, event) do
     assert [entry] = Enum.filter(rows, &(&1["event_type"] == event))

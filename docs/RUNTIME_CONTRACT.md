@@ -512,7 +512,56 @@ These checks coordinate cooperating local code. A check followed by a remote cal
 is not a distributed transaction: an observed reply, publication or deploy command
 is not rolled back after a subsequent conflict, and no automatic replay is
 authorized. Existing bulk GitHub calls are guarded at their consumer boundary.
-Deploy uses the checked state/continuation bridge; versioned operation binding is
-I2c work. Sessions, uncertain-run inspection/reconciliation and final thesis
-acceptance remain P2/I3/E1 requirements. Test and integration results belong to
+Deploy uses the versioned operation binding described below. Session lifecycle,
+uncertain-run reconciliation and final thesis acceptance remain P2/I3/E1 requirements. Test and integration results belong to
 the frozen validation records, not this description of the implemented contract.
+
+
+## Deployment operation binding (I2c)
+
+Version 2 opening requires the worker's captured dispatch, complete physical token,
+raw material witness and owner-confirmed invocation provenance. New version 1
+operations require genuine raw absence of run identity and C3 ownership. Partial,
+pending or unreadable state cannot downgrade to legacy. Only the process that opened
+a confirmed operation retains its exact ticket/live reference; no restart import or
+reconstruction is supported.
+
+A valid original result consumes its observation attempt before preparation or IO.
+The event identity is retained before encoding. Preparation, encoding, marker or
+ledger failure cannot restore unused status; repetition returns the existing attempt
+without another preparation, lock or writer action. A still-authorized disk marker
+cannot override that private consumed state. Legacy return shapes remain unchanged.
+
+The original result can be observed under live custody after a guard rejects further
+execution. The receipt separates authority and persistence and does not authorize a
+command, tracker effect, transition or finish. First worker terminal remains exact;
+secondary failure is logged with safe causes and stack locations, without formatting
+arguments or command output. Without an earlier terminal, an unexpected exception is
+reraised with its original stack.
+
+Continuation checks the original authority and material state inside one workspace
+lock. A proven denial of its own evidence stays retained even if files are restored;
+foreign tickets and malformed caller inputs cannot install that denial. The checked
+CAS returns and privately anchors its exact previous/next/event receipt. Owner ACK
+must succeed before the worker recognizes that receipt. Finish compares it with the
+current successor and original chain; it does not use the pre-CAS material context.
+Own done uses a terminal-specific confirmation, never generic execution permission.
+
+Only an authorized checked runtime stage transition can derive last_agent_session.
+The diagnostic is committed with its own event reference and snapshot digest, without
+a separate write. Fresh authenticated session provenance and checked historical prior
+session evidence remain distinct; neither public attrs nor a retired handle can forge
+a current binding. The diagnostic is excluded from the worker material projection.
+
+Public stop can terminate a worker before a result arrives. In that case no observed
+map is fabricated. Its authentic DOWN may close DispatchAudit as worker termination
+while DeployAudit stays pending; that event is not successful deploy continuation.
+Shell exit maps passed/failed, and exceptions map unavailable. A distinct timeout
+observation is tested at the observation API only; no public shell timeout detection
+or deadline is introduced by this block.
+
+DeployAudit.inspect_pending returns only checked finite diagnostic fields. It never
+imports a ticket, writes, reconciles or removes evidence. All absent/corrupt/pending
+states stay distinguishable. A later release must establish its loaded build and
+acceptance separately from source integration and local test results. See
+[deployment audit](deploy-audit.md) for the persistence and remote-effect limits.

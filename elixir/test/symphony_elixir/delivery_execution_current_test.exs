@@ -864,12 +864,30 @@ defmodule SymphonyElixir.DeliveryExecutionCurrentTest do
     assert_received :deploy_effect
     refute_received :deploy_effect
     assert_received {:control_evidence, before}
-    assert evidence(c) == before
+    assert Map.delete(evidence(c), :ledger) == Map.delete(before, :ledger)
     assert File.exists?(DeployAudit.marker_directory(c.workspace))
     assert raw!(c)["stage"] == "deploy_preview"
     refute_received {:tracker_effect, :move, _}
     assert Enum.count(rows(), &(&1["event_type"] == "deploy.preview.requested")) == 1
-    refute Enum.any?(rows(), &(&1["event_type"] == "deploy.preview.observed"))
+    [observed] = Enum.filter(rows(), &(&1["event_type"] == "deploy.preview.observed"))
+    marker = c.workspace |> DeployAudit.marker_directory() |> Path.join("marker.json") |> File.read!() |> Jason.decode!()
+    assert marker["version"] == 2
+    assert marker["status"] == "result_confirmed"
+    assert marker["continuation_denied"] == %{"phase" => "record_result", "kind" => "stale_execution", "reason_tag" => "material_state_changed"}
+    assert marker["execution"]["dispatch_ticket"]["run_id"] == c.ticket.run_id
+    assert marker["execution"]["dispatch_ticket"]["dispatch_id"] == c.ticket.dispatch_id
+    assert marker["result"] == observed
+    assert observed["metadata"]["deploy_operation_id"] == marker["operation_id"]
+    assert observed["metadata"]["execution"]["run_id"] == c.ticket.run_id
+    assert observed["metadata"]["execution"]["dispatch_id"] == c.ticket.dispatch_id
+    assert observed["metadata"]["result"] == %{"status" => "passed", "command" => "deploy-fixture", "output" => "deployment already happened"}
+    prefix_rows = before.ledger |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    assert rows() == prefix_rows ++ [observed]
+    after_observation = evidence(c)
+    assert {:stop, {:stale_execution, _, :material_state_changed}} = within(c, fn -> run(c, shell_runner: shell) end)
+    assert evidence(c) == after_observation
+    refute_received :deploy_effect
+    refute_received {:tracker_effect, :move, _}
   end
 
   defp within(c, fun),

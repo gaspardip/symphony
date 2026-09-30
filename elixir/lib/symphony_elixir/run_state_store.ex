@@ -115,20 +115,39 @@ defmodule SymphonyElixir.RunStateStore do
     end
   end
 
-  @doc "Transitions only from the checked fresh state; a conflict precedes audit intent."
+  @doc "Transitions only from checked fresh state and records validated runtime provenance."
   @spec transition_current(authority(), map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def transition_current(authority, expected, stage, attrs) when stage in @current_stages do
+    transition_current_with_provenance(authority, expected, stage, attrs, :runtime)
+  end
+
+  def transition_current(_authority, _expected, _stage, _attrs), do: {:error, :invalid_current_stage}
+
+  @doc "Persists only provenance supplied by the owner-confirmed worker invocation."
+  @spec transition_current(authority(), map(), String.t(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def transition_current(authority, expected, stage, attrs, provenance) when stage in @current_stages and is_map(provenance) do
+    transition_current_with_provenance(authority, expected, stage, attrs, provenance)
+  end
+
+  def transition_current(_authority, _expected, _stage, _attrs, _provenance), do: {:error, :invalid_execution_provenance}
+
+  defp transition_current_with_provenance(authority, expected, stage, attrs, provenance) do
     with {:ok, workspace} <- authority_workspace(authority) do
       with_workspace_lock(workspace, fn ->
         with {:ok, state} <- current_state_unlocked(authority, expected),
-             {:ok, attrs} <- validate_current_attrs(attrs, state) do
-          transition_from_state(workspace, stage, attrs, ensure_runner_metadata(state))
+             {:ok, attrs} <- validate_current_attrs(attrs, state),
+             {:ok, execution} <- execution_provenance(authority, state, provenance) do
+          transition_from_state(workspace, stage, attrs, ensure_runner_metadata(state), %{execution: execution})
         end
       end)
     end
   end
 
-  def transition_current(_authority, _expected, _stage, _attrs), do: {:error, :invalid_current_stage}
+  @doc false
+  @spec check_deploy_current_locked(authority(), map()) :: {:ok, map()} | {:error, term()}
+  def check_deploy_current_locked(authority, expected) do
+    with {:ok, _workspace} <- authority_workspace(authority), do: current_state_unlocked(authority, expected)
+  end
 
   @doc "Records usage only if captured material is still current inside the checkpoint lock."
   @spec record_token_usage_current(Path.t(), map(), map(), authority(), map()) :: {:ok, map()} | {:error, term()}
@@ -238,6 +257,83 @@ defmodule SymphonyElixir.RunStateStore do
   end
 
   defp validate_current_attrs(_attrs, _state), do: {:error, :invalid_current_attrs}
+
+  defp execution_provenance(authority, state, :runtime) do
+    with {:ok, prior} <- checked_prior_agent_session(state) do
+      {:ok,
+       %{
+         version: 1,
+         actor_role: "runtime",
+         run_id: authority.ticket.run_id,
+         dispatch_id: authority.ticket.dispatch_id,
+         lease_generation: authority.lease_token.lease_generation,
+         agent_session: nil,
+         prior_agent_session: prior
+       }}
+    end
+  end
+
+  defp execution_provenance(authority, state, provenance) when is_map(provenance) do
+    with {:ok, expected} <- execution_provenance(authority, state, :runtime),
+         true <- MapSet.new(Map.keys(provenance)) == MapSet.new(Map.keys(expected)) or {:error, :invalid_execution_provenance},
+         true <- Map.delete(provenance, :agent_session) == Map.delete(expected, :agent_session) or {:error, :execution_provenance_mismatch},
+         :ok <- valid_agent_session(provenance.agent_session) do
+      {:ok, provenance}
+    end
+  end
+
+  defp valid_agent_session(nil), do: :ok
+
+  defp valid_agent_session(%{provider: provider, kind: kind, id: id, invocation: ordinal} = session)
+       when provider in ["claude_cli", "codex_cli", "app_server"] and kind in ["session", "thread"] and is_binary(id) and id != "" and
+              is_integer(ordinal) and ordinal > 0 and map_size(session) == 4,
+       do: :ok
+
+  defp valid_agent_session(_session), do: {:error, :invalid_execution_agent_session}
+
+  defp checked_prior_agent_session(state) do
+    case Map.fetch(state, :last_agent_session) do
+      :error -> {:ok, nil}
+      {:ok, previous} -> validate_prior_agent_session(state, previous)
+    end
+  end
+
+  defp validate_prior_agent_session(state, %{version: 1, event_id: id, run_id: run_id, dispatch_id: dispatch_id, agent_session: session} = previous)
+       when is_binary(id) and id != "" and is_binary(run_id) and run_id != "" and is_binary(dispatch_id) and dispatch_id != "" and
+              is_map(session) and map_size(previous) == 5 do
+    with :ok <- valid_agent_session(session),
+         true <- run_id == state[:run_id] or {:error, :prior_agent_session_run_mismatch},
+         {:ok, event} <- RunLedger.fetch_entry_checked(id),
+         true <-
+           (event["event_type"] == "stage.transition" and event["issue_id"] == state[:issue_id] and
+              event["issue_identifier"] == state[:issue_identifier]) or {:error, :prior_agent_session_event_mismatch},
+         execution when is_map(execution) <- get_in(event, ["metadata", "execution"]),
+         true <-
+           (execution["version"] == 1 and execution["actor_role"] == "runtime" and execution["run_id"] == run_id and
+              execution["dispatch_id"] == dispatch_id and execution["agent_session"] == json_value(session)) or
+             {:error, :prior_agent_session_event_mismatch} do
+      {:ok, Map.take(previous, [:event_id, :run_id, :dispatch_id, :agent_session])}
+    else
+      {:error, reason} -> {:error, {:invalid_prior_agent_session, reason}}
+      _ -> {:error, {:invalid_prior_agent_session, :missing_execution_provenance}}
+    end
+  end
+
+  defp validate_prior_agent_session(_state, _previous), do: {:error, :invalid_prior_agent_session}
+
+  defp json_value(value), do: value |> Jason.encode!() |> Jason.decode!()
+
+  defp record_last_agent_session(state, %{execution: %{agent_session: session} = execution}, event_id) when is_map(session) do
+    Map.put(state, :last_agent_session, %{
+      version: 1,
+      event_id: event_id,
+      run_id: execution.run_id,
+      dispatch_id: execution.dispatch_id,
+      agent_session: session
+    })
+  end
+
+  defp record_last_agent_session(state, _metadata, _event_id), do: state
 
   defp validate_stop_receipt(%{previous: previous, next: %{"stage" => "blocked", "stop_reason" => stop_reason} = next, binding: {provider, kind, id}, ordinal: ordinal, outcome: {:stop, _violation}})
        when is_map(previous) and is_map(stop_reason) and map_size(stop_reason) > 0 and is_atom(provider) and
@@ -629,7 +725,7 @@ defmodule SymphonyElixir.RunStateStore do
   @spec ensure_deploy_current(DeployAudit.ticket()) :: :ok | {:error, term()}
   def ensure_deploy_current(%{workspace: workspace} = ticket) do
     with_workspace_lock(workspace, fn ->
-      with {:ok, context} <- DeployAudit.continuation_context(ticket),
+      with {:ok, context} <- DeployAudit.continuation_context_locked(ticket),
            {:ok, state} <- load(workspace) do
         matching_deploy_snapshot(state, context)
       end
@@ -638,9 +734,9 @@ defmodule SymphonyElixir.RunStateStore do
 
   @doc "Advances a confirmed deploy once, preserving fresh lease and consumption metadata under one snapshot lock."
   @spec transition_deploy(DeployAudit.ticket(), String.t(), map()) :: {:ok, map(), DeployAudit.continuation()} | {:error, term()}
-  def transition_deploy(%{workspace: workspace} = ticket, stage, attrs) when is_map(attrs) and stage in ["post_deploy_verify", "done"] do
+  def transition_deploy(%{workspace: workspace, version: 1} = ticket, stage, attrs) when is_map(attrs) and stage in ["post_deploy_verify", "done"] do
     with_workspace_lock(workspace, fn ->
-      with {:ok, context} <- DeployAudit.continuation_context(ticket),
+      with {:ok, context} <- DeployAudit.continuation_context_locked(ticket),
            {:ok, previous_state} <- load(workspace),
            :ok <- matching_deploy_snapshot(previous_state, context),
            :ok <- validate_deploy_attrs(attrs),
@@ -657,25 +753,64 @@ defmodule SymphonyElixir.RunStateStore do
   @doc "Checks dispatch material inside the existing deploy continuation lock and returns its persisted state."
   @spec transition_deploy(DeployAudit.ticket(), String.t(), map(), %{authority: authority(), expected: map()}) ::
           {:ok, map(), DeployAudit.continuation()} | {:error, term()}
-  def transition_deploy(%{workspace: workspace} = ticket, stage, attrs, %{authority: authority, expected: expected})
+  def transition_deploy(%{workspace: workspace, version: 2, execution: %{authority: bound_authority, expected: bound_expected} = execution} = ticket, stage, attrs, %{
+        authority: authority,
+        expected: expected
+      })
       when is_binary(workspace) and is_map(attrs) and stage in ["post_deploy_verify", "done"] do
-    with {:ok, captured_workspace} <- authority_workspace(authority),
+    with true <- (authority == bound_authority and expected == bound_expected) or {:error, :deploy_audit_execution_mismatch},
+         {:ok, captured_workspace} <- authority_workspace(authority),
          :ok <- matching_usage_workspace(workspace, captured_workspace) do
       with_workspace_lock(captured_workspace, fn ->
-        with {:ok, previous_state} <- current_state_unlocked(authority, expected),
-             {:ok, context} <- stale_check(DeployAudit.continuation_context(ticket)),
+        with {:ok, context} <- DeployAudit.continuation_context_locked(ticket),
+             {:ok, previous_state} <- current_state_unlocked(authority, expected),
              :ok <- stale_check(matching_deploy_snapshot(previous_state, context)),
              :ok <- validate_deploy_attrs(attrs),
-             {:ok, state} <- transition_from_state(workspace, stage, deploy_attrs(attrs, context), previous_state, deploy_metadata(context)),
+             {:ok, provenance} <- execution_provenance(authority, previous_state, execution.provenance),
+             metadata = Map.put(deploy_metadata(context), :execution, provenance),
+             {:ok, state} <- transition_from_state(workspace, stage, deploy_attrs(attrs, context), previous_state, metadata),
              :ok <- DeployAudit.ensure_ledger_path(context.ledger_path),
-             {:ok, event} <- RunLedger.fetch_entry_checked(state.last_ledger_event_id) do
-          {:ok, state, %{stage: stage, event: event}}
+             {:ok, event} <- RunLedger.fetch_entry_checked(state.last_ledger_event_id),
+             continuation = %{version: 2, stage: stage, event: event, previous: expected, next: material_projection(state)},
+             :ok <- DeployAudit.anchor_continuation_locked(ticket, continuation) do
+          {:ok, state, continuation}
         end
       end)
     end
   end
 
   def transition_deploy(_ticket, _stage, _attrs, _precondition), do: {:error, :invalid_deploy_transition}
+
+  @doc false
+  @spec confirm_deploy_continuation_locked(DeployAudit.ticket(), authority(), DeployAudit.continuation()) :: :ok | {:error, term()}
+  def confirm_deploy_continuation_locked(
+        %{version: 2, execution: %{authority: bound_authority, expected: bound_expected}} = ticket,
+        authority,
+        %{version: 2, stage: stage, event: event, previous: previous, next: next} = continuation
+      )
+      when stage in ["post_deploy_verify", "done"] do
+    with :ok <- DeployAudit.assert_continuation_locked(ticket, continuation),
+         true <- (authority == bound_authority and previous == bound_expected) or {:error, :deploy_audit_execution_mismatch},
+         {:ok, _workspace} <- authority_workspace(authority),
+         {:ok, state} <- deploy_next_state(authority, next, stage),
+         true <-
+           (state[:last_ledger_event_id] == event["event_id"] and state[:last_deploy_operation_id] == ticket.operation_id and
+              is_nil(state[:stop_reason])) or {:error, :deploy_audit_continuation_mismatch},
+         :ok <- DeployAudit.ensure_ledger_path(authority.ticket.ledger_path),
+         {:ok, confirmed} <- RunLedger.fetch_entry_checked(event["event_id"]),
+         true <- confirmed == event or {:error, :deploy_audit_continuation_mismatch},
+         do: :ok
+  end
+
+  def confirm_deploy_continuation_locked(_ticket, _authority, _continuation), do: {:error, :invalid_deploy_audit_continuation}
+  defp deploy_next_state(authority, %{"stage" => "done"} = next, "done"), do: terminal_state_unlocked(authority, next)
+  defp deploy_next_state(authority, %{"stage" => "post_deploy_verify"} = next, "post_deploy_verify"), do: current_state_unlocked(authority, next)
+  defp deploy_next_state(_authority, _next, _stage), do: {:error, :invalid_deploy_audit_continuation}
+
+  defp matching_deploy_snapshot(state, %{version: 2} = context) do
+    if state[:issue_id] == context.issue_id and state[:issue_identifier] == context.issue_identifier and state[:stage] == context.stage and
+         state[:last_ledger_event_id] == context.entry_event_id and is_nil(state[:stop_reason]), do: :ok, else: {:error, :deploy_audit_snapshot_conflict}
+  end
 
   defp matching_deploy_snapshot(state, context) do
     if state[:issue_id] == context.issue_id and state[:issue_identifier] == context.issue_identifier and state[:stage] == context.stage and
@@ -761,6 +896,10 @@ defmodule SymphonyElixir.RunStateStore do
     with {:ok, ledger_path} <- RunLedger.ledger_file_path_checked(),
          {:ok, intent} <- RunLedger.prepare_entry("stage.transition.requested", intent_attrs),
          {:ok, confirmation} <- RunLedger.prepare_entry("stage.transition", event_attrs),
+         state = record_last_agent_session(state, transition_metadata, confirmation.event_id),
+         digest = snapshot_digest(state),
+         intent = put_in(intent, [:metadata, :snapshot_digest], digest),
+         confirmation = put_in(confirmation, [:metadata, :snapshot_digest], digest),
          {:ok, _} <- RunLedger.persist_prepared(intent) do
       pending = %{
         operation_id: operation_id,

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.AgentExecutionCurrentTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{AgentExecution, DeployAudit, DispatchAudit, LeaseManager, RunStateStore}
+  alias SymphonyElixir.{AgentExecution, DispatchAudit, LeaseManager, RunStateStore}
   alias SymphonyElixir.AgentProvider.Claude
 
   # This fixture exercises the worker protocol against real storage. It is not
@@ -539,13 +539,16 @@ defmodule SymphonyElixir.AgentExecutionCurrentTest do
   test "checked deploy returns the existing operation continuation and advances only its persisted state", c do
     assert :ok =
              within(c, fn ->
-               assert {:ok, deploy} = DeployAudit.begin(c.workspace, %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, stage: "deploy_preview", command: "local-test-only"})
-               assert :ok = DeployAudit.record_result(deploy, %{status: :passed, command: "local-test-only", output: "observed"})
+               assert {:ok, deploy} = AgentExecution.begin_deploy(c.workspace, %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, stage: "deploy_preview", command: "local-test-only"})
+
+               assert {:ok, %{authority: :current, persistence: :confirmed, command_status: "passed"}} =
+                        AgentExecution.record_deploy_result(deploy, %{status: :passed, command: "local-test-only", output: "observed"})
+
                assert {:ok, persisted, continuation} = AgentExecution.transition_deploy(deploy, "post_deploy_verify", %{})
                assert persisted.stage == "post_deploy_verify"
                assert continuation.event["event_id"] == persisted.last_ledger_event_id
                assert continuation.event["metadata"]["deploy_operation_id"] == deploy.operation_id
-               assert :ok = DeployAudit.finish(deploy, continuation)
+               assert :ok = AgentExecution.finish_deploy(deploy, continuation)
                assert {:ok, _} = AgentExecution.ensure_current()
                :ok
              end)

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.DeployAuditTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.{DeployAudit, RunLedger, RunStateStore, TestSupport, WorkflowStore}
+  alias SymphonyElixir.{DeployAudit, LeaseManager, RunLedger, RunStateStore, TestSupport, WorkflowStore}
 
   setup context do
     root = Path.join(System.tmp_dir!(), "deploy-audit-" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower))
@@ -341,6 +341,211 @@ defmodule SymphonyElixir.DeployAuditTest do
     assert File.read!(evidence) == "do not discard"
     assert marker(context.workspace)["status"] == "result_confirmed"
     assert {:error, {:deploy_audit_pending, _}} = DeployAudit.ensure_available(context.workspace)
+  end
+
+  for legacy_binding <- [:partial_identity, :snapshot_generation, :physical_generation] do
+    @tag legacy_binding: legacy_binding
+    test "legacy admission rejects #{legacy_binding} without a reservation", context do
+      case context.legacy_binding do
+        :partial_identity ->
+          path = RunStateStore.state_path(context.workspace)
+          File.write!(path, Jason.encode!(Map.put(Jason.decode!(File.read!(path)), "run_identity_pending", nil)))
+
+        :snapshot_generation ->
+          path = RunStateStore.state_path(context.workspace)
+          File.write!(path, Jason.encode!(Map.put(Jason.decode!(File.read!(path)), "lease_generation", "partial")))
+
+        :physical_generation ->
+          assert {:ok, _} = LeaseManager.acquire(context.issue.id, context.issue.identifier, "physical-owner")
+      end
+
+      snapshot = File.read!(RunStateStore.state_path(context.workspace))
+      ledger = File.read!(RunLedger.ledger_file_path())
+      assert {:error, :deploy_audit_execution_context_required} = DeployAudit.begin(context.workspace, context.attrs)
+      assert :ok = DeployAudit.ensure_available(context.workspace)
+      assert File.read!(RunStateStore.state_path(context.workspace)) == snapshot
+      assert File.read!(RunLedger.ledger_file_path()) == ledger
+    end
+  end
+
+  test "legacy observation consumes its attempt even if the first pending write fails", context do
+    assert {:ok, ticket} = DeployAudit.begin(context.workspace, context.attrs)
+    original = File.read!(marker_path(context.workspace))
+    directory = DeployAudit.marker_directory(context.workspace)
+    File.chmod!(directory, 0o500)
+
+    try do
+      assert {:error, {:deploy_audit_marker_write_failed, :eacces}} = DeployAudit.record_result(ticket, context.result)
+    after
+      File.chmod!(directory, 0o700)
+    end
+
+    assert File.read!(marker_path(context.workspace)) == original
+    ledger_before = File.read!(RunLedger.ledger_file_path())
+
+    assert [] ==
+             trace_writers(fn ->
+               for result <- [context.result, %{context.result | output: "different observed output"}] do
+                 assert {:error, :deploy_audit_result_already_started} = DeployAudit.record_result(ticket, result)
+                 assert {:error, :deploy_audit_result_already_started} = DeployAudit.record_result(ticket, result, :current)
+               end
+             end)
+
+    assert File.read!(marker_path(context.workspace)) == original
+    assert File.read!(RunLedger.ledger_file_path()) == ledger_before
+    assert length(deploy_rows()) == 1
+  end
+
+  for persistence <- [:marker_only, :confirmed] do
+    @tag legacy_persistence: persistence
+    test "legacy #{persistence} rejects same and different results without preparing or writing again", context do
+      assert {:ok, ticket} = DeployAudit.begin(context.workspace, context.attrs)
+      original_ledger = File.read!(RunLedger.ledger_file_path())
+
+      if context.legacy_persistence == :marker_only do
+        File.write!(RunLedger.ledger_file_path(), "{broken")
+        assert {:error, %RunLedger.PersistenceError{}} = DeployAudit.record_result(ticket, context.result)
+        assert marker(context.workspace)["status"] == "result_pending"
+        File.write!(RunLedger.ledger_file_path(), original_ledger)
+      else
+        assert :ok = DeployAudit.record_result(ticket, context.result)
+        assert marker(context.workspace)["status"] == "result_confirmed"
+      end
+
+      marker_before = File.read!(marker_path(context.workspace))
+      ledger_before = File.read!(RunLedger.ledger_file_path())
+
+      assert [] ==
+               trace_writers(fn ->
+                 for result <- [context.result, %{context.result | status: :failed, output: "different observed result"}] do
+                   assert {:error, :deploy_audit_result_already_started} = DeployAudit.record_result(ticket, result)
+                   assert {:error, :deploy_audit_result_already_started} = DeployAudit.record_result(ticket, result, :current)
+                 end
+               end)
+
+      assert File.read!(marker_path(context.workspace)) == marker_before
+      assert File.read!(RunLedger.ledger_file_path()) == ledger_before
+      assert Enum.count(deploy_rows(), &String.ends_with?(&1["event_type"], ".observed")) == if(context.legacy_persistence == :confirmed, do: 1, else: 0)
+    end
+  end
+
+  test "legacy canonical read denial remains explicit after the file is restored", context do
+    assert {:ok, ticket} = DeployAudit.begin(context.workspace, context.attrs)
+    assert :ok = DeployAudit.record_result(ticket, context.result)
+    snapshot = RunStateStore.state_path(context.workspace)
+    retained = Path.join(context.root, "retained-state")
+    File.rename!(snapshot, retained)
+    File.mkdir!(snapshot)
+    assert {:error, :eisdir} = DeployAudit.continuation_context(ticket)
+    File.rmdir!(snapshot)
+    File.rename!(retained, snapshot)
+    before = File.read!(snapshot)
+    assert {:error, :eisdir} = RunStateStore.ensure_deploy_current(ticket)
+    assert {:error, :eisdir} = RunStateStore.transition_deploy(ticket, "done", %{})
+    assert File.read!(snapshot) == before
+    assert marker(context.workspace)["status"] == "result_confirmed"
+  end
+
+  test "legacy diagnostic stays read-only and never synthesizes run or dispatch identity", context do
+    assert {:ok, ticket} = DeployAudit.begin(context.workspace, context.attrs)
+    assert :ok = DeployAudit.record_result(ticket, context.result)
+    before = File.read!(marker_path(context.workspace))
+    ledger = File.read!(RunLedger.ledger_file_path())
+    assert {:ok, diagnostic} = DeployAudit.inspect_pending(context.workspace)
+    assert diagnostic.version == 1
+    assert diagnostic.status == "result_confirmed"
+    refute Map.has_key?(diagnostic, :run_id)
+    refute Map.has_key?(diagnostic, :dispatch_id)
+    refute Map.has_key?(diagnostic, :execution)
+    assert File.read!(marker_path(context.workspace)) == before
+    assert File.read!(RunLedger.ledger_file_path()) == ledger
+  end
+
+  for boundary <- [:context, :finish], corruption <- [:ledger, :marker] do
+    @tag rejected_boundary: boundary, corrupted_evidence: corruption
+    test "legacy #{boundary} retains its checked #{corruption} rejection after restoration", context do
+      assert {:ok, ticket} = DeployAudit.begin(context.workspace, context.attrs)
+      assert :ok = DeployAudit.record_result(ticket, context.result)
+
+      continuation =
+        if context.rejected_boundary == :finish do
+          assert {:ok, _state, receipt} = RunStateStore.transition_deploy(ticket, "done", %{})
+          receipt
+        end
+
+      path = if context.corrupted_evidence == :ledger, do: RunLedger.ledger_file_path(), else: marker_path(context.workspace)
+      original = File.read!(path)
+      File.write!(path, "{broken")
+      rejected = if context.rejected_boundary == :context, do: DeployAudit.continuation_context(ticket), else: DeployAudit.finish(ticket, continuation)
+      assert {:error, reason} = rejected
+
+      case context.corrupted_evidence do
+        :ledger -> assert %RunLedger.PersistenceError{} = reason
+        :marker -> assert {:deploy_audit_marker_unreadable, %Jason.DecodeError{}} = reason
+      end
+
+      File.write!(path, original)
+      marker_before = File.read!(marker_path(context.workspace))
+      snapshot_before = File.read!(RunStateStore.state_path(context.workspace))
+      ledger_before = File.read!(RunLedger.ledger_file_path())
+      assert {:error, ^reason} = DeployAudit.continuation_context(ticket)
+
+      if context.rejected_boundary == :finish do
+        assert {:error, ^reason} = DeployAudit.finish(ticket, continuation)
+      else
+        assert {:error, ^reason} = RunStateStore.transition_deploy(ticket, "done", %{})
+      end
+
+      assert File.read!(marker_path(context.workspace)) == marker_before
+      assert File.read!(RunStateStore.state_path(context.workspace)) == snapshot_before
+      assert File.read!(RunLedger.ledger_file_path()) == ledger_before
+    end
+  end
+
+  test "a forged legacy continuation does not poison the checked own continuation", context do
+    assert {:ok, ticket} = DeployAudit.begin(context.workspace, context.attrs)
+    assert :ok = DeployAudit.record_result(ticket, context.result)
+    assert {:ok, _state, continuation} = RunStateStore.transition_deploy(ticket, "done", %{})
+    forged = %{continuation | event: Map.put(continuation.event, "event_id", "nonexistent-caller-id")}
+    marker_before = File.read!(marker_path(context.workspace))
+    assert {:error, :not_found} = DeployAudit.finish(ticket, forged)
+    assert File.read!(marker_path(context.workspace)) == marker_before
+    assert :ok = DeployAudit.finish(ticket, continuation)
+  end
+
+  defp trace_writers(fun) do
+    {tracer, monitor} = spawn_monitor(fn -> collect_calls([]) end)
+    patterns = [{RunLedger, :prepare_entry, 2}, {RunLedger, :persist_prepared, 1}, {RunStateStore, :with_workspace_lock, 2}, {File, :write, 3}, {File, :rename, 2}, {File, :mkdir, 1}, {File, :rm, 1}]
+
+    try do
+      for pattern <- patterns, do: assert(:erlang.trace_pattern(pattern, true, [:local]) == 1)
+      :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+      fun.()
+      barrier = :erlang.trace_delivered(self())
+      assert_receive {:trace_delivered, _pid, ^barrier}, 5_000
+      send(tracer, {:calls, self()})
+      assert_receive {:calls, calls}, 5_000
+      calls
+    after
+      :erlang.trace(self(), false, [:call])
+      for pattern <- patterns, do: :erlang.trace_pattern(pattern, false, [:local])
+      send(tracer, :stop)
+      assert_receive {:DOWN, ^monitor, :process, ^tracer, :normal}, 5_000
+    end
+  end
+
+  defp collect_calls(calls) do
+    receive do
+      {:trace, _pid, :call, {module, function, args}} ->
+        collect_calls([{module, function, length(args)} | calls])
+
+      {:calls, owner} ->
+        send(owner, {:calls, Enum.reverse(calls)})
+        collect_calls(calls)
+
+      :stop ->
+        :ok
+    end
   end
 
   defp apply_conflict(%{snapshot_conflict: :stop} = context) do
