@@ -1251,6 +1251,109 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert pending_ids() == []
   end
 
+  test "discardable prefixes reach one valid head while valid decisions still yield", c do
+    assert :ok = TrackerEventInbox.initialize(c.location)
+
+    prefix = [
+      "invalid",
+      Jason.encode!(%{"unexpected" => "record"}),
+      Jason.encode!(%{"event" => %{"entity_type" => "Comment", "entity_id" => "IGNORED", "action" => "update"}}),
+      Jason.encode!(%{"event" => %{"entity_id" => 17}}),
+      Jason.encode!(%{"event" => %{"entity_id" => ""}})
+    ]
+
+    File.write!(c.location.events_path, Enum.join(prefix, "\n") <> "\n")
+    assert {:ok, _} = TrackerEventInbox.enqueue([event("A")])
+    File.write!(c.location.events_path, "invalid\n", [:append])
+    assert {:ok, _} = TrackerEventInbox.enqueue([event("B")])
+    assert {:ok, captured} = TrackerEventInbox.capture(c.location, inbox_limits())
+    state_bytes = File.read!(c.location.state_path)
+    assert :ok = GenServer.call(c.pid, {:hold, :continue, true})
+    send(c.pid, :run_webhook_cycle)
+
+    first = read!(:lookup, ["A"])
+    state = runtime(c.pid)
+    batch_ref = state.tracker_inbox_batch.ref
+    assert state.tracker_inbox_batch.head.event.entity_id == "A"
+    assert length(state.tracker_inbox_batch.rows) == 3
+    assert state.tracker_inbox_batch.end_offset == List.last(captured.rows).cursor.end_offset
+    assert state.tracker_inbox_batch.applied_cursor == Enum.at(captured.rows, 4).cursor
+    assert state.issue_routing_cache == %{}
+    assert File.read!(c.location.state_path) == state_bytes
+    refute_received {:inbox_callback, :continue, _, _}
+    refute_received {:inbox_callback, :ack, _, _}
+
+    answer(first, {:ok, nil})
+    continuation = callback!(:continue, c.pid)
+    assert length(runtime(c.pid).tracker_inbox_batch.rows) == 2
+    refute_received {:inbox_read, :lookup, _, ["B"]}
+    deliver!(c.pid, continuation)
+
+    second = read!(:lookup, ["B"])
+    state = runtime(c.pid)
+    assert state.tracker_inbox_batch.ref == batch_ref
+    assert state.tracker_inbox_batch.end_offset == List.last(captured.rows).cursor.end_offset
+    assert state.tracker_inbox_batch.head.event.entity_id == "B"
+    assert length(state.tracker_inbox_batch.rows) == 1
+    assert state.tracker_inbox_batch.applied_cursor == Enum.at(captured.rows, 6).cursor
+    assert File.read!(c.location.state_path) == state_bytes
+    refute_received {:inbox_callback, :continue, _, _}
+    answer(second, {:ok, nil})
+    deliver!(c.pid, callback!(:continue, c.pid))
+    assert {:tracker_inbox_ack, cursor} = ack!(c.pid)
+    assert cursor == List.last(captured.rows).cursor
+    assert pending_ids() == []
+  end
+
+  for mutation <- [:bytes, :generation] do
+    @tag prefix_mutation: mutation
+    test "a discard-only bounded prefix keeps checked acknowledgment after #{mutation} changes", c do
+      assert :ok = TrackerEventInbox.initialize(c.location)
+      File.write!(c.location.events_path, String.duplicate("invalid\n", 100))
+      assert {:ok, _} = TrackerEventInbox.enqueue([event("TAIL")])
+      assert {:ok, captured} = TrackerEventInbox.capture(c.location, inbox_limits())
+      assert captured.limit_reached
+      assert :ok = GenServer.call(c.pid, {:hold, :continue, true})
+      send(c.pid, :run_webhook_cycle)
+      ack = {:tracker_inbox_ack, cursor} = callback!(:ack, c.pid)
+      assert cursor == List.last(captured.rows).cursor
+      assert runtime(c.pid).tracker_inbox_batch.rows == []
+      refute_received {:inbox_callback, :continue, _, _}
+      assert {:ok, _} = TrackerEventInbox.enqueue([event("APPEND")])
+
+      case c.prefix_mutation do
+        :bytes ->
+          bytes = File.read!(c.location.events_path)
+          File.write!(c.location.events_path, String.replace(bytes, "invalid\n", "changed\n", global: false))
+
+        :generation ->
+          assert :ok = TrackerEventInbox.reset(c.location)
+          assert {:ok, _} = TrackerEventInbox.enqueue([event("NEW")])
+      end
+
+      state_bytes = File.read!(c.location.state_path)
+      events_bytes = File.read!(c.location.events_path)
+      deliver!(c.pid, ack)
+      state = runtime(c.pid)
+
+      case c.prefix_mutation do
+        :bytes ->
+          assert state.inbox_storage_error.reason_code == :prefix_changed
+          assert state.inbox_ack_pending == cursor
+
+        :generation ->
+          assert state.inbox_storage_error.reason_code == :generation_changed
+          assert state.inbox_ack_pending == nil
+      end
+
+      assert File.read!(c.location.state_path) == state_bytes
+      assert File.read!(c.location.events_path) == events_bytes
+      assert state.issue_routing_cache == %{}
+      assert state.running == %{}
+      refute_received {:inbox_read, :lookup, _, _}
+    end
+  end
+
   test "equivalent JSON with different physical bytes cannot renew a blocked head's cursor", c do
     reader = held_head!(c.pid, :lookup)
     original = runtime(c.pid).tracker_inbox_batch

@@ -74,6 +74,18 @@ not a distributed transaction with reset.
 
 ## Next Step
 
+The covered 100-row regression reproduced a timeout while the coordinator kept
+advancing through invalid rows. A bounded instrumented run recorded 99 remaining
+rows after discovery, 56 near one second, and 10 near the two-second deadline,
+with one new approval reader for each local discard and no inbox storage error.
+The proposed C4b correction consumes only the already rebound, discardable prefix
+without those extra approval cycles. It keeps existing heads/readers intact,
+stops at the first valid event and leaves physical cursor acknowledgment checked.
+The existing 100-row regression and all deadlines remain unchanged. New barrier
+tests cover yielding between valid decisions and rejection of changed bytes or
+generation after a discard-only batch. This source still requires review,
+formatting and runtime validation; the failed evidence remains preserved.
+
 Validate the corrected fixtures, then complete compatibility and all repository
 gates in the assigned isolated slot.
 Preserve any failure and its exact source manifest; integrate only the validated

@@ -327,6 +327,13 @@ classes. An existing C3 promotion keeps its physical slot and acquisition deadli
 Waiting for admission or backoff releases B. Appends do not extend the original
 batch. A cancelled reader keeps its physical slot until guardian DOWN.
 
+After checking context and rebinding that captured prefix, consecutive rows with
+no decodable scheduling event or usable entity ID are discarded locally. This
+bounded step stops at the first valid event, an existing head or an active inbox
+reader. It preserves the captured cursor for checked acknowledgment and does not
+start another approval read for each discarded row. Valid decisions still yield
+through their ordinary continuation before processing the next event.
+
 The head is bound to physical location, generation, cursor, configuration,
 worker/custody identity and observed routing cache. The coordinator recaptures the
 prefix before applying a retained result or authorizing its gate. This check does

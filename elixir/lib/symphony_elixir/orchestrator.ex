@@ -2807,6 +2807,7 @@ defmodule SymphonyElixir.Orchestrator do
     with {:ok, context} <- capture_tracker_poll_context(),
          true <- TrackerEventInbox.location() == state.tracker_inbox_batch.location and context.fingerprint == state.tracker_inbox_batch.fingerprint,
          {:ok, state} <- rebind_tracker_inbox_prefix(state) do
+      state = if tracker_inbox_reader_active?(state), do: state, else: discard_tracker_inbox_prefix(state, context)
       state = ensure_tracker_inbox_head(state, context)
 
       case state.tracker_inbox_batch do
@@ -2884,6 +2885,25 @@ defmodule SymphonyElixir.Orchestrator do
     put_in(state.tracker_inbox_batch.head, head)
   end
 
+  defp discard_tracker_inbox_prefix(%{tracker_inbox_batch: %{head: nil, rows: [_ | _]}} = state, context) do
+    state = ensure_tracker_inbox_head(state, context)
+    batch = state.tracker_inbox_batch
+
+    if discardable_tracker_inbox_event?(batch.head.event) do
+      batch = %{batch | head: nil, rows: tl(batch.rows), applied_cursor: batch.head.row.cursor}
+      discard_tracker_inbox_prefix(%{state | tracker_inbox_batch: batch}, context)
+    else
+      state
+    end
+  end
+
+  defp discard_tracker_inbox_prefix(state, _context), do: state
+
+  defp discardable_tracker_inbox_event?(%TrackerEvent{} = event),
+    do: not TrackerEvent.schedule_affecting?(event) or not is_binary(event.entity_id) or event.entity_id == ""
+
+  defp discardable_tracker_inbox_event?(_event), do: true
+
   defp start_tracker_inbox_lookup(state, context) do
     head = state.tracker_inbox_batch.head
 
@@ -2891,13 +2911,7 @@ defmodule SymphonyElixir.Orchestrator do
       tracker_inbox_reader_active?(state) ->
         state
 
-      not match?(%TrackerEvent{}, head.event) ->
-        apply_tracker_inbox_head(state, :discarded)
-
-      not TrackerEvent.schedule_affecting?(head.event) ->
-        apply_tracker_inbox_head(state, :discarded)
-
-      not is_binary(head.event.entity_id) or head.event.entity_id == "" ->
+      discardable_tracker_inbox_event?(head.event) ->
         apply_tracker_inbox_head(state, :discarded)
 
       stale_tracker_event?(state, head.event) ->
