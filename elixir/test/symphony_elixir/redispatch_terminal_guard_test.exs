@@ -493,8 +493,10 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       assert_receive {:authorize_dispatch, _, _, ^pid} = authorization
       assert {:noreply, authorized} = Orchestrator.handle_info(authorization, next)
 
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal} = down, 2_000
-      assert {:noreply, finished} = Orchestrator.handle_info(down, authorized)
+      deadline = System.monotonic_time(:millisecond) + 2_000
+      {down, before_down} = await_worker_down(authorized, pid, ref, deadline)
+      assert {:DOWN, ^ref, :process, ^pid, :normal} = down
+      assert {:noreply, finished} = Orchestrator.handle_info(down, before_down)
       cancel_retries(finished)
       assert File.exists?(Path.join(workspace, ".symphony/before-run-seen"))
       refute File.exists?(Path.join(workspace, ".symphony/provider-invoked"))
@@ -886,6 +888,27 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
 
       Process.demonitor(ref, [:flush])
     end)
+  end
+
+  defp await_worker_down(state, pid, ref, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+    if remaining <= 0, do: flunk("worker did not finish within 2000ms")
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} = down ->
+        {down, state}
+
+      {:"$gen_call", from, message} ->
+        assert {:reply, reply, next} = Orchestrator.handle_call(message, from, state)
+        GenServer.reply(from, reply)
+        await_worker_down(next, pid, ref, deadline)
+
+      message ->
+        assert {:noreply, next} = Orchestrator.handle_info(message, state)
+        await_worker_down(next, pid, ref, deadline)
+    after
+      remaining -> flunk("worker did not finish within 2000ms")
+    end
   end
 
   defp dispatch_through_real_starters(state, issue, acquire, execute_job?) do

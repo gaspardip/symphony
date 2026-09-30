@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @max_stream_log_bytes 1_000
   @non_interactive_tool_input_answer "This is a non-interactive session. Operator input is unavailable."
   @command_monitor_key :symphony_command_monitor
+  @usage_callback_key {__MODULE__, :on_usage}
 
   @type session :: %{
           port: port(),
@@ -93,78 +94,80 @@ defmodule SymphonyElixir.Codex.AppServer do
         issue,
         opts \\ []
       ) do
-    with_port_exit_trapping(fn ->
-      on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    with_usage_callback(opts, fn ->
+      with_port_exit_trapping(fn ->
+        on_message = Keyword.get(opts, :on_message, &default_on_message/1)
 
-      tool_executor =
-        Keyword.get(opts, :tool_executor, fn tool, arguments ->
-          DynamicTool.execute(tool, arguments)
-        end)
+        tool_executor =
+          Keyword.get(opts, :tool_executor, fn tool, arguments ->
+            DynamicTool.execute(tool, arguments)
+          end)
 
-      case start_turn(
-             port,
-             thread_id,
-             prompt,
-             issue,
-             workspace,
-             approval_policy,
-             turn_sandbox_policy,
-             Keyword.get(opts, :effort),
-             Keyword.get(opts, :model)
-           ) do
-        {:ok, turn_id} ->
-          session_id = "#{thread_id}-#{turn_id}"
-          Process.put(@command_monitor_key, command_monitor(opts))
-          Logger.info("Codex session started for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}")
+        case start_turn(
+               port,
+               thread_id,
+               prompt,
+               issue,
+               workspace,
+               approval_policy,
+               turn_sandbox_policy,
+               Keyword.get(opts, :effort),
+               Keyword.get(opts, :model)
+             ) do
+          {:ok, turn_id} ->
+            session_id = "#{thread_id}-#{turn_id}"
+            Process.put(@command_monitor_key, command_monitor(opts))
+            Logger.info("Codex session started for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}")
 
-          emit_message(
-            on_message,
-            :session_started,
-            %{
-              session_id: session_id,
-              thread_id: thread_id,
-              turn_id: turn_id
-            },
-            metadata
-          )
+            try do
+              emit_message(
+                on_message,
+                :session_started,
+                %{
+                  session_id: session_id,
+                  thread_id: thread_id,
+                  turn_id: turn_id
+                },
+                metadata
+              )
 
-          try do
-            case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
-              {:ok, result} ->
-                Logger.info("Codex session completed for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}")
+              case await_turn_completion(port, on_message, tool_executor, auto_approve_requests) do
+                {:ok, result} ->
+                  Logger.info("Codex session completed for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}")
 
-                {:ok,
-                 %{
-                   result: result,
-                   session_id: session_id,
-                   thread_id: thread_id,
-                   turn_id: turn_id
-                 }}
+                  {:ok,
+                   %{
+                     result: result,
+                     session_id: session_id,
+                     thread_id: thread_id,
+                     turn_id: turn_id
+                   }}
 
-              {:error, reason} ->
-                Logger.warning("Codex session ended with error for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
+                {:error, reason} ->
+                  Logger.warning("Codex session ended with error for #{SymphonyElixir.Util.issue_log_context(issue)} session_id=#{session_id}: #{inspect(reason)}")
 
-                emit_message(
-                  on_message,
-                  :turn_ended_with_error,
-                  %{
-                    session_id: session_id,
-                    reason: reason
-                  },
-                  metadata
-                )
+                  emit_message(
+                    on_message,
+                    :turn_ended_with_error,
+                    %{
+                      session_id: session_id,
+                      reason: reason
+                    },
+                    metadata
+                  )
 
-                {:error, reason}
+                  {:error, reason}
+              end
+            after
+              Process.delete(@command_monitor_key)
             end
-          after
-            Process.delete(@command_monitor_key)
-          end
 
-        {:error, reason} ->
-          Logger.error("Codex session failed for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
-          emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
-          {:error, reason}
-      end
+          {:error, reason} ->
+            Logger.error("Codex session failed for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
+            emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
+            {:error, reason}
+        end
+      end)
     end)
   end
 
@@ -453,10 +456,38 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  defp with_usage_callback(opts, fun) do
+    previous = Process.get(@usage_callback_key)
+    Process.put(@usage_callback_key, Keyword.get(opts, :on_usage))
+
+    try do
+      fun.()
+    after
+      if is_nil(previous), do: Process.delete(@usage_callback_key), else: Process.put(@usage_callback_key, previous)
+    end
+  end
+
+  defp observe_raw_message({:ok, payload}) when is_map(payload) do
+    case Process.get(@usage_callback_key) do
+      nil ->
+        :ok
+
+      callback when is_function(callback, 1) ->
+        case callback.(payload) do
+          {:stop, {:accounting_uncertain, _}} = terminal -> throw({:agent_execution_halt, terminal})
+          result -> result
+        end
+    end
+  end
+
+  defp observe_raw_message(_decoded), do: :ok
+
   defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests) do
     payload_string = to_string(data)
+    decoded = Jason.decode(payload_string)
+    observe_raw_message(decoded)
 
-    case Jason.decode(payload_string) do
+    case decoded do
       {:ok, %{"method" => "turn/completed"} = payload} ->
         emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
         {:ok, :turn_completed}
@@ -1012,8 +1043,10 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp handle_response(port, request_id, data, timeout_ms) do
     payload = to_string(data)
+    decoded = Jason.decode(payload)
+    observe_raw_message(decoded)
 
-    case Jason.decode(payload) do
+    case decoded do
       {:ok, %{"id" => ^request_id, "error" => error}} ->
         {:error, {:response_error, error}}
 

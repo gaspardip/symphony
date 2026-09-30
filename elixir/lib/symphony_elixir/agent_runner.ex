@@ -4,23 +4,33 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{DeliveryEngine, LeaseManager, Linear.Issue, RunPolicy, RunStateStore, Workspace}
+  alias SymphonyElixir.{AgentExecution, DeliveryEngine, LeaseManager, Linear.Issue, RunPolicy, RunStateStore, Workspace}
 
-  @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
+  @spec run(map(), pid() | nil, keyword()) :: :ok | AgentExecution.terminal() | no_return()
   def run(issue, agent_update_recipient \\ nil, opts \\ []) do
     Logger.info("Starting agent run for #{issue_context(issue)}")
 
+    with {:ok, context} <- AgentExecution.entry_context(Workspace.path_for_issue(issue), issue) do
+      run_with_context(issue, agent_update_recipient, opts, context)
+    end
+  end
+
+  defp run_with_context(issue, agent_update_recipient, opts, context) do
     case Workspace.create_for_issue(issue) do
       {:ok, workspace} ->
         try do
           Logger.info("Workspace ready for #{issue_context(issue)} workspace=#{workspace}")
-          ensure_dispatch_run_state(workspace, issue)
+          if context == :legacy, do: ensure_dispatch_run_state(workspace, issue)
 
-          with :ok <- log_step("before_run_hook", issue, fn -> Workspace.run_before_run_hook(workspace, issue) end),
+          with {:ok, _context} <- AgentExecution.entry_context(workspace, issue),
+               :ok <- log_step("before_run_hook", issue, fn -> Workspace.run_before_run_hook(workspace, issue) end),
                :ok <- log_step("pre_run_policy", issue, fn -> RunPolicy.enforce_pre_run(issue, workspace) end),
                :ok <- log_step("delivery_engine", issue, fn -> run_agent_turns(workspace, issue, agent_update_recipient, opts) end) do
             :ok
           else
+            {:stop, {:accounting_uncertain, _}} = terminal ->
+              terminal
+
             {:stop, reason} ->
               Logger.warning("Agent run stopped by policy for #{issue_context(issue)}: #{inspect(reason)}")
               :ok

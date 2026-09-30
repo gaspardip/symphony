@@ -3,11 +3,11 @@ defmodule SymphonyElixir.VerifierRunner do
   Runs the hybrid publish gate: deterministic smoke first, then a read-only agent verifier.
   """
 
+  alias SymphonyElixir.AgentExecution
   alias SymphonyElixir.AgentProvider
   alias SymphonyElixir.BehavioralProof
   alias SymphonyElixir.Config
   alias SymphonyElixir.DebugArtifacts
-  alias SymphonyElixir.DeliveryEngine.TurnEffects
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Observability
@@ -20,9 +20,15 @@ defmodule SymphonyElixir.VerifierRunner do
   @report_verifier_result_tool "report_verifier_result"
   @verifier_result_key_prefix :symphony_verifier_result
 
-  @spec verify(Path.t(), Issue.t() | map(), map(), RunInspector.snapshot(), keyword()) :: map()
+  @spec verify(Path.t(), Issue.t() | map(), map(), RunInspector.snapshot(), keyword()) :: map() | AgentExecution.terminal()
   def verify(workspace, issue, state, inspection, opts \\ [])
       when is_binary(workspace) and is_map(state) do
+    with {:ok, _context} <- AgentExecution.entry_context(workspace, issue) do
+      verify_with_context(workspace, issue, state, inspection, opts)
+    end
+  end
+
+  defp verify_with_context(workspace, issue, state, inspection, opts) do
     metadata = %{
       issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
       stage: "verify",
@@ -69,6 +75,9 @@ defmodule SymphonyElixir.VerifierRunner do
                 verifier_session_runner = Keyword.get(opts, :verifier_session_runner, &run_verifier_session/4)
 
                 case verifier_session_runner.(workspace, issue, state, Keyword.put(opts, :verification_context, context)) do
+                  {:stop, {:accounting_uncertain, _}} = terminal ->
+                    terminal
+
                   {:ok, %VerifierResult{} = result} ->
                     after_snapshot = RunInspector.inspect(workspace, opts)
 
@@ -106,21 +115,26 @@ defmodule SymphonyElixir.VerifierRunner do
             end
         end
 
-      Observability.emit(
-        [:symphony, :verifier, :completed],
-        %{count: 1, duration: System.monotonic_time() - start_time},
-        metadata
-        |> Map.put(:verdict, Map.get(result, :verdict) || Map.get(result, "verdict"))
-        |> Map.put(:smoke_status, smoke_result.status)
-      )
+      with result when is_map(result) <- result,
+           {:ok, _execution_context} <- AgentExecution.entry_context(workspace, issue) do
+        Observability.emit(
+          [:symphony, :verifier, :completed],
+          %{count: 1, duration: System.monotonic_time() - start_time},
+          metadata
+          |> Map.put(:verdict, Map.get(result, :verdict) || Map.get(result, "verdict"))
+          |> Map.put(:smoke_status, smoke_result.status)
+        )
 
-      result
+        result
+      end
     end)
   end
 
-  @spec post_merge_verify(Path.t(), map() | nil, keyword()) :: RunInspector.command_result()
+  @spec post_merge_verify(Path.t(), map() | nil, keyword()) :: RunInspector.command_result() | AgentExecution.terminal()
   def post_merge_verify(workspace, harness, opts \\ []) do
-    RunInspector.run_post_merge(workspace, harness, opts)
+    with {:ok, _context} <- AgentExecution.entry_context(workspace, nil) do
+      RunInspector.run_post_merge(workspace, harness, opts)
+    end
   end
 
   defp run_verifier_session(workspace, issue, state, opts) do
@@ -138,11 +152,12 @@ defmodule SymphonyElixir.VerifierRunner do
 
     provider = AgentProvider.resolve_for_stage("verifier")
 
-    with {:ok, session} <- provider.start_session(workspace, verifier_opts) do
+    with {:ok, session, binding} <- AgentProvider.open_session(provider, workspace, issue, :verifier, verifier_opts) do
       try do
-        transport_result = provider.run_turn(session, prompt, verifier_issue(issue), verifier_opts)
+        turn_opts = Keyword.put(verifier_opts, :execution_binding, binding)
+        turn_result = AgentProvider.run_turn(provider, session, workspace, prompt, verifier_issue(issue), turn_opts, :verifier)
 
-        with {:ok, _turn_session} <- TurnEffects.apply_result(provider, transport_result, workspace, issue, verifier_opts, :verifier),
+        with {:ok, _turn_session} <- turn_result,
              {:ok, result} <- fetch_verifier_result(issue) do
           after_snapshot = RunInspector.inspect(workspace, opts)
 
@@ -154,7 +169,7 @@ defmodule SymphonyElixir.VerifierRunner do
         end
       after
         clear_verifier_result(issue)
-        provider.stop_session(session)
+        AgentProvider.close_session(provider, session, binding)
       end
     end
   end

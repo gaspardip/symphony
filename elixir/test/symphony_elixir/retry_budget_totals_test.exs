@@ -2,7 +2,118 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Orchestrator.State
-  alias SymphonyElixir.RunStateStore
+  alias SymphonyElixir.{DispatchAudit, RunStateStore}
+
+  defmodule OwnerHarness do
+    use GenServer
+    alias SymphonyElixir.{AgentExecution, DispatchAudit, DispatchGate, LeaseManager, Orchestrator, Workspace}
+    alias SymphonyElixir.AgentProvider.Claude
+
+    def start_link(args), do: GenServer.start_link(__MODULE__, args)
+    def init({runtime, observer}), do: {:ok, %{runtime: runtime, observer: observer}}
+
+    def handle_call({:dispatch, issue, attempt}, _from, state) do
+      runtime = state.runtime
+      {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, runtime.lease_owner)
+
+      claim = %{
+        token: acquired.token,
+        lease: acquired.lease,
+        custody_ref: make_ref(),
+        holder: :retry,
+        workspace: Workspace.path_for_issue(issue),
+        issue: issue,
+        started_at_ms: System.monotonic_time(:millisecond),
+        deadline: :not_pending,
+        promotion_ref: nil,
+        timer: nil
+      }
+
+      runtime = %{runtime | lease_claims: %{issue.id => claim}}
+      observer = state.observer
+
+      # This fixture replaces only the worker body. Production admission, custody,
+      # gate authorization, checkpoint and DOWN handlers remain in the real owner.
+      start_child = fn supervisor, _job ->
+        Task.Supervisor.start_child(supervisor, fn -> controlled_worker(observer) end)
+      end
+
+      runtime = Orchestrator.do_spawn_issue_worker_for_test(runtime, issue, attempt, self(), start_child_fun: start_child)
+      {:reply, runtime, %{state | runtime: runtime}}
+    end
+
+    def handle_call({:terminate, id}, _from, state) do
+      runtime = Orchestrator.terminate_running_issue(state.runtime, id, false)
+      {:reply, runtime, %{state | runtime: runtime}}
+    end
+
+    def handle_call(:runtime, _from, state), do: {:reply, state.runtime, state}
+
+    def handle_call(message, from, state) do
+      {:reply, reply, runtime} = Orchestrator.handle_call(message, from, state.runtime)
+      {:reply, reply, %{state | runtime: runtime}}
+    end
+
+    def handle_info({:authorize_dispatch, id, _dispatch_id, pid} = message, state) do
+      send(pid, {:execution_context, state.runtime.running[id].agent_execution.context})
+      {:noreply, runtime} = Orchestrator.handle_info(message, state.runtime)
+      {:noreply, %{state | runtime: runtime}}
+    end
+
+    def handle_info({:agent_execution_usage, _invocation, _observation} = message, state) do
+      {:noreply, runtime} = Orchestrator.handle_info(message, state.runtime)
+      send(state.observer, {:usage_processed, self(), runtime})
+      {:noreply, %{state | runtime: runtime}}
+    end
+
+    def handle_info({:DOWN, _ref, :process, _pid, _reason} = message, state) do
+      {:noreply, runtime} = Orchestrator.handle_info(message, state.runtime)
+      send(state.observer, {:budget_worker_down, self(), runtime})
+      {:noreply, %{state | runtime: runtime}}
+    end
+
+    def handle_info(message, state) do
+      {:noreply, runtime} = Orchestrator.handle_info(message, state.runtime)
+      {:noreply, %{state | runtime: runtime}}
+    end
+
+    defp controlled_worker(observer) do
+      receive do
+        {:execution_context, context} ->
+          DispatchGate.run(context.owner, context.ticket.dispatch_id, fn ->
+            DispatchAudit.with_authorization(context.ticket, fn ->
+              AgentExecution.with_context(context.ticket, context.lease_token, context.owner, fn ->
+                :ok = AgentExecution.ensure_session_capacity()
+                {:ok, session} = Claude.start_session(context.ticket.workspace)
+                {:ok, binding} = AgentExecution.register_session(Claude, session, :main)
+                {:ok, invocation} = AgentExecution.begin_invocation(binding)
+                send(observer, {:budget_worker_ready, context.owner, self()})
+
+                try do
+                  usage_loop(observer, invocation)
+                after
+                  Claude.stop_session(session)
+                end
+              end)
+            end)
+          end)
+      end
+    end
+
+    defp usage_loop(observer, invocation) do
+      receive do
+        {:observe_usage, input, output} ->
+          case AgentExecution.observe_usage(invocation, %{usage: %{input_tokens: input, output_tokens: output, total_tokens: input + output}}) do
+            :ok ->
+              usage_loop(observer, invocation)
+
+            {:stop, {:accounting_uncertain, cause}} = terminal ->
+              send(observer, {:budget_worker_uncertain, self(), terminal})
+              receive do: (:finish_uncertain -> exit({:accounting_uncertain, cause}))
+          end
+      end
+    end
+  end
 
   setup do
     root = Path.join(System.tmp_dir!(), "retry-budget-totals-#{System.unique_integer([:positive])}")
@@ -35,21 +146,25 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
   end
 
   test "a fresh worker resumes accumulated totals and duplicate provider reports are idempotent", context do
-    first = spawn_worker(context.issue)
+    {first_owner, first} = spawn_worker(context.issue)
     assert first.running[context.issue.id].issue_token_usage_base == %{}
-    first = report_usage(first, context.issue.id, 100_000, 1_000)
+    report_usage(first_owner, context.issue.id, 100_000, 1_000)
     assert {:ok, %{token_usage: %{total_tokens: 101_000}}} = RunStateStore.load(context.workspace)
 
-    duplicate = report_usage(first, context.issue.id, 100_000, 1_000)
+    duplicate = report_usage(first_owner, context.issue.id, 100_000, 1_000)
     assert duplicate.running[context.issue.id].agent_total_tokens == 101_000
     assert {:ok, %{token_usage: %{total_tokens: 101_000}}} = RunStateStore.load(context.workspace)
-    Orchestrator.terminate_running_issue(duplicate, context.issue.id, false)
+    GenServer.call(first_owner, {:terminate, context.issue.id})
+    assert_receive {:budget_worker_down, ^first_owner, first_stopped}, 1_000
+    refute Map.has_key?(first_stopped.running, context.issue.id)
+    GenServer.stop(first_owner, :normal)
 
     # The next worker gets no prior in-memory state, as on retry after a runtime restart.
-    second = spawn_worker(context.issue, 2)
+    {second_owner, second} = spawn_worker(context.issue, 2)
     assert second.running[context.issue.id].agent_total_tokens == 0
     assert second.running[context.issue.id].issue_token_usage_base.total_tokens == 101_000
-    stopped = report_usage(second, context.issue.id, 100_000, 1_000)
+    report_usage(second_owner, context.issue.id, 100_000, 1_000)
+    assert_receive {:budget_worker_down, ^second_owner, stopped}, 1_000
     refute Map.has_key?(stopped.running, context.issue.id)
     refute Map.has_key?(stopped.retry_attempts, context.issue.id)
 
@@ -156,13 +271,33 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
   end
 
   test "a corrupt snapshot during usage checkpoint stops the worker and blocks another dispatch", context do
-    state = spawn_worker(context.issue)
+    {owner, state} = spawn_worker(context.issue)
+    entry = state.running[context.issue.id]
+    worker = entry.pid
+    journal_path = Path.join(DispatchAudit.marker_directory(context.workspace), "marker.json")
+    journal_before = File.read!(journal_path)
+    lease_before = File.read!(entry.lease_token.storage.lease_path)
     payload = "{broken-snapshot"
     File.write!(RunStateStore.state_path(context.workspace), payload)
-    stopped = report_usage(state, context.issue.id, 10, 1)
-    refute Map.has_key?(stopped.running, context.issue.id)
-    assert {:run_state_unreadable, _} = stopped.token_usage_errors[context.issue.id]
+    uncertain = report_usage(owner, context.issue.id, 10, 1)
+    assert uncertain.running[context.issue.id].pid == worker
+    assert Process.alive?(worker)
+    assert {:accounting_uncertain, %{context: execution, cause: %Jason.DecodeError{}}} = uncertain.token_usage_errors[context.issue.id]
+    assert execution == entry.agent_execution.context
+    assert_receive {:budget_worker_uncertain, ^worker, {:stop, {:accounting_uncertain, %Jason.DecodeError{}}}}, 1_000
     assert File.read!(RunStateStore.state_path(context.workspace)) == payload
+    assert File.read!(journal_path) == journal_before
+    assert File.read!(entry.lease_token.storage.lease_path) == lease_before
+    refute Map.has_key?(uncertain.retry_attempts, context.issue.id)
+
+    send(worker, :finish_uncertain)
+    assert_receive {:budget_worker_down, ^owner, stopped}, 1_000
+    refute Map.has_key?(stopped.running, context.issue.id)
+    assert stopped.token_usage_errors[context.issue.id] == uncertain.token_usage_errors[context.issue.id]
+    assert stopped.lease_claims[context.issue.id] == uncertain.lease_claims[context.issue.id]
+    assert File.read!(RunStateStore.state_path(context.workspace)) == payload
+    assert File.read!(journal_path) == journal_before
+    assert File.read!(entry.lease_token.storage.lease_path) == lease_before
     refute Map.has_key?(stopped.retry_attempts, context.issue.id)
 
     dispatch = fn returned, _issue, _attempt ->
@@ -208,57 +343,24 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
   end
 
   defp spawn_worker(issue, attempt \\ 1) do
-    worker = spawn(fn -> receive do: (:stop -> :ok) end)
-    on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
-
-    state = %State{
+    runtime = %State{
       lease_owner: "budget-totals-owner",
       max_concurrent_agents: 1,
       agent_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
     }
 
-    assert {:ok, acquired} = SymphonyElixir.LeaseManager.acquire(issue.id, issue.identifier, state.lease_owner)
-
-    state = %{
-      state
-      | lease_claims: %{
-          issue.id => %{
-            token: acquired.token,
-            lease: acquired.lease,
-            custody_ref: make_ref(),
-            holder: :retry,
-            workspace: Workspace.path_for_issue(issue),
-            issue: issue,
-            started_at_ms: System.monotonic_time(:millisecond),
-            deadline: :not_pending,
-            promotion_ref: nil,
-            timer: nil
-          }
-        }
-    }
-
-    Orchestrator.do_spawn_issue_worker_for_test(state, issue, attempt, self(), start_child_fun: fn _supervisor, _fun -> {:ok, worker} end)
+    owner = start_supervised!(Supervisor.child_spec({OwnerHarness, {runtime, self()}}, id: make_ref()))
+    state = GenServer.call(owner, {:dispatch, issue, attempt})
+    worker = state.running[issue.id].pid
+    on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
+    assert_receive {:budget_worker_ready, ^owner, ^worker}, 1_000
+    {owner, GenServer.call(owner, :runtime)}
   end
 
-  defp report_usage(state, issue_id, input, output) do
-    assert {:noreply, next_state} =
-             Orchestrator.handle_info(
-               {:agent_worker_update, issue_id,
-                %{
-                  event: :notification,
-                  timestamp: DateTime.utc_now(),
-                  payload: %{
-                    "method" => "thread/tokenUsage/updated",
-                    "params" => %{
-                      "tokenUsage" => %{
-                        "total" => %{"inputTokens" => input, "outputTokens" => output, "totalTokens" => input + output}
-                      }
-                    }
-                  }
-                }},
-               state
-             )
-
+  defp report_usage(owner, issue_id, input, output) do
+    state = GenServer.call(owner, :runtime)
+    send(state.running[issue_id].pid, {:observe_usage, input, output})
+    assert_receive {:usage_processed, ^owner, next_state}, 1_000
     next_state
   end
 end

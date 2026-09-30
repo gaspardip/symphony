@@ -131,9 +131,9 @@ an error event. Successful synthesis precedes a normal CLI final event; failed
 preparation or report acceptance emits no normal final event.
 
 Other historical plan behavior for transport errors/raw failed turns is unchanged.
-I2 will validate execution ownership between transport and effects and at dynamic
-tool entry points; B2 does not authorize stale work or fence remote provider effects.
-CLI usage remains scoped to each invocation until I2.
+I2a confirms admitted execution context and persisted usage before local turn
+effects and dynamic tools. B2 does not authorize stale work or fence remote
+provider effects. Material stage/review validity remains a separate I2b boundary.
 
 ## Checked inbox storage (C4a)
 
@@ -363,3 +363,79 @@ retain their existing availability limits. This change does not establish I2
 post-gate validity, I3 recovery, distributed exactly-once processing or acceptance
 against an external provider. Verification results belong to the frozen validation
 record, not the existence of these test cases.
+
+## Admitted execution and usage (I2a)
+
+An admitted worker captures its complete dispatch ticket, physical lease token and
+owner PID before starting. `AgentExecution` scopes that context to the worker;
+it does not reconstruct authority from a provider payload, current configuration
+or a mutable lease projection. An identified or partially identified snapshot
+cannot enter delivery as legacy because its execution context is missing.
+Nested execution contexts are rejected without resetting consumption or replacing
+the first failure. The verifier uses the existing context with its own session.
+
+Session bindings come from supported provider handles: the local session ID for
+Claude/CodexCLI and thread ID for AppServer. A CLI process's raw session ID is a
+different namespace and never replaces the runtime binding. Canonical runtime IDs
+must match. Two sessions may be live and at most 64 bindings, including retired
+ones, may exist per dispatch. Capacity and supported accounting capability are
+checked before opening a transport; retired identities are neither reused nor
+evicted. Before a turn starts, its provider and exact handle must match the
+registered binding. Returning from verifier B to the still-live handle A selects
+A's existing record.
+
+Each invocation has a monotonic ordinal. Callbacks check worker PID, captured
+context, binding and ordinal before sending an update or running a tool. The
+owner checks the actual caller of each confirmation against its running entry
+and custody. Provider data is separate from this envelope. A single confirmation
+call waits up to 5,000 ms, including mailbox and checkpoint time, without retry.
+Timeout does not cancel an in-flight checkpoint: persistence may finish, but the
+worker must not continue controlled effects.
+
+CLI usage is observed before normalization as an absolute total for the current
+invocation. Supported AppServer total-token-usage shapes are absolute for the
+thread; explicit turn-completed usage is scoped to the invocation. Unknown scope,
+last-only reports and malformed dimensions are errors, not zero usage. Input and
+output must be explicit nonnegative integers; absent total may be derived from
+those two valid dimensions. An explicit valid thread total takes precedence over
+an accompanying last report. Complete absence of usage is distinct from null or
+partial usage. AppServer observations are checked while awaiting the turn-start
+response as well as during the turn, before replies or tools can continue.
+
+For each binding and dimension, let S be its accepted contribution, T its maximum
+thread total, C its contribution at invocation start, and U the maximum reported
+for that invocation. New contribution is `max(S, T, C + U)`; only the difference
+is added to the durable issue baseline. Duplicate reports do not add consumption,
+and another session or retry does not reset prior accepted totals.
+
+The owner installs deltas, totals and related telemetry only after the audited
+checkpoint succeeds. `record_token_usage/4` receives already authenticated captured
+context, checks the exact physical token and admission, and writes monotonic usage
+to the matching existing snapshot. It neither creates nor adopts a snapshot.
+The legacy `/3` path rejects complete or partial identity inside the snapshot lock
+before applying defaults. Lock order is snapshot, physical lease verification,
+then admission/ledger verification. These cooperating local checks are not a
+distributed transaction between lease and snapshot. A mutable snapshot lease
+header is not an additional authority for binding a ticket to a token.
+
+The first `accounting_uncertain` cause persists in worker and owner. Successful
+later callbacks or a provider that catches the callback error cannot clear it.
+Confirmation precedes controlled tools, approval continuation, turn effects,
+another invocation and `after_run`; transport cleanup may still run. Plan,
+implementation, verification and active/passive wrappers preserve this terminal
+reason instead of converting it into ordinary blocked output or success.
+
+The owner retains the worker monitor until DOWN. It compares monitor, PID and
+captured admission before removing that worker, and retains the uncertain claim
+and journal without finish, retry, tracker transition or successor cleanup.
+An explicit healthy stop retains any intended retry until the original DOWN and
+successful dispatch close; later accounting or custody uncertainty prevents it.
+Previously persisted deltas are not counted again at termination. Recovery of
+this uncertainty requires a separate explicit reconciliation contract; restarting
+or a later healthy refresh does not grant replay authority.
+
+Direct legacy adapter calls remain transports without these admitted-execution
+guarantees. Audited custom providers require an explicit accounting contract;
+implementing the transport behaviour alone is insufficient. I2a cannot prevent
+effects a remote provider already performed before reporting usage. I2b material
+validity, I2c operation binding, I3 recovery and final acceptance remain separate.

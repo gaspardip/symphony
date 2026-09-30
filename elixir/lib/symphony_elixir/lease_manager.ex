@@ -164,6 +164,20 @@ defmodule SymphonyElixir.LeaseManager do
     end
   end
 
+  @doc "Checks the complete captured token under its physical lock without renewing or adopting the lease."
+  @spec ensure_current(token()) :: :ok | {:error, term()}
+  def ensure_current(token) do
+    with :ok <- validate_token(token) do
+      with_lease_lock(token.storage, fn ->
+        with {:ok, existing} <- read_at(token.storage),
+             :ok <- compare_token(token, existing),
+             true <- not stale_lease?(existing["updated_at"], DateTime.utc_now(), token.storage.ttl_ms) or {:error, :lease_expired} do
+          :ok
+        end
+      end)
+    end
+  end
+
   @spec refresh_token(token()) :: {:ok, map()} | {:error, term()}
   def refresh_token(token) do
     with :ok <- validate_token(token) do

@@ -11,6 +11,7 @@ defmodule SymphonyElixir.DispatchAudit do
   alias SymphonyElixir.{RunIdentity, RunLedger, RunStateStore}
 
   @context_key {__MODULE__, :authorization}
+  @ticket_key {__MODULE__, :ticket}
   @marker_name "marker.json"
   @type ticket :: %{
           workspace: Path.t(),
@@ -80,13 +81,25 @@ defmodule SymphonyElixir.DispatchAudit do
          :ok <- validate_recorded_admission(marker),
          :ok <- RunIdentity.verify(ticket.workspace, marker["run_id"], marker["authorized"]["issue_id"], marker["authorized"]["issue_identifier"]) do
       previous = Process.get(@context_key)
+      previous_ticket = Process.get(@ticket_key)
       Process.put(@context_key, marker_identity(marker))
+      Process.put(@ticket_key, ticket)
 
       try do
         fun.()
       after
         if is_nil(previous), do: Process.delete(@context_key), else: Process.put(@context_key, previous)
+        if is_nil(previous_ticket), do: Process.delete(@ticket_key), else: Process.put(@ticket_key, previous_ticket)
       end
+    end
+  end
+
+  @doc "Returns the ticket already validated by the current scoped authorization."
+  @spec current_ticket() :: {:ok, ticket()} | {:error, :dispatch_context_missing}
+  def current_ticket do
+    case Process.get(@ticket_key) do
+      nil -> {:error, :dispatch_context_missing}
+      ticket -> {:ok, ticket}
     end
   end
 

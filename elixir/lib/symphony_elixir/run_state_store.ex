@@ -4,6 +4,8 @@ defmodule SymphonyElixir.RunStateStore do
   """
 
   alias SymphonyElixir.DeployAudit
+  alias SymphonyElixir.DispatchAudit
+  alias SymphonyElixir.LeaseManager
   alias SymphonyElixir.Observability
   alias SymphonyElixir.RunLedger
   alias SymphonyElixir.RunnerRuntime
@@ -240,10 +242,12 @@ defmodule SymphonyElixir.RunStateStore do
     end
   end
 
+  @doc "Records legacy usage only when the snapshot has no complete or partial run identity."
   @spec record_token_usage(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def record_token_usage(workspace, issue, usage) do
     with_workspace_lock(workspace, fn ->
-      with {:ok, state} <- load_for_update(workspace, issue) do
+      with :ok <- ensure_legacy_token_usage(workspace),
+           {:ok, state} <- load_for_update(workspace, issue) do
         state = Map.put(state, :token_usage, usage)
 
         case save_unlocked(workspace, state) do
@@ -252,6 +256,87 @@ defmodule SymphonyElixir.RunStateStore do
         end
       end
     end)
+  end
+
+  @doc "Checks captured dispatch authority and records monotonic usage without creating or adopting a snapshot."
+  @spec record_token_usage(Path.t(), map(), map(), %{ticket: DispatchAudit.ticket(), lease_token: LeaseManager.token()}) :: {:ok, map()} | {:error, term()}
+  def record_token_usage(workspace, issue, usage, %{ticket: ticket, lease_token: token})
+      when is_binary(workspace) and is_map(issue) and is_map(ticket) do
+    with_workspace_lock(workspace, fn ->
+      with :ok <- LeaseManager.ensure_current(token),
+           {:ok, snapshot} <- read_token_usage_snapshot(state_path(workspace)),
+           :ok <- ensure_audit_complete(snapshot),
+           :ok <- SymphonyElixir.RunIdentity.validate_snapshot(snapshot),
+           state = atomize(snapshot),
+           :ok <- matching_token_usage_context(workspace, issue, state, ticket, token),
+           {:ok, usage} <- monotonic_token_usage(state, usage) do
+        DispatchAudit.with_authorization(ticket, fn ->
+          state = Map.put(state, :token_usage, usage)
+
+          with :ok <- DispatchAudit.ensure_workspace_access(workspace),
+               :ok <- write_json_atomically(state_path(workspace), state) do
+            {:ok, state}
+          end
+        end)
+      end
+    end)
+  end
+
+  def record_token_usage(_workspace, _issue, _usage, _context), do: {:error, :token_usage_context_mismatch}
+
+  defp matching_token_usage_context(workspace, %{id: id, identifier: identifier}, state, ticket, token)
+       when is_binary(id) and id != "" and is_binary(identifier) and identifier != "" do
+    cond do
+      ticket[:workspace] != Path.expand(workspace) or token.storage.issue_id != id or token.storage.ledger_path != ticket[:ledger_path] or
+        token.owner != ticket[:owner] or token.epoch != ticket[:epoch] ->
+        {:error, :token_usage_context_mismatch}
+
+      state[:issue_id] != id or state[:issue_identifier] != identifier or not is_binary(ticket[:run_id]) or ticket[:run_id] == "" or state[:run_id] != ticket[:run_id] ->
+        {:error, :token_usage_snapshot_mismatch}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp matching_token_usage_context(_workspace, _issue, _state, _ticket, _token), do: {:error, :token_usage_context_mismatch}
+
+  defp monotonic_token_usage(state, usage) do
+    previous = Map.get(state, :token_usage, %{input_tokens: 0, output_tokens: 0, total_tokens: 0})
+
+    with :ok <- validate_token_usage(usage),
+         :ok <- validate_token_usage(previous) do
+      {:ok, Map.new([:input_tokens, :output_tokens, :total_tokens], fn key -> {key, max(Map.fetch!(usage, key), Map.fetch!(previous, key))} end)}
+    end
+  end
+
+  defp validate_token_usage(%{input_tokens: input, output_tokens: output, total_tokens: total} = usage)
+       when map_size(usage) == 3 and is_integer(input) and input >= 0 and is_integer(output) and output >= 0 and is_integer(total) and total >= 0,
+       do: :ok
+
+  defp validate_token_usage(_usage), do: {:error, :invalid_token_usage}
+
+  defp ensure_legacy_token_usage(workspace) do
+    with {:ok, path} <- load_path(workspace),
+         {:ok, snapshot} <- read_token_usage_snapshot(path) do
+      if Enum.any?(["run_id", "run_identity_event_id", "run_identity_ledger_path", "run_identity_pending"], &Map.has_key?(snapshot, &1)),
+        do: {:error, :token_usage_context_required},
+        else: :ok
+    else
+      {:error, :missing} -> :ok
+      {:error, reason} -> {:error, write_error(reason)}
+    end
+  end
+
+  defp read_token_usage_snapshot(path) do
+    with {:ok, payload} <- File.read(path),
+         {:ok, snapshot} <- Jason.decode(payload),
+         true <- is_map(snapshot) or {:error, :invalid_state} do
+      {:ok, snapshot}
+    else
+      {:error, :enoent} -> {:error, :missing}
+      {:error, _reason} = error -> error
+    end
   end
 
   @spec transition(Path.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}

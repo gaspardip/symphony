@@ -1,9 +1,14 @@
 defmodule SymphonyElixir.AgentProvider do
   @moduledoc """
   Behaviour for agent providers. Implement this to add a new coding agent to Symphony.
+
+  Accounted engine calls use the session wrappers below. Their callbacks run in
+  the admitted worker, observe raw usage before adapter normalization, and confirm
+  durable accounting before tools or turn effects. Direct adapter calls preserve
+  the transport-only legacy contract and do not establish accounting authority.
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{AgentExecution, Config, DeliveryEngine.TurnEffects}
 
   @type session :: map()
   @type cli_observation :: %{
@@ -31,9 +36,126 @@ defmodule SymphonyElixir.AgentProvider do
   final CLI event. Other providers retain their own tool and event contracts.
   """
   @callback run_turn(session(), prompt :: String.t(), issue :: map(), opts :: keyword()) ::
-              {:ok, turn_result()} | {:error, term()}
+              {:ok, turn_result()} | {:error, term()} | AgentExecution.terminal()
 
   @callback stop_session(session()) :: :ok
+
+  @doc false
+  @spec open_session(module(), Path.t(), map(), :main | :verifier, keyword()) ::
+          {:ok, session(), AgentExecution.binding() | :legacy} | {:error, term()} | AgentExecution.terminal()
+  def open_session(provider, workspace, issue, purpose, opts \\ []) do
+    with {:ok, context} <- AgentExecution.entry_context(workspace, issue),
+         :ok <- session_capacity(context, provider),
+         {:ok, session} <- provider.start_session(workspace, opts) do
+      case register_session(context, provider, session, purpose) do
+        {:ok, binding} ->
+          {:ok, session, binding}
+
+        {:stop, _} = terminal ->
+          provider.stop_session(session)
+          terminal
+      end
+    end
+  end
+
+  @doc false
+  @spec close_session(module(), session(), AgentExecution.binding() | :legacy) :: :ok | AgentExecution.terminal()
+  def close_session(provider, session, binding) do
+    :ok = provider.stop_session(session)
+    if binding == :legacy, do: :ok, else: AgentExecution.retire_session(binding)
+  end
+
+  @doc false
+  @spec run_turn(module(), session(), Path.t(), String.t(), map(), keyword(), :delivery | :verifier) ::
+          {:ok, map()} | {:error, term()} | AgentExecution.terminal()
+  def run_turn(provider, session, workspace, prompt, issue, opts, purpose) do
+    with {:ok, context} <- AgentExecution.entry_context(workspace, issue) do
+      case context do
+        :legacy ->
+          result = provider.run_turn(session, prompt, issue, opts)
+          TurnEffects.apply_result(provider, result, workspace, issue, opts, purpose)
+
+        _context ->
+          with {:ok, invocation} <- AgentExecution.begin_invocation(provider, session, Keyword.get(opts, :execution_binding)) do
+            run_accounted_turn(provider, session, workspace, prompt, issue, opts, purpose, invocation)
+          end
+      end
+    end
+  end
+
+  defp session_capacity(:legacy, _provider), do: :ok
+  defp session_capacity(_context, provider), do: AgentExecution.ensure_session_capacity(provider)
+  defp register_session(:legacy, _provider, _session, _purpose), do: {:ok, :legacy}
+  defp register_session(_context, provider, session, purpose), do: AgentExecution.register_session(provider, session, purpose)
+
+  defp run_accounted_turn(provider, session, workspace, prompt, issue, opts, purpose, invocation) do
+    guarded_opts = accounting_callbacks(invocation, opts)
+
+    try do
+      result = provider.run_turn(session, prompt, issue, guarded_opts)
+
+      with :ok <- confirm_result(invocation, result),
+           :ok <- observe_result(provider, invocation, result) do
+        case result do
+          {:stop, {:accounting_uncertain, _}} = terminal ->
+            terminal
+
+          _ ->
+            applied = TurnEffects.apply_result(provider, result, workspace, issue, guarded_opts, purpose)
+            with :ok <- AgentExecution.confirm_invocation(invocation), do: applied
+        end
+      end
+    catch
+      :throw, {:agent_execution_halt, {:stop, {:accounting_uncertain, _}} = terminal} -> terminal
+    end
+  end
+
+  defp confirm_result(invocation, {:ok, result}) when is_map(result), do: AgentExecution.confirm_invocation(invocation, result)
+  defp confirm_result(invocation, _result), do: AgentExecution.confirm_invocation(invocation)
+
+  defp observe_result(provider, invocation, {:ok, result}) when provider in [SymphonyElixir.AgentProvider.Claude, SymphonyElixir.AgentProvider.CodexCLI] and is_map(result),
+    do: AgentExecution.observe_usage(invocation, result)
+
+  defp observe_result(_provider, _invocation, _result), do: :ok
+
+  defp accounting_callbacks(invocation, opts) do
+    on_message = Keyword.get(opts, :on_message, fn _ -> :ok end)
+    tool_executor = Keyword.get(opts, :tool_executor)
+
+    opts =
+      opts
+      |> Keyword.put(:on_usage, fn raw ->
+        guarded_callback(invocation, fn -> AgentExecution.observe_usage(invocation, raw) end)
+      end)
+      |> Keyword.put(:on_message, fn message ->
+        guarded_callback(invocation, fn ->
+          require_accounting(AgentExecution.forward_update(invocation, message))
+          on_message.(message)
+        end)
+      end)
+
+    if is_function(tool_executor, 2) do
+      Keyword.put(opts, :tool_executor, fn tool, arguments ->
+        guarded_callback(invocation, fn ->
+          require_accounting(AgentExecution.confirm_invocation(invocation))
+          tool_executor.(tool, arguments)
+        end)
+      end)
+    else
+      opts
+    end
+  end
+
+  defp guarded_callback(invocation, fun) do
+    case AgentExecution.guard_invocation(invocation) do
+      :ok -> require_accounting(fun.())
+      {:discard, _} = discarded -> discarded
+      {:stop, _} = terminal -> throw({:agent_execution_halt, terminal})
+    end
+  end
+
+  defp require_accounting({:stop, {:accounting_uncertain, _}} = terminal), do: throw({:agent_execution_halt, terminal})
+  defp require_accounting(result), do: result
 
   @doc "Resolve the provider module from config or explicit option."
   @spec resolve(keyword()) :: module()

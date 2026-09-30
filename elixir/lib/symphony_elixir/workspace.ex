@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
+  alias SymphonyElixir.AgentExecution
   alias SymphonyElixir.Config
   alias SymphonyElixir.DeployAudit
   alias SymphonyElixir.DispatchAudit
@@ -132,30 +133,34 @@ defmodule SymphonyElixir.Workspace do
     :ok
   end
 
-  @spec run_before_run_hook(Path.t(), map() | String.t() | nil) :: :ok | {:error, term()}
+  @spec run_before_run_hook(Path.t(), map() | String.t() | nil) :: :ok | {:error, term()} | AgentExecution.terminal()
   def run_before_run_hook(workspace, issue_or_identifier) when is_binary(workspace) do
-    issue_context = issue_context(issue_or_identifier)
+    with {:ok, _context} <- AgentExecution.entry_context(workspace, issue_or_identifier) do
+      issue_context = issue_context(issue_or_identifier)
 
-    case Config.workspace_hooks()[:before_run] do
-      nil ->
-        :ok
+      case Config.workspace_hooks()[:before_run] do
+        nil ->
+          :ok
 
-      command ->
-        run_hook(command, workspace, issue_context, "before_run")
+        command ->
+          run_hook(command, workspace, issue_context, "before_run")
+      end
     end
   end
 
-  @spec run_after_run_hook(Path.t(), map() | String.t() | nil) :: :ok
+  @spec run_after_run_hook(Path.t(), map() | String.t() | nil) :: :ok | AgentExecution.terminal()
   def run_after_run_hook(workspace, issue_or_identifier) when is_binary(workspace) do
-    issue_context = issue_context(issue_or_identifier)
+    with {:ok, _context} <- AgentExecution.entry_context(workspace, issue_or_identifier) do
+      issue_context = issue_context(issue_or_identifier)
 
-    case Config.workspace_hooks()[:after_run] do
-      nil ->
-        :ok
+      case Config.workspace_hooks()[:after_run] do
+        nil ->
+          :ok
 
-      command ->
-        run_hook(command, workspace, issue_context, "after_run")
-        |> ignore_hook_failure()
+        command ->
+          run_hook(command, workspace, issue_context, "after_run")
+          |> ignore_hook_failure()
+      end
     end
   end
 

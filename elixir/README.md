@@ -455,7 +455,8 @@ or synthesize delivery reports. Failed Git detection, formatting, staging, commi
 or report acceptance now returns `turn_effect_failed` and stops plan/implement
 before the next stage; prior local effects remain. Missing Git base references
 are errors without fallback, and delivery requires an executor returning a
-string-keyed boolean `success`. Execution-ownership checks remain I2 work. See
+string-keyed boolean `success`. I2a checks admitted context and persisted usage
+before controlled continuation; material stage/review validity remains I2b work. See
 [the runtime contract](../docs/RUNTIME_CONTRACT.md#cli-transport-and-local-turn-effects).
 
 ### Inbox state migration and recovery
@@ -615,3 +616,28 @@ Failed release/audit remains explicit and cannot become success by observing a
 missing lease. Restart retains at-least-once delivery without recovering volatile
 custody. See [the full contract](../docs/RUNTIME_CONTRACT.md#linear-inbox-continuation-c4b)
 and [reader lifecycle](../docs/tracker-poll-async.md#linear-inbox-reads-and-completion-c4b).
+
+## Admitted execution and token accounting (I2a)
+
+Workers retain their original dispatch ticket, complete physical lease token and
+owner PID. Provider callbacks cannot replace that context. The runtime registers
+session handles and invocation ordinals, with at most two live sessions and 64
+bindings per dispatch, including retired identities. The verifier can use B while
+the main session A remains live; returning to A preserves its accepted totals.
+
+Usage is classified before CLI normalization. Per-invocation CLI totals and
+AppServer thread totals have different scopes; duplicate reports do not double
+count, and a retry starts from the persisted issue baseline. Missing, malformed
+or unknown-scope observations are not silently converted to zero.
+
+The owner checkpoints accepted usage with the captured ticket/token before
+committing its in-memory counters. The worker confirms before controlled tools,
+turn effects, the next invocation and `after_run`. Confirmation is a single
+5,000 ms call. On timeout or failed persistence, `accounting_uncertain` remains
+terminal even if the provider subsequently returns success. Cleanup may close
+transports, but automatic finish, retry and journal removal remain blocked.
+
+Identified snapshots require execution context; direct legacy transport calls
+retain their narrower contract. These checks do not roll back remote effects,
+provide distributed atomicity or implement uncertain-run recovery. See
+[the admitted execution contract](../docs/RUNTIME_CONTRACT.md#admitted-execution-and-usage-i2a).

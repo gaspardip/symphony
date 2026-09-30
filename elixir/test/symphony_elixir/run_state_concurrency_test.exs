@@ -22,16 +22,20 @@ defmodule SymphonyElixir.RunStateConcurrencyTest do
     test "lease generation roundtrip preserves #{identity_mode} identity and consumption", context do
       identity_fields = [:run_id, :run_identity_event_id, :run_identity_ledger_path]
 
-      if context.identity_mode == :identified do
-        assert {:ok, ticket} =
-                 SymphonyElixir.DispatchAudit.begin(context.workspace, %{
-                   issue_id: context.issue.id,
-                   issue_identifier: context.issue.identifier,
-                   metadata: %{owner: "roundtrip-owner", epoch: 1}
-                 })
+      execution =
+        if context.identity_mode == :identified do
+          assert {:ok, acquired} = SymphonyElixir.LeaseManager.acquire(context.issue.id, context.issue.identifier, "roundtrip-owner")
+          on_exit(fn -> assert {:ok, :released} = SymphonyElixir.LeaseManager.release_token(acquired.token) end)
 
-        assert :ok = SymphonyElixir.DispatchAudit.finish(ticket, :not_started)
-      end
+          assert {:ok, ticket} =
+                   SymphonyElixir.DispatchAudit.begin(context.workspace, %{
+                     issue_id: context.issue.id,
+                     issue_identifier: context.issue.identifier,
+                     metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}
+                   })
+
+          %{ticket: ticket, lease_token: acquired.token}
+        end
 
       assert {:ok, before} = RunStateStore.load(context.workspace)
       identity = Map.take(before, identity_fields)
@@ -45,7 +49,20 @@ defmodule SymphonyElixir.RunStateConcurrencyTest do
           assert Enum.all?(identity, fn {_key, value} -> is_binary(value) and value != "" end)
       end
 
-      assert {:ok, consumed} = RunStateStore.record_token_usage(context.workspace, context.issue, %{input_tokens: 17, output_tokens: 3, total_tokens: 20})
+      usage = %{input_tokens: 17, output_tokens: 3, total_tokens: 20}
+
+      consumed =
+        case execution do
+          nil ->
+            assert {:ok, consumed} = RunStateStore.record_token_usage(context.workspace, context.issue, usage)
+            consumed
+
+          %{ticket: ticket} ->
+            assert {:ok, consumed} = RunStateStore.record_token_usage(context.workspace, context.issue, usage, execution)
+            assert :ok = SymphonyElixir.DispatchAudit.finish(ticket, :not_started)
+            consumed
+        end
+
       assert Map.take(consumed, identity_fields) == identity
       attrs = %{lease_owner: "owner", lease_epoch: 2, lease_version: 2, lease_generation: "generation", lease_updated_at: DateTime.to_iso8601(DateTime.utc_now())}
       assert {:ok, synced} = RunStateStore.sync_lease(context.workspace, context.issue, attrs)

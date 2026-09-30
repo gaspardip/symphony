@@ -54,6 +54,11 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
 
     def handle_call(:runtime, _from, state), do: {:reply, state.runtime, state}
 
+    def handle_call(message, from, state) do
+      {:reply, reply, runtime} = Orchestrator.handle_call(message, from, state.runtime)
+      {:reply, reply, %{state | runtime: runtime}}
+    end
+
     def handle_info({:authorize_dispatch, id, dispatch_id, pid} = message, state) do
       # This is a real subsequent GenServer callback. Its runtime was installed
       # by the preceding dispatch call before the queued authorization arrived.
@@ -328,7 +333,7 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     owner = owner_harness()
     runtime = GenServer.call(owner, {:dispatch_held_start, context.issue})
     id = context.issue.id
-    assert %{pid: worker, dispatch_ticket: ticket} = runtime.running[id]
+    assert %{pid: worker, dispatch_ticket: ticket, lease_token: token} = runtime.running[id]
     assert_receive {:authorization_held, ^owner, ^id, dispatch_id, ^worker, _}, 1_000
     assert dispatch_id == ticket.dispatch_id
     marker_path = Path.join(DispatchAudit.marker_directory(context.workspace), "marker.json")
@@ -341,7 +346,7 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     ledger_fault!(context.root)
     send(worker, :release_worker)
 
-    assert_receive {:down_held, ^owner, {:DOWN, _ref, :process, ^worker, {:dispatch_authorization_failed, _reason}}},
+    assert_receive {:down_held, ^owner, {:DOWN, _ref, :process, ^worker, {:accounting_uncertain, {:dispatch_authorization_failed, authorization_reason}}}},
                    2_000
 
     ledger = RunLedger.ledger_file_path()
@@ -353,7 +358,8 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     assert stopped.running == %{}
     assert stopped.retry_attempts == %{}
     refute Map.has_key?(stopped.completed, id)
-    assert {:dispatch_audit_failed, ^id, _reason} = stopped.candidate_fetch_error
+    assert {:accounting_uncertain, ^id, {:dispatch_authorization_failed, ^authorization_reason}} = stopped.candidate_fetch_error
+    assert stopped.lease_claims[id].token == token
     assert File.read!(marker_path) == marker_before
     assert {:error, {:dispatch_audit_pending, _}} = DispatchAudit.ensure_available(context.workspace)
     refute File.exists?(Path.join(context.workspace, ".symphony/hook-executed"))

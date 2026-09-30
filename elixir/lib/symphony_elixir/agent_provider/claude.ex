@@ -72,9 +72,10 @@ defmodule SymphonyElixir.AgentProvider.Claude do
     send(port, {self(), {:command, ""}})
 
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    on_usage = Keyword.get(opts, :on_usage)
 
     try do
-      {exit_result, stream_state} = receive_stream(port, on_message, %StreamState{})
+      {exit_result, stream_state} = receive_stream(port, on_message, on_usage, %StreamState{})
 
       {:ok,
        %{
@@ -89,6 +90,10 @@ defmodule SymphonyElixir.AgentProvider.Claude do
          }
        }}
     catch
+      :throw, {:agent_execution_halt, {:stop, {:accounting_uncertain, _}} = terminal} ->
+        safe_close_port(port)
+        terminal
+
       kind, reason ->
         safe_close_port(port)
 
@@ -165,19 +170,20 @@ defmodule SymphonyElixir.AgentProvider.Claude do
 
   # -- NDJSON stream processing --
 
-  defp receive_stream(port, on_message, %StreamState{} = state) do
+  defp receive_stream(port, on_message, on_usage, %StreamState{} = state) do
     receive do
       {^port, {:data, {:eol, line}}} ->
+        observe_raw_line(line, on_usage)
         {updated_state, event} = parse_stream_line(line, state)
 
         if event do
           on_message.(event)
         end
 
-        receive_stream(port, on_message, updated_state)
+        receive_stream(port, on_message, on_usage, updated_state)
 
       {^port, {:data, {:noeol, _partial}}} ->
-        receive_stream(port, on_message, state)
+        receive_stream(port, on_message, on_usage, state)
 
       {^port, {:exit_status, 0}} ->
         {:turn_completed, state}
@@ -190,6 +196,24 @@ defmodule SymphonyElixir.AgentProvider.Claude do
         safe_close_port(port)
         Logger.error("Claude CLI turn timed out")
         {:turn_failed, %{state | error: "timeout"}}
+    end
+  end
+
+  defp observe_raw_line(_line, nil), do: :ok
+
+  defp observe_raw_line(line, on_usage) when is_function(on_usage, 1) do
+    case Jason.decode(line) do
+      {:ok, payload} when is_map(payload) ->
+        case on_usage.(payload) do
+          {:stop, {:accounting_uncertain, _}} = terminal -> throw({:agent_execution_halt, terminal})
+          result -> result
+        end
+
+      {:ok, _payload} ->
+        :ok
+
+      {:error, _reason} ->
+        :ok
     end
   end
 

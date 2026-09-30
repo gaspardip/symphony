@@ -7,6 +7,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   require Logger
 
+  alias SymphonyElixir.AgentExecution
   alias SymphonyElixir.AgentProvider
   alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.AgentHarness
@@ -60,12 +61,29 @@ defmodule SymphonyElixir.DeliveryEngine do
           :ok | {:done, Issue.t()} | {:stop, term()} | {:error, term()}
   def run(workspace, %Issue{} = issue, agent_update_recipient, opts \\ [])
       when is_binary(workspace) do
-    with :ok <- RunStateStore.ensure_readable(workspace) do
+    with :ok <- ensure_delivery_entry_readable(workspace, issue) do
       run_with_readable_snapshot(workspace, issue, agent_update_recipient, opts)
     else
+      {:stop, {:accounting_uncertain, _}} = terminal ->
+        terminal
+
       {:error, reason} ->
         Logger.error("Delivery blocked by unreadable snapshot issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
         {:stop, reason}
+    end
+  end
+
+  defp ensure_delivery_entry_readable(workspace, issue) do
+    case AgentExecution.current_context() do
+      {:ok, _captured_context} ->
+        with {:ok, _context} <- AgentExecution.entry_context(workspace, issue),
+             :ok <- RunStateStore.ensure_readable(workspace),
+             do: :ok
+
+      {:error, :execution_context_missing} ->
+        with :ok <- RunStateStore.ensure_readable(workspace),
+             {:ok, _context} <- AgentExecution.entry_context(workspace, issue),
+             do: :ok
     end
   end
 
@@ -85,7 +103,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       provider = AgentProvider.resolve_for_stage(stage)
       Logger.info("Starting agent session bootstrap for #{issue.identifier} provider=#{inspect(provider)} workspace=#{workspace}")
 
-      with {:ok, app_session} <- provider.start_session(workspace) do
+      with {:ok, app_session, binding} <- AgentProvider.open_session(provider, workspace, issue, :main) do
         session_id = Map.get(app_session, :thread_id) || Map.get(app_session, :session_id, "unknown")
         Logger.info("Agent session bootstrap succeeded for #{issue.identifier} session_id=#{session_id}")
 
@@ -97,12 +115,15 @@ defmodule SymphonyElixir.DeliveryEngine do
             agent_update_recipient,
             issue_state_fetcher,
             max_turns,
-            Keyword.put(opts, :agent_provider, provider)
+            opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
           )
         after
-          provider.stop_session(app_session)
+          AgentProvider.close_session(provider, app_session, binding)
         end
       else
+        {:stop, {:accounting_uncertain, _}} = terminal ->
+          terminal
+
         {:error, reason} = error ->
           Logger.error("Agent session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
 
@@ -285,7 +306,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          max_turns,
          opts
        ) do
-    with :ok <- RunStateStore.ensure_readable(workspace) do
+    with :ok <- ensure_delivery_entry_readable(workspace, issue) do
       do_run_with_readable_snapshot(
         app_session,
         workspace,
@@ -296,6 +317,9 @@ defmodule SymphonyElixir.DeliveryEngine do
         opts
       )
     else
+      {:stop, {:accounting_uncertain, _}} = terminal ->
+        terminal
+
       {:error, reason} ->
         Logger.error("Delivery blocked by unreadable snapshot issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
         {:stop, reason}
@@ -359,7 +383,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     Logger.info("Late session bootstrap for active stage #{stage} issue=#{issue.identifier} provider=#{inspect(provider)}")
 
-    with {:ok, app_session} <- provider.start_session(workspace) do
+    with {:ok, app_session, binding} <- AgentProvider.open_session(provider, workspace, issue, :main) do
       try do
         do_run(
           app_session,
@@ -368,12 +392,15 @@ defmodule SymphonyElixir.DeliveryEngine do
           agent_update_recipient,
           issue_state_fetcher,
           max_turns,
-          Keyword.put(opts, :agent_provider, provider)
+          opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
         )
       after
-        provider.stop_session(app_session)
+        AgentProvider.close_session(provider, app_session, binding)
       end
     else
+      {:stop, {:accounting_uncertain, _}} = terminal ->
+        terminal
+
       {:error, reason} = error ->
         Logger.error("Late session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
 
@@ -759,6 +786,9 @@ defmodule SymphonyElixir.DeliveryEngine do
       run_logged_agent_turn(provider, app_session, workspace, prompt, issue, turn_opts)
 
     case provider_turn_result do
+      {:stop, {:accounting_uncertain, _}} = terminal ->
+        terminal
+
       {:error, {:turn_effect_failed, _details}} = error ->
         log_agent_turn_lifecycle(turn_log_context, plan_turn_log_result(error, error, false))
         error
@@ -1088,6 +1118,9 @@ defmodule SymphonyElixir.DeliveryEngine do
                 end
             end
           else
+            {:stop, {:accounting_uncertain, _}} = terminal ->
+              terminal
+
             error ->
               log_agent_turn_lifecycle(
                 turn_log_context,
@@ -1140,12 +1173,6 @@ defmodule SymphonyElixir.DeliveryEngine do
                     turn_result.summary,
                     @blocked_state
                   )
-
-                {:done, finished_issue} ->
-                  {:done, finished_issue}
-
-                {:skip, finished_issue} ->
-                  {:done, finished_issue}
 
                 {:error, reason} ->
                   cond do
@@ -1396,77 +1423,46 @@ defmodule SymphonyElixir.DeliveryEngine do
        ) do
     if Config.policy_require_verifier?() do
       verifier_runner = Keyword.get(opts, :verifier_runner, &VerifierRunner.verify/5)
-      result = verifier_runner.(workspace, issue, state, inspection, opts)
-      verification_attempts = Map.get(state, :verification_attempts, 0) + 1
 
-      verifier_summary =
-        Map.get(result, :summary) || Map.get(result, "summary") || inspect(result)
+      with result when is_map(result) <- verifier_runner.(workspace, issue, state, inspection, opts),
+           {:ok, _context} <- AgentExecution.entry_context(workspace, issue) do
+        verification_attempts = Map.get(state, :verification_attempts, 0) + 1
 
-      RunLedger.record("verification.completed", %{
-        issue_id: issue.id,
-        issue_identifier: issue.identifier,
-        stage: "verify",
-        actor_type: "runtime",
-        actor_id: "delivery_engine",
-        policy_class: Map.get(state, :effective_policy_class),
-        summary: verifier_summary,
-        details: verifier_summary,
-        metadata: %{
-          verdict: Map.get(result, :verdict) || Map.get(result, "verdict"),
-          attempt: verification_attempts
-        }
-      })
+        verifier_summary =
+          Map.get(result, :summary) || Map.get(result, "summary") || inspect(result)
 
-      case Map.get(result, :verdict) || Map.get(result, "verdict") do
-        "pass" ->
-          verifier_map = verifier_result_to_map(result)
+        RunLedger.record("verification.completed", %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          stage: "verify",
+          actor_type: "runtime",
+          actor_id: "delivery_engine",
+          policy_class: Map.get(state, :effective_policy_class),
+          summary: verifier_summary,
+          details: verifier_summary,
+          metadata: %{
+            verdict: Map.get(result, :verdict) || Map.get(result, "verdict"),
+            attempt: verification_attempts
+          }
+        })
 
-          {:ok, _state} =
-            RunStateStore.transition(
-              workspace,
-              "publish",
-              Map.merge(
-                %{
-                  verification_attempts: verification_attempts,
-                  last_verifier: verifier_map,
-                  last_verifier_verdict: "pass",
-                  acceptance_summary:
-                    get_in(result, [:acceptance, :summary]) ||
-                      get_in(result, ["acceptance", "summary"]),
-                  ui_proof_required_checks: ui_proof_required_checks(verifier_map)
-                },
-                resume_context_attrs(
-                  workspace,
-                  issue,
-                  state,
-                  inspection,
-                  %{
-                    last_verifier_summary: summarized_text(verifier_summary, 800),
-                    next_objective: "Publish the verified branch and attach the PR."
-                  },
-                  opts
-                )
-              )
-            )
+        case Map.get(result, :verdict) || Map.get(result, "verdict") do
+          "pass" ->
+            verifier_map = verifier_result_to_map(result)
 
-          do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
-
-        "needs_more_work" ->
-          reason_code = Map.get(result, :reason_code) || Map.get(result, "reason_code")
-
-          if should_retry_verification?(reason_code, verification_attempts, state, max_turns) do
             {:ok, _state} =
               RunStateStore.transition(
                 workspace,
-                "implement",
+                "publish",
                 Map.merge(
                   %{
                     verification_attempts: verification_attempts,
-                    last_verifier: verifier_result_to_map(result),
-                    last_verifier_verdict: "needs_more_work",
+                    last_verifier: verifier_map,
+                    last_verifier_verdict: "pass",
                     acceptance_summary:
                       get_in(result, [:acceptance, :summary]) ||
-                        get_in(result, ["acceptance", "summary"])
+                        get_in(result, ["acceptance", "summary"]),
+                    ui_proof_required_checks: ui_proof_required_checks(verifier_map)
                   },
                   resume_context_attrs(
                     workspace,
@@ -1475,7 +1471,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                     inspection,
                     %{
                       last_verifier_summary: summarized_text(verifier_summary, 800),
-                      next_objective: verifier_retry_objective(result)
+                      next_objective: "Publish the verified branch and attach the PR."
                     },
                     opts
                   )
@@ -1483,49 +1479,83 @@ defmodule SymphonyElixir.DeliveryEngine do
               )
 
             do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
-          else
-            stop_reason =
-              cond do
-                reason_code == "behavior_proof_missing" -> :behavior_proof_missing
-                reason_code == "ui_proof_missing" -> :ui_proof_missing
-                true -> :verifier_failed
-              end
 
+          "needs_more_work" ->
+            reason_code = Map.get(result, :reason_code) || Map.get(result, "reason_code")
+
+            if should_retry_verification?(reason_code, verification_attempts, state, max_turns) do
+              {:ok, _state} =
+                RunStateStore.transition(
+                  workspace,
+                  "implement",
+                  Map.merge(
+                    %{
+                      verification_attempts: verification_attempts,
+                      last_verifier: verifier_result_to_map(result),
+                      last_verifier_verdict: "needs_more_work",
+                      acceptance_summary:
+                        get_in(result, [:acceptance, :summary]) ||
+                          get_in(result, ["acceptance", "summary"])
+                    },
+                    resume_context_attrs(
+                      workspace,
+                      issue,
+                      state,
+                      inspection,
+                      %{
+                        last_verifier_summary: summarized_text(verifier_summary, 800),
+                        next_objective: verifier_retry_objective(result)
+                      },
+                      opts
+                    )
+                  )
+                )
+
+              do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+            else
+              stop_reason =
+                cond do
+                  reason_code == "behavior_proof_missing" -> :behavior_proof_missing
+                  reason_code == "ui_proof_missing" -> :ui_proof_missing
+                  true -> :verifier_failed
+                end
+
+              block_issue(
+                workspace,
+                issue,
+                stop_reason,
+                get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
+                @blocked_state
+              )
+            end
+
+          "blocked" ->
             block_issue(
               workspace,
               issue,
-              stop_reason,
+              :verifier_blocked,
               get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
               @blocked_state
             )
-          end
 
-        "blocked" ->
-          block_issue(
-            workspace,
-            issue,
-            :verifier_blocked,
-            get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
-            @blocked_state
-          )
+          "unsafe_to_merge" ->
+            block_issue(
+              workspace,
+              issue,
+              :unsafe_to_merge,
+              get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
+              @blocked_state
+            )
 
-        "unsafe_to_merge" ->
-          block_issue(
-            workspace,
-            issue,
-            :unsafe_to_merge,
-            get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
-            @blocked_state
-          )
-
-        other ->
-          block_issue(
-            workspace,
-            issue,
-            :verifier_failed,
-            "Verifier returned an unknown verdict: #{inspect(other)}",
-            @blocked_state
-          )
+          other ->
+            block_issue(
+              workspace,
+              issue,
+              :verifier_failed,
+              "Verifier returned an unknown verdict: #{inspect(other)}",
+              @blocked_state
+            )
+        end
       end
     else
       {:ok, _state} = RunStateStore.transition(workspace, "publish", %{})
@@ -2114,6 +2144,9 @@ defmodule SymphonyElixir.DeliveryEngine do
           :ok
       end
     else
+      {:stop, {:accounting_uncertain, _}} = terminal ->
+        terminal
+
       {:error, :missing_preview_deploy} ->
         block_issue(
           workspace,
@@ -2297,35 +2330,35 @@ defmodule SymphonyElixir.DeliveryEngine do
 
     if Config.policy_post_merge_verification_required?() and
          workflow_profile.post_merge_verification_required do
-      result = VerifierRunner.post_merge_verify(workspace, harness, opts)
+      with %{status: status} = result <- VerifierRunner.post_merge_verify(workspace, harness, opts) do
+        case status do
+          :passed ->
+            {:ok, _state} =
+              RunStateStore.update(workspace, fn state ->
+                state
+                |> Map.put(:last_post_merge, command_result_to_map(result))
+                |> Map.put(:last_decision, nil)
+              end)
 
-      case result.status do
-        :passed ->
-          {:ok, _state} =
-            RunStateStore.update(workspace, fn state ->
-              state
-              |> Map.put(:last_post_merge, command_result_to_map(result))
-              |> Map.put(:last_decision, nil)
-            end)
+            RunLedger.record("post_merge.completed", %{
+              issue_id: issue.id,
+              issue_identifier: issue.identifier,
+              stage: "post_merge",
+              actor_type: "runtime",
+              actor_id: "delivery_engine",
+              summary: "Post-merge verification passed",
+              details: String.slice(to_string(result.output || ""), 0, 500),
+              metadata: %{command: result.command}
+            })
 
-          RunLedger.record("post_merge.completed", %{
-            issue_id: issue.id,
-            issue_identifier: issue.identifier,
-            stage: "post_merge",
-            actor_type: "runtime",
-            actor_id: "delivery_engine",
-            summary: "Post-merge verification passed",
-            details: String.slice(to_string(result.output || ""), 0, 500),
-            metadata: %{command: result.command}
-          })
+            :ok
 
-          :ok
+          :failed ->
+            {:error, {:post_merge_rework, result.output}}
 
-        :failed ->
-          {:error, {:post_merge_rework, result.output}}
-
-        :unavailable ->
-          {:error, {:post_merge_unavailable, result.output}}
+          :unavailable ->
+            {:error, {:post_merge_unavailable, result.output}}
+        end
       end
     else
       :ok
@@ -3573,9 +3606,15 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp run_logged_agent_turn(provider, app_session, workspace, prompt, issue, opts) do
     started_at = System.monotonic_time()
-    transport_result = provider.run_turn(app_session, prompt, issue, opts)
-    turn_result = SymphonyElixir.DeliveryEngine.TurnEffects.apply_result(provider, transport_result, workspace, issue, opts, :delivery)
+    turn_result = AgentProvider.run_turn(provider, app_session, workspace, prompt, issue, opts, :delivery)
 
+    case turn_result do
+      {:stop, {:accounting_uncertain, _}} = terminal -> {terminal, nil}
+      _ -> logged_agent_turn_result(turn_result, provider, issue, opts, started_at)
+    end
+  end
+
+  defp logged_agent_turn_result(turn_result, provider, issue, opts, started_at) do
     duration_ms =
       System.convert_time_unit(System.monotonic_time() - started_at, :native, :millisecond)
 
@@ -3706,10 +3745,6 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_reported_turn_outcome({:error, reason}) do
     normalize_turn_outcome_value(reason, "missing")
   end
-
-  defp normalize_reported_turn_outcome({:done, _issue}), do: "done"
-  defp normalize_reported_turn_outcome({:skip, _issue}), do: "skip"
-  defp normalize_reported_turn_outcome(_result), do: "unknown"
 
   defp normalize_turn_outcome_value({tag, _details}, _default) when is_atom(tag),
     do: Atom.to_string(tag)
@@ -4159,7 +4194,7 @@ defmodule SymphonyElixir.DeliveryEngine do
     fn message ->
       maybe_capture_turn_runtime_error(issue, message)
 
-      if is_pid(recipient) and is_binary(issue.id) do
+      if match?({:error, :execution_context_missing}, AgentExecution.current_context()) and is_pid(recipient) and is_binary(issue.id) do
         send(recipient, {:agent_worker_update, issue.id, message})
       end
 
