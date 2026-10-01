@@ -15,6 +15,10 @@ Compose checked readers, coordinator storage and GitHub owner under the adopted
 contract. Review the whole source, run required repository gates, then assess local
 integration. Preserve earlier failed proposals and validation records.
 
+A separate structural unit after integrated-green C5 extracts GitHub feedback
+planning into Orchestrator.GitHubFollowUp.plan/4. Refresh its source pins and
+review it independently before applying it; this does not block or absorb C6.
+
 ## Work Log
 
 Initial lookup and refresh after effects share B; active admission uses existing A.
@@ -22,6 +26,12 @@ A live worker defers changes until confirmed normal close. Fresh evaluation reta
 retry context and original material across admission. Checked coordinator deltas,
 physical ownership and one acquisition deadline guard each later effect. Failed own
 no-child close retains exact ticket/claim uncertainty through generic cleanup.
+
+The structural proposal groups review/CI attrs, claim merging, retained proof
+attempts and resume summaries behind one pure interface. The owner still
+evaluates eligibility from current State and checked material. Authority, CAS,
+writer, ledger, refresh, worker gate and physical inbox ACK remain owner effects;
+a returned plan conveys no permission and adds no cache or second state owner.
 
 ## Evidence
 
@@ -31,6 +41,12 @@ Assertions alone do not prove passing behavior. Exact-source execution, independ
 reviews and integration receipts live in the coordinator's external records; this
 file embeds no mutable count or acceptance claim. Controlled transport/worker
 fixtures do not establish production-provider acceptance.
+
+The proposed planner regressions use independent payload expectations and real
+coordinator storage calls, including sparse source presence and retained claims.
+They do not substitute for the existing C5 owner/worker integration cases. Source
+movement, type checks and execution results require separate review and gates;
+the structural proposal alone establishes no passing or integration result.
 
 No callable LSP is available. Source/spec review, compilation, Dialyzer and runtime
 checks remain separate evidence.
