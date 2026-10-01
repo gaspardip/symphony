@@ -2,9 +2,11 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
   @moduledoc """
   Builds the read-only snapshot returned by the orchestrator :snapshot call.
 
-  Every public function here is a pure data builder — it reads workspace state,
-  run-state files, lease details, and policy resolution, then returns plain maps
-  whose shape defines the `/api/v1/state` contract.
+  Builders inspect configuration, workspace and run-state files, physical leases
+  and policy resolution in the caller's process. They preserve existing routing
+  diagnostics and return plain maps for the `/api/v1/state` contract. They do not
+  own State, renew custody, schedule readers or authorize execution; those remain
+  responsibilities of the orchestrator GenServer.
   """
 
   alias SymphonyElixir.Config
@@ -223,9 +225,7 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
         workspace_path = Workspace.path_for_issue(entry.identifier || entry.issue_id)
 
         run_state = load_run_state(workspace_path, entry.issue)
-
-        {policy_class, policy_source, policy_override} =
-          Orchestrator.policy_snapshot_values(entry.issue, state, run_state)
+        {policy_class, policy_source, policy_override} = Orchestrator.policy_snapshot_values(entry.issue, state, run_state)
 
         {last_rule_id, last_failure_class, last_decision_summary, next_human_action} =
           queue_policy_reason(entry.issue, state, run_state)
@@ -270,13 +270,39 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
 
     case {queue_entries, Map.get(state, :candidate_fetch_error)} do
       {[], reason} when not is_nil(reason) -> [%{error: inspect(reason)}]
-      _ -> queue_entries
+      _ -> project_pending_dispatch_error(queue_entries, state.candidate_fetch_error)
     end
   end
 
   # -------------------------------------------------------------------
   # Private helpers — snapshot-only
   # -------------------------------------------------------------------
+
+  defp project_pending_dispatch_error(entries, {:dispatch_audit_pending, workspace}) when is_binary(workspace),
+    do: project_pending_dispatch_error(entries, nil, workspace)
+
+  defp project_pending_dispatch_error(entries, {:dispatch_audit_failed, issue_id, {:dispatch_audit_pending, workspace}})
+       when is_binary(issue_id) and is_binary(workspace),
+       do: project_pending_dispatch_error(entries, issue_id, workspace)
+
+  defp project_pending_dispatch_error(entries, _reason), do: entries
+
+  defp project_pending_dispatch_error(entries, issue_id, workspace) do
+    matches =
+      Enum.filter(entries, fn entry ->
+        (is_nil(issue_id) or entry.issue_id == issue_id) and
+          Workspace.path_for_issue(entry.issue_identifier || entry.issue_id) == workspace
+      end)
+
+    case matches do
+      [matched] ->
+        error = {:dispatch_audit_pending, workspace} |> inspect() |> SymphonyElixir.SecretRedactor.redact()
+        Enum.map(entries, fn entry -> if entry == matched, do: Map.put(entry, :error, error), else: entry end)
+
+      _ ->
+        entries
+    end
+  end
 
   defp apply_persisted_review_state(%RunInspector.Snapshot{} = inspection, run_state)
        when is_map(run_state) do
@@ -331,9 +357,6 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
       )
     )
   end
-
-  defp apply_persisted_review_state(%RunInspector.Snapshot{} = inspection, _run_state),
-    do: inspection
 
   defp persisted_check_list(run_state, key, fallback) when is_map(run_state) do
     case Map.get(run_state, key) do
