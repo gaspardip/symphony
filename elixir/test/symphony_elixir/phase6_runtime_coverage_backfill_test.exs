@@ -221,10 +221,26 @@ defmodule SymphonyElixir.Phase6RuntimeCoverageBackfillTest do
     end)
   end
 
-  test "run ledger covers persistence fallbacks and malformed recent entries" do
+  test "run ledger raises persistence errors and preserves normalization and malformed recent reads" do
     with_log_file_env(self(), fn ->
       assert :ok = RunLedger.append("legacy.event", %{issue_identifier: "MT-LEDGER"})
 
+      error =
+        assert_raise RunLedger.PersistenceError, fn ->
+          RunLedger.record("operator.action", %{issue_identifier: "MT-LEDGER"})
+        end
+
+      assert error.phase == :configuration
+      assert error.reason == :invalid_log_file
+      assert error.confirmation == :not_confirmed
+      assert is_binary(error.event_id)
+      assert RunLedger.recent_entries(5) == []
+    end)
+
+    log_root = tmp_dir!("run-ledger")
+    on_exit(fn -> File.rm_rf(log_root) end)
+
+    with_log_file_env(Path.join(log_root, "symphony.log"), fn ->
       nil_actor_entry =
         RunLedger.record("operator.action", %{
           issue_identifier: "MT-LEDGER",
@@ -250,11 +266,7 @@ defmodule SymphonyElixir.Phase6RuntimeCoverageBackfillTest do
 
       refute Map.has_key?(blank_actor_entry, :actor_type)
       refute Map.has_key?(blank_actor_entry, :details)
-      assert RunLedger.recent_entries(5) == []
     end)
-
-    log_root = tmp_dir!("run-ledger")
-    on_exit(fn -> File.rm_rf(log_root) end)
 
     with_log_file_env(Path.join(log_root, "symphony.log"), fn ->
       path = RunLedger.ledger_file_path()

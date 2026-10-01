@@ -6,7 +6,6 @@ defmodule SymphonyElixir.RunLedger do
 
   # credo:disable-for-this-file
 
-  alias SymphonyElixir.Observability
   alias SymphonyElixir.SecretRedactor
 
   @default_filename "run_ledger.jsonl"
@@ -49,23 +48,18 @@ defmodule SymphonyElixir.RunLedger do
       :ok
   end
 
+  @doc "Returns the confirmed event map; raises PersistenceError without retry when persistence is not confirmed or uncertain."
   @spec record(String.t(), map()) :: map()
   def record(event_type, attrs \\ %{}) when is_binary(event_type) and is_map(attrs) do
-    entry =
-      attrs
-      |> typed_entry(event_type)
-      |> persist_entry()
-
-    Observability.emit_ledger_event(event_type, entry)
-    entry
-  rescue
-    _error ->
-      typed_entry(attrs, event_type)
+    case record_checked(event_type, attrs) do
+      {:ok, entry} -> entry
+      {:error, error} -> raise error
+    end
   end
 
   defmodule PersistenceError do
     @moduledoc "A checked ledger operation was not confirmed or has an uncertain outcome."
-    defstruct [:phase, :event_id, :confirmation, :reason, cleanup_errors: []]
+    defexception [:phase, :event_id, :confirmation, :reason, cleanup_errors: []]
 
     @type t :: %__MODULE__{
             phase: atom(),
@@ -74,6 +68,10 @@ defmodule SymphonyElixir.RunLedger do
             reason: term(),
             cleanup_errors: [{atom(), term()}]
           }
+
+    # Keep raw causes and cleanup evidence in fields, never in the rendered message.
+    @impl true
+    def message(_error), do: "Run ledger persistence failed."
   end
 
   defmodule CheckedStorage do
@@ -192,7 +190,7 @@ defmodule SymphonyElixir.RunLedger do
     end
 
     # Atomic mkdir excludes cooperating checked writers/readers across OS processes.
-    # Legacy append/record do not participate. No stale-lock deletion or automatic retry.
+    # Legacy append does not participate. No stale-lock deletion or automatic retry.
     defp with_checked_lock(path, id, confirmation, operation) do
       # This serializes only this VM. The filesystem guard remains authoritative
       # for independent VMs and refuses occupied/orphaned locks without deleting them.
@@ -466,13 +464,6 @@ defmodule SymphonyElixir.RunLedger do
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
     |> SecretRedactor.redact()
-  end
-
-  defp persist_entry(entry) do
-    path = ledger_file_path()
-    :ok = File.mkdir_p(Path.dirname(path))
-    File.write!(path, Jason.encode!(entry) <> "\n", [:append])
-    entry
   end
 
   defp extra_metadata(attrs) do

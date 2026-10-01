@@ -1848,6 +1848,25 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
   end
 
   test "status dashboard helper formatters cover unavailable rendering, dedupe, urls, and codex messages" do
+    previous_orchestrator = Process.whereis(Orchestrator)
+
+    if is_pid(previous_orchestrator) do
+      assert {Orchestrator, ^previous_orchestrator, :worker, _} =
+               List.keyfind(Supervisor.which_children(SymphonyElixir.Supervisor), Orchestrator, 0)
+
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, Orchestrator)
+    end
+
+    on_exit(fn ->
+      assert is_nil(Process.whereis(Orchestrator))
+
+      if is_pid(previous_orchestrator) do
+        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, Orchestrator)
+      end
+    end)
+
+    start_supervised!({BackfillOrchestrator, name: Orchestrator, test_pid: self(), snapshot: empty_snapshot()})
+
     dashboard_name = Module.concat(__MODULE__, :EnabledDashboard)
     parent = self()
 
