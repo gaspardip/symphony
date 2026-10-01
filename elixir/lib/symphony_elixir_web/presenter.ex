@@ -1608,10 +1608,12 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp pr_watcher_payload(pack \\ nil, workspace_path \\ nil, thread_states \\ %{}, pr_url \\ nil, opts \\ []) do
+  defp pr_watcher_payload(pack \\ nil, workspace_path \\ nil, thread_states \\ %{}, pr_url \\ nil, opts \\ [])
+
+  defp pr_watcher_payload(pack, workspace_path, thread_states, pr_url, opts) when is_binary(workspace_path) do
     base = PRWatcher.status(pack)
 
-    if is_binary(workspace_path) and File.dir?(workspace_path) do
+    if File.dir?(workspace_path) do
       Map.put(
         base,
         :review_feedback,
@@ -1627,6 +1629,8 @@ defmodule SymphonyElixirWeb.Presenter do
       base
     end
   end
+
+  defp pr_watcher_payload(pack, _workspace_path, _thread_states, _pr_url, _opts), do: PRWatcher.status(pack)
 
   defp normalize_review_thread_states(states) when is_map(states) do
     Map.new(states, fn {key, value} ->
@@ -1720,8 +1724,6 @@ defmodule SymphonyElixirWeb.Presenter do
       end
     end)
   end
-
-  defp latest_operator_signal(_history), do: nil
 
   defp issue_runtime_health_payload(running_payload, run_state, tracked_issue, decision_history) do
     if running_payload do
@@ -2707,7 +2709,7 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp tracked_issue_payload(issue_identifier) do
-    case IssueSource.fetch_issue(%{canonical_identifier: issue_identifier}) do
+    case IssueSource.fetch_issue(%{source: nil, canonical_identifier: issue_identifier}) do
       {:ok, nil} -> nil
       {:ok, issue} when is_map(issue) -> normalize_tracked_issue_payload(issue)
       _ -> nil
@@ -2721,8 +2723,6 @@ defmodule SymphonyElixirWeb.Presenter do
     |> Map.update(:created_at, nil, &normalize_timestamp/1)
     |> Map.update(:updated_at, nil, &normalize_timestamp/1)
   end
-
-  defp normalize_tracked_issue_payload(issue) when is_map(issue), do: issue
 
   defp normalize_issue_source(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_issue_source(value), do: value

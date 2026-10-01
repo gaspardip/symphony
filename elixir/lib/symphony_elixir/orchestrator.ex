@@ -62,21 +62,14 @@ defmodule SymphonyElixir.Orchestrator do
     seconds_running: 0
   }
   @dialyzer {:nowarn_function,
-             persist_review_feedback_for_workspace: 4,
-             persist_ci_failure_for_workspace: 5,
              review_thread_state: 2,
-             issue_for_run_state: 1,
              seeded_manual_issue_from_run_state: 1,
              issue_ref_for_run_state: 1,
              normalize_issue_source: 1,
-             maybe_start_autonomous_review_follow_up: 8,
-             maybe_start_autonomous_ci_follow_up: 6,
              autonomous_review_follow_up?: 4,
              paused_issue?: 3,
-             maybe_dispatch_autonomous_review_follow_up: 2,
              ci_resume_context: 3,
              ci_failure_summary: 1,
-             put_review_resume_context: 5,
              review_resume_context: 5,
              review_feedback_summary: 1}
 
@@ -138,6 +131,8 @@ defmodule SymphonyElixir.Orchestrator do
       github_webhook_last_rejected_at: nil,
       github_webhook_last_rejected_reason: nil,
       github_webhook_last_rejected_rule_id: nil,
+      github_inbox_batch: nil,
+      github_inbox_wakeup: nil,
       github_inbox_last_drained_at: nil,
       github_inbox_ack_pending: nil,
       github_inbox_storage_error: nil,
@@ -274,6 +269,80 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(:run_webhook_cycle, state), do: {:noreply, enqueue_tracker_poll(refresh_runtime_config(state), :webhook)}
   def handle_info(:run_github_webhook_cycle, state), do: {:noreply, enqueue_tracker_poll(refresh_runtime_config(state), :github_webhook)}
 
+  def handle_info({:github_inbox_continue, ref}, %{github_inbox_batch: %{ref: ref}} = state) do
+    state =
+      cond do
+        not is_nil(state.github_inbox_ack_pending) ->
+          state
+
+        match?(%{blocked: false, operation: nil, workspaces: []}, state.github_inbox_batch.head) ->
+          case github_batch_current(state) do
+            :ok -> complete_github_head(state)
+            {:error, reason} -> invalidate_github_head(state, reason)
+          end
+
+        not is_nil(state.tracker_poll_read) ->
+          state |> queue_tracker_poll(:github_webhook) |> sync_tracker_poll_flags()
+
+        true ->
+          enqueue_tracker_poll(state, :github_webhook)
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:github_inbox_continue, _ref}, state), do: {:noreply, state}
+
+  def handle_info({:github_inbox_ack, cursor}, %{github_inbox_ack_pending: cursor} = state), do: {:noreply, confirm_github_prefix(state)}
+  def handle_info({:github_inbox_ack, _cursor}, state), do: {:noreply, state}
+
+  def handle_info({:github_inbox_wakeup, ref, location, generation}, %{github_inbox_wakeup: %{ref: ref} = wake, github_inbox_batch: %{location: location, generation: generation}} = state) do
+    operation = state.github_inbox_batch.head.operation
+    state = %{state | github_inbox_wakeup: nil}
+
+    state =
+      cond do
+        operation.ref != wake.operation_ref ->
+          state
+
+        wake.backoff != tracker_poll_backoff_identity(state) ->
+          backoff_github_head(state, wake.phase)
+
+        wake.phase == :resolving ->
+          state = put_in(state.github_inbox_batch.head.operation.phase, :resolving)
+          enqueue_tracker_poll(state, :github_webhook)
+
+        true ->
+          state = put_in(state.github_inbox_batch.head.operation.phase, :refreshing_after_effects)
+          enqueue_tracker_poll(state, :github_webhook)
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:github_inbox_wakeup, _ref, _location, _generation}, state), do: {:noreply, state}
+
+  def handle_info({:github_deadline, ref}, %{github_inbox_batch: %{head: %{operation: %{ref: ref}}}} = state),
+    do: {:noreply, invalidate_github_head(state, :github_deadline_expired)}
+
+  def handle_info({:github_deadline, ref}, state), do: {:noreply, expire_disabled_github_custody(state, ref)}
+
+  def handle_info({:tracker_read_result, ref, result}, %{tracker_poll_read: %{purpose: :github_lookup, ref: ref} = reader} = state) do
+    if reader.invalidated do
+      {:noreply, observe_github_transport(state, reader, result)}
+    else
+      Process.demonitor(reader.monitor, [:flush])
+      state = %{state | tracker_poll_read: nil} |> receive_github_result(reader, result) |> finish_github_poll() |> advance_admission()
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, monitor, :process, pid, reason}, %{tracker_poll_read: %{purpose: :github_lookup, monitor: monitor, pid: pid} = reader} = state) do
+    state = %{state | tracker_poll_read: nil}
+    state = if reader.invalidated, do: github_cancelled_reader(state), else: receive_github_result(state, reader, {:error, {:tracker_reader_down, reason}})
+    {:noreply, state |> finish_github_poll() |> advance_admission()}
+  end
+
   def handle_info({:tracker_inbox_continue, ref}, %{tracker_inbox_batch: %{ref: ref}} = state) do
     state =
       cond do
@@ -357,6 +426,7 @@ defmodule SymphonyElixir.Orchestrator do
           next = next |> tracker_inbox_outcome(id, outcome) |> finish_tracker_inbox_action(completion, nil)
 
           case next.candidate_fetch_error do
+            {:github_admission_closure_uncertain, ^id} -> {:noreply, next}
             {tag, ^id, _reason} when tag in [:lease_release_failed, :lease_release_audit_failed] -> {:noreply, next}
             _ -> {:noreply, %{next | candidate_fetch_error: {:promotion_deadline_expired, id}}}
           end
@@ -398,6 +468,7 @@ defmodule SymphonyElixir.Orchestrator do
              :ok <- tracker_inbox_boundary(state, completion),
              {:ok, _workspace} <- current_custody_workspace(state, entry.issue),
              :ok <- DispatchAudit.with_authorization(ticket, fn -> DispatchAudit.ensure_workspace_access(ticket.workspace) end),
+             :ok <- github_gate_recheck(state, completion),
              :ok <- LeaseManager.activate_dispatch(claim.token, claim.deadline, pid, dispatch_id) do
           state = transfer_issue_custody(state, issue_id, :running)
           claim = Map.fetch!(state.lease_claims, issue_id)
@@ -437,6 +508,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         entry = Map.fetch!(state.running, issue_id)
+        state = if entry.pid == pid, do: github_worker_down(state, issue_id, reason), else: state
 
         cond do
           entry.pid != pid ->
@@ -649,7 +721,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp enqueue_tracker_poll(state, mode) do
-    state = reconcile_tracker_inbox_context(state)
+    state = state |> reconcile_github_context() |> reconcile_tracker_inbox_context()
     state = queue_tracker_poll(state, mode)
     state = if is_nil(state.tracker_poll_cycle), do: begin_next_tracker_poll(state), else: state
     sync_tracker_poll_flags(state)
@@ -847,7 +919,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp advance_tracker_poll(%{tracker_poll_cycle: %{phase: :approval, mode: mode}} = state, context) do
     cond do
       mode == :github_webhook ->
-        state |> drain_github_events() |> finish_tracker_poll()
+        state |> drain_github_events() |> finish_github_poll()
 
       mode == :webhook ->
         state = drain_tracker_events(state)
@@ -1040,20 +1112,22 @@ defmodule SymphonyElixir.Orchestrator do
   defp advance_admission(state, context) do
     retry =
       state.retry_attempts
-      |> Enum.filter(fn {_id, entry} -> Map.get(entry, :status) == :ready end)
+      |> Enum.filter(fn {id, entry} -> Map.get(entry, :status) == :ready and not github_reserved?(state, id) end)
       |> Enum.min_by(fn {id, entry} -> {entry.due_at_ms, id} end, fn -> nil end)
 
     ready = %{
       poll: match?(%{issues: [_ | _]}, state.admission_batch),
       retry: retry != nil,
-      inbox: match?(%{head: %{phase: :admission_ready}}, state.tracker_inbox_batch) and is_nil(state.inbox_ack_pending)
+      inbox: match?(%{head: %{phase: :admission_ready}}, state.tracker_inbox_batch) and is_nil(state.inbox_ack_pending),
+      github: github_admission_ready?(state)
     }
 
     order =
       case state.next_admission_kind do
-        :poll -> [:poll, :retry, :inbox]
-        :retry -> [:retry, :inbox, :poll]
-        :inbox -> [:inbox, :poll, :retry]
+        :retry -> [:retry, :inbox, :github, :poll]
+        :inbox -> [:inbox, :github, :poll, :retry]
+        :github -> [:github, :poll, :retry, :inbox]
+        _ -> [:poll, :retry, :inbox, :github]
       end
 
     case Enum.find(order, &Map.fetch!(ready, &1)) do
@@ -1066,8 +1140,12 @@ defmodule SymphonyElixir.Orchestrator do
         state = advance_admission_batch(%{state | next_admission_kind: :retry}, context)
         advance_admission(state, context)
 
+      :github ->
+        state = select_github_admission(%{state | next_admission_kind: :poll}, context)
+        advance_admission(state, context)
+
       :inbox ->
-        state = select_tracker_inbox_admission(%{state | next_admission_kind: :poll}, context)
+        state = select_tracker_inbox_admission(%{state | next_admission_kind: :github}, context)
         advance_admission(state, context)
 
       nil ->
@@ -1100,7 +1178,15 @@ defmodule SymphonyElixir.Orchestrator do
 
     case TrackerReader.start(read) do
       {:ok, reader} ->
-        operation = Map.merge(reader, %{purpose: :poll, issue: issue, fingerprint: context.fingerprint, backoff: tracker_poll_backoff_identity(state)})
+        operation =
+          Map.merge(reader, %{
+            purpose: :poll,
+            issue: issue,
+            fingerprint: context.fingerprint,
+            backoff: tracker_poll_backoff_identity(state),
+            github_disabled_custody: disabled_github_custody(state, issue.id)
+          })
+
         Logger.info("[admission] pending issue_id=#{issue.id} remaining=#{length(state.admission_batch.issues)}")
         %{state | admission_read: operation}
 
@@ -1138,7 +1224,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp tracker_inbox_issue_current?(state, issue) do
-    not Map.has_key?(state.retry_attempts, issue.id) and not tracker_backoff_active?(state) and
+    not github_reserved?(state, issue.id) and not Map.has_key?(state.retry_attempts, issue.id) and not tracker_backoff_active?(state) and
       Map.get(RunnerRuntime.runner_health(), :dispatch_enabled, true) and is_nil(dispatch_skip_reason(issue, state)) and
       should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
   end
@@ -1405,7 +1491,7 @@ defmodule SymphonyElixir.Orchestrator do
           apply_current_admission_result(state, issue, result)
 
         {:ok, _issues} ->
-          if admission_issue_current?(state, issue) do
+          if admission_issue_current?(state, issue) and disabled_github_admission_current?(state, operation) do
             apply_current_admission_result(state, issue, result)
           else
             admission_discard(state, issue, :admission_no_longer_eligible)
@@ -1434,7 +1520,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp admission_issue_current?(state, issue) do
     invalidated = state.admission_batch.invalidated
 
-    not MapSet.member?(invalidated, issue.id) and not MapSet.member?(invalidated, issue.identifier) and
+    not github_reserved?(state, issue.id) and not MapSet.member?(invalidated, issue.id) and not MapSet.member?(invalidated, issue.identifier) and
       not Map.has_key?(state.retry_attempts, issue.id) and
       (ManualIssueSpec.runtime_issue_id?(issue.id) or not tracker_backoff_active?(state)) and
       Map.get(RunnerRuntime.runner_health(), :dispatch_enabled, true) and
@@ -1449,7 +1535,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp invalidate_admission_issue(state, identifier, origin \\ nil) do
     identifier = String.trim(identifier)
-    state = invalidate_tracker_inbox_issue(state, identifier, origin)
+    state = state |> invalidate_github_issue(identifier, origin) |> invalidate_tracker_inbox_issue(identifier, origin)
 
     state =
       if state.admission_batch,
@@ -1522,64 +1608,1452 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp drain_github_events(%State{} = state) do
-    fields = %{pending: :github_inbox_ack_pending, error: :github_inbox_storage_error, drained: :github_inbox_last_drained_at}
-    drain_inbox(state, GitHubEventInbox, fields, &process_github_inbox_row/2)
-  end
+  # A captured GitHub head owns its workspace index and effects until physical ack.
+  # Reads use B; only the admission arbiter may transfer an applied continuation.
+  defp drain_github_events(%{github_inbox_ack_pending: cursor} = state) when not is_nil(cursor), do: confirm_github_prefix(state)
 
-  defp process_github_inbox_row(state, {:ok, record}) do
-    case decode_github_event_record(record) do
-      %GitHubEvent{} = event -> {:ok, maybe_process_github_event(state, event)}
-      _ -> {:drop, state}
+  defp drain_github_events(%{github_inbox_batch: nil} = state) do
+    with {:ok, context} <- capture_tracker_poll_context(),
+         {:ok, captured} <- GitHubEventInbox.capture(GitHubEventInbox.location(), tracker_inbox_limits()) do
+      case captured.rows do
+        [] ->
+          %{state | github_inbox_storage_error: nil, github_inbox_last_drained_at: DateTime.utc_now()}
+
+        _ ->
+          batch = Map.merge(captured, %{ref: make_ref(), fingerprint: context.fingerprint, root: Config.workspace_root(), head: nil})
+          resume_github_head(%{state | github_inbox_batch: batch, github_inbox_storage_error: nil})
+      end
+    else
+      {:error, reason} -> block_github_head(state, reason)
     end
   end
 
-  defp process_github_inbox_row(state, {:invalid, _reason}), do: {:drop, state}
+  defp drain_github_events(state), do: resume_github_head(state)
 
-  defp drain_inbox(state, inbox, fields, process_row) do
-    if Map.get(state, fields.pending) do
-      # Applied effects are not replayed when only their physical ack is pending.
-      confirm_inbox_prefix(state, inbox, fields)
+  defp resume_github_head(%{github_inbox_batch: %{head: %{blocked: true}}} = state), do: state
+
+  defp resume_github_head(%{github_inbox_batch: %{head: %{operation: %{phase: phase}}}} = state)
+       when phase in [:blocked, :reading, :refresh_reading, :backoff, :gate], do: state
+
+  defp resume_github_head(%{github_inbox_batch: %{head: %{operation: %{phase: :waiting_admission}}}} = state), do: advance_admission(state)
+  defp resume_github_head(%{tracker_poll_read: reader} = state) when not is_nil(reader), do: state
+
+  defp resume_github_head(state) do
+    with :ok <- github_batch_current(state) do
+      state = ensure_github_head(state)
+
+      case state.github_inbox_batch.head do
+        %{blocked: true} -> state
+        %{operation: %{phase: :refreshing_after_effects}} -> start_github_read(state, :refreshing_after_effects)
+        %{operation: %{phase: :waiting_worker} = operation} -> resume_github_after_worker(state, operation)
+        %{operation: %{phase: :resolving} = operation} -> restart_github_resolution(state, operation)
+        %{operation: nil, workspaces: []} -> complete_github_head(state)
+        %{operation: nil, workspaces: [workspace | _]} -> prepare_github_workspace(state, workspace)
+        _ -> state
+      end
     else
-      case inbox.capture(inbox.location(), %{max_rows: 100, max_bytes: 4 * 1024 * 1024}) do
-        {:ok, batch} ->
-          {state, cursor} =
-            Enum.reduce_while(batch.rows, {state, nil}, fn row, {acc, _cursor} ->
-              case process_row.(acc, row.record) do
-                {:ok, next} -> {:cont, {next, row.cursor}}
-                {:drop, next} -> {:cont, {next, row.cursor}}
-              end
-            end)
+      {:error, reason} -> invalidate_github_head(state, reason)
+    end
+  end
 
-          finish_inbox_batch(state, inbox, fields, batch, cursor)
+  defp github_batch_current(state) do
+    batch = state.github_inbox_batch
 
-        {:error, error} ->
-          inbox_storage_failed(state, fields, error)
+    with {:ok, context} <- capture_tracker_poll_context(),
+         true <- (context.fingerprint == batch.fingerprint and Config.workspace_root() == batch.root) or {:error, :github_context_changed},
+         true <- GitHubEventInbox.location() == batch.location or {:error, :github_location_changed},
+         {:ok, captured} <- GitHubEventInbox.capture(batch.location, tracker_inbox_limits()),
+         true <- (captured.generation == batch.generation and captured.start_offset == batch.start_offset) or {:error, :github_cursor_changed},
+         true <- Enum.take(captured.rows, length(batch.rows)) == batch.rows or {:error, :github_prefix_changed} do
+      :ok
+    end
+  end
+
+  defp ensure_github_head(%{github_inbox_batch: %{head: head}} = state) when not is_nil(head), do: state
+
+  defp ensure_github_head(state) do
+    row = hd(state.github_inbox_batch.rows)
+
+    event =
+      case row.record do
+        {:ok, record} -> decode_github_event_record(record)
+        {:invalid, _} -> nil
+      end
+
+    head = %{ref: make_ref(), row: row, event: event, workspaces: [], outcomes: [], operation: nil, blocked: false}
+    state = put_in(state.github_inbox_batch.head, head)
+
+    if match?(%GitHubEvent{}, event) and present?(event.pr_url) and
+         (GitHubEvent.review_affecting?(event) or GitHubEvent.ci_failure_affecting?(event)) do
+      case capture_github_workspaces(state.github_inbox_batch.root) do
+        {:ok, workspaces} -> put_in(state.github_inbox_batch.head.workspaces, workspaces)
+        {:error, reason} -> block_github_head(state, {:github_workspace_capture_failed, reason})
+      end
+    else
+      state
+    end
+  end
+
+  defp capture_github_workspaces(root) do
+    case File.ls(root) do
+      {:ok, names} ->
+        names
+        |> Enum.sort()
+        |> Enum.reduce_while({:ok, []}, fn name, {:ok, paths} ->
+          path = Path.join(root, name)
+
+          case File.stat(path) do
+            {:ok, %File.Stat{type: :directory}} -> {:cont, {:ok, [path | paths]}}
+            {:ok, %File.Stat{}} -> {:cont, {:ok, paths}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+        |> case do
+          {:ok, paths} -> {:ok, Enum.reverse(paths)}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, :enoent} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp prepare_github_workspace(state, workspace) do
+    event = state.github_inbox_batch.head.event
+
+    case read_github_raw(workspace) do
+      {:ok, raw} ->
+        view = github_view(raw)
+
+        cond do
+          view[:pr_url] != event.pr_url or not canonical_github_workspace?(workspace, view) -> finish_github_candidate(state, :unmatched)
+          not run_state_routed_to_current_runner?(view) -> finish_github_candidate(state, :routed_to_other_runner, view)
+          true -> capture_github_operation(state, workspace, raw, view)
+        end
+
+      {:error, :enoent} ->
+        finish_github_candidate(state, :workspace_missing)
+
+      {:error, reason} ->
+        block_github_head(state, {:github_snapshot_read_failed, reason})
+    end
+  end
+
+  defp read_github_raw(workspace) do
+    with {:ok, payload} <- File.read(RunStateStore.state_path(workspace)),
+         {:ok, raw} <- Jason.decode(payload),
+         true <- is_map(raw) or {:error, :invalid_state},
+         :ok <- SymphonyElixir.RunIdentity.validate_snapshot(raw) do
+      if Map.has_key?(raw, "audit_pending"), do: {:error, :audit_pending}, else: {:ok, raw}
+    end
+  end
+
+  defp github_view(raw) do
+    keys =
+      ~w(issue_id issue_identifier issue_source stage pr_url repo_url policy_pack effective_policy_class policy_class policy_override stop_reason review_threads review_claims resume_context last_ci_failure runner_channel runner_instance_id issue_title issue_labels issue_state branch_name branch target_runner_channel run_id run_identity_event_id run_identity_ledger_path)a
+
+    Map.new(Enum.filter(keys, &Map.has_key?(raw, Atom.to_string(&1))), &{&1, Map.fetch!(raw, Atom.to_string(&1))})
+  end
+
+  defp github_binding(raw) do
+    keys = ~w(run_id run_identity_event_id run_identity_ledger_path)a
+
+    if Enum.all?(keys, &(not Map.has_key?(raw, Atom.to_string(&1)))),
+      do: :legacy_absent,
+      else: {:identified, Map.new(keys, &{&1, raw[Atom.to_string(&1)]})}
+  end
+
+  defp github_issue_ref(view) do
+    source = view[:issue_source]
+
+    if is_nil(source) or not is_nil(normalize_issue_source(source)),
+      do: {:ok, %{id: view[:issue_id], identifier: view[:issue_identifier], source: normalize_issue_source(source)}},
+      else: {:error, {:invalid_issue_ref, :source}}
+  end
+
+  defp capture_github_operation(state, workspace, raw, view) do
+    with false <- github_admission_in_progress?(state, view[:issue_id]),
+         {:ok, ref} <- github_issue_ref(view),
+         true <- (present?(ref.id) and present?(ref.identifier)) or {:error, :invalid_issue_ref},
+         {:ok, context} <- capture_tracker_poll_context() do
+      operation = %{
+        ref: make_ref(),
+        workspace: workspace,
+        issue_ref: ref,
+        expected: RunStateStore.coordinator_projection(raw),
+        binding: github_binding(raw),
+        fingerprint: context.fingerprint,
+        worker: github_worker_identity(state, ref.id),
+        custody: github_custody_identity(state, ref.id),
+        phase: :resolving,
+        view: view,
+        feedback: nil,
+        issue: nil,
+        origin: nil,
+        authority: nil,
+        custody_ref: nil,
+        cleanup_owned: false,
+        effects: %{cas: :not_started, writer: :not_started, ledger: :not_started},
+        invalidated: false,
+        cancellation: nil,
+        waited_worker: nil,
+        waited_down: nil,
+        retry: Map.get(state.retry_attempts, ref.id),
+        resolution: nil,
+        failure: nil,
+        outcome: nil,
+        errors: [],
+        completion: nil,
+        ticket: nil,
+        admitted_expected: nil,
+        admission_close_error: nil
+      }
+
+      state = put_in(state.github_inbox_batch.head.operation, operation)
+
+      cond do
+        operation.worker -> put_in(state.github_inbox_batch.head.operation, %{operation | phase: :waiting_worker, waited_worker: operation.worker})
+        operation.custody -> finish_github_existing_custody(state)
+        true -> prepare_github_unowned_candidate(state)
+      end
+    else
+      true -> finish_github_candidate(state, :admission_in_progress)
+      {:error, {:invalid_issue_ref, _}} -> finish_github_candidate(state, :invalid_reference)
+      {:error, :invalid_issue_ref} -> finish_github_candidate(state, :invalid_reference)
+      {:error, reason} -> block_github_head(state, reason)
+    end
+  end
+
+  defp finish_github_existing_custody(state) do
+    operation = state.github_inbox_batch.head.operation
+
+    with {:ok, workspace} <- current_custody_workspace(state, operation.issue_ref),
+         true <- Path.expand(workspace) == Path.expand(operation.workspace) or {:error, :lease_workspace_changed} do
+      finish_github_candidate(state, :custody_in_progress)
+    else
+      {:error, reason} -> finish_github_candidate(state, {:lease_lookup_error, reason})
+    end
+  end
+
+  defp prepare_github_unowned_candidate(state) do
+    operation = state.github_inbox_batch.head.operation
+
+    case review_follow_up_lease_status(state, operation.view, operation.workspace) do
+      :ok -> prepare_github_feedback(state)
+      {:reclaimable, _owner} -> prepare_github_feedback(state)
+      {:skip, owner} when is_binary(owner) and owner != "" -> finish_github_candidate(state, {:leased_elsewhere, owner})
+      {:skip, _invalid_owner} -> finish_github_candidate(state, {:lease_lookup_error, :invalid_lease_owner})
+      {:error, reason} -> finish_github_candidate(state, {:lease_lookup_error, reason})
+    end
+  end
+
+  defp finish_github_claimed(state) do
+    operation = state.github_inbox_batch.head.operation
+
+    case review_follow_up_lease_status(state, operation.view, operation.workspace) do
+      {:skip, owner} when is_binary(owner) and owner != "" -> finish_github_candidate(state, {:leased_elsewhere, owner})
+      {:skip, _invalid_owner} -> finish_github_candidate(state, {:lease_lookup_error, :invalid_lease_owner})
+      {:error, reason} -> finish_github_candidate(state, {:lease_lookup_error, reason})
+      :ok -> finish_github_candidate(state, {:lease_lookup_error, :claimed})
+      {:reclaimable, _owner} -> finish_github_candidate(state, {:lease_lookup_error, :claimed})
+    end
+  end
+
+  defp github_worker_identity(state, id) do
+    case Map.get(state.running, id) do
+      nil ->
+        nil
+
+      entry ->
+        {entry.pid, entry.ref, Map.get(Map.get(entry, :dispatch_ticket) || %{}, :dispatch_id), Map.get(Map.get(entry, :dispatch_ticket) || %{}, :run_id), Map.get(entry, :custody_ref),
+         Map.get(entry, :lease_token)}
+    end
+  end
+
+  defp github_custody_identity(state, id) do
+    case Map.get(state.lease_claims, id) do
+      nil -> nil
+      claim -> {claim.custody_ref, claim.token}
+    end
+  end
+
+  defp prepare_github_feedback(state) do
+    operation = state.github_inbox_batch.head.operation
+    event = state.github_inbox_batch.head.event
+
+    feedback =
+      if GitHubEvent.review_affecting?(event),
+        do:
+          PRWatcher.review_feedback(operation.workspace, policy_pack: PolicyPack.name_string(PolicyPack.resolve()), thread_states: Map.get(operation.view, :review_threads, %{}), pr_url: event.pr_url),
+        else: nil
+
+    batch = state.github_inbox_batch
+    head = %{batch.head | operation: %{operation | feedback: feedback}}
+    state = %{state | github_inbox_batch: %{batch | head: head}}
+
+    case feedback do
+      nil -> start_github_read(state, :resolving)
+      %{status: "ok", pending_drafts_count: count} when count > 0 -> start_github_read(state, :resolving)
+      %{} -> finish_github_candidate(state, :no_feedback)
+    end
+  end
+
+  defp resume_github_after_worker(state, operation) do
+    cond do
+      github_worker_identity(state, operation.issue_ref.id) == operation.waited_worker ->
+        state
+
+      not is_nil(github_worker_identity(state, operation.issue_ref.id)) ->
+        finish_github_candidate(state, :worker_successor)
+
+      operation.waited_down != :normal or execution_hold?(state, operation.issue_ref.id) ->
+        block_github_head(state, :github_worker_closure_uncertain)
+
+      true ->
+        with :ok <- DispatchAudit.ensure_available(operation.workspace), :ok <- DeployAudit.ensure_available(operation.workspace) do
+          operation = %{operation | worker: nil, custody: github_custody_identity(state, operation.issue_ref.id), retry: Map.get(state.retry_attempts, operation.issue_ref.id)}
+          restart_github_resolution(put_in(state.github_inbox_batch.head.operation, operation), operation)
+        else
+          {:error, reason} -> block_github_head(state, reason)
+        end
+    end
+  end
+
+  # A new resolving read refreshes material, never the proof of a reserved W1 close
+  # or the local custody to which that proof applies.
+  defp restart_github_resolution(state, operation) do
+    with :ok <- github_batch_current(state),
+         true <- not operation.invalidated or {:error, :github_invalidated},
+         true <- github_worker_identity(state, operation.issue_ref.id) == operation.worker or {:error, :github_worker_changed},
+         true <- github_custody_identity(state, operation.issue_ref.id) == operation.custody or {:error, :github_custody_changed},
+         true <- not execution_hold?(state, operation.issue_ref.id) or {:error, :github_worker_closure_uncertain},
+         :ok <- DispatchAudit.ensure_available(operation.workspace),
+         :ok <- DeployAudit.ensure_available(operation.workspace),
+         {:ok, raw} <- read_github_raw(operation.workspace) do
+      fresh = github_view(raw)
+
+      cond do
+        fresh[:issue_id] != operation.issue_ref.id or fresh[:issue_identifier] != operation.issue_ref.identifier or
+          fresh[:pr_url] != operation.view[:pr_url] or not canonical_github_workspace?(operation.workspace, fresh) ->
+          finish_github_candidate(state, :worker_context_changed)
+
+        not run_state_routed_to_current_runner?(fresh) ->
+          finish_github_candidate(state, :routed_to_other_runner, fresh)
+
+        true ->
+          case github_issue_ref(fresh) do
+            {:ok, ref} ->
+              operation = %{
+                operation
+                | ref: make_ref(),
+                  phase: :resolving,
+                  issue_ref: ref,
+                  expected: RunStateStore.coordinator_projection(raw),
+                  binding: github_binding(raw),
+                  view: fresh,
+                  feedback: nil,
+                  issue: nil,
+                  origin: nil,
+                  resolution: nil
+              }
+
+              prepare_github_feedback(put_in(state.github_inbox_batch.head.operation, operation))
+
+            {:error, {:invalid_issue_ref, _}} ->
+              finish_github_candidate(state, :invalid_reference)
+          end
+      end
+    else
+      {:error, reason} -> reject_github_current(state, reason)
+    end
+  end
+
+  defp start_github_read(state, phase) do
+    operation = state.github_inbox_batch.head.operation
+
+    with :ok <- github_operation_current(state), {:ok, context} <- capture_tracker_poll_context() do
+      if github_tracker_ref?(operation.issue_ref) and tracker_backoff_active?(state) do
+        backoff_github_head(state, phase)
+      else
+        ref = operation.issue_ref
+
+        case TrackerReader.start(fn -> IssueSource.fetch_issue_checked(ref, context) end) do
+          {:ok, reader} ->
+            reader =
+              Map.merge(reader, %{
+                purpose: :github_lookup,
+                head_ref: state.github_inbox_batch.head.ref,
+                operation_ref: operation.ref,
+                phase: phase,
+                fingerprint: context.fingerprint,
+                backoff: tracker_poll_backoff_identity(state),
+                invalidated: false
+              })
+
+            state = put_in(state.github_inbox_batch.head.operation.phase, if(phase == :resolving, do: :reading, else: :refresh_reading))
+            %{state | tracker_poll_read: reader}
+
+          {:error, reason} ->
+            block_github_head(state, {:tracker_reader_start_failed, reason})
+        end
+      end
+    else
+      {:error, reason} -> reject_github_current(state, reason)
+    end
+  end
+
+  defp github_operation_current(state) do
+    operation = state.github_inbox_batch.head.operation
+
+    with :ok <- github_batch_current(state),
+         true <- not operation.invalidated or {:error, :github_invalidated},
+         true <- github_worker_identity(state, operation.issue_ref.id) == operation.worker or {:error, :github_worker_changed},
+         true <- github_custody_identity(state, operation.issue_ref.id) == operation.custody or {:error, :github_custody_changed},
+         true <- not execution_hold?(state, operation.issue_ref.id) or {:error, :github_worker_closure_uncertain},
+         {:ok, raw} <- read_github_raw(operation.workspace),
+         true <- (raw["issue_id"] == operation.issue_ref.id and raw["issue_identifier"] == operation.issue_ref.identifier) or {:error, :github_identity_changed},
+         true <- github_binding(raw) == operation.binding or {:error, :github_binding_changed},
+         true <- RunStateStore.coordinator_projection(raw) == operation.expected or {:error, :github_material_changed} do
+      if operation.authority do
+        case RunStateStore.ensure_coordinator_current(operation.authority, operation.expected) do
+          {:ok, _fresh} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+      else
+        :ok
       end
     end
   end
 
-  defp finish_inbox_batch(state, inbox, fields, _batch, %SymphonyElixir.EventInbox.Cursor{} = cursor) do
-    state |> Map.put(fields.pending, cursor) |> confirm_inbox_prefix(inbox, fields)
+  defp receive_github_result(state, reader, result) do
+    state = observe_github_transport(state, reader, result)
+
+    case state.github_inbox_batch do
+      %{head: %{ref: head_ref, operation: %{ref: ref}}} when head_ref == reader.head_ref and ref == reader.operation_ref ->
+        cond do
+          reader.invalidated ->
+            github_cancelled_reader(state)
+
+          github_result_backoff_stale?(state, reader, result) ->
+            backoff_github_head(state, reader.phase)
+
+          true ->
+            case github_operation_current(state) do
+              :ok ->
+                state = put_in(state.github_inbox_batch.head.operation.resolution, result)
+                consume_github_result(state, reader.phase, result)
+
+              {:error, reason} ->
+                reject_github_current(state, reason)
+            end
+        end
+
+      _ ->
+        state
+    end
   end
 
-  defp finish_inbox_batch(state, _inbox, fields, %{rows: [], tail: :none, limit_reached: false}, nil) do
-    state |> Map.put(fields.error, nil) |> Map.put(fields.drained, DateTime.utc_now())
+  defp observe_github_transport(state, reader, result) do
+    with %{head: %{ref: head_ref}} <- state.github_inbox_batch,
+         true <- head_ref == reader.head_ref,
+         :ok <- github_batch_current(state),
+         {:ok, context} <- capture_tracker_poll_context(),
+         true <- context.fingerprint == reader.fingerprint and tracker_poll_backoff_identity(state) == reader.backoff do
+      case result do
+        {:ok, {:rate_limited, reason}} -> elem(tracker_read(state, fn -> {:error, reason} end), 0)
+        {:ok, {:issue, :tracker, _}} -> elem(tracker_read(state, fn -> {:ok, :checked_issue} end), 0)
+        {:ok, {:missing, :tracker}} -> elem(tracker_read(state, fn -> {:ok, nil} end), 0)
+        _ -> state
+      end
+    else
+      _ -> state
+    end
   end
 
-  defp finish_inbox_batch(state, _inbox, fields, _batch, nil), do: Map.put(state, fields.error, nil)
+  defp consume_github_result(state, phase, {:ok, {:rate_limited, _reason}}), do: backoff_github_head(state, phase)
+  defp consume_github_result(state, _phase, {:error, reason}), do: block_github_head(state, {:github_reader_failed, reason})
+  defp consume_github_result(state, _phase, {:ok, {:read_error, :manual, reason}}), do: block_github_head(state, reason)
+  defp consume_github_result(state, _phase, {:ok, {:invalid, :response, reason}}), do: block_github_head(state, reason)
+  defp consume_github_result(state, :resolving, {:ok, {:invalid, kind, _reason}}) when kind in [:reference, :issue], do: finish_github_candidate(state, :invalid_issue)
+  defp consume_github_result(state, _phase, {:ok, {:disabled, _source}}), do: finish_github_candidate(state, :source_disabled)
+  defp consume_github_result(state, :resolving, {:ok, {:issue, source, %Issue{} = issue}}), do: apply_github_observation(state, issue, source)
 
-  defp confirm_inbox_prefix(state, inbox, fields) do
-    case inbox.ack(Map.fetch!(state, fields.pending)) do
+  defp consume_github_result(state, :resolving, {:ok, {:missing, :manual}}) do
+    operation = state.github_inbox_batch.head.operation
+    issue = if operation.issue_ref.source == :manual, do: seeded_manual_issue_from_run_state(operation.view), else: nil
+    apply_github_observation(state, issue, if(issue, do: :seeded_local, else: :manual_missing))
+  end
+
+  defp consume_github_result(state, :resolving, {:ok, {:missing, :tracker}}), do: apply_github_observation(state, nil, :issue_missing)
+  defp consume_github_result(state, :resolving, {:ok, {:read_error, :tracker, _reason}}), do: apply_github_observation(state, nil, :tracker_read_error)
+  defp consume_github_result(state, :refreshing_after_effects, {:ok, {:issue, _source, %Issue{} = issue}}), do: github_wait_admission(state, issue)
+
+  defp consume_github_result(state, :refreshing_after_effects, {:ok, {:missing, :manual}}) do
+    operation = state.github_inbox_batch.head.operation
+
+    if operation.origin == :seeded_local do
+      case RunStateStore.ensure_coordinator_current(operation.authority, operation.expected) do
+        {:ok, fresh} ->
+          case seeded_manual_issue_from_run_state(fresh) do
+            %Issue{} = issue -> github_wait_admission(state, issue)
+            nil -> finish_github_candidate(state, :seed_no_longer_valid)
+          end
+
+        {:error, reason} ->
+          reject_github_current(state, reason)
+      end
+    else
+      finish_github_candidate(state, :issue_missing_after_effects)
+    end
+  end
+
+  defp consume_github_result(state, :refreshing_after_effects, {:ok, {:missing, :tracker}}), do: finish_github_candidate(state, :issue_missing_after_effects)
+  defp consume_github_result(state, :refreshing_after_effects, {:ok, {:read_error, :tracker, _reason}}), do: finish_github_candidate(state, :tracker_error_after_effects)
+  defp consume_github_result(state, _phase, _result), do: block_github_head(state, :invalid_github_reader_result)
+
+  defp acquire_github_authority(state) do
+    operation = state.github_inbox_batch.head.operation
+    existing = Map.get(state.lease_claims, operation.issue_ref.id)
+    allowed = is_nil(existing) or (operation.waited_down == :normal and existing.holder == :retry and github_custody_identity(state, operation.issue_ref.id) == operation.custody)
+
+    with true <- allowed or {:error, :github_custody_reserved},
+         :ok <- github_operation_current(state),
+         {:ok, next} <- acquire_issue_custody(state, operation.issue_ref, &LeaseManager.acquire/3, operation.workspace) do
+      claim = Map.fetch!(next.lease_claims, operation.issue_ref.id)
+      deadline = claim.started_at_ms + div(claim.token.storage.ttl_ms, 2)
+      timer = Process.send_after(self(), {:github_deadline, operation.ref}, max(0, deadline - System.monotonic_time(:millisecond)))
+      claim = %{claim | holder: :follow_up, deadline: deadline, timer: timer} |> Map.put(:completion, nil)
+      next = put_in(next.lease_claims[operation.issue_ref.id], claim)
+
+      authority = %{
+        workspace: operation.workspace,
+        issue_id: operation.issue_ref.id,
+        issue_identifier: operation.issue_ref.identifier,
+        binding: operation.binding,
+        lease_token: claim.token,
+        deadline: deadline
+      }
+
+      operation = %{operation | authority: authority, custody_ref: claim.custody_ref, custody: {claim.custody_ref, claim.token}, cleanup_owned: true, phase: :applying}
+      {:ok, put_in(next.github_inbox_batch.head.operation, operation)}
+    else
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp apply_github_observation(state, issue, origin) do
+    state = put_in(state.github_inbox_batch.head.operation.issue, issue)
+    state = put_in(state.github_inbox_batch.head.operation.origin, origin)
+
+    case acquire_github_authority(state) do
+      {:ok, next} -> apply_github_current(next)
+      {:error, :claimed, next} -> finish_github_claimed(next)
+      {:error, reason, next} -> reject_github_current(next, reason)
+    end
+  end
+
+  defp apply_github_current(state) do
+    operation = state.github_inbox_batch.head.operation
+
+    with :ok <- github_operation_current(state),
+         {:ok, fresh} <- RunStateStore.ensure_coordinator_current(operation.authority, operation.expected),
+         true <- Enum.all?([:review_threads, :review_claims], &is_map(Map.get(fresh, &1, %{}))) or {:error, :invalid_review_state} do
+      state = if operation.origin == :seeded_local, do: put_in(state.github_inbox_batch.head.operation.issue, seeded_manual_issue_from_run_state(fresh)), else: state
+      decision = github_decision(state, fresh)
+
+      result =
+        case decision.stage do
+          nil -> RunStateStore.update_coordinator_current(operation.authority, operation.expected, decision.attrs)
+          stage -> RunStateStore.transition_coordinator_current(operation.authority, operation.expected, stage, decision.attrs)
+        end
+
+      case result do
+        {:ok, persisted} ->
+          operation = state.github_inbox_batch.head.operation
+          operation = %{operation | expected: RunStateStore.coordinator_projection(persisted), effects: %{operation.effects | cas: :confirmed}}
+          state = put_in(state.github_inbox_batch.head.operation, operation)
+          complete_github_effects(state, decision)
+
+        {:error, reason} ->
+          state = put_in(state.github_inbox_batch.head.operation.effects.cas, {:error, reason})
+          block_github_head(state, {:github_cas_failed, reason})
+      end
+    else
+      {:error, reason} -> reject_github_current(state, reason)
+    end
+  end
+
+  defp complete_github_effects(state, decision) do
+    with :ok <- github_operation_current(state) do
+      operation = state.github_inbox_batch.head.operation
+
+      writer =
+        cond do
+          is_nil(decision.stage) -> :not_applicable
+          operation.origin == :seeded_local -> :not_applicable
+          true -> github_write_issue(operation.issue)
+        end
+
+      state = put_in(state.github_inbox_batch.head.operation.effects.writer, writer)
+      state = observe_github_writer_transport(state, writer)
+
+      case github_record_effects(state, decision) do
+        {:ok, next} when writer in [:ok, :not_applicable] ->
+          if is_nil(decision.stage),
+            do: finish_github_candidate(next, :observed),
+            else: start_github_read(put_in(next.github_inbox_batch.head.operation.phase, :refreshing_after_effects), :refreshing_after_effects)
+
+        {:ok, next} ->
+          block_github_head(next, {:github_writer_failed, writer})
+
+        {:error, reason, next} ->
+          block_github_head(next, {:github_ledger_failed, reason})
+      end
+    else
+      {:error, reason} -> reject_github_current(state, reason)
+    end
+  end
+
+  defp github_write_issue(issue) do
+    case IssueSource.update_issue_state(issue, "In Progress") do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  catch
+    kind, reason -> {:error, {:github_writer_exception, kind, reason}}
+  end
+
+  defp observe_github_writer_transport(state, {:error, reason}) do
+    operation = state.github_inbox_batch.head.operation
+
+    rate_limited =
+      case reason do
+        {:linear_rate_limited, metadata} when is_map(metadata) -> true
+        {:linear_api_status, 429, metadata} when is_map(metadata) -> true
+        _ -> false
+      end
+
+    with true <- rate_limited and operation.origin == :tracker and github_tracker_ref?(IssueSource.issue_ref(operation.issue)),
+         :ok <- github_batch_current(state),
+         {:ok, context} <- capture_tracker_poll_context(),
+         true <- context.fingerprint == operation.fingerprint do
+      elem(tracker_read(state, fn -> {:error, reason} end), 0)
+    else
+      _ -> state
+    end
+  end
+
+  defp observe_github_writer_transport(state, _writer), do: state
+
+  defp github_record_effects(state, decision) do
+    operation = state.github_inbox_batch.head.operation
+
+    with :ok <- github_operation_current(state),
+         {:ok, entry} <-
+           RunLedger.prepare_entry(decision.event, %{
+             issue_id: operation.issue_ref.id,
+             issue_identifier: operation.issue_ref.identifier,
+             actor_type: "runtime",
+             actor_id: "github_webhook",
+             summary: decision.attrs.last_decision_summary,
+             details: operation.view.pr_url,
+             metadata: decision.metadata |> Map.put(:writer_result, github_writer_label(operation.effects.writer)) |> Map.put(:source_outcome, operation.origin)
+           }),
+         :ok <- github_operation_current(state),
+         {:ok, _confirmed} <- RunLedger.CheckedStorage.persist(entry, operation.authority.lease_token.storage.ledger_path) do
+      {:ok, put_in(state.github_inbox_batch.head.operation.effects.ledger, :confirmed)}
+    else
+      {:error, reason} -> {:error, reason, put_in(state.github_inbox_batch.head.operation.effects.ledger, {:error, reason})}
+    end
+  end
+
+  defp github_effect_labels(nil), do: nil
+  defp github_effect_labels(effects), do: Map.new(effects, fn {key, value} -> {key, if(is_atom(value), do: value, else: :failed)} end)
+
+  defp github_writer_label(:ok), do: "confirmed"
+  defp github_writer_label(:not_applicable), do: "not_applicable"
+  defp github_writer_label({:error, _}), do: "failed"
+
+  defp github_wait_admission(state, issue) do
+    state = put_in(state.github_inbox_batch.head.operation.issue, issue)
+
+    if state.max_concurrent_agents == 0 do
+      finish_disabled_github_follow_up(state)
+    else
+      state = put_in(state.github_inbox_batch.head.operation.phase, :waiting_admission)
+      advance_admission(state)
+    end
+  end
+
+  defp finish_disabled_github_follow_up(state) do
+    operation = state.github_inbox_batch.head.operation
+    id = operation.issue_ref.id
+
+    with :ok <- github_operation_current(state),
+         {:ok, claim} <- current_issue_custody(state, id, operation.custody_ref),
+         true <- claim.token == operation.authority.lease_token or {:error, :github_custody_changed},
+         true <- (operation.effects.cas == :confirmed and operation.effects.writer in [:ok, :not_applicable] and operation.effects.ledger == :confirmed) or {:error, :github_effects_unconfirmed} do
+      completion = %{purpose: :github_disabled, decision_ref: operation.ref, head_ref: state.github_inbox_batch.head.ref, custody_ref: claim.custody_ref, binding: operation.binding, acked: false}
+      state = put_in(state.lease_claims[id].completion, completion)
+      state = put_in(state.github_inbox_batch.head.operation.cleanup_owned, false)
+      finish_github_candidate(state, :dispatch_disabled)
+    else
+      {:error, reason} -> reject_github_current(state, reason)
+    end
+  end
+
+  defp acknowledge_disabled_github_custody(state, head_ref) do
+    claims =
+      Map.new(state.lease_claims, fn
+        {id, %{completion: %{purpose: :github_disabled, head_ref: ^head_ref, custody_ref: ref} = completion, custody_ref: ref} = claim} ->
+          {id, %{claim | completion: %{completion | acked: true}}}
+
+        entry ->
+          entry
+      end)
+
+    %{state | lease_claims: claims}
+  end
+
+  defp disabled_github_custody(state, id) do
+    case Map.get(state.lease_claims, id) do
+      %{holder: :follow_up, completion: %{purpose: :github_disabled, custody_ref: ref, acked: true, decision_ref: decision}, custody_ref: ref, token: token} ->
+        %{custody_ref: ref, token: token, decision_ref: decision}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp disabled_github_admission_current?(state, operation) do
+    case Map.get(operation, :github_disabled_custody) do
+      nil -> true
+      captured -> disabled_github_custody(state, operation.issue.id) == captured
+    end
+  end
+
+  defp disabled_github_candidate?(state, id) do
+    case Map.get(state.lease_claims, id) do
+      %{deadline: deadline} when is_integer(deadline) ->
+        state.max_concurrent_agents > 0 and System.monotonic_time(:millisecond) < deadline and not is_nil(disabled_github_custody(state, id))
+
+      _ ->
+        false
+    end
+  end
+
+  defp expire_disabled_github_custody(state, ref) do
+    Enum.reduce(state.lease_claims, state, fn {id, claim}, current ->
+      retained = match?(%{purpose: :github_disabled, decision_ref: ^ref, custody_ref: custody} when custody == claim.custody_ref, Map.get(claim, :completion))
+      admitted = claim.promotion_ref == ref and claim.holder in [:pending, :gated]
+
+      if (retained or admitted) and is_integer(claim.deadline) and System.monotonic_time(:millisecond) >= claim.deadline do
+        current = invalidate_admission_issue(current, id)
+        if Map.has_key?(current.running, id), do: do_terminate_running_issue(current, id, false), else: release_issue_claim(current, id)
+      else
+        current
+      end
+    end)
+  end
+
+  defp backoff_github_head(state, phase) do
+    operation = state.github_inbox_batch.head.operation
+    until = state.tracker_backoff_until_ms || System.monotonic_time(:millisecond)
+
+    if operation.authority && until >= operation.authority.deadline do
+      finish_github_candidate(state, :deadline_expired)
+    else
+      cancel_github_wakeup(state)
+      ref = make_ref()
+      batch = state.github_inbox_batch
+      timer = Process.send_after(self(), {:github_inbox_wakeup, ref, batch.location, batch.generation}, max(0, until - System.monotonic_time(:millisecond)))
+      state = put_in(state.github_inbox_batch.head.operation.phase, :backoff)
+      %{state | github_inbox_wakeup: %{ref: ref, timer: timer, operation_ref: operation.ref, phase: phase, backoff: tracker_poll_backoff_identity(state)}}
+    end
+  end
+
+  defp cancel_github_wakeup(%{github_inbox_wakeup: %{timer: timer}}), do: Process.cancel_timer(timer)
+  defp cancel_github_wakeup(_state), do: false
+
+  defp finish_github_candidate(state, reason, captured_view \\ nil)
+
+  defp finish_github_candidate(%{github_inbox_batch: %{head: %{operation: %{admission_close_error: error}}}} = state, _reason, _captured_view)
+       when not is_nil(error), do: state
+
+  defp finish_github_candidate(state, reason, captured_view) do
+    cancel_github_wakeup(state)
+    state = release_github_acquisition(%{state | github_inbox_wakeup: nil})
+
+    case state.github_inbox_batch do
+      %{head: %{operation: %{errors: [_ | _]}}} ->
+        block_github_head(state, :github_cleanup_failed)
+
+      %{head: head} ->
+        operation = head.operation
+        view = captured_view || if(operation, do: operation.view, else: %{})
+
+        outcome = %{
+          workspace: List.first(head.workspaces),
+          issue_identifier: view[:issue_identifier],
+          target_runner_channel: view[:runner_channel],
+          reason: reason,
+          effects: if(operation, do: operation.effects, else: nil)
+        }
+
+        outcomes = if reason in [:unmatched, :workspace_missing], do: head.outcomes, else: head.outcomes ++ [outcome]
+        head = %{head | workspaces: tl(head.workspaces), operation: nil, outcomes: outcomes}
+        state = put_in(state.github_inbox_batch.head, head)
+        send(self(), {:github_inbox_continue, state.github_inbox_batch.ref})
+        state
+
+      _ ->
+        state
+    end
+  end
+
+  defp complete_github_head(state) do
+    head = state.github_inbox_batch.head
+
+    outcomes =
+      Enum.map(head.outcomes, fn outcome ->
+        projected = Map.merge(Map.take(outcome, [:workspace, :issue_identifier, :target_runner_channel]), %{reason: github_reason_code(outcome.reason), effects: github_effect_labels(outcome.effects)})
+
+        case outcome.reason do
+          {:leased_elsewhere, owner} -> Map.put(projected, :lease_owner, inspect(owner))
+          {:lease_lookup_error, reason} -> Map.put(projected, :lease_error, inspect(github_reason_code(reason)))
+          _ -> projected
+        end
+      end)
+
+    state = if head.event, do: record_github_assignment(state, head.event, github_assignment(head.event, outcomes)), else: state
+    cursor = head.row.cursor
+    send(self(), {:github_inbox_ack, cursor})
+    %{state | github_inbox_ack_pending: cursor}
+  end
+
+  defp github_assignment(event, outcomes) do
+    processed = Enum.find(outcomes, &match?(%{effects: %{cas: :confirmed}}, &1))
+    leased = Enum.find(outcomes, &(&1.reason == :leased_elsewhere))
+    routed = Enum.find(outcomes, &(&1.reason == :routed_to_other_runner))
+    lease_error = Enum.find(outcomes, &(&1.reason == :lease_lookup_error))
+
+    assignment =
+      cond do
+        not GitHubEvent.review_affecting?(event) and not GitHubEvent.ci_failure_affecting?(event) ->
+          %{assignment_state: "ignored", assignment_reason: if(GitHubEvent.ci_affecting?(event), do: "non_failing_ci_event", else: "non_review_affecting_event")}
+
+        not present?(event.pr_url) ->
+          %{assignment_state: "ignored", assignment_reason: "missing_pr_url"}
+
+        processed ->
+          %{
+            assignment_state: "processed",
+            assignment_reason: if(GitHubEvent.review_affecting?(event), do: "review_feedback_persisted", else: "ci_failure_persisted"),
+            issue_identifier: processed.issue_identifier,
+            assigned_runner_channel: Config.runner_channel(),
+            assigned_runner_instance_id: RunnerRuntime.instance_id()
+          }
+
+        leased ->
+          %{
+            assignment_state: "leased_elsewhere",
+            assignment_reason: "issue_lease_owned_by_other_runner",
+            issue_identifier: leased.issue_identifier,
+            lease_owner: leased.lease_owner
+          }
+
+        routed ->
+          %{
+            assignment_state: "routed_to_other_runner",
+            assignment_reason: "run_state_owned_by_other_runner",
+            issue_identifier: routed.issue_identifier,
+            assigned_runner_channel: routed.target_runner_channel
+          }
+
+        lease_error ->
+          %{assignment_state: "lease_lookup_error", assignment_reason: lease_error.lease_error, issue_identifier: lease_error.issue_identifier}
+
+        outcomes == [] ->
+          %{assignment_state: "unmatched_pr", assignment_reason: "no_workspace_for_pr"}
+
+        true ->
+          %{assignment_state: "ignored", assignment_reason: Atom.to_string(hd(outcomes).reason)}
+      end
+
+    Map.merge(assignment, %{matched_run_states: length(outcomes), outcomes: outcomes})
+  end
+
+  defp confirm_github_prefix(state) do
+    cursor = state.github_inbox_ack_pending
+
+    case GitHubEventInbox.ack(cursor) do
       {:ok, _confirmation} ->
-        state |> Map.put(fields.pending, nil) |> Map.put(fields.error, nil) |> Map.put(fields.drained, DateTime.utc_now())
+        batch = state.github_inbox_batch
+        state = acknowledge_disabled_github_custody(state, batch.head.ref)
+        remaining = tl(batch.rows)
+        state = %{state | github_inbox_ack_pending: nil, github_inbox_storage_error: nil, github_inbox_last_drained_at: DateTime.utc_now()}
 
-      {:error, %{reason_code: :generation_changed} = error} ->
-        state |> Map.put(fields.pending, nil) |> inbox_storage_failed(fields, error)
+        if remaining == [] do
+          send(self(), :run_github_webhook_cycle)
+          %{state | github_inbox_batch: nil}
+        else
+          case GitHubEventInbox.capture(batch.location, tracker_inbox_limits()) do
+            {:ok, captured} ->
+              rows = Enum.take(captured.rows, length(remaining))
+
+              if captured.generation == batch.generation and captured.start_offset == cursor.end_offset and
+                   Enum.map(rows, &{&1.record, &1.cursor.end_offset}) == Enum.map(remaining, &{&1.record, &1.cursor.end_offset}) do
+                state = %{state | github_inbox_batch: %{batch | rows: rows, start_offset: captured.start_offset, head: nil}}
+                send(self(), {:github_inbox_continue, batch.ref})
+                state
+              else
+                block_github_head(state, :github_prefix_changed)
+              end
+
+            {:error, reason} ->
+              block_github_head(state, reason)
+          end
+        end
 
       {:error, error} ->
-        inbox_storage_failed(state, fields, error)
+        inbox_storage_failed(state, %{error: :github_inbox_storage_error}, error)
     end
+  end
+
+  defp release_github_acquisition(state) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{admission_close_error: error}}} when not is_nil(error) ->
+        state
+
+      %{head: %{operation: %{cleanup_owned: true, authority: authority, custody_ref: ref} = operation}} ->
+        id = operation.issue_ref.id
+
+        case current_issue_custody(state, id, ref) do
+          {:ok, claim} when claim.token == authority.lease_token and not is_map_key(state.running, id) ->
+            next = release_issue_claim(state, id)
+            next = put_in(next.github_inbox_batch.head.operation.cleanup_owned, false)
+
+            if match?({:ok, %{custody_ref: ^ref}}, current_issue_custody(next, id, ref)),
+              do: update_in(next.github_inbox_batch.head.operation.errors, &Enum.uniq(&1 ++ [:github_lease_not_released])),
+              else: next
+
+          _ ->
+            put_in(state.github_inbox_batch.head.operation.cleanup_owned, false)
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp block_github_head(%{github_inbox_batch: %{head: %{operation: %{phase: :blocked, admission_close_error: error}}}} = state, _reason)
+       when not is_nil(error), do: state
+
+  defp block_github_head(state, reason) do
+    cancel_github_wakeup(state)
+    Logger.error("GitHub continuation blocked reason=#{github_reason_code(reason)}")
+    state = %{state | github_inbox_storage_error: %{phase: :continuation, reason_code: github_reason_code(reason), confirmation: :not_confirmed}, github_inbox_wakeup: nil}
+
+    state =
+      case state.github_inbox_batch do
+        %{head: head} when not is_nil(head) -> put_in(state.github_inbox_batch.head.blocked, true)
+        _ -> state
+      end
+
+    case state.github_inbox_batch do
+      %{head: %{operation: operation}} when not is_nil(operation) ->
+        operation = %{operation | phase: :blocked, failure: reason}
+        release_github_acquisition(put_in(state.github_inbox_batch.head.operation, operation))
+
+      _ ->
+        state
+    end
+  end
+
+  defp github_reason_code(reason) when is_atom(reason), do: reason
+  defp github_reason_code(reason) when is_tuple(reason), do: github_reason_code(elem(reason, 0))
+  defp github_reason_code(_reason), do: :github_checked_failure
+
+  defp reject_github_current(state, {:coordinator_precondition_failed, _} = reason), do: finish_github_candidate(state, reason)
+
+  defp reject_github_current(state, reason)
+       when reason in [:github_invalidated, :github_deadline_expired, :github_worker_changed, :github_custody_changed, :github_material_changed, :github_binding_changed, :github_identity_changed],
+       do: finish_github_candidate(state, reason)
+
+  defp reject_github_current(state, reason), do: block_github_head(state, reason)
+
+  defp invalidate_github_head(%{github_inbox_batch: %{head: %{blocked: true}}} = state, _reason), do: state
+
+  defp invalidate_github_head(state, reason) do
+    case state.github_inbox_batch do
+      %{head: %{operation: operation}} when not is_nil(operation) ->
+        state = put_in(state.github_inbox_batch.head.operation, %{operation | invalidated: true, cancellation: reason})
+
+        case state.tracker_poll_read do
+          %{purpose: :github_lookup, operation_ref: ref} = reader when ref == operation.ref ->
+            :ok = TrackerReader.cancel(Map.take(reader, [:owner, :pid, :monitor, :ref]))
+            %{state | tracker_poll_read: %{reader | invalidated: true}}
+
+          _ ->
+            reject_github_current(state, reason)
+        end
+
+      _ ->
+        block_github_head(state, reason)
+    end
+  end
+
+  defp invalidate_github_issue(state, identifier, origin) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{ref: ref, issue_ref: issue}}} when ref != origin and identifier in [issue.id, issue.identifier] -> invalidate_github_head(state, :github_invalidated)
+      _ -> state
+    end
+  end
+
+  defp github_tracked_issue?(state, id), do: match?(%{head: %{operation: %{issue_ref: %{id: ^id}}}}, state.github_inbox_batch)
+
+  defp github_reserved?(state, id) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{issue_ref: %{id: ^id}, phase: phase, invalidated: false}}} ->
+        phase != :blocked or github_admission_close_held?(state, id)
+
+      _ ->
+        false
+    end
+  end
+
+  defp github_decision(state, fresh) do
+    operation = state.github_inbox_batch.head.operation
+    event = state.github_inbox_batch.head.event
+    autonomous = not is_nil(operation.issue) and autonomous_review_follow_up?(state, operation.issue, fresh, operation.workspace)
+
+    if GitHubEvent.review_affecting?(event) do
+      github_review_decision(operation, fresh, event.pr_url, autonomous)
+    else
+      failure = ci_failure_payload(event, event.pr_url)
+      stage = if autonomous, do: "implement", else: nil
+
+      summary =
+        if autonomous,
+          do: "GitHub CI failure detected on #{event.pr_url}. Returning to implement to fix failing checks.",
+          else: "GitHub CI failure detected on #{event.pr_url}: #{ci_failure_summary(failure)}."
+
+      objective = "Investigate and fix the failing GitHub checks on #{event.pr_url}. Focus first on #{ci_failure_summary(failure)} and return the branch to runtime validation."
+      failure_context = if autonomous, do: Map.put(failure, :next_objective, objective), else: failure
+
+      attrs = %{
+        last_ci_failure: failure,
+        last_decision_summary: summary,
+        next_human_action: if(autonomous, do: nil, else: "Inspect the failing GitHub checks and decide whether Symphony should reopen implementation."),
+        resume_context: ci_resume_context(Map.get(fresh, :resume_context), event.pr_url, failure_context)
+      }
+
+      attrs =
+        if autonomous,
+          do: Map.merge(attrs, %{issue_source: fresh[:issue_source], pr_url: event.pr_url, stop_reason: nil, last_decision: nil, last_rule_id: nil, last_failure_class: nil, await_checks_polls: 0}),
+          else: attrs
+
+      %{stage: stage, attrs: attrs, event: if(autonomous, do: "ci.failure_autonomous_follow_up", else: "ci.failure_detected"), metadata: failure}
+    end
+  end
+
+  defp github_review_decision(operation, fresh, pr_url, eligible) do
+    feedback = operation.feedback
+    {review_threads, review_claims} = github_review_maps(fresh, feedback, pr_url)
+    autonomous = eligible and PRWatcher.actionable_feedback?(feedback)
+    noise = eligible and not PRWatcher.actionable_feedback?(feedback)
+    stage = if autonomous, do: PRWatcher.follow_up_stage(feedback), else: nil
+
+    summary =
+      cond do
+        stage == "review_verification" -> "GitHub review feedback detected on #{pr_url}. Returning to review_verification before reopening implementation."
+        autonomous -> "GitHub review feedback detected on #{pr_url}. Returning to implement to address the requested changes."
+        noise -> "GitHub review feedback detected on #{pr_url}, but the current adjudicator triaged it as non-actionable noise."
+        true -> "New PR review feedback detected on #{pr_url}."
+      end
+
+    objective =
+      case stage do
+        "review_verification" -> "Verify the pending GitHub review feedback on #{pr_url}, collect local evidence, and reopen implementation only for verified claims."
+        "implement" -> "Address the pending GitHub review feedback on #{pr_url}, update the code, and return the branch to runtime validation."
+        nil -> nil
+      end
+
+    attrs = %{
+      review_threads: review_threads,
+      review_claims: review_claims,
+      last_review_decision: Map.get(feedback, :review_decision),
+      last_decision_summary: summary,
+      next_human_action: if(autonomous or noise, do: nil, else: "Review drafted replies and decide whether to address code changes or post a response."),
+      resume_context: review_resume_context(Map.get(fresh, :resume_context), pr_url, review_threads, review_claims, objective)
+    }
+
+    attrs =
+      if autonomous,
+        do:
+          Map.merge(attrs, %{issue_source: fresh[:issue_source], pr_url: pr_url, review_return_stage: fresh[:stage], stop_reason: nil, last_decision: nil, last_rule_id: nil, last_failure_class: nil}),
+        else: attrs
+
+    type =
+      cond do
+        autonomous -> "review.feedback_autonomous_follow_up"
+        noise -> "review.feedback_triaged"
+        true -> "review.feedback_detected"
+      end
+
+    %{
+      stage: stage,
+      attrs: attrs,
+      event: type,
+      metadata: %{pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0), review_decision: Map.get(feedback, :review_decision), target_stage: stage}
+    }
+  end
+
+  defp github_cancelled_reader(state) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{cancellation: reason}}} -> reject_github_current(state, reason)
+      _ -> state
+    end
+  end
+
+  defp github_tracker_ref?(%{source: :tracker}), do: true
+  defp github_tracker_ref?(%{source: :manual}), do: false
+  defp github_tracker_ref?(%{source: nil, id: id}), do: not ManualIssueSpec.runtime_issue_id?(id)
+
+  defp github_result_backoff_stale?(state, reader, result) do
+    case result do
+      {:ok, {:issue, :tracker, _}} -> tracker_poll_backoff_identity(state) != reader.backoff and tracker_backoff_active?(state)
+      {:ok, {:missing, :tracker}} -> tracker_poll_backoff_identity(state) != reader.backoff and tracker_backoff_active?(state)
+      {:ok, {:read_error, :tracker, _}} -> tracker_poll_backoff_identity(state) != reader.backoff and tracker_backoff_active?(state)
+      _ -> false
+    end
+  end
+
+  defp github_admission_in_progress?(state, id), do: match?(%{issue: %{id: ^id}}, state.admission_read)
+
+  defp github_admission_ready?(state) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{phase: :waiting_admission} = operation}} ->
+        available = %{state | lease_claims: Map.delete(state.lease_claims, operation.issue_ref.id), claimed: MapSet.delete(state.claimed, operation.issue_ref.id)}
+
+        is_nil(state.github_inbox_ack_pending) and dispatch_slots_available?(operation.issue, available) and
+          company_slots_available?(available, PolicyPack.resolve(policy_pack_name(operation.issue, state)))
+
+      _ ->
+        false
+    end
+  end
+
+  defp github_gate_recheck(state, %{purpose: :github_inbox} = completion), do: github_gate_boundary(state, completion)
+  defp github_gate_recheck(_state, _completion), do: :ok
+
+  defp reconcile_github_context(%{github_inbox_batch: nil} = state), do: state
+  defp reconcile_github_context(%{github_inbox_batch: %{head: %{operation: %{phase: :blocked}}}} = state), do: state
+
+  defp reconcile_github_context(state) do
+    case github_batch_current(state) do
+      :ok -> state
+      {:error, reason} -> invalidate_github_head(state, reason)
+    end
+  end
+
+  defp github_pre_admission(state, id, stage) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{issue_ref: %{id: ^id}, phase: :admitting} = operation}} ->
+        available = %{state | lease_claims: Map.delete(state.lease_claims, id), claimed: MapSet.delete(state.claimed, id)}
+
+        with true <- stage in ["implement", "review_verification"] or {:error, :github_dispatch_stage_changed},
+             true <-
+               (retry_active_current?(available, operation.issue) and dispatch_slots_available?(operation.issue, available) and
+                  company_slots_available?(available, PolicyPack.resolve(policy_pack_name(operation.issue, state)))) or {:error, :github_admission_changed},
+             :ok <- github_operation_current(state),
+             do: :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp github_post_admission(state, id, ticket, admitted_raw) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{issue_ref: %{id: ^id}, phase: :admitting} = operation}} ->
+        with true <- not operation.invalidated or {:error, :github_invalidated},
+             true <- github_worker_identity(state, id) == operation.worker or {:error, :github_worker_changed},
+             true <- not execution_hold?(state, id) or {:error, :github_worker_closure_uncertain},
+             {:ok, claim} <- current_issue_custody(state, id, operation.custody_ref),
+             true <- (claim.token == operation.authority.lease_token and {claim.custody_ref, claim.token} == operation.custody) or {:error, :github_custody_changed},
+             true <-
+               (ticket.workspace == operation.workspace and ticket.owner == claim.token.owner and ticket.epoch == claim.token.epoch and
+                  admitted_raw["issue_id"] == id and admitted_raw["issue_identifier"] == operation.issue_ref.identifier and ticket.run_id == admitted_raw["run_id"]) or
+                 {:error, :github_admission_ticket_changed},
+             true <- RunStateStore.coordinator_projection(admitted_raw) == operation.expected or {:error, :github_material_changed},
+             :ok <- LeaseManager.ensure_current(claim.token),
+             :ok <- github_batch_current(state),
+             {:ok, raw} <- read_github_raw(operation.workspace),
+             true <- (raw["issue_id"] == id and raw["issue_identifier"] == operation.issue_ref.identifier) or {:error, :github_identity_changed},
+             true <- github_binding(raw) == github_binding(admitted_raw) or {:error, :github_binding_changed},
+             true <- RunStateStore.coordinator_projection(raw) == operation.expected or {:error, :github_material_changed},
+             true <- System.monotonic_time(:millisecond) < operation.authority.deadline or {:error, :github_deadline_expired} do
+          :ok
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp close_rejected_github_admission(ticket, cause) do
+    case DispatchAudit.finish(ticket, :not_started) do
+      :ok -> {:error, {:github_admission_rejected, cause}}
+      {:error, reason} -> {:error, {:github_admission_close_failed, ticket, cause, reason}}
+    end
+  catch
+    kind, reason -> {:error, {:github_admission_close_failed, ticket, cause, {kind, reason}}}
+  end
+
+  defp retain_github_admission_close(state, ticket, cause, close_error) do
+    operation = state.github_inbox_batch.head.operation
+    failure = {:github_admission_close_failed, cause, close_error}
+    state = put_in(state.github_inbox_batch.head.operation, %{operation | ticket: ticket, admission_close_error: close_error, outcome: {:blocked, failure}})
+    state = %{state | candidate_fetch_error: {:github_admission_closure_uncertain, operation.issue_ref.id}}
+    block_github_head(state, failure)
+  end
+
+  defp github_admission_close_held?(state, id) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{issue_ref: %{id: ^id}, ticket: ticket, admission_close_error: error, custody_ref: ref, authority: authority}}}
+      when not is_nil(ticket) and not is_nil(error) ->
+        case current_issue_custody(state, id, ref) do
+          {:ok, claim} -> claim.token == authority.lease_token
+          {:error, _} -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp select_github_admission(state, _context) do
+    operation = state.github_inbox_batch.head.operation
+    available = %{state | lease_claims: Map.delete(state.lease_claims, operation.issue_ref.id), claimed: MapSet.delete(state.claimed, operation.issue_ref.id)}
+
+    with :ok <- github_operation_current(state),
+         true <- retry_active_current?(available, operation.issue) or {:error, :github_admission_ineligible},
+         true <-
+           (dispatch_slots_available?(operation.issue, available) and company_slots_available?(available, PolicyPack.resolve(policy_pack_name(operation.issue, state)))) or
+             {:error, :github_capacity_unavailable} do
+      attempt = if operation.retry, do: operation.retry.attempt, else: nil
+      completion = %{purpose: :github_inbox, head_ref: state.github_inbox_batch.head.ref, decision_ref: operation.ref, custody_ref: operation.custody_ref}
+      state = put_in(state.github_inbox_batch.head.operation.completion, completion)
+      state = put_in(state.lease_claims[operation.issue_ref.id].completion, completion)
+      state = dispatch_runtime_issue(state, operation.issue, attempt, &start_github_worker/3, &reject_github_passive/3)
+
+      case state.github_inbox_batch do
+        %{head: %{operation: %{phase: :gate}}} -> state
+        %{head: %{operation: %{phase: :blocked}}} -> state
+        %{head: %{operation: %{ref: ref}}} when ref == operation.ref -> finish_github_candidate(state, :dispatch_rejected)
+        _ -> state
+      end
+    else
+      {:error, :github_capacity_unavailable} -> state
+      {:error, :github_admission_ineligible} -> finish_github_candidate(state, :not_eligible)
+      {:error, reason} -> reject_github_current(state, reason)
+    end
+  end
+
+  defp start_github_worker(state, issue, attempt) do
+    operation = state.github_inbox_batch.head.operation
+
+    with :ok <- github_operation_current(state),
+         {:ok, fresh} <- RunStateStore.ensure_coordinator_current(operation.authority, operation.expected),
+         true <- fresh[:stage] in ["implement", "review_verification"] or {:error, :github_dispatch_stage_changed} do
+      state = put_in(state.github_inbox_batch.head.operation.phase, :admitting)
+      start_active_issue_worker(state, issue, attempt, self(), &Task.Supervisor.start_child/2, fresh.stage)
+    else
+      {:error, reason} -> reject_github_current(state, reason)
+    end
+  end
+
+  defp reject_github_passive(state, _issue, _attempt), do: finish_github_candidate(state, :passive_stage_changed)
+
+  defp bind_github_admission(state, id, ticket, _raw) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{issue_ref: %{id: ^id}, phase: :admitting} = operation}} ->
+        operation = %{operation | ticket: ticket, admitted_expected: operation.expected, phase: :gate, worker: github_worker_identity(state, id)}
+        put_in(state.github_inbox_batch.head.operation, operation)
+
+      _ ->
+        state
+    end
+  end
+
+  defp github_gate_boundary(state, completion) do
+    with %{head: %{ref: head_ref, operation: %{ref: _ref} = operation}} <- state.github_inbox_batch,
+         true <- head_ref == completion.head_ref and operation.ref == completion.decision_ref and not operation.invalidated,
+         true <- operation.errors == [] and operation.phase == :gate,
+         :ok <- github_batch_current(state),
+         {:ok, claim} <- current_issue_custody(state, operation.issue_ref.id, completion.custody_ref),
+         true <- claim.token == operation.authority.lease_token and claim.holder == :gated,
+         true <- github_worker_identity(state, operation.issue_ref.id) == operation.worker,
+         %{dispatch_ticket: ticket} <- Map.get(state.running, operation.issue_ref.id),
+         true <- ticket == operation.ticket,
+         {:ok, raw} <- read_github_raw(operation.workspace),
+         true <- raw["run_id"] == ticket.run_id and RunStateStore.coordinator_projection(raw) == operation.admitted_expected,
+         :ok <- LeaseManager.ensure_current(claim.token),
+         true <- System.monotonic_time(:millisecond) < operation.authority.deadline do
+      :ok
+    else
+      {:error, reason} -> {:blocked, reason}
+      _ -> {:recheck, :github_gate_changed}
+    end
+  end
+
+  defp github_bind_custody(state, id, previous, claim) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{issue_ref: %{id: ^id}, completion: %{custody_ref: expected} = completion} = operation}} when expected == previous ->
+        completion = %{completion | custody_ref: claim.custody_ref}
+        state = put_in(state.lease_claims[id].completion, completion)
+        operation = %{operation | completion: completion, custody_ref: claim.custody_ref, custody: {claim.custody_ref, claim.token}, cleanup_owned: false}
+        put_in(state.github_inbox_batch.head.operation, operation)
+
+      _ ->
+        state
+    end
+  end
+
+  defp github_action_outcome(state, id, outcome) do
+    operation = state.github_inbox_batch.head.operation
+
+    if operation.issue_ref.id == id and is_nil(operation.admission_close_error) do
+      case operation.outcome do
+        {:blocked, _} -> state
+        _ -> put_in(state.github_inbox_batch.head.operation.outcome, outcome)
+      end
+    else
+      state
+    end
+  end
+
+  defp finish_github_action(state, completion, fallback) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{ref: ref} = operation}} when ref == completion.decision_ref ->
+        cond do
+          not is_nil(operation.admission_close_error) ->
+            state
+
+          operation.errors != [] ->
+            block_github_head(state, :github_cleanup_failed)
+
+          operation.invalidated ->
+            finish_github_candidate(state, :invalidated)
+
+          true ->
+            case operation.outcome || fallback do
+              {:applied, reason} -> finish_github_candidate(state, reason)
+              {:blocked, reason} -> block_github_head(state, reason)
+              {:recheck, reason} -> finish_github_candidate(state, reason)
+              {:backoff, _} -> finish_github_candidate(state, :admission_backoff_changed)
+              _ -> state
+            end
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp github_worker_down(state, id, reason) do
+    case state.github_inbox_batch do
+      %{head: %{operation: %{issue_ref: %{id: ^id}, phase: :waiting_worker} = operation}} ->
+        if github_worker_identity(state, id) == operation.waited_worker do
+          send(self(), {:github_inbox_continue, state.github_inbox_batch.ref})
+          put_in(state.github_inbox_batch.head.operation.waited_down, reason)
+        else
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp finish_github_poll(%{tracker_poll_cycle: %{mode: :github_webhook}, tracker_poll_read: nil} = state), do: finish_tracker_poll(state)
+  defp finish_github_poll(state), do: state
+
+  defp github_review_maps(fresh, feedback, pr_url) do
+    review_claims =
+      feedback
+      |> Map.get(:items, [])
+      |> Enum.reduce(Map.get(fresh, :review_claims, %{}), fn item, acc ->
+        case Map.get(item, :thread_key) do
+          thread_key when is_binary(thread_key) ->
+            persisted = Map.get(acc, thread_key, %{})
+
+            verification_status = review_claim_verification_status(persisted, item)
+
+            claim_state = %{
+              "thread_key" => Map.get(item, :thread_key),
+              "id" => Map.get(item, :id),
+              "kind" => Map.get(item, :kind) |> to_string(),
+              "author" => Map.get(item, :author),
+              "body" => Map.get(item, :body),
+              "path" => Map.get(item, :path),
+              "line" => Map.get(item, :line),
+              "state" => Map.get(item, :state),
+              "review_decision" => Map.get(item, :review_decision),
+              "submitted_at" => Map.get(item, :submitted_at),
+              "source_class" => Map.get(item, :source_class),
+              "claim_type" => Map.get(item, :claim_type),
+              "veracity_score" => Map.get(item, :veracity_score),
+              "reproducibility_score" => Map.get(item, :reproducibility_score),
+              "evidence_quality_score" => Map.get(item, :evidence_quality_score),
+              "locality_score" => Map.get(item, :locality_score),
+              "source_precision_score" => Map.get(item, :source_precision_score),
+              "consensus_score" => Map.get(item, :consensus_score),
+              "consensus_state" => Map.get(item, :consensus_state),
+              "consensus_summary" => Map.get(item, :consensus_summary),
+              "consensus_reasons" => Map.get(item, :consensus_reasons, []),
+              "historical_precision_score" => Map.get(item, :historical_precision_score),
+              "stagnation_score" => Map.get(item, :stagnation_score),
+              "stagnation_state" => Map.get(item, :stagnation_state),
+              "repeated_feedback_count" => Map.get(item, :repeated_feedback_count, 1),
+              "hard_proof" => Map.get(item, :hard_proof, false),
+              "proof_sources" => Map.get(item, :proof_sources, []),
+              "contradiction_sources" => Map.get(item, :contradiction_sources, []),
+              "disposition" => Map.get(item, :disposition),
+              "actionable" => Map.get(item, :actionable, false),
+              "adjudication_summary" => Map.get(item, :adjudication_summary),
+              "verification_status" => verification_status,
+              "verification_attempts" => Map.get(persisted, "verification_attempts", 0),
+              "evidence_refs" => Map.get(persisted, "evidence_refs", []),
+              "evidence_summary" => Map.get(persisted, "evidence_summary"),
+              "pr_url" => pr_url
+            }
+
+            Map.put(acc, thread_key, claim_state)
+
+          _ ->
+            acc
+        end
+      end)
+
+    review_threads =
+      feedback
+      |> Map.get(:items, [])
+      |> Enum.reduce(Map.get(fresh, :review_threads, %{}), fn item, acc ->
+        case Map.get(item, :thread_key) do
+          thread_key when is_binary(thread_key) ->
+            Map.put(acc, thread_key, review_thread_state(item, pr_url))
+
+          _ ->
+            acc
+        end
+      end)
+
+    {review_threads, review_claims}
   end
 
   defp inbox_storage_failed(state, fields, error) do
@@ -1593,370 +3067,6 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.put(:ack_pending, not is_nil(pending))
     |> Map.put(:last_storage_error, error)
     |> Map.put(:last_drained_at, datetime_to_iso8601(drained_at))
-  end
-
-  defp maybe_process_github_event(%State{} = state, %GitHubEvent{} = event) do
-    cond do
-      GitHubEvent.review_affecting?(event) ->
-        {next_state, assignment} = refresh_pr_feedback_by_url(state, event)
-        record_github_assignment(next_state, event, assignment)
-
-      GitHubEvent.ci_failure_affecting?(event) ->
-        {next_state, assignment} = refresh_pr_ci_failure_by_url(state, event)
-        record_github_assignment(next_state, event, assignment)
-
-      GitHubEvent.ci_affecting?(event) ->
-        record_github_assignment(state, event, %{
-          assignment_state: "ignored",
-          assignment_reason: "non_failing_ci_event"
-        })
-
-      true ->
-        record_github_assignment(state, event, %{
-          assignment_state: "ignored",
-          assignment_reason: "non_review_affecting_event"
-        })
-    end
-  end
-
-  defp refresh_pr_feedback_by_url(%State{} = state, %GitHubEvent{} = event) do
-    pr_url = Map.get(event, :pr_url)
-
-    if is_binary(pr_url) and pr_url != "" do
-      refresh_pr_feedback_for_url(state, event, pr_url)
-    else
-      {state,
-       %{
-         assignment_state: "ignored",
-         assignment_reason: "missing_pr_url"
-       }}
-    end
-  end
-
-  defp refresh_pr_feedback_for_url(%State{} = state, %GitHubEvent{} = event, pr_url)
-       when is_binary(pr_url) and pr_url != "" do
-    {next_state, outcomes} =
-      Config.workspace_root()
-      |> list_workspace_paths()
-      |> Enum.reduce({state, []}, fn workspace, {state_acc, outcomes_acc} ->
-        case RunStateStore.load(workspace) do
-          {:ok, run_state} ->
-            if Map.get(run_state, :pr_url) != pr_url or not canonical_github_workspace?(workspace, run_state) do
-              {state_acc, outcomes_acc}
-            else
-              process_github_workspace_match(
-                state_acc,
-                workspace,
-                run_state,
-                pr_url,
-                outcomes_acc
-              )
-            end
-
-          _ ->
-            {state_acc, outcomes_acc}
-        end
-      end)
-
-    {next_state, summarize_github_assignment(event, pr_url, outcomes)}
-  end
-
-  defp refresh_pr_feedback_for_url(%State{} = state, _event, _pr_url) do
-    {state, %{assignment_state: "ignored", assignment_reason: "missing_pr_url"}}
-  end
-
-  defp refresh_pr_ci_failure_by_url(%State{} = state, %GitHubEvent{} = event) do
-    pr_url = Map.get(event, :pr_url)
-
-    if is_binary(pr_url) and pr_url != "" do
-      refresh_pr_ci_failure_for_url(state, event, pr_url)
-    else
-      {state,
-       %{
-         assignment_state: "ignored",
-         assignment_reason: "missing_pr_url"
-       }}
-    end
-  end
-
-  defp refresh_pr_ci_failure_for_url(%State{} = state, %GitHubEvent{} = event, pr_url)
-       when is_binary(pr_url) and pr_url != "" do
-    {next_state, outcomes} =
-      Config.workspace_root()
-      |> list_workspace_paths()
-      |> Enum.reduce({state, []}, fn workspace, {state_acc, outcomes_acc} ->
-        case RunStateStore.load(workspace) do
-          {:ok, run_state} ->
-            if Map.get(run_state, :pr_url) != pr_url or not canonical_github_workspace?(workspace, run_state) do
-              {state_acc, outcomes_acc}
-            else
-              process_github_ci_workspace_match(
-                state_acc,
-                workspace,
-                run_state,
-                pr_url,
-                event,
-                outcomes_acc
-              )
-            end
-
-          _ ->
-            {state_acc, outcomes_acc}
-        end
-      end)
-
-    {next_state, summarize_github_assignment(event, pr_url, outcomes)}
-  end
-
-  defp refresh_pr_ci_failure_for_url(%State{} = state, _event, _pr_url) do
-    {state, %{assignment_state: "ignored", assignment_reason: "missing_pr_url"}}
-  end
-
-  defp process_github_workspace_match(
-         %State{} = state,
-         workspace,
-         run_state,
-         pr_url,
-         outcomes
-       )
-       when is_map(run_state) do
-    issue_identifier = Map.get(run_state, :issue_identifier)
-    target_runner_channel = Map.get(run_state, :runner_channel)
-    runner_instance_id = Map.get(run_state, :runner_instance_id)
-    lease_status = review_follow_up_lease_status(state, run_state, workspace)
-
-    cond do
-      not run_state_routed_to_current_runner?(run_state) ->
-        Logger.info(
-          "Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} runner_channel=#{target_runner_channel} runner_instance_id=#{runner_instance_id} current_channel=#{Config.runner_channel()} current_instance_id=#{RunnerRuntime.instance_id()}"
-        )
-
-        {state,
-         [
-           %{
-             issue_identifier: issue_identifier,
-             target_runner_channel: target_runner_channel,
-             assigned_runner_channel: target_runner_channel,
-             assigned_runner_instance_id: runner_instance_id,
-             assignment_state: "routed_to_other_runner",
-             assignment_reason: "run_state_owned_by_other_runner"
-           }
-           | outcomes
-         ]}
-
-      match?({:skip, _}, lease_status) ->
-        {:skip, owner} = lease_status
-
-        Logger.info("Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} lease_owner=#{inspect(owner)} current_owner=#{state.lease_owner}")
-
-        {state,
-         [
-           %{
-             issue_identifier: issue_identifier,
-             target_runner_channel: target_runner_channel,
-             assigned_runner_channel: Config.runner_channel(),
-             assigned_runner_instance_id: RunnerRuntime.instance_id(),
-             assignment_state: "leased_elsewhere",
-             assignment_reason: "issue_lease_owned_by_other_runner",
-             lease_owner: inspect(owner)
-           }
-           | outcomes
-         ]}
-
-      match?({:error, _}, lease_status) ->
-        {:error, reason} = lease_status
-
-        Logger.warning("Skipping PR feedback refresh for workspace=#{workspace} pr_url=#{pr_url} due to lease lookup error: #{inspect(reason)}")
-
-        {state,
-         [
-           %{
-             issue_identifier: issue_identifier,
-             target_runner_channel: target_runner_channel,
-             assigned_runner_channel: Config.runner_channel(),
-             assigned_runner_instance_id: RunnerRuntime.instance_id(),
-             assignment_state: "lease_lookup_error",
-             assignment_reason: inspect(reason)
-           }
-           | outcomes
-         ]}
-
-      true ->
-        {
-          persist_review_feedback_for_workspace(state, workspace, run_state, pr_url),
-          [
-            %{
-              issue_identifier: issue_identifier,
-              target_runner_channel: target_runner_channel || Config.runner_channel(),
-              assigned_runner_channel: Config.runner_channel(),
-              assigned_runner_instance_id: RunnerRuntime.instance_id(),
-              assignment_state:
-                case lease_status do
-                  {:reclaimable, _owner} -> "stale_lease_reclaimable"
-                  _ -> "processed"
-                end,
-              assignment_reason:
-                case lease_status do
-                  {:reclaimable, _owner} ->
-                    "review_feedback_persisted_pending_stale_lease_takeover"
-
-                  _ ->
-                    "review_feedback_persisted"
-                end,
-              lease_owner:
-                case lease_status do
-                  {:reclaimable, owner} -> inspect(owner)
-                  _ -> nil
-                end
-            }
-            | outcomes
-          ]
-        }
-    end
-  end
-
-  defp process_github_workspace_match(%State{} = state, _workspace, _run_state, _pr_url, outcomes) do
-    {state, outcomes}
-  end
-
-  defp process_github_ci_workspace_match(
-         %State{} = state,
-         workspace,
-         run_state,
-         pr_url,
-         event,
-         outcomes
-       )
-       when is_map(run_state) do
-    issue_identifier = Map.get(run_state, :issue_identifier)
-    target_runner_channel = Map.get(run_state, :runner_channel)
-    runner_instance_id = Map.get(run_state, :runner_instance_id)
-    lease_status = review_follow_up_lease_status(state, run_state, workspace)
-
-    cond do
-      not run_state_routed_to_current_runner?(run_state) ->
-        {state,
-         [
-           %{
-             issue_identifier: issue_identifier,
-             target_runner_channel: target_runner_channel,
-             assigned_runner_channel: target_runner_channel,
-             assigned_runner_instance_id: runner_instance_id,
-             assignment_state: "routed_to_other_runner",
-             assignment_reason: "run_state_owned_by_other_runner"
-           }
-           | outcomes
-         ]}
-
-      match?({:skip, _}, lease_status) ->
-        {:skip, owner} = lease_status
-
-        {state,
-         [
-           %{
-             issue_identifier: issue_identifier,
-             target_runner_channel: target_runner_channel,
-             assigned_runner_channel: Config.runner_channel(),
-             assigned_runner_instance_id: RunnerRuntime.instance_id(),
-             assignment_state: "leased_elsewhere",
-             assignment_reason: "issue_lease_owned_by_other_runner",
-             lease_owner: inspect(owner)
-           }
-           | outcomes
-         ]}
-
-      match?({:error, _}, lease_status) ->
-        {:error, reason} = lease_status
-
-        {state,
-         [
-           %{
-             issue_identifier: issue_identifier,
-             target_runner_channel: target_runner_channel,
-             assigned_runner_channel: Config.runner_channel(),
-             assigned_runner_instance_id: RunnerRuntime.instance_id(),
-             assignment_state: "lease_lookup_error",
-             assignment_reason: inspect(reason)
-           }
-           | outcomes
-         ]}
-
-      true ->
-        {
-          persist_ci_failure_for_workspace(state, workspace, run_state, pr_url, event),
-          [
-            %{
-              issue_identifier: issue_identifier,
-              target_runner_channel: target_runner_channel || Config.runner_channel(),
-              assigned_runner_channel: Config.runner_channel(),
-              assigned_runner_instance_id: RunnerRuntime.instance_id(),
-              assignment_state:
-                case lease_status do
-                  {:reclaimable, _owner} -> "stale_lease_reclaimable"
-                  _ -> "processed"
-                end,
-              assignment_reason:
-                case lease_status do
-                  {:reclaimable, _owner} ->
-                    "ci_failure_persisted_pending_stale_lease_takeover"
-
-                  _ ->
-                    "ci_failure_persisted"
-                end,
-              lease_owner:
-                case lease_status do
-                  {:reclaimable, owner} -> inspect(owner)
-                  _ -> nil
-                end
-            }
-            | outcomes
-          ]
-        }
-    end
-  end
-
-  defp process_github_ci_workspace_match(%State{} = state, _workspace, _run_state, _pr_url, _event, outcomes) do
-    {state, outcomes}
-  end
-
-  defp summarize_github_assignment(%GitHubEvent{} = event, pr_url, outcomes)
-       when is_list(outcomes) do
-    preferred_outcome =
-      Enum.find_value(
-        [
-          "stale_lease_reclaimable",
-          "processed",
-          "leased_elsewhere",
-          "routed_to_other_runner",
-          "lease_lookup_error"
-        ],
-        fn target_state ->
-          Enum.find(outcomes, &(Map.get(&1, :assignment_state) == target_state))
-        end
-      )
-
-    base = %{
-      event_id: Map.get(event, :event_id),
-      event_name: Map.get(event, :event_name),
-      action: Map.get(event, :action),
-      pr_url: pr_url,
-      repo_full_name: Map.get(event, :repo_full_name),
-      received_runner_channel: Map.get(event, :received_runner_channel) || Config.runner_channel(),
-      received_runner_instance_id: Map.get(event, :received_runner_instance_id) || RunnerRuntime.instance_id(),
-      matched_run_states: length(outcomes),
-      processed_at: datetime_to_iso8601(DateTime.utc_now())
-    }
-
-    case preferred_outcome do
-      nil ->
-        Map.merge(base, %{
-          assignment_state: "unmatched_pr",
-          assignment_reason: "no_workspace_for_pr"
-        })
-
-      %{} = outcome ->
-        Map.merge(base, outcome)
-    end
   end
 
   defp record_github_assignment(%State{} = state, %GitHubEvent{} = event, attrs)
@@ -2042,281 +3152,6 @@ defmodule SymphonyElixir.Orchestrator do
               {:ok, issue, storage, nil}
             end
         end
-    end
-  end
-
-  defp persist_review_feedback_for_workspace(%State{} = state, workspace, run_state, pr_url) do
-    feedback =
-      PRWatcher.review_feedback(
-        workspace,
-        policy_pack: PolicyPack.name_string(PolicyPack.resolve()),
-        thread_states: Map.get(run_state, :review_threads, %{}),
-        pr_url: pr_url
-      )
-
-    if Map.get(feedback, :status) == "ok" and Map.get(feedback, :pending_drafts_count, 0) > 0 do
-      review_claims =
-        feedback
-        |> Map.get(:items, [])
-        |> Enum.reduce(Map.get(run_state, :review_claims, %{}), fn item, acc ->
-          case Map.get(item, :thread_key) do
-            thread_key when is_binary(thread_key) ->
-              persisted = Map.get(acc, thread_key, %{})
-
-              verification_status = review_claim_verification_status(persisted, item)
-
-              claim_state = %{
-                "thread_key" => Map.get(item, :thread_key),
-                "id" => Map.get(item, :id),
-                "kind" => Map.get(item, :kind) |> to_string(),
-                "author" => Map.get(item, :author),
-                "body" => Map.get(item, :body),
-                "path" => Map.get(item, :path),
-                "line" => Map.get(item, :line),
-                "state" => Map.get(item, :state),
-                "review_decision" => Map.get(item, :review_decision),
-                "submitted_at" => Map.get(item, :submitted_at),
-                "source_class" => Map.get(item, :source_class),
-                "claim_type" => Map.get(item, :claim_type),
-                "veracity_score" => Map.get(item, :veracity_score),
-                "reproducibility_score" => Map.get(item, :reproducibility_score),
-                "evidence_quality_score" => Map.get(item, :evidence_quality_score),
-                "locality_score" => Map.get(item, :locality_score),
-                "source_precision_score" => Map.get(item, :source_precision_score),
-                "consensus_score" => Map.get(item, :consensus_score),
-                "consensus_state" => Map.get(item, :consensus_state),
-                "consensus_summary" => Map.get(item, :consensus_summary),
-                "consensus_reasons" => Map.get(item, :consensus_reasons, []),
-                "historical_precision_score" => Map.get(item, :historical_precision_score),
-                "stagnation_score" => Map.get(item, :stagnation_score),
-                "stagnation_state" => Map.get(item, :stagnation_state),
-                "repeated_feedback_count" => Map.get(item, :repeated_feedback_count, 1),
-                "hard_proof" => Map.get(item, :hard_proof, false),
-                "proof_sources" => Map.get(item, :proof_sources, []),
-                "contradiction_sources" => Map.get(item, :contradiction_sources, []),
-                "disposition" => Map.get(item, :disposition),
-                "actionable" => Map.get(item, :actionable, false),
-                "adjudication_summary" => Map.get(item, :adjudication_summary),
-                "verification_status" => verification_status,
-                "verification_attempts" => Map.get(persisted, "verification_attempts", 0),
-                "evidence_refs" => Map.get(persisted, "evidence_refs", []),
-                "evidence_summary" => Map.get(persisted, "evidence_summary"),
-                "pr_url" => pr_url
-              }
-
-              Map.put(acc, thread_key, claim_state)
-
-            _ ->
-              acc
-          end
-        end)
-
-      review_threads =
-        feedback
-        |> Map.get(:items, [])
-        |> Enum.reduce(Map.get(run_state, :review_threads, %{}), fn item, acc ->
-          case Map.get(item, :thread_key) do
-            thread_key when is_binary(thread_key) ->
-              Map.put(acc, thread_key, review_thread_state(item, pr_url))
-
-            _ ->
-              acc
-          end
-        end)
-
-      issue = issue_for_run_state(run_state)
-
-      case maybe_start_autonomous_review_follow_up(
-             state,
-             issue,
-             workspace,
-             run_state,
-             pr_url,
-             feedback,
-             review_threads,
-             review_claims
-           ) do
-        {:ok, next_state} ->
-          next_state
-
-        {:ok, next_state, :non_actionable} ->
-          next_state
-
-        {:not_autonomous, state} ->
-          summary = "New PR review feedback detected on #{pr_url}."
-
-          human_action =
-            "Review drafted replies and decide whether to address code changes or post a response."
-
-          case RunStateStore.update(workspace, fn persisted ->
-                 persisted
-                 |> Map.put(:review_threads, review_threads)
-                 |> Map.put(:review_claims, review_claims)
-                 |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
-                 |> Map.put(:last_decision_summary, summary)
-                 |> Map.put(:next_human_action, human_action)
-                 |> put_review_resume_context(pr_url, review_threads, review_claims, nil)
-               end) do
-            {:ok, next_run_state} ->
-              RunLedger.record("review.feedback_detected", %{
-                issue_id: Map.get(next_run_state, :issue_id),
-                issue_identifier: Map.get(next_run_state, :issue_identifier),
-                actor_type: "runtime",
-                actor_id: "github_webhook",
-                summary: summary,
-                details: pr_url,
-                metadata: %{
-                  pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
-                  review_decision: Map.get(feedback, :review_decision)
-                }
-              })
-
-              state
-
-            {:error, reason} ->
-              Logger.warning("Failed to persist manual review feedback for #{pr_url}: #{inspect(reason)}")
-
-              state
-          end
-      end
-    else
-      state
-    end
-  end
-
-  defp persist_ci_failure_for_workspace(
-         %State{} = state,
-         workspace,
-         run_state,
-         pr_url,
-         %GitHubEvent{} = event
-       ) do
-    issue = issue_for_run_state(run_state)
-    ci_failure = ci_failure_payload(event, pr_url)
-
-    case maybe_start_autonomous_ci_follow_up(state, issue, workspace, run_state, pr_url, ci_failure) do
-      {:ok, next_state} ->
-        next_state
-
-      {:not_autonomous, state} ->
-        summary = "GitHub CI failure detected on #{pr_url}: #{ci_failure_summary(ci_failure)}."
-
-        human_action =
-          "Inspect the failing GitHub checks and decide whether Symphony should reopen implementation."
-
-        case RunStateStore.update(workspace, fn persisted ->
-               persisted
-               |> Map.put(:last_ci_failure, ci_failure)
-               |> Map.put(:last_decision_summary, summary)
-               |> Map.put(:next_human_action, human_action)
-               |> Map.put(:resume_context, ci_resume_context(Map.get(persisted, :resume_context), pr_url, ci_failure))
-             end) do
-          {:ok, next_run_state} ->
-            RunLedger.record("ci.failure_detected", %{
-              issue_id: Map.get(next_run_state, :issue_id),
-              issue_identifier: Map.get(next_run_state, :issue_identifier),
-              actor_type: "runtime",
-              actor_id: "github_webhook",
-              summary: summary,
-              details: Map.get(ci_failure, :details_url) || pr_url,
-              metadata: ci_failure
-            })
-
-            state
-
-          {:error, reason} ->
-            Logger.warning("Failed to persist CI failure for #{pr_url}: #{inspect(reason)}")
-            state
-        end
-    end
-  end
-
-  defp maybe_start_autonomous_ci_follow_up(
-         %State{} = state,
-         issue,
-         workspace,
-         run_state,
-         pr_url,
-         ci_failure
-       ) do
-    if autonomous_review_follow_up?(state, issue, run_state, workspace) do
-      summary = "GitHub CI failure detected on #{pr_url}. Returning to implement to fix failing checks."
-
-      next_objective =
-        "Investigate and fix the failing GitHub checks on #{pr_url}. Focus first on #{ci_failure_summary(ci_failure)} and return the branch to runtime validation."
-
-      case ensure_review_follow_up_lease(state, run_state, workspace) do
-        {:ok, state, lease_attrs, release_on_failure?} ->
-          case RunStateStore.transition(
-                 workspace,
-                 "implement",
-                 %{
-                   issue_id: Map.get(run_state, :issue_id),
-                   issue_identifier: Map.get(run_state, :issue_identifier),
-                   issue_source: Map.get(run_state, :issue_source),
-                   pr_url: pr_url,
-                   stop_reason: nil,
-                   last_decision: nil,
-                   last_rule_id: nil,
-                   last_failure_class: nil,
-                   last_decision_summary: summary,
-                   next_human_action: nil,
-                   await_checks_polls: 0,
-                   last_ci_failure: ci_failure,
-                   resume_context:
-                     ci_resume_context(
-                       Map.get(run_state, :resume_context),
-                       pr_url,
-                       Map.put(ci_failure, :next_objective, next_objective)
-                     )
-                 }
-                 |> Map.merge(lease_attrs)
-               ) do
-            {:ok, _next_run_state} ->
-              issue_ref = issue_ref_for_run_state(run_state)
-              _ = IssueSource.update_issue_state(issue || issue_ref, "In Progress")
-
-              refreshed_issue =
-                case issue do
-                  %Issue{} = existing_issue ->
-                    case IssueSource.refresh_issue(existing_issue) do
-                      {:ok, %Issue{} = latest_issue} -> latest_issue
-                      _ -> %{existing_issue | state: "In Progress"}
-                    end
-
-                  _ ->
-                    nil
-                end
-
-              RunLedger.record("ci.failure_autonomous_follow_up", %{
-                issue_id: Map.get(run_state, :issue_id),
-                issue_identifier: Map.get(run_state, :issue_identifier),
-                actor_type: "runtime",
-                actor_id: "github_webhook",
-                summary: summary,
-                details: Map.get(ci_failure, :details_url) || pr_url,
-                metadata: ci_failure
-              })
-
-              {:ok, maybe_dispatch_autonomous_review_follow_up(state, refreshed_issue)}
-
-            {:error, reason} ->
-              state = if release_on_failure?, do: release_review_follow_up_lease(state, run_state, workspace), else: state
-
-              Logger.warning("Failed to transition #{pr_url} back to implement after CI failure: #{inspect(reason)}")
-              {:not_autonomous, state}
-          end
-
-        {:skip, owner} ->
-          Logger.info("Skipping autonomous CI follow-up for #{pr_url}; lease is owned by #{inspect(owner)}")
-          {:not_autonomous, state}
-
-        {:error, reason} ->
-          Logger.warning("Unable to secure lease for autonomous CI follow-up on #{pr_url}: #{inspect(reason)}")
-          {:ok, state}
-      end
-    else
-      {:not_autonomous, state}
     end
   end
 
@@ -2421,13 +3256,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         "not_needed"
-    end
-  end
-
-  defp issue_for_run_state(run_state) when is_map(run_state) do
-    case IssueSource.fetch_issue(issue_ref_for_run_state(run_state)) do
-      {:ok, %Issue{} = issue} -> issue
-      _ -> seeded_manual_issue_from_run_state(run_state)
     end
   end
 
@@ -2541,163 +3369,6 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normalize_issue_source(_value), do: nil
 
-  defp maybe_start_autonomous_review_follow_up(
-         %State{} = state,
-         issue,
-         workspace,
-         run_state,
-         pr_url,
-         feedback,
-         review_threads,
-         review_claims
-       ) do
-    if autonomous_review_follow_up?(state, issue, run_state, workspace) and
-         PRWatcher.actionable_feedback?(feedback) do
-      target_stage = PRWatcher.follow_up_stage(feedback)
-
-      next_objective =
-        case target_stage do
-          "review_verification" ->
-            "Verify the pending GitHub review feedback on #{pr_url}, collect local evidence, and reopen implementation only for verified claims."
-
-          _ ->
-            "Address the pending GitHub review feedback on #{pr_url}, update the code, and return the branch to runtime validation."
-        end
-
-      summary =
-        case target_stage do
-          "review_verification" ->
-            "GitHub review feedback detected on #{pr_url}. Returning to review_verification before reopening implementation."
-
-          _ ->
-            "GitHub review feedback detected on #{pr_url}. Returning to implement to address the requested changes."
-        end
-
-      case ensure_review_follow_up_lease(state, run_state, workspace) do
-        {:ok, state, lease_attrs, release_on_failure?} ->
-          case RunStateStore.transition(
-                 workspace,
-                 target_stage,
-                 %{
-                   issue_id: Map.get(run_state, :issue_id),
-                   issue_identifier: Map.get(run_state, :issue_identifier),
-                   issue_source: Map.get(run_state, :issue_source),
-                   pr_url: pr_url,
-                   review_threads: review_threads,
-                   review_claims: review_claims,
-                   review_return_stage: Map.get(run_state, :stage),
-                   last_review_decision: Map.get(feedback, :review_decision),
-                   stop_reason: nil,
-                   last_decision: nil,
-                   last_rule_id: nil,
-                   last_failure_class: nil,
-                   last_decision_summary: summary,
-                   next_human_action: nil,
-                   resume_context:
-                     review_resume_context(
-                       Map.get(run_state, :resume_context),
-                       pr_url,
-                       review_threads,
-                       review_claims,
-                       next_objective
-                     )
-                 }
-                 |> Map.merge(lease_attrs)
-               ) do
-            {:ok, _next_run_state} ->
-              issue_ref = issue_ref_for_run_state(run_state)
-              _ = IssueSource.update_issue_state(issue || issue_ref, "In Progress")
-
-              refreshed_issue =
-                case issue do
-                  %Issue{} = existing_issue ->
-                    case IssueSource.refresh_issue(existing_issue) do
-                      {:ok, %Issue{} = latest_issue} -> latest_issue
-                      _ -> %{existing_issue | state: "In Progress"}
-                    end
-
-                  _ ->
-                    nil
-                end
-
-              RunLedger.record("review.feedback_autonomous_follow_up", %{
-                issue_id: Map.get(run_state, :issue_id),
-                issue_identifier: Map.get(run_state, :issue_identifier),
-                actor_type: "runtime",
-                actor_id: "github_webhook",
-                summary: summary,
-                details: pr_url,
-                metadata: %{
-                  review_decision: Map.get(feedback, :review_decision),
-                  pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
-                  target_stage: target_stage
-                }
-              })
-
-              {:ok, maybe_dispatch_autonomous_review_follow_up(state, refreshed_issue)}
-
-            {:error, reason} ->
-              state = if release_on_failure?, do: release_review_follow_up_lease(state, run_state, workspace), else: state
-
-              Logger.warning("Failed to transition #{pr_url} back to implement after review feedback: #{inspect(reason)}")
-
-              {:not_autonomous, state}
-          end
-
-        {:skip, owner} ->
-          Logger.info("Skipping autonomous PR review follow-up for #{pr_url}; lease is owned by #{inspect(owner)}")
-
-          {:not_autonomous, state}
-
-        {:error, reason} ->
-          Logger.warning("Unable to secure lease for autonomous PR review follow-up on #{pr_url}: #{inspect(reason)}")
-
-          {:ok, state}
-      end
-    else
-      case {autonomous_review_follow_up?(state, issue, run_state, workspace), PRWatcher.actionable_feedback?(feedback)} do
-        {true, false} ->
-          summary =
-            "GitHub review feedback detected on #{pr_url}, but the current adjudicator triaged it as non-actionable noise."
-
-          case RunStateStore.update(workspace, fn persisted ->
-                 persisted
-                 |> Map.put(:review_threads, review_threads)
-                 |> Map.put(:review_claims, review_claims)
-                 |> Map.put(:last_review_decision, Map.get(feedback, :review_decision))
-                 |> Map.put(:last_decision_summary, summary)
-                 |> Map.put(:next_human_action, nil)
-                 |> put_review_resume_context(pr_url, review_threads, review_claims, nil)
-               end) do
-            {:ok, next_run_state} ->
-              RunLedger.record("review.feedback_triaged", %{
-                issue_id: Map.get(next_run_state, :issue_id),
-                issue_identifier: Map.get(next_run_state, :issue_identifier),
-                actor_type: "runtime",
-                actor_id: "github_webhook",
-                summary: summary,
-                details: pr_url,
-                metadata: %{
-                  pending_drafts_count: Map.get(feedback, :pending_drafts_count, 0),
-                  actionable_items_count: Map.get(feedback, :actionable_items_count, 0),
-                  review_decision: Map.get(feedback, :review_decision)
-                }
-              })
-
-              {:ok, state, :non_actionable}
-
-            {:error, reason} ->
-              Logger.warning("Failed to persist non-actionable review triage for #{pr_url}: #{inspect(reason)}")
-
-              {:not_autonomous, state}
-          end
-
-        _ ->
-          {:not_autonomous, state}
-      end
-    end
-  end
-
   defp autonomous_review_follow_up?(%State{} = state, issue, run_state, workspace) when is_map(run_state) do
     stage = Map.get(run_state, :stage)
 
@@ -2740,41 +3411,6 @@ defmodule SymphonyElixir.Orchestrator do
       issue_id when is_binary(issue_id) -> Map.has_key?(state.paused_issue_states, issue_id)
       _ -> false
     end
-  end
-
-  defp maybe_dispatch_autonomous_review_follow_up(%State{} = state, %Issue{} = issue) do
-    cond do
-      Map.has_key?(state.running, issue.id) ->
-        state
-
-      retry_candidate_issue?(issue, terminal_state_set()) and
-          dispatch_slots_available?(issue, state) ->
-        dispatch_runtime_issue(state, issue, nil)
-
-      true ->
-        :ok = schedule_tick(0)
-        state
-    end
-  end
-
-  defp maybe_dispatch_autonomous_review_follow_up(%State{} = state, _issue) do
-    :ok = schedule_tick(0)
-    state
-  end
-
-  defp put_review_resume_context(run_state, pr_url, review_threads, review_claims, next_objective)
-       when is_map(run_state) do
-    Map.put(
-      run_state,
-      :resume_context,
-      review_resume_context(
-        Map.get(run_state, :resume_context),
-        pr_url,
-        review_threads,
-        review_claims,
-        next_objective
-      )
-    )
   end
 
   defp review_resume_context(
@@ -3178,11 +3814,12 @@ defmodule SymphonyElixir.Orchestrator do
   defp invalidate_tracker_inbox_cache(state, issues, origin) do
     Enum.reduce(issues, state, fn issue, current ->
       if remember_issue_cache_entry(current.issue_routing_cache, issue) != current.issue_routing_cache,
-        do: invalidate_tracker_inbox_issue(current, issue.id, origin),
+        do: current |> invalidate_github_issue(issue.id, origin) |> invalidate_tracker_inbox_issue(issue.id, origin),
         else: current
     end)
   end
 
+  defp tracker_inbox_boundary(state, %{purpose: :github_inbox} = completion), do: github_gate_boundary(state, completion)
   defp tracker_inbox_boundary(_state, nil), do: :ok
 
   defp tracker_inbox_boundary(state, completion) do
@@ -3201,6 +3838,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp bind_tracker_inbox_custody(state, id, previous, claim) do
+    state = github_bind_custody(state, id, previous, claim)
+
     case tracker_inbox_completion(state, id) do
       %{custody_ref: expected} = completion when expected == previous ->
         completion = %{completion | custody_ref: claim.custody_ref}
@@ -3213,6 +3852,9 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
+
+  defp tracker_inbox_wait(%{github_inbox_batch: %{head: %{operation: %{issue_ref: %{id: id}, completion: completion}}}} = state, id, phase) when not is_nil(completion),
+    do: github_action_outcome(state, id, {:wait, phase})
 
   defp tracker_inbox_wait(state, id, phase) do
     case tracker_inbox_completion(state, id) do
@@ -3254,6 +3896,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp tracker_inbox_outcome(%{github_inbox_batch: %{head: %{operation: %{issue_ref: %{id: id}, completion: completion}}}} = state, id, outcome) when not is_nil(completion),
+    do: github_action_outcome(state, id, outcome)
+
   defp tracker_inbox_outcome(state, id, outcome) do
     case tracker_inbox_completion(state, id) do
       nil ->
@@ -3274,6 +3919,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp tracker_inbox_failure(%{github_inbox_batch: %{head: %{operation: %{issue_ref: %{id: id}}}}} = state, id, reason),
+    do: update_in(state.github_inbox_batch.head.operation.errors, &Enum.uniq(&1 ++ [reason]))
+
   defp tracker_inbox_failure(state, id, reason) do
     case tracker_inbox_completion(state, id) do
       nil -> state
@@ -3281,6 +3929,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp finish_tracker_inbox_action(state, %{purpose: :github_inbox} = completion, fallback), do: finish_github_action(state, completion, fallback)
   defp finish_tracker_inbox_action(state, nil, _fallback), do: state
 
   defp finish_tracker_inbox_action(state, completion, fallback) do
@@ -4492,7 +5141,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("[dispatch] reject #{id} check=issue_paused")
         false
 
-      MapSet.member?(claimed, issue.id) ->
+      MapSet.member?(claimed, issue.id) and not disabled_github_candidate?(state, issue.id) ->
         Logger.info("[dispatch] reject #{id} check=already_claimed")
         false
 
@@ -4737,10 +5386,15 @@ defmodule SymphonyElixir.Orchestrator do
        when is_function(acquire_fun, 3) and is_function(spawn_fun, 4) do
     recipient = self()
 
-    with {:ok, workspace} <- current_custody_workspace(state, issue),
+    with false <- github_reserved?(state, issue.id),
+         {:ok, workspace} <- current_custody_workspace(state, issue),
          :ok <- DeployAudit.ensure_available(workspace) do
-      case acquire_issue_custody(state, issue, acquire_fun, workspace) do
-        {:ok, state} ->
+      case acquire_dispatch_custody(state, issue, acquire_fun, workspace) do
+        {:ok, state, {:github_disabled, stage}} ->
+          state = start_active_issue_worker(state, issue, attempt, recipient, &Task.Supervisor.start_child/2, stage)
+          if Map.has_key?(state.running, issue.id), do: invalidate_admission_issue(state, issue.id, tracker_inbox_origin(state, issue.id)), else: state
+
+        {:ok, state, :acquired} ->
           case persist_dispatchable_issue_lease(state, workspace, issue) do
             {:ok, _run_state} ->
               state = spawn_fun.(state, issue, attempt, recipient)
@@ -4761,7 +5415,33 @@ defmodule SymphonyElixir.Orchestrator do
           tracker_inbox_outcome(state, issue.id, {:blocked, {:lease_acquire_failed, reason}})
       end
     else
+      true -> state
       {:error, reason} -> halt_dispatch_audit(state, issue.id, reason)
+    end
+  end
+
+  defp acquire_dispatch_custody(state, issue, acquire_fun, workspace) do
+    case Map.get(state.lease_claims, issue.id) do
+      %{completion: %{purpose: :github_disabled} = completion} = claim ->
+        with true <- acquire_fun == (&LeaseManager.acquire/3) or {:error, :github_disabled_acquire_changed},
+             true <- disabled_github_candidate?(state, issue.id) or {:error, :github_disabled_custody_expired},
+             :ok <- LeaseManager.ensure_current(claim.token),
+             {:ok, raw} <- read_github_raw(workspace),
+             true <- (raw["issue_id"] == issue.id and raw["issue_identifier"] == issue.identifier) or {:error, :github_identity_changed},
+             true <- github_binding(raw) == completion.binding or {:error, :github_binding_changed},
+             stage when stage in ["implement", "review_verification"] <- raw["stage"] do
+          claim = %{claim | holder: :pending, issue: issue, promotion_ref: completion.decision_ref, completion: nil}
+          {:ok, put_in(state.lease_claims[issue.id], claim), {:github_disabled, stage}}
+        else
+          {:error, _reason} = error -> error
+          _stage -> {:error, :github_disabled_stage_changed}
+        end
+
+      _ ->
+        case acquire_issue_custody(state, issue, acquire_fun, workspace) do
+          {:ok, next} -> {:ok, next, :acquired}
+          {:error, _reason} = error -> error
+        end
     end
   end
 
@@ -4805,6 +5485,7 @@ defmodule SymphonyElixir.Orchestrator do
          true <- view.stage == dispatch_stage or {:error, :admission_stage_changed},
          run_state = merge_retry_budget_resume_context(view, retry_metadata),
          stage = view.stage,
+         :ok <- github_pre_admission(state, issue.id, stage),
          {:ok, pid, ticket, admitted_raw} <-
            start_audited_worker(
              state,
@@ -4880,8 +5561,15 @@ defmodule SymphonyElixir.Orchestrator do
           claimed: MapSet.put(state.claimed, issue.id),
           retry_attempts: Map.delete(state.retry_attempts, issue.id)
       }
+      |> bind_github_admission(issue.id, ticket, admitted_raw)
       |> tracker_inbox_wait(issue.id, :gate)
     else
+      {:error, {:github_admission_close_failed, ticket, cause, close_error}} ->
+        retain_github_admission_close(state, ticket, cause, close_error)
+
+      {:error, {:github_admission_rejected, reason}} ->
+        reject_github_current(state, reason)
+
       {:error, {tag, _} = reason} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
         halt_dispatch_audit(state, issue.id, reason)
 
@@ -4897,16 +5585,20 @@ defmodule SymphonyElixir.Orchestrator do
         stop_terminal_dispatch(state, issue, reason)
 
       {:error, reason} ->
-        {state, reason} = tracker_inbox_worker_start_failure(state, issue.id, reason)
-        Logger.error("Unable to spawn agent for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
-        state = tracker_inbox_outcome(state, issue.id, {:applied, :dispatch_rejected})
-        state = release_issue_claim(state, issue.id)
-        next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
+        if github_reserved?(state, issue.id) do
+          block_github_head(state, {:github_worker_start_failed, reason})
+        else
+          {state, reason} = tracker_inbox_worker_start_failure(state, issue.id, reason)
+          Logger.error("Unable to spawn agent for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
+          state = tracker_inbox_outcome(state, issue.id, {:applied, :dispatch_rejected})
+          state = release_issue_claim(state, issue.id)
+          next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
-        schedule_issue_retry(state, issue.id, next_attempt, %{
-          identifier: issue.identifier,
-          error: "failed to spawn agent: #{inspect(reason)}"
-        })
+          schedule_issue_retry(state, issue.id, next_attempt, %{
+            identifier: issue.identifier,
+            error: "failed to spawn agent: #{inspect(reason)}"
+          })
+        end
     end
   end
 
@@ -5118,6 +5810,7 @@ defmodule SymphonyElixir.Orchestrator do
     {policy_class, policy_source, _override} = policy_snapshot_values(issue, state, run_state)
 
     with {:ok, claim} <- current_issue_custody(state, issue.id),
+         :ok <- github_pre_admission(state, issue.id, run_state.stage),
          lease = claim.lease,
          {:ok, ticket, admitted_raw} <-
            DispatchAudit.begin(
@@ -5132,27 +5825,37 @@ defmodule SymphonyElixir.Orchestrator do
              },
              source
            ) do
-      case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
-             DispatchGate.run(owner, ticket.dispatch_id, fn ->
-               case DispatchAudit.with_authorization(ticket, fn ->
-                      {:executed, AgentExecution.with_context(ticket, claim.token, owner, admitted_raw, worker_fun)}
-                    end) do
-                 {:executed, {:stop, {:accounting_uncertain, cause}}} -> exit({:accounting_uncertain, cause})
-                 {:executed, {:stop, {:stale_execution, ids, cause}}} -> exit({:stale_execution, ids, cause})
-                 {:executed, {:stop, {:execution_stopped, _stop}}} -> :ok
-                 {:executed, result} -> result
-                 {:error, reason} -> exit({:accounting_uncertain, {:dispatch_authorization_failed, reason}})
-               end
-             end)
-           end) do
-        {:ok, pid} ->
-          {:ok, pid, ticket, admitted_raw}
+      with :ok <- github_post_admission(state, issue.id, ticket, admitted_raw) do
+        case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
+               DispatchGate.run(owner, ticket.dispatch_id, fn ->
+                 case DispatchAudit.with_authorization(ticket, fn ->
+                        {:executed, AgentExecution.with_context(ticket, claim.token, owner, admitted_raw, worker_fun)}
+                      end) do
+                   {:executed, {:stop, {:accounting_uncertain, cause}}} -> exit({:accounting_uncertain, cause})
+                   {:executed, {:stop, {:stale_execution, ids, cause}}} -> exit({:stale_execution, ids, cause})
+                   {:executed, {:stop, {:execution_stopped, _stop}}} -> :ok
+                   {:executed, result} -> result
+                   {:error, reason} -> exit({:accounting_uncertain, {:dispatch_authorization_failed, reason}})
+                 end
+               end)
+             end) do
+          {:ok, pid} ->
+            {:ok, pid, ticket, admitted_raw}
 
-        {:error, reason} ->
-          case DispatchAudit.finish(ticket, :not_started) do
-            :ok -> {:error, {:dispatch_worker_start_failed, reason}}
-            {:error, audit_reason} -> {:error, {:dispatch_audit_failed, audit_reason}}
-          end
+          {:error, reason} ->
+            case state.github_inbox_batch do
+              %{head: %{operation: %{issue_ref: %{id: id}, phase: :admitting}}} when id == issue.id ->
+                close_rejected_github_admission(ticket, {:dispatch_worker_start_failed, reason})
+
+              _ ->
+                case DispatchAudit.finish(ticket, :not_started) do
+                  :ok -> {:error, {:dispatch_worker_start_failed, reason}}
+                  {:error, audit_reason} -> {:error, {:dispatch_audit_failed, audit_reason}}
+                end
+            end
+        end
+      else
+        {:error, reason} -> close_rejected_github_admission(ticket, reason)
       end
     else
       {:error, reason} -> {:error, {:dispatch_audit_failed, reason}}
@@ -5854,7 +6557,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
-    if execution_hold?(state, issue_id), do: state, else: release_healthy_issue_claim(state, issue_id)
+    if execution_hold?(state, issue_id) or github_admission_close_held?(state, issue_id), do: state, else: release_healthy_issue_claim(state, issue_id)
   end
 
   defp release_healthy_issue_claim(%State{} = state, issue_id) do
@@ -5877,7 +6580,10 @@ defmodule SymphonyElixir.Orchestrator do
             state |> tracker_inbox_outcome(issue_id, {:recheck, :lease_ownership_changed}) |> drop_issue_custody(issue_id) |> Map.put(:candidate_fetch_error, {:lease_ownership_changed, issue_id})
 
           {:error, reason} ->
-            Logger.error("Lease release failed issue_id=#{issue_id}; persisted ownership was preserved: #{inspect(reason)}")
+            if github_tracked_issue?(state, issue_id),
+              do: Logger.error("GitHub continuation cleanup failed issue_id=#{issue_id} reason=#{github_reason_code(reason)}"),
+              else: Logger.error("Lease release failed issue_id=#{issue_id}; persisted ownership was preserved: #{inspect(reason)}")
+
             state = tracker_inbox_failure(state, issue_id, {:lease_release_failed, reason})
             %{state | claimed: MapSet.put(state.claimed, issue_id), candidate_fetch_error: {:lease_release_failed, issue_id, reason}}
         end
@@ -5904,7 +6610,10 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.error("Lease physically released but its audit was not confirmed issue_id=#{issue_id}: #{inspect(reason)}")
+        if github_tracked_issue?(state, issue_id),
+          do: Logger.error("GitHub continuation release audit unconfirmed issue_id=#{issue_id} reason=#{github_reason_code(reason)}"),
+          else: Logger.error("Lease physically released but its audit was not confirmed issue_id=#{issue_id}: #{inspect(reason)}")
+
         state = tracker_inbox_failure(state, issue_id, {:lease_release_audit_failed, reason})
         %{state | candidate_fetch_error: {:lease_release_audit_failed, issue_id, reason}}
     end
@@ -6735,36 +7444,43 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:retry_issue_now, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
     {reply, state} = Controls.retry_issue_now_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:refresh_merge_readiness, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
     {reply, state} = Controls.refresh_merge_readiness_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:reprioritize_issue, issue_identifier, override_rank}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
     {reply, state} = Controls.reprioritize_issue_runtime(state, issue_identifier, override_rank)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:approve_issue_for_merge, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
     {reply, state} = Controls.approve_issue_for_merge_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:approve_issue_for_deploy, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
     {reply, state} = Controls.approve_issue_for_deploy_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:approve_review_drafts, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
+
     {reply, state} =
       Controls.review_thread_action_runtime(state, issue_identifier, "approve_review_drafts")
 
@@ -6773,12 +7489,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:reject_review_drafts, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
     {reply, state} = Controls.review_thread_action_runtime(state, issue_identifier, "reject_review_drafts")
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:mark_review_threads_posted, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
+
     {reply, state} =
       Controls.review_thread_action_runtime(state, issue_identifier, "mark_review_threads_posted")
 
@@ -6787,12 +7506,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:post_review_drafts, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
     {reply, state} = Controls.post_review_drafts_runtime(state, issue_identifier)
     notify_dashboard()
     {:reply, reply, state}
   end
 
   def handle_call({:resolve_review_threads, issue_identifier}, _from, state) do
+    state = invalidate_github_issue(state, issue_identifier, nil)
+
     {reply, state} =
       Controls.review_thread_action_runtime(state, issue_identifier, "resolve_review_threads")
 
@@ -7135,9 +7857,13 @@ defmodule SymphonyElixir.Orchestrator do
         stop_terminal_dispatch(state, issue, reason)
 
       {:error, reason} ->
-        Logger.error("Dispatch blocked by runtime validation issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
-        state = tracker_inbox_outcome(state, issue.id, tracker_inbox_validation_outcome(reason))
-        %{state | candidate_fetch_error: reason}
+        if github_reserved?(state, issue.id) do
+          block_github_head(state, {:github_dispatch_validation_failed, reason})
+        else
+          Logger.error("Dispatch blocked by runtime validation issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+          state = tracker_inbox_outcome(state, issue.id, tracker_inbox_validation_outcome(reason))
+          %{state | candidate_fetch_error: reason}
+        end
     end
   end
 
@@ -7670,18 +8396,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       true ->
         "healthy"
-    end
-  end
-
-  defp list_workspace_paths(root) when is_binary(root) do
-    case File.ls(root) do
-      {:ok, entries} ->
-        entries
-        |> Enum.map(&Path.join(root, &1))
-        |> Enum.filter(&File.dir?/1)
-
-      _ ->
-        []
     end
   end
 
@@ -9012,8 +9726,6 @@ defmodule SymphonyElixir.Orchestrator do
       _ -> state
     end
   end
-
-  defp release_review_follow_up_lease(state, _run_state, _workspace), do: state
 
   defp persist_live_issue_lease(%State{} = state, workspace, issue) when is_binary(workspace) and is_map(issue) do
     with {:ok, claim} <- current_issue_custody(state, issue.id),

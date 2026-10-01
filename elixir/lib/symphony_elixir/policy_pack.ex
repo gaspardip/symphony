@@ -171,7 +171,7 @@ defmodule SymphonyElixir.PolicyPack do
   @spec resolve() :: t()
   def resolve, do: resolve(Config.policy_pack_name())
 
-  @spec resolve(String.t() | atom() | nil) :: t()
+  @spec resolve(t() | map() | String.t() | atom() | nil) :: t()
   def resolve(%__MODULE__{} = pack) do
     %__MODULE__{
       name: normalize_name(pack.name) || :private_autopilot,

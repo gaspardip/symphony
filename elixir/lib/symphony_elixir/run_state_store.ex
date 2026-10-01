@@ -27,6 +27,25 @@ defmodule SymphonyElixir.RunStateStore do
                       last_merge last_merge_readiness last_post_deploy_verify last_decision deploy_approved last_post_merge current_deploy_target stop_reason
                       last_implementation_error reason last_rule_id last_failure_class deploy_window_wait)a
 
+  @coordinator_fields @material_fields ++ ~w(resume_context last_ci_failure issue_source runner_channel runner_instance_id last_review_decision next_human_action)
+  @coordinator_review_attrs ~w(review_threads review_claims last_review_decision last_decision_summary next_human_action resume_context)a
+  @coordinator_ci_attrs ~w(last_ci_failure last_decision_summary next_human_action resume_context)a
+  @coordinator_cleanup_attrs ~w(stop_reason last_decision last_rule_id last_failure_class next_human_action)a
+  @coordinator_transition_attrs ~w(issue_source pr_url stop_reason last_decision last_rule_id last_failure_class)a
+  @coordinator_binding ~w(run_id run_identity_event_id run_identity_ledger_path)a
+  @coordinator_ci_fields ~w(event_name action check_name conclusion details_url head_sha pr_url summary)
+  @coordinator_review_resume ~w(review_feedback_summary review_claim_summary review_feedback_pr_url)
+  @coordinator_ci_resume ~w(ci_failure_summary ci_failure_pr_url ci_failure_details_url)
+
+  @type coordinator_authority :: %{
+          workspace: Path.t(),
+          issue_id: String.t(),
+          issue_identifier: String.t(),
+          binding: :legacy_absent | {:identified, map()},
+          lease_token: LeaseManager.token(),
+          deadline: integer()
+        }
+
   @type authority :: %{ticket: DispatchAudit.ticket(), lease_token: LeaseManager.token()}
   @type admission_source :: :missing | {:present, map()}
 
@@ -34,6 +53,254 @@ defmodule SymphonyElixir.RunStateStore do
   @spec material_projection(map()) :: map()
   def material_projection(state) when is_map(state) do
     state |> Jason.encode!() |> Jason.decode!() |> Map.take(@material_fields)
+  end
+
+  @doc "Keeps the coordinator's complete canonical decision inputs without changing worker material."
+  @spec coordinator_projection(map()) :: map()
+  def coordinator_projection(state) when is_map(state) do
+    state |> Jason.encode!() |> Jason.decode!() |> Map.take(@coordinator_fields)
+  end
+
+  @doc "Checks a pre-dispatch coordinator's captured run, token, material and deadline."
+  @spec ensure_coordinator_current(coordinator_authority(), map()) :: {:ok, map()} | {:error, term()}
+  def ensure_coordinator_current(authority, expected) do
+    with {:ok, workspace} <- coordinator_workspace(authority) do
+      with_workspace_lock(workspace, fn ->
+        with {:ok, state, _lease} <- coordinator_state_unlocked(authority, expected), :ok <- coordinator_deadline(authority.deadline), do: {:ok, state}
+      end)
+    end
+  end
+
+  @doc "Persists one closed review or CI observation on the checked fresh snapshot."
+  @spec update_coordinator_current(coordinator_authority(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def update_coordinator_current(authority, expected, attrs) do
+    with {:ok, workspace} <- coordinator_workspace(authority) do
+      with_workspace_lock(workspace, fn ->
+        with {:ok, state, _lease} <- coordinator_state_unlocked(authority, expected),
+             {:ok, attrs} <- coordinator_attrs(attrs, state, :update),
+             updated = Map.merge(state, attrs),
+             :ok <- write_coordinator_snapshot(workspace, updated, authority.deadline),
+             do: {:ok, updated}
+      end)
+    end
+  end
+
+  @doc "Applies only an owner-decided CI/review transition under captured coordinator authority."
+  @spec transition_coordinator_current(coordinator_authority(), map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def transition_coordinator_current(authority, expected, stage, attrs) when stage in ["implement", "review_verification"] do
+    with {:ok, workspace} <- coordinator_workspace(authority) do
+      with_workspace_lock(workspace, fn ->
+        with {:ok, state, lease} <- coordinator_state_unlocked(authority, expected),
+             {:ok, attrs} <- coordinator_attrs(attrs, state, {:transition, stage}) do
+          same_stage? = state[:stage] == stage
+
+          updated =
+            state
+            |> Map.merge(attrs)
+            |> apply_lease_attrs(LeaseManager.snapshot_for_state(lease))
+            |> ensure_runner_metadata()
+            |> Map.put(:stage, stage)
+            |> maybe_record_stage_transition(stage, nil, same_stage?)
+
+          if same_stage? do
+            with :ok <- write_coordinator_snapshot(workspace, updated, authority.deadline), do: {:ok, updated}
+          else
+            commit_audited_transition(workspace, updated, attrs, state[:stage], %{}, authority.deadline)
+          end
+        end
+      end)
+    end
+  end
+
+  def transition_coordinator_current(_authority, _expected, _stage, _attrs), do: {:error, :invalid_coordinator_stage}
+
+  defp coordinator_workspace(%{workspace: workspace, issue_id: id, issue_identifier: identifier, binding: _binding, lease_token: token, deadline: deadline} = authority)
+       when is_binary(workspace) and workspace != "" and is_binary(id) and id != "" and is_binary(identifier) and identifier != "" and
+              is_map(token) and is_integer(deadline) and map_size(authority) == 6 do
+    if Path.type(workspace) == :absolute and Path.expand(workspace) == workspace,
+      do: {:ok, workspace},
+      else: coordinator_rejected(:invalid_coordinator_workspace)
+  end
+
+  defp coordinator_workspace(_authority), do: coordinator_rejected(:invalid_coordinator_authority)
+
+  defp coordinator_state_unlocked(authority, expected) do
+    with :ok <- coordinator_deadline(authority.deadline),
+         :ok <- DispatchAudit.ensure_available(authority.workspace),
+         :ok <- DeployAudit.ensure_available(authority.workspace),
+         {:ok, raw} <- read_canonical_snapshot(authority.workspace),
+         :ok <- coordinator_assert(raw["issue_id"] == authority.issue_id and raw["issue_identifier"] == authority.issue_identifier, :coordinator_issue_mismatch),
+         :ok <- coordinator_binding(authority, raw),
+         {:ok, path} <- RunLedger.ledger_file_path_checked(),
+         :ok <- coordinator_token_location(authority, path),
+         :ok <- coordinator_lease_check(LeaseManager.ensure_current(authority.lease_token)),
+         {:ok, lease} <- LeaseManager.read_at(authority.lease_token.storage),
+         :ok <- coordinator_physical_lease(authority, lease),
+         :ok <- coordinator_assert(is_map(expected) and expected == coordinator_projection(raw), :coordinator_material_changed) do
+      state =
+        Map.new(raw, fn
+          {"stage_transition_counts", counts} -> {:stage_transition_counts, counts}
+          {key, value} -> {atom_key(key), atomize_value(value)}
+        end)
+
+      {:ok, state, lease}
+    end
+  end
+
+  defp coordinator_binding(%{binding: :legacy_absent}, raw) do
+    coordinator_assert(Enum.all?(@coordinator_binding, &(not Map.has_key?(raw, Atom.to_string(&1)))), :coordinator_binding_changed)
+  end
+
+  defp coordinator_binding(%{binding: {:identified, binding}} = authority, raw) when is_map(binding) do
+    with :ok <- coordinator_assert(coordinator_keys?(binding, @coordinator_binding), :invalid_coordinator_binding),
+         :ok <- coordinator_assert(Enum.all?(@coordinator_binding, &(is_binary(binding[&1]) and binding[&1] != "" and raw[Atom.to_string(&1)] == binding[&1])), :coordinator_binding_changed) do
+      SymphonyElixir.RunIdentity.verify(authority.workspace, binding.run_id, authority.issue_id, authority.issue_identifier)
+    end
+  end
+
+  defp coordinator_binding(_authority, _raw), do: coordinator_rejected(:invalid_coordinator_binding)
+
+  defp coordinator_token_location(%{issue_id: id, lease_token: %{storage: %{issue_id: id, ledger_path: path}}}, path), do: :ok
+  defp coordinator_token_location(_authority, _path), do: coordinator_rejected(:coordinator_lease_location_changed)
+
+  defp coordinator_physical_lease(%{lease_token: token, issue_identifier: identifier}, lease) do
+    same? =
+      lease["lease_version"] == 2 and lease["issue_id"] == token.storage.issue_id and lease["issue_identifier"] == identifier and
+        lease["owner"] == token.owner and lease["epoch"] == token.epoch and lease["lease_generation"] == token.lease_generation and
+        lease["acquired_at"] == token.acquired_at
+
+    with :ok <- coordinator_assert(same?, :lease_token_mismatch),
+         age when is_integer(age) <- LeaseManager.age_ms(lease) do
+      coordinator_assert(age < token.storage.ttl_ms, :lease_expired)
+    else
+      nil -> coordinator_rejected(:invalid_lease)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp coordinator_lease_check({:error, reason}) when reason in [:lease_token_mismatch, :lease_expired, :invalid_lease_token, :invalid_lease_storage, :missing],
+    do: coordinator_rejected(reason)
+
+  defp coordinator_lease_check(result), do: result
+
+  defp coordinator_deadline(:not_pending), do: :ok
+  defp coordinator_deadline(deadline), do: coordinator_assert(System.monotonic_time(:millisecond) < deadline, :coordinator_deadline_expired)
+  defp coordinator_assert(true, _cause), do: :ok
+  defp coordinator_assert(false, cause), do: coordinator_rejected(cause)
+  defp coordinator_rejected(cause), do: {:error, {:coordinator_precondition_failed, cause}}
+
+  defp coordinator_keys?(map, keys), do: MapSet.new(Map.keys(map)) == MapSet.new(keys)
+
+  defp coordinator_attrs(attrs, state, operation) when is_map(attrs) do
+    with {:ok, kind} <- coordinator_attr_kind(attrs, operation),
+         {:ok, encoded} <- Jason.encode(attrs),
+         canonical = Jason.decode!(encoded),
+         true <- coordinator_values?(canonical, state, kind, operation) do
+      # A nil legacy source supplied by the closed shape must not materialize a missing RAW field.
+      attrs = if operation != :update and not Map.has_key?(state, :issue_source), do: Map.delete(attrs, :issue_source), else: attrs
+      {:ok, attrs}
+    else
+      _ -> {:error, :invalid_coordinator_attrs}
+    end
+  end
+
+  defp coordinator_attrs(_attrs, _state, _operation), do: {:error, :invalid_coordinator_attrs}
+
+  defp coordinator_attr_kind(attrs, :update) do
+    cond do
+      coordinator_keys?(attrs, @coordinator_review_attrs) -> {:ok, :review}
+      coordinator_keys?(attrs, @coordinator_ci_attrs) -> {:ok, :ci}
+      true -> {:error, :invalid_coordinator_attrs}
+    end
+  end
+
+  defp coordinator_attr_kind(attrs, {:transition, stage}) do
+    cond do
+      stage == "implement" and coordinator_keys?(attrs, @coordinator_ci_attrs ++ @coordinator_transition_attrs ++ [:await_checks_polls]) -> {:ok, :ci}
+      coordinator_keys?(attrs, @coordinator_review_attrs ++ @coordinator_transition_attrs ++ [:review_return_stage]) -> {:ok, :review}
+      true -> {:error, :invalid_coordinator_attrs}
+    end
+  end
+
+  defp coordinator_values?(attrs, state, kind, operation) do
+    raw = state |> Jason.encode!() |> Jason.decode!()
+    valid_summary? = is_binary(attrs["last_decision_summary"]) and (is_nil(attrs["next_human_action"]) or is_binary(attrs["next_human_action"]))
+
+    valid_fields? =
+      case kind do
+        :review ->
+          is_map(attrs["review_threads"]) and is_map(attrs["review_claims"]) and (is_nil(attrs["last_review_decision"]) or is_binary(attrs["last_review_decision"]))
+
+        :ci ->
+          is_map(attrs["last_ci_failure"]) and coordinator_keys?(attrs["last_ci_failure"], @coordinator_ci_fields) and
+            Enum.all?(Map.values(attrs["last_ci_failure"]), &(is_nil(&1) or is_binary(&1))) and attrs["last_ci_failure"]["pr_url"] == raw["pr_url"]
+      end
+
+    valid_transition? =
+      case operation do
+        :update ->
+          true
+
+        {:transition, _stage} ->
+          coordinator_source?(attrs["issue_source"]) and attrs["issue_source"] == raw["issue_source"] and
+            is_binary(attrs["pr_url"]) and attrs["pr_url"] != "" and attrs["pr_url"] == raw["pr_url"] and
+            Enum.all?(@coordinator_cleanup_attrs, &is_nil(attrs[Atom.to_string(&1)])) and
+            if(kind == :ci, do: attrs["await_checks_polls"] == 0, else: attrs["review_return_stage"] == raw["stage"])
+      end
+
+    valid_summary? and valid_fields? and valid_transition? and coordinator_resume?(attrs["resume_context"], raw, kind)
+  end
+
+  defp coordinator_source?(nil), do: true
+  defp coordinator_source?(source) when is_binary(source), do: String.downcase(String.trim(source)) in ["manual", "tracker"]
+  defp coordinator_source?(_source), do: false
+
+  defp coordinator_resume?(resume, raw, kind) when is_map(resume) do
+    previous =
+      case raw["resume_context"] do
+        context when is_map(context) -> context
+        _ -> %{}
+      end
+
+    fields = if kind == :review, do: @coordinator_review_resume, else: @coordinator_ci_resume
+    pr_key = if kind == :review, do: "review_feedback_pr_url", else: "ci_failure_pr_url"
+    allowed = ["next_objective" | fields]
+    objective_unchanged? = Map.fetch(resume, "next_objective") == Map.fetch(previous, "next_objective")
+    objective = resume["next_objective"]
+
+    Enum.all?(fields, &(Map.has_key?(resume, &1) and (is_nil(resume[&1]) or is_binary(resume[&1])))) and
+      resume[pr_key] == raw["pr_url"] and Map.drop(resume, allowed) == Map.drop(previous, allowed) and
+      (objective_unchanged? or (is_binary(objective) and String.trim(objective) != ""))
+  end
+
+  defp coordinator_resume?(_resume, _raw, _kind), do: false
+
+  defp write_coordinator_snapshot(workspace, state, deadline) do
+    path = state_path(workspace)
+    tmp_path = "#{path}.tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         {:ok, payload} <- Jason.encode(state),
+         :ok <- coordinator_deadline(deadline) do
+      case File.write(tmp_path, payload, [:write]) do
+        :ok ->
+          case File.rename(tmp_path, path) do
+            :ok -> :ok
+            {:error, _reason} = error -> coordinator_snapshot_error(tmp_path, error)
+          end
+
+        {:error, _reason} = error ->
+          coordinator_snapshot_error(tmp_path, error)
+      end
+    end
+  end
+
+  defp coordinator_snapshot_error(tmp_path, {:error, primary} = error) do
+    case File.rm(tmp_path) do
+      :ok -> error
+      {:error, :enoent} -> error
+      {:error, cleanup} -> {:error, {:coordinator_snapshot_cleanup_failed, primary, cleanup}}
+    end
   end
 
   @doc "Reads the canonical admission witness and its derived view from one snapshot read."
@@ -868,7 +1135,7 @@ defmodule SymphonyElixir.RunStateStore do
     end
   end
 
-  defp commit_audited_transition(workspace, state, attrs, previous_stage, transition_metadata) do
+  defp commit_audited_transition(workspace, state, attrs, previous_stage, transition_metadata, coordinator_deadline \\ :not_pending) do
     state = ensure_runner_metadata(state)
     operation_id = SymphonyElixir.Util.generate_id("op_")
 
@@ -900,6 +1167,7 @@ defmodule SymphonyElixir.RunStateStore do
          digest = snapshot_digest(state),
          intent = put_in(intent, [:metadata, :snapshot_digest], digest),
          confirmation = put_in(confirmation, [:metadata, :snapshot_digest], digest),
+         :ok <- coordinator_deadline(coordinator_deadline),
          {:ok, _} <- RunLedger.persist_prepared(intent) do
       pending = %{
         operation_id: operation_id,
@@ -1030,11 +1298,12 @@ defmodule SymphonyElixir.RunStateStore do
     end)
   end
 
+  @doc "Synchronizes lease metadata without adding defaults to an existing matching snapshot."
   @spec sync_lease(Path.t(), map(), map()) :: {:ok, map()} | {:error, term()}
   def sync_lease(workspace, issue, lease_attrs)
       when is_binary(workspace) and is_map(issue) and is_map(lease_attrs) do
     with_workspace_lock(workspace, fn ->
-      with {:ok, previous_state} <- load_for_update(workspace, issue) do
+      with {:ok, previous_state} <- load_for_lease_sync(workspace, issue) do
         state = apply_lease_attrs(previous_state, lease_attrs)
 
         case save_unlocked(workspace, state) do
@@ -1043,6 +1312,21 @@ defmodule SymphonyElixir.RunStateStore do
         end
       end
     end)
+  end
+
+  defp load_for_lease_sync(workspace, issue) do
+    case load(workspace) do
+      {:ok, state} ->
+        if run_state_matches_issue?(state, issue),
+          do: {:ok, state},
+          else: {:ok, default_state(issue)}
+
+      {:error, :missing} ->
+        {:ok, default_state(issue)}
+
+      {:error, reason} ->
+        {:error, write_error(reason)}
+    end
   end
 
   @spec clear_lease(Path.t()) :: {:ok, map()} | {:error, term()}

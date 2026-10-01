@@ -88,6 +88,26 @@ defmodule SymphonyElixir.ManualIssueStore do
      end)}
   end
 
+  @doc "Reads one captured-root record; only a missing target is returned as nil."
+  @spec fetch_issue_by_id_checked(String.t(), Path.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_id_checked(issue_id, root_path) when is_binary(issue_id) and issue_id != "" and is_binary(root_path) do
+    path = Path.join(root_path, Base.url_encode64(issue_id, padding: false) <> ".json")
+
+    case File.read(path) do
+      {:ok, payload} ->
+        case Jason.decode(payload) do
+          {:ok, record} -> decode_checked_issue(record, issue_id)
+          {:error, reason} -> {:error, {:manual_issue_decode_failed, reason}}
+        end
+
+      {:error, :enoent} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        {:error, {:manual_issue_read_failed, reason}}
+    end
+  end
+
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, Issue.t() | nil}
   def fetch_issue_by_identifier(issue_identifier) when is_binary(issue_identifier) do
     fetch_issue_by_identifier(issue_identifier, root())
@@ -265,6 +285,24 @@ defmodule SymphonyElixir.ManualIssueStore do
       _ -> nil
     end
   end
+
+  defp decode_checked_issue(%{"issue" => issue_payload}, issue_id) when is_map(issue_payload) do
+    cond do
+      issue_payload["id"] != issue_id ->
+        {:error, {:manual_issue_identity_mismatch, :id}}
+
+      not is_binary(issue_payload["identifier"]) or issue_payload["identifier"] == "" ->
+        {:error, {:manual_issue_identity_mismatch, :identifier}}
+
+      issue_payload["source"] != "manual" ->
+        {:error, {:manual_issue_identity_mismatch, :source}}
+
+      true ->
+        {:ok, decode_issue(issue_payload)}
+    end
+  end
+
+  defp decode_checked_issue(_record, _issue_id), do: {:error, :invalid_manual_issue_record}
 
   defp decode_record(%{"issue" => issue_payload} = record) when is_map(issue_payload) do
     {:ok,

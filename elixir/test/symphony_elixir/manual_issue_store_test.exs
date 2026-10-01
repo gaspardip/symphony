@@ -94,4 +94,131 @@ defmodule SymphonyElixir.ManualIssueStoreTest do
                "acceptance_criteria" => ["Still unique"]
              })
   end
+
+  describe "checked lookup" do
+    test "returns the stored issue intact without changing the record", %{store_root: root} do
+      assert {:ok, issue} =
+               ManualIssueStore.submit(%{
+                 "id" => "checked",
+                 "identifier" => "CHECKED-1",
+                 "title" => "Checked manual issue",
+                 "acceptance_criteria" => ["Read exact record"]
+               })
+
+      assert {:ok, record} = ManualIssueStore.load_record_by_identifier(issue.identifier)
+      expected = record.issue
+      path = checked_path(root, issue.id)
+      bytes = File.read!(path)
+
+      assert {:ok, ^expected} = ManualIssueStore.fetch_issue_by_id_checked(issue.id, root)
+      assert File.read!(path) == bytes
+    end
+
+    test "uses the captured root instead of the current workflow root", %{store_root: root} do
+      id = "manual:captured"
+      captured = Path.join(root, "captured")
+      replacement = Path.join(root, "replacement")
+      checked_record!(captured, id, %{"identifier" => "CAPTURED-1"})
+      checked_record!(replacement, id, %{"identifier" => "REPLACEMENT-1"})
+      write_workflow_file!(Workflow.workflow_file_path(), manual_store_root: replacement)
+
+      assert {:ok, %{id: ^id, identifier: "CAPTURED-1", source: :manual}} =
+               ManualIssueStore.fetch_issue_by_id_checked(id, captured)
+
+      assert {:ok, %{identifier: "REPLACEMENT-1"}} = ManualIssueStore.fetch_issue_by_id(id)
+    end
+
+    test "only physical target absence is nil and lookup creates nothing", %{store_root: root} do
+      checked_record!(root, "manual:sibling")
+      before = Enum.sort(File.ls!(root))
+      missing_root = Path.join(root, "absent-root")
+
+      assert {:ok, nil} = ManualIssueStore.fetch_issue_by_id_checked("manual:missing", root)
+      assert {:ok, nil} = ManualIssueStore.fetch_issue_by_id_checked("manual:missing", missing_root)
+      assert Enum.sort(File.ls!(root)) == before
+      assert {:error, :enoent} = File.lstat(missing_root)
+    end
+
+    test "a healthy sibling cannot hide corrupt target JSON", %{store_root: root} do
+      id = "manual:corrupt"
+      checked_record!(root, "manual:sibling")
+      path = checked_path(root, id)
+      File.write!(path, "{broken-target")
+      bytes = File.read!(path)
+
+      assert {:error, {:manual_issue_decode_failed, %Jason.DecodeError{}}} =
+               ManualIssueStore.fetch_issue_by_id_checked(id, root)
+
+      assert File.read!(path) == bytes
+      assert {:ok, nil} = ManualIssueStore.fetch_issue_by_id(id, root)
+    end
+
+    test "directory and non-directory IO failures stay explicit", %{store_root: root} do
+      id = "manual:io"
+      File.mkdir_p!(checked_path(root, id))
+
+      assert {:error, {:manual_issue_read_failed, :eisdir}} = ManualIssueStore.fetch_issue_by_id_checked(id, root)
+
+      root_file = Path.join(root, "not-a-directory")
+      File.write!(root_file, "unchanged")
+      assert {:error, {:manual_issue_read_failed, :enotdir}} = ManualIssueStore.fetch_issue_by_id_checked(id, root_file)
+      assert File.read!(root_file) == "unchanged"
+    end
+
+    test "requires a JSON object containing an issue object", %{store_root: root} do
+      id = "manual:shape"
+      File.mkdir_p!(root)
+
+      for payload <- [nil, [], "record", %{}, %{"issue" => nil}, %{"issue" => []}] do
+        path = checked_path(root, id)
+        bytes = Jason.encode!(payload)
+        File.write!(path, bytes)
+        assert {:error, :invalid_manual_issue_record} = ManualIssueStore.fetch_issue_by_id_checked(id, root)
+        assert File.read!(path) == bytes
+      end
+    end
+
+    test "checks identity and explicit physical manual source before legacy decoding", %{store_root: root} do
+      id = "manual:identity"
+      valid = %{"id" => id, "identifier" => "MAN-1", "source" => "manual"}
+
+      mutations = [
+        {"id", nil, :id},
+        {"id", "", :id},
+        {"id", "manual:other", :id},
+        {"id", 42, :id},
+        {"identifier", nil, :identifier},
+        {"identifier", "", :identifier},
+        {"identifier", 42, :identifier},
+        {"source", nil, :source},
+        {"source", "tracker", :source},
+        {"source", "unknown", :source},
+        {"source", false, :source}
+      ]
+
+      File.mkdir_p!(root)
+
+      for {key, value, field} <- mutations do
+        path = checked_path(root, id)
+        bytes = Jason.encode!(%{"issue" => Map.put(valid, key, value)})
+        File.write!(path, bytes)
+
+        assert {:error, {:manual_issue_identity_mismatch, ^field}} = ManualIssueStore.fetch_issue_by_id_checked(id, root)
+        assert File.read!(path) == bytes
+      end
+
+      for {key, field} <- [{"id", :id}, {"identifier", :identifier}, {"source", :source}] do
+        File.write!(checked_path(root, id), Jason.encode!(%{"issue" => Map.delete(valid, key)}))
+        assert {:error, {:manual_issue_identity_mismatch, ^field}} = ManualIssueStore.fetch_issue_by_id_checked(id, root)
+      end
+    end
+  end
+
+  defp checked_path(root, id), do: Path.join(root, Base.url_encode64(id, padding: false) <> ".json")
+
+  defp checked_record!(root, id, attrs \\ %{}) do
+    File.mkdir_p!(root)
+    issue = Map.merge(%{"id" => id, "identifier" => "MAN-1", "source" => "manual"}, attrs)
+    File.write!(checked_path(root, id), Jason.encode!(%{"issue" => issue}))
+  end
 end

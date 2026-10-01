@@ -20,6 +20,14 @@ defmodule SymphonyElixir.IssueSource do
           manual: {:ok, [Issue.t()]} | {:error, term()}
         }
 
+  @type checked_outcome ::
+          {:issue, :manual | :tracker, Issue.t()}
+          | {:missing, :manual | :tracker}
+          | {:disabled, :manual | :tracker}
+          | {:read_error, :manual | :tracker, term()}
+          | {:rate_limited, term()}
+          | {:invalid, :reference | :issue | :response, term()}
+
   @spec fetch_candidate_outcomes(TrackerReadContext.t()) :: read_outcomes()
   def fetch_candidate_outcomes(%TrackerReadContext{} = context) do
     %{
@@ -171,6 +179,29 @@ defmodule SymphonyElixir.IssueSource do
     end
   end
 
+  @doc "Reads a captured reference without conflating semantic outcomes with reader failures."
+  @spec fetch_issue_checked(term(), TrackerReadContext.t()) :: {:ok, checked_outcome()}
+  def fetch_issue_checked(ref, %TrackerReadContext{} = context) do
+    case checked_reference(ref) do
+      {:ok, source, id, identifier} ->
+        enabled = if source == :manual, do: context.manual_enabled, else: tracker_enabled?(context)
+
+        if enabled do
+          outcome =
+            observe_checked_lookup(source, id, identifier, fn ->
+              read_checked_source(source, id, context)
+            end)
+
+          {:ok, outcome}
+        else
+          {:ok, {:disabled, source}}
+        end
+
+      {:error, reason} ->
+        {:ok, {:invalid, :reference, reason}}
+    end
+  end
+
   @spec create_comment(Issue.t() | String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(%Issue{} = issue, body), do: create_comment(issue_ref(issue), body)
   def create_comment(%{} = issue_ref, body), do: create_comment_ref(issue_ref(issue_ref), body)
@@ -228,6 +259,97 @@ defmodule SymphonyElixir.IssueSource do
         Map.get(issue, :canonical_identifier) || Map.get(issue, "canonical_identifier") ||
           Map.get(issue, :identifier) || Map.get(issue, "identifier")
     }
+  end
+
+  defp checked_reference(%{} = ref) do
+    id = Map.get(ref, :id)
+    identifier = Map.get(ref, :identifier)
+    source = Map.get(ref, :source)
+
+    cond do
+      not is_binary(id) or id == "" ->
+        {:error, {:invalid_issue_ref, :id}}
+
+      not is_binary(identifier) or identifier == "" ->
+        {:error, {:invalid_issue_ref, :identifier}}
+
+      not Map.has_key?(ref, :source) or source not in [nil, :manual, :tracker, "manual", "tracker"] ->
+        {:error, {:invalid_issue_ref, :source}}
+
+      true ->
+        route = if is_nil(source), do: infer_source(id), else: normalize_source(source)
+        {:ok, route, id, identifier}
+    end
+  end
+
+  defp checked_reference(_ref), do: {:error, {:invalid_issue_ref, :id}}
+
+  defp read_checked_source(:manual, id, context),
+    do: ManualIssueStore.fetch_issue_by_id_checked(id, context.manual_store_root)
+
+  defp read_checked_source(:tracker, id, %TrackerReadContext{tracker_kind: "memory"}),
+    do: SymphonyElixir.Tracker.Memory.fetch_issue_by_id(id)
+
+  defp read_checked_source(:tracker, id, %TrackerReadContext{linear_client_module: SymphonyElixir.Linear.Client} = context),
+    do: SymphonyElixir.Linear.Client.fetch_issue_by_id(id, context)
+
+  defp read_checked_source(:tracker, id, %TrackerReadContext{linear_client_module: client}),
+    do: client.fetch_issue_by_id(id)
+
+  defp checked_source_result({:ok, %Issue{} = issue}, source, id, identifier) do
+    cond do
+      issue.id != id -> checked_identity_error(source, :id)
+      issue.identifier != identifier -> checked_identity_error(source, :identifier)
+      not checked_issue_source?(source, issue.source) -> checked_identity_error(source, :source)
+      true -> {:issue, source, issue}
+    end
+  end
+
+  defp checked_source_result({:ok, nil}, source, _id, _identifier), do: {:missing, source}
+
+  defp checked_source_result({:error, {:linear_rate_limited, metadata} = reason}, :tracker, _id, _identifier),
+    do: checked_rate_limit(reason, metadata)
+
+  defp checked_source_result({:error, {:linear_api_status, 429, metadata} = reason}, :tracker, _id, _identifier),
+    do: checked_rate_limit(reason, metadata)
+
+  defp checked_source_result({:error, reason}, source, _id, _identifier), do: {:read_error, source, reason}
+  defp checked_source_result({:ok, _value}, _source, _id, _identifier), do: {:invalid, :issue, :invalid_issue}
+  defp checked_source_result(_result, _source, _id, _identifier), do: {:invalid, :response, :invalid_source_result}
+
+  defp checked_issue_source?(:manual, :manual), do: true
+  defp checked_issue_source?(:tracker, source) when source in [nil, :tracker], do: true
+  defp checked_issue_source?(_route, _source), do: false
+
+  defp checked_identity_error(:manual, field), do: {:read_error, :manual, {:manual_issue_identity_mismatch, field}}
+  defp checked_identity_error(:tracker, field), do: {:invalid, :issue, {:issue_identity_mismatch, field}}
+
+  defp checked_rate_limit(reason, metadata) when is_map(metadata), do: {:rate_limited, reason}
+  defp checked_rate_limit(_reason, _metadata), do: {:invalid, :response, :invalid_rate_limit_metadata}
+
+  @spec observe_checked_lookup(:manual | :tracker, String.t(), String.t(), (-> term())) :: checked_outcome()
+  defp observe_checked_lookup(source, id, identifier, fun) do
+    metadata = %{source: Atom.to_string(source), operation: "lookup"}
+    start_time = System.monotonic_time()
+    Observability.emit([:symphony, :issue_source, :start], %{count: 1}, metadata)
+    outcome = checked_source_result(fun.(), source, id, identifier)
+
+    label =
+      case outcome do
+        {:issue, _, _} -> "ok"
+        {:missing, _} -> "missing"
+        {:read_error, _, _} -> "error"
+        {:rate_limited, _} -> "rate_limited"
+        {:invalid, _, _} -> "invalid"
+      end
+
+    Observability.emit(
+      [:symphony, :issue_source, :stop],
+      %{count: 1, duration: System.monotonic_time() - start_time},
+      Map.put(metadata, :outcome, label)
+    )
+
+    outcome
   end
 
   defp tracker_outcome(context, fun) when is_function(fun, 0) do

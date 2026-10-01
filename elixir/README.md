@@ -242,8 +242,9 @@ abandoning the entry. Current identity, capacity, ownership and audit checks sti
 apply before worker authorization.
 
 This is a partial availability boundary. C3 promotion and C4b Linear inbox reads
-use the shared readers described below. GitHub processing, immediate controls,
-their pre-dispatch reads, tracker writes and local effects remain synchronous;
+use the shared readers described below, as do C5 GitHub issue-resolution reads. PR
+inspection, immediate controls, their pre-dispatch reads, tracker writes and local
+effects remain synchronous;
 applying a result may still invoke those paths. See [the phase contract and
 regressions](../docs/tracker-poll-async.md).
 
@@ -582,7 +583,8 @@ transaction over workspace deletion. Pending audit/corrupt/IO outcomes remain
 visible rather than being treated as missing.
 
 C3 does not fence all effects after the gate, recover volatile custody after a
-restart, or move webhook/GitHub/control business I/O to background readers.
+restart. C4b and C5 separately move their issue-resolution reads to shared readers;
+PR inspection, controls and business writers retain their synchronous limits.
 Validation of this candidate remains pending until the recorded repository gates.
 
 GitHub follow-up custody is bound to the explicit destination workspace. A local
@@ -606,7 +608,8 @@ Linear lookup uses the polling reader, and active revalidation shares one admiss
 reader with poll candidates, retries and existing C3 promotion. One bounded batch
 and one head preserve physical order. The inbox phase is visible in snapshots;
 held remote reads do not occupy the coordinator. Synchronous local effects and
-GitHub/control operations retain their existing limits.
+PR inspection and control operations retain their existing limits; C5 GitHub
+issue-resolution reads share B as described below.
 
 The head completes at a local reconciliation/rejection or real gate authorization,
 not when a worker is merely queued. Its cache projection stays private until that
@@ -688,3 +691,34 @@ passed/failed/unavailable; this block adds no distinct public timeout detection.
 See [the operation contract](../docs/RUNTIME_CONTRACT.md#deployment-operation-binding-i2c)
 and [deployment audit](../docs/deploy-audit.md). Source checks, loaded release and thesis
 acceptance remain separate evidence.
+
+
+## GitHub issue-resolution continuation (C5)
+
+Review and failing-check events retain a bounded physical inbox head while initial
+issue lookup and the refresh after confirmed effects share polling reader B. Active
+admission shares A with poll, retries and C3. A retained read leaves the coordinator
+available; PR inspection, local effects and tracker writers keep synchronous limits.
+
+A live worker delays all changes by that head. Its confirmed normal close triggers
+fresh state/source/routing/feedback evaluation without losing retry budget/context.
+Pending or uncertain closure remains blocked. Current review feedback can eliminate
+obsolete work; this does not add semantic deduplication of still-eligible CI events.
+
+A manual seed requires an enabled explicit manual source and actual absence of the
+exact checked record. Corruption, IO, remote lookup failure and disappearance during
+refresh cannot supply a seed or stale issue for dispatch. Remote absence/error can
+record an allowed observation and human action without autonomous reopening.
+
+Transitions, tracker writes and follow-up outcomes are not repeated when refresh or
+ack is retried. Current tracker 429 updates shared backoff: initial lookup retries
+fresh resolution; after effects only refresh may resume within original custody.
+Neither renewal nor backoff extends the acquisition deadline. Expiration preserves
+actual effects and blocks a late gate. Cleanup cannot release transferred or successor
+ownership. Failed no-child admission closure retains its own ticket and claim even
+through control/retry cleanup; inspection does not authorize recovery.
+
+The coordinator uses its own 19-field material comparison while preserving worker
+checks and fresh usage. Controls invalidate pending continuations even without a
+persisted stop marker. Source integration, loaded release, external providers and
+thesis acceptance need separate evidence. See [the full phase and error contract](../docs/RUNTIME_CONTRACT.md#github-event-continuation-c5).

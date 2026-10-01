@@ -1,12 +1,12 @@
 # Plan de evolución de la arquitectura de Symphony
 
-Fecha: 25 de septiembre de 2026. Estado: plan revisado técnicamente; implementación pendiente. Coordinación: tarea actual de Tesis.
+Fecha del plan original: 25 de septiembre de 2026. Seguimiento: las unidades se integran por separado; el contrato C5 se describe en su registro de progreso. Coordinación: tarea actual de Tesis.
 
 ## Objetivo y corte de referencia
 
 Cerrar las garantías pendientes del sistema, reducir el acoplamiento del coordinador y hacer comprobable el contrato con los proveedores. Incorporar cada unidad validada a `main` antes de acumular trabajo dependiente. Después, evaluar modelos nuevos sobre el mismo contrato y casos de aceptación.
 
-Base inspeccionada: `main`, `45fae0239176288712dd1acee5fac8d7facc632d`, en `/Users/gaspar/src/symphony`, limpia. La recuperación `b29ce72` está integrada localmente. La última validación registrada del árbol de producto tiene 1.365 pruebas sin fallos, 82,11 % de cobertura y los siete controles aprobados; esta revisión no volvió a ejecutarlos. Permanece abierto el fallo temporal observado en WorkflowStore y la aceptación funcional de tesis. La cifra de pruebas no demuestra aceptación ni ausencia de condiciones de carrera.
+Corte histórico de la revisión original: `main`, `45fae0239176288712dd1acee5fac8d7facc632d`, en `/Users/gaspar/src/symphony`, limpia. La recuperación `b29ce72` está integrada localmente. La última validación registrada del árbol de producto tiene 1.365 pruebas sin fallos, 82,11 % de cobertura y los siete controles aprobados; esta revisión no volvió a ejecutarlos. Permanece abierto el fallo temporal observado en WorkflowStore y la aceptación funcional de tesis. La cifra de pruebas no demuestra aceptación ni ausencia de condiciones de carrera.
 
 La planificación parte del [contrato vigente](RUNTIME_CONTRACT.md), las [lecturas asíncronas ya incorporadas](tracker-poll-async.md) y los contratos de [dispatch](dispatch-audit.md), [deploy](deploy-audit.md) y [leases](lease-exclusion.md). Los documentos históricos de diseño describen propuestas: no se convierten automáticamente en alcance de esta iniciativa.
 
@@ -131,6 +131,6 @@ Tres revisiones de lectura examinaron disponibilidad, identidad y proveedores so
 - Diferenciar modelo solicitado, modelo informado al abrir sesión y ejecución efectiva.
 - Mantener worker por intento y almacenamiento local mientras no exista una necesidad demostrada para reemplazarlos.
 
-Primer paquete de implementación: **C1**. Archivos previsibles: `elixir/lib/symphony_elixir/orchestrator.ex`, una nueva regresión de admisión asíncrona en `elixir/test/symphony_elixir/`, `docs/tracker-poll-async.md` y la documentación operativa afectada. El nombre de la nueva prueba se decide al verificar las convenciones existentes. Reutilizar TrackerReader y Config; ampliar sólo si la ruta demuestra que falta un contrato. Antes de escribir, concretar la interacción de admisión pendiente con el polling B y todas las entradas que llaman al predespacho.
+La revisión original eligió C1 como primer paquete. Los registros de progreso y los receipts externos conservan la implementación, pruebas e integración de cada unidad; las cifras del corte histórico anterior no describen automáticamente el árbol posterior.
 
-Finalización de esta fase: plan conservado en el repositorio y revisado técnicamente. C1 y los demás cambios de producto siguen pendientes para la continuación posterior a la revisión del plan con el usuario.
+C5 separa la resolución inicial del refresh posterior a efectos, comparte B y la admisión A existentes, difiere efectos mientras vive el worker y conserva el deadline original hasta el gate. Su [registro de progreso](../.symphony/progress/architecture-C5.md) describe el contrato y los límites; la aceptación depende de revisar y ejecutar el corte compuesto. C6, P2/I3, la autoridad y consumo de evidencia E1, la comprobación de release cargada y los 26 casos mantienen sus propios criterios. La comparación de modelos viene después de esas garantías.

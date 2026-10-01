@@ -105,6 +105,11 @@ acceptance_signals:
   - Runtime and dispatch expose immutable startup build diagnostics through a constant-time getter without new filesystem or module scans
   - Explicit worker inspections distinguish changed disk artifacts, mismatched loaded code, old code and modules not loaded without changing admission policy
   - Promotion checks the clean build receipt before and after copying a release without treating it as task acceptance or canary proof
+  - GitHub issue-resolution and post-effect refresh share polling reader B and the existing A admission arbiter with bounded physical cursor and workspace progress
+  - GitHub continuation defers all material effects until the live worker closes normally, then revalidates fresh source, routing and feedback while conserving retry context
+  - Coordinator writes compare 19 material fields and closed deltas without broadening worker material checks or resetting usage
+  - GitHub seeded manual continuation requires checked absence of the exact enabled explicit-manual record; corrupt, unavailable and vanished refresh records cannot become seeds
+  - GitHub callbacks, backoff and admission preserve the original custody deadline; failed own no-child closure retains exact audit uncertainty through controls and retry cleanup
 dependencies:
   - harness
-last_updated_by_issue: architecture-I2c
+last_updated_by_issue: architecture-C5

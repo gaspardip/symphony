@@ -145,6 +145,135 @@ defmodule SymphonyElixir.RunStateConcurrencyTest do
     end
   end
 
+  for identity_mode <- [:legacy, :identified] do
+    @tag lease_sync_identity_mode: identity_mode
+    test "lease synchronization preserves absent material fields for #{identity_mode} RAW", context do
+      assert {:ok, previous} = RunStateStore.load(context.workspace)
+      absent = [:implementation_turns, :policy_override, :review_return_stage]
+      sparse = previous |> Map.drop(absent) |> Map.put(:resume_context, %{retained: "lease-sync"})
+      path = RunStateStore.state_path(context.workspace)
+      File.write!(path, Jason.encode!(sparse))
+
+      authority =
+        if context.lease_sync_identity_mode == :identified do
+          assert {:ok, acquired} = SymphonyElixir.LeaseManager.acquire(context.issue.id, context.issue.identifier, "sparse-sync-owner")
+          assert {:ok, source, _view} = RunStateStore.read_admission_source(context.workspace, context.issue)
+
+          assert {:ok, ticket, _admitted} =
+                   SymphonyElixir.DispatchAudit.begin(
+                     context.workspace,
+                     %{issue_id: context.issue.id, issue_identifier: context.issue.identifier, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}},
+                     source
+                   )
+
+          on_exit(fn ->
+            assert :ok = SymphonyElixir.DispatchAudit.finish(ticket, :not_started)
+            assert {:ok, :released} = SymphonyElixir.LeaseManager.release_token(acquired.token)
+          end)
+
+          %{ticket: ticket, lease_token: acquired.token}
+        end
+
+      before = path |> File.read!() |> Jason.decode!()
+      expected = RunStateStore.material_projection(before)
+      Enum.each(absent, fn field -> refute Map.has_key?(before, Atom.to_string(field)) end)
+      ledger = File.read!(RunLedger.ledger_file_path())
+
+      attrs =
+        if authority do
+          assert {:ok, _} = RunStateStore.ensure_current(authority, expected)
+          assert {:ok, refreshed} = SymphonyElixir.LeaseManager.refresh_token(authority.lease_token)
+          SymphonyElixir.LeaseManager.snapshot_for_state(refreshed)
+        else
+          %{lease_owner: "sparse-sync-owner", lease_epoch: 2, lease_updated_at: "renewed"}
+        end
+
+      assert {:ok, synced} = RunStateStore.sync_lease(context.workspace, context.issue, attrs)
+      after_sync = path |> File.read!() |> Jason.decode!()
+      assert RunStateStore.material_projection(synced) == expected
+      assert RunStateStore.material_projection(after_sync) == expected
+      Enum.each(absent, fn field -> refute Map.has_key?(synced, field) end)
+      Enum.each(absent, fn field -> refute Map.has_key?(after_sync, Atom.to_string(field)) end)
+      assert synced.resume_context == %{retained: "lease-sync"}
+      assert after_sync["resume_context"] == before["resume_context"]
+      assert synced.lease_updated_at == attrs.lease_updated_at
+      assert File.read!(RunLedger.ledger_file_path()) == ledger
+      if authority, do: assert({:ok, _} = RunStateStore.ensure_current(authority, expected))
+    end
+  end
+
+  test "lease synchronization keeps explicit matching material values", context do
+    assert {:ok, _} = RunStateStore.update(context.workspace, &Map.merge(&1, %{implementation_turns: 7, policy_override: nil, review_return_stage: "await_checks"}))
+    assert {:ok, before} = RunStateStore.load(context.workspace)
+    expected = RunStateStore.material_projection(before)
+    assert {:ok, synced} = RunStateStore.sync_lease(context.workspace, context.issue, %{lease_owner: "matching-owner", lease_updated_at: "renewed"})
+    assert synced.implementation_turns == 7
+    assert Map.has_key?(synced, :policy_override)
+    assert synced.policy_override == nil
+    assert synced.review_return_stage == "await_checks"
+    assert RunStateStore.material_projection(synced) == expected
+    assert {:ok, persisted} = RunStateStore.load(context.workspace)
+    assert RunStateStore.material_projection(persisted) == expected
+  end
+
+  test "lease synchronization still initializes a missing snapshot", context do
+    workspace = Path.join(context.workspace, "new-snapshot")
+    assert {:error, :missing} = RunStateStore.load(workspace)
+    expected = workspace |> RunStateStore.load_or_default(context.issue) |> RunStateStore.material_projection()
+    assert {:ok, synced} = RunStateStore.sync_lease(workspace, context.issue, %{lease_owner: "new-owner", lease_epoch: 1})
+    assert synced.issue_id == context.issue.id
+    assert synced.issue_identifier == context.issue.identifier
+    assert synced.stage == "checkout"
+    assert synced.lease_owner == "new-owner"
+    assert synced.lease_epoch == 1
+    assert RunStateStore.material_projection(synced) == expected
+    assert {:ok, ^synced} = RunStateStore.load(workspace)
+  end
+
+  test "lease synchronization preserves legacy mismatched-issue initialization", context do
+    other = %{context.issue | id: "other-sync-issue", identifier: "OTHER-SYNC-ISSUE"}
+    assert {:ok, before} = RunStateStore.load(context.workspace)
+    assert before.issue_id != other.id
+    refute Map.has_key?(before, :run_id)
+    ledger = File.read!(RunLedger.ledger_file_path())
+    assert {:ok, synced} = RunStateStore.sync_lease(context.workspace, other, %{lease_owner: "other-owner", lease_epoch: 1})
+    assert synced.issue_id == other.id
+    assert synced.issue_identifier == other.identifier
+    assert synced.stage == "checkout"
+    assert synced.implementation_turns == 0
+    assert synced.policy_override == nil
+    assert synced.review_return_stage == nil
+    assert synced.lease_owner == "other-owner"
+    assert {:ok, ^synced} = RunStateStore.load(context.workspace)
+    assert File.read!(RunLedger.ledger_file_path()) == ledger
+  end
+
+  for {kind, payload, expected} <- [
+        {:json, "{invalid-json", {:run_state_unreadable, {:invalid_json, 1}}},
+        {:shape, "[]", {:run_state_unreadable, :invalid_state}},
+        {:pending, ~s({"audit_pending":{"operation_id":"pending-sync"}}), {:run_state_unreadable, {:audit_pending, "pending-sync"}}},
+        {:identity, ~s({"run_id":"partial-sync"}), :invalid_run_identity}
+      ] do
+    @tag lease_sync_error: {payload, expected}
+    test "lease synchronization preserves the #{kind} read error and bytes", context do
+      {payload, expected} = context.lease_sync_error
+      path = RunStateStore.state_path(context.workspace)
+      File.write!(path, payload)
+      ledger = File.read!(RunLedger.ledger_file_path())
+      assert {:error, ^expected} = RunStateStore.sync_lease(context.workspace, context.issue, %{lease_owner: "must-not-write"})
+      assert File.read!(path) == payload
+      assert File.read!(RunLedger.ledger_file_path()) == ledger
+    end
+  end
+
+  test "lease synchronization preserves the snapshot directory error", context do
+    path = RunStateStore.state_path(context.workspace)
+    File.rm!(path)
+    File.mkdir!(path)
+    assert {:error, :eisdir} = RunStateStore.sync_lease(context.workspace, context.issue, %{})
+    assert File.dir?(path)
+  end
+
   defp paused_update(workspace, fun) do
     parent = self()
 

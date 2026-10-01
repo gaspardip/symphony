@@ -159,13 +159,14 @@ are limited to 4 MiB; ordinary drains also stop at 100 physical rows. Oversize i
 is rejected before append. Logical reset preserves history and changes generation,
 sets the offset to EOF and clears dedupe. It is not corruption repair or compaction.
 
-GitHub business processing remains synchronous. After applying a prefix, the coordinator
+C4a defines storage, not business scheduling. C5 supplies the GitHub read continuation
+described below. After applying a prefix, the coordinator
 retains an unconfirmed cursor on storage failure and retries only that ack at the
 next drain opportunity. The cursor keeps its original location across configuration
 changes. A reset invalidates it; other mismatches remain blocked and visible.
 Owner restart can replay effects: delivery is at least once, not exactly once.
-The storage layer introduces no autonomous wakeup or reader. The Linear continuation
-below supplies those coordinator behaviors without changing the cursor contract.
+The storage layer introduces no autonomous wakeup or reader. The Linear and GitHub continuations
+below supply those coordinator behaviors without changing the cursor contract.
 
 
 ## Snapshot metadata reads
@@ -300,7 +301,8 @@ transaction over workspace deletion. Pending audit/corrupt/IO outcomes remain
 visible rather than being treated as missing.
 
 C3 does not fence all effects after the gate, recover volatile custody after a
-restart, or move webhook/GitHub/control business I/O to background readers.
+restart. C4b and C5 separately move their issue-resolution reads to shared readers;
+PR inspection, controls and business writers retain their synchronous limits.
 Validation of this candidate remains pending until the recorded repository gates.
 
 GitHub follow-up custody is bound to the explicit destination workspace. A local
@@ -358,8 +360,9 @@ for that owner, even if a later observation sees a missing lease; no repair of t
 audit is implied. No incomplete head publishes its own cache projection.
 
 The contract assumes one consuming coordinator and retains at-least-once delivery
-after owner restart. GitHub, controls, tracker writes and local business effects
-retain their existing availability limits. This change does not establish I2
+after owner restart. C5 separately moves GitHub issue-resolution reads to B. PR
+inspection, controls, tracker writes and local business effects retain their existing
+availability limits. This change does not establish I2
 post-gate validity, I3 recovery, distributed exactly-once processing or acceptance
 against an external provider. Verification results belong to the frozen validation
 record, not the existence of these test cases.
@@ -565,3 +568,73 @@ imports a ticket, writes, reconciles or removes evidence. All absent/corrupt/pen
 states stay distinguishable. A later release must establish its loaded build and
 acceptance separately from source integration and local test results. See
 [deployment audit](deploy-audit.md) for the persistence and remote-effect limits.
+
+
+## GitHub event continuation (C5)
+
+One captured physical inbox batch, bounded to 100 rows and 4 MiB, retains its cursor,
+generation and sorted workspace index. Resolving and refreshing after effects use
+the existing B polling reader; admission shares A with poll, retries and C3. No third
+reader or new queue service is introduced. Local callbacks retain operation identity;
+a stale result cannot acknowledge a replacement queue or repeat completed workspaces.
+An ack failure retries only confirmation. Restart retains at-least-once delivery,
+not durable exactly-once effects or a scan of workspaces created after capture.
+
+A live worker defers every C5 material effect, including local observations. B is
+free while the head waits. Only a confirmed normal audit close wakes fresh resolution
+of RAW, source, routing and review feedback. The worker's retry metadata and budget
+remain conserved until a real admission decision; stale or uncertain closure stays
+blocked. Fresh feedback may make review work unnecessary, and current stage/policy
+may make CI ineligible. This is not semantic deduplication of CI events whose current
+state remains eligible.
+
+Checked resolution captures id, identifier, source and context before lookup. Backend
+errors are semantic outcomes inside a reader envelope; a reader crash remains a reader
+failure. Manual lookup reads only the exact target record. Only its actual enoent,
+explicit manual source, enabled context and valid current binding/policy can authorize
+a seeded local continuation. Corruption, IO failure, disabled source or a record that
+disappears during refresh cannot become a seed. Remote missing/error may record the
+permitted local observation or human action, but cannot reopen or dispatch work.
+Invalid reference or returned identity authorizes no business effect.
+
+Coordinator writes compare a distinct 19-field projection: the worker's 12 material
+fields plus resume_context, last_ci_failure, issue_source, runner_channel,
+runner_instance_id, last_review_decision and next_human_action. Missing and explicit
+null differ. Four closed delta shapes cover review/CI observations and their existing
+autonomous transitions; unrelated attrs are rejected. Fresh usage and physical lease
+renewal are preserved. Identity/binding journals, workspace, physical token, local
+custody reference, controls and the original expected material remain checked.
+This does not broaden the worker projection or authorize adopting concurrent state.
+
+Applying records the checked local change, then its tracker outcome and follow-up
+result once. Only a confirmed writer outcome can proceed to fresh issue resolution;
+seeded local work has no fictitious successful tracker call. Failed or uncertain
+writers retain the real partial outcome without refresh, replay or successful ack.
+Current tracker 429 observations update shared backoff against the captured context.
+An initial-read 429 resumes fresh resolving; a post-effect 429 resumes only refresh.
+Backoff does not erase authenticated worker-close/retry lineage, grant ownership,
+repeat effects or allow old success to clear a newer transport observation.
+
+Custody starts at actual acquisition with the C3 monotonic deadline. Lock waits,
+writers and admission count toward that same deadline; phase changes, 429, renewal
+and transfer cannot extend it. Checks follow blocking validation and precede each
+new business writer or gate. An already-started writer completes its real outcome
+or uncertainty even if the deadline crosses; expiration cannot claim zero effects.
+Canceled reads retain their physical slot until DOWN. Cleanup releases only the
+still-owned token and local reference, never a successor or transferred custody.
+
+Admission retains the original coordinator projection across DispatchAudit.begin,
+checks its own admitted RAW and current RAW against it before creating a child, and
+uses the actual DispatchGate. Rejection before child creation closes only its own
+ticket as not_started. A real failed close retains that exact ticket, error and owned
+claim; stop, pause, retry and deadline cleanup cannot silently release that uncertain
+claim. No journal reconstruction, second finish attempt or automatic recovery is
+provided. Once a child exists, its real worker/audit lifecycle owns termination.
+
+Controls invalidate the pending continuation before later effects, including controls
+that leave no durable stop marker. Original retry context and downstream budget guards
+remain in force; an eligible preexisting blocked run is not universally vetoed by C5.
+PRWatcher, tracker mutations and local writers remain synchronous. Availability during
+held issue reads does not prove prompt stop during these effects, distributed atomicity,
+loaded-release correctness or thesis acceptance. Verification belongs to the frozen
+composed source and its external validation receipts.

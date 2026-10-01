@@ -36,6 +36,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     def handle_info(message, state), do: Orchestrator.handle_info(message, state)
     @impl true
     def handle_call(:state, _from, state), do: {:reply, state, state}
+    def handle_call(:github_pending_events, _from, state), do: {:reply, GitHubEventInbox.pending_events(), state}
     def handle_call(message, from, state), do: Orchestrator.handle_call(message, from, state)
   end
 
@@ -149,12 +150,12 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
              ])
 
     send(ctx.pid, :run_github_webhook_cycle)
-    state = wait_state!(ctx.pid, &(is_struct(&1.github_inbox_last_drained_at, DateTime) and idle?(&1)))
+    state = wait_state!(ctx.pid, &(is_struct(&1.github_inbox_last_drained_at, DateTime) and idle?(&1) and is_nil(&1.github_inbox_batch) and is_nil(&1.github_inbox_ack_pending)))
     assert state.github_last_assignment.event_id == "github-A"
     assert state.github_last_assignment.received_runner_channel == "canary"
     assert state.github_last_assignment.received_runner_instance_id == "canary:test"
     assert state.github_last_assignment.assignment_reason == "non_review_affecting_event"
-    assert [] == GitHubEventInbox.pending_events()
+    assert [] == GenServer.call(ctx.pid, :github_pending_events, 500)
     assert state.github_inbox_ack_pending == nil
   end
 
