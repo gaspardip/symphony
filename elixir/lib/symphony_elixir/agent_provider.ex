@@ -89,6 +89,7 @@ defmodule SymphonyElixir.AgentProvider do
   defp register_session(_context, provider, session, purpose), do: AgentExecution.register_session(provider, session, purpose)
 
   defp run_accounted_turn(provider, session, workspace, prompt, issue, opts, purpose, invocation) do
+    invocation = Map.put(invocation, :usage_metadata, usage_metadata(provider, session, opts))
     guarded_opts = accounting_callbacks(invocation, opts)
 
     try do
@@ -109,6 +110,24 @@ defmodule SymphonyElixir.AgentProvider do
       :throw, {:agent_execution_halt, {:stop, _} = terminal} -> terminal
     end
   end
+
+  # Capture the same model selection the adapter receives. This is descriptive
+  # telemetry, never execution authority or a fresh read of global configuration.
+  defp usage_metadata(SymphonyElixir.AgentProvider.Codex, _session, opts) do
+    model =
+      case Keyword.get(opts, :model) do
+        model when is_binary(model) and model != "" -> model
+        _omitted_model -> nil
+      end
+
+    %{provider: "codex", model: model}
+  end
+
+  defp usage_metadata(SymphonyElixir.AgentProvider.CodexCLI, session, opts),
+    do: %{provider: "codex-cli", model: Keyword.get(opts, :model, session.model)}
+
+  defp usage_metadata(SymphonyElixir.AgentProvider.Claude, session, opts),
+    do: %{provider: "claude", model: Keyword.get(opts, :model, session.model)}
 
   defp confirm_result(invocation, {:ok, result}) when is_map(result), do: AgentExecution.confirm_invocation(invocation, result)
   defp confirm_result(invocation, _result), do: AgentExecution.confirm_invocation(invocation)

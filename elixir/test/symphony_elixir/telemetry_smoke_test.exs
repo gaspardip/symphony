@@ -154,6 +154,23 @@ defmodule SymphonyElixir.TelemetrySmokeTest do
     assert report_payload["summary"]["recent_deliveries"] == 0
   end
 
+  test "token metrics preserve legacy labels and explicitly export missing labels" do
+    start_supervised!({TelemetryMetricsPrometheus.Core, metrics: SymphonyElixir.Observability.Metrics.metrics(), name: :legacy_usage_metrics, start_async: false})
+    entry = %{issue: %{id: "metric-legacy", identifier: "METRIC-1", source: :tracker}, stage: "implement"}
+    delta = %{input_tokens: 11, output_tokens: 7, total_tokens: 18}
+    assert :ok = Observability.emit_token_delta(entry, delta, %{event: :turn_completed, usage: %{"provider" => "openai", "model" => "reported-model"}})
+    assert :ok = Observability.emit_token_delta(entry, delta, %{event: :usage_observed})
+    assert :ok = Observability.emit_token_delta(entry, %{input_tokens: 0, output_tokens: 0, total_tokens: 0}, %{event: :usage_observed})
+    body = TelemetryMetricsPrometheus.Core.scrape(:legacy_usage_metrics) |> IO.iodata_to_binary()
+
+    for {name, value} <- [{"symphony_tokens_input_total", 11}, {"symphony_tokens_output_total", 7}, {"symphony_tokens_total", 18}, {"symphony_tokens_turns_total", 1}] do
+      lines = body |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, name <> "{"))
+      assert length(lines) == 2
+      assert Enum.any?(lines, &(&1 =~ "model_provider=\"openai\"" and &1 =~ "model_name=\"reported-model\"" and String.ends_with?(&1, " #{value}")))
+      assert Enum.any?(lines, &(&1 =~ "model_provider=\"unreported\"" and &1 =~ "model_name=\"unreported\"" and String.ends_with?(&1, " #{value}")))
+    end
+  end
+
   defp start_test_endpoint(overrides) do
     endpoint_config =
       :symphony_elixir

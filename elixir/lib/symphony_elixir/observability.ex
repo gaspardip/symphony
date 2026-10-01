@@ -132,8 +132,8 @@ defmodule SymphonyElixir.Observability do
             session_id: Map.get(running_entry, :session_id),
             turn_count: Map.get(running_entry, :turn_count),
             agent_event: Map.get(update, :event),
-            model_provider: update_usage_value(update, "provider"),
-            model_name: update_usage_value(update, "model"),
+            model_provider: reported_usage_label(update_usage_value(update, "provider")),
+            model_name: reported_usage_label(update_usage_value(update, "model")),
             reasoning_tier: Map.get(running_entry, :reasoning_tier)
           }
         )
@@ -301,6 +301,11 @@ defmodule SymphonyElixir.Observability do
     |> inspect(limit: 20, printable_limit: 200)
     |> String.slice(0, @max_reason_length)
   end
+
+  # Missing labels must remain visible in metrics. This does not infer a model
+  # or provider, and preserves every value the existing legacy caller supplies.
+  defp reported_usage_label(nil), do: "unreported"
+  defp reported_usage_label(value), do: value
 
   defp update_usage_value(update, key) do
     usage = Map.get(update, :usage) || %{}

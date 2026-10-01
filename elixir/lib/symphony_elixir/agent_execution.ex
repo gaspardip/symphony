@@ -28,7 +28,12 @@ defmodule SymphonyElixir.AgentExecution do
   @type counters :: %{input_tokens: non_neg_integer(), output_tokens: non_neg_integer(), total_tokens: non_neg_integer()}
   @type binding :: {module(), :session | :thread, String.t()}
   @type context :: %{ticket: DispatchAudit.ticket(), lease_token: map(), owner: pid(), worker: pid(), issue_id: String.t()}
-  @type invocation :: %{context: context(), binding: binding() | nil, ordinal: non_neg_integer()}
+  @type invocation :: %{
+          required(:context) => context(),
+          required(:binding) => binding() | nil,
+          required(:ordinal) => non_neg_integer(),
+          optional(:usage_metadata) => %{provider: String.t(), model: String.t() | nil}
+        }
   @type terminal :: {:stop, {:accounting_uncertain, term()} | {:stale_execution, %{run_id: String.t(), dispatch_id: String.t()}, term()} | {:execution_stopped, %{stage: String.t() | nil}}}
   @type registry :: %{live: map(), retired: %{optional(binding()) => true}, retired_usage: counters(), current: binding() | nil, ordinal: non_neg_integer(), uncertain: term() | nil}
   @type observation :: :no_usage | {:ok, :thread_absolute | :invocation_absolute, counters()}

@@ -1461,6 +1461,186 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     assert consumer_head(c) == before.head
   end
 
+  for {provider_name, provider} <- [{"claude", Claude}, {"codex-cli", CodexCLI}],
+      selection <- [:session, :turn] do
+    @metrics_provider provider
+    @metrics_provider_name provider_name
+    @metrics_selection selection
+    test "accounted #{@metrics_provider_name} metrics retain the #{@metrics_selection} model across global drift", c do
+      consumer_fixture!(c, @metrics_provider_name, "implement")
+
+      consumer_cli!(c, @metrics_provider_name, %{
+        "input_tokens" => 7,
+        "output_tokens" => 3,
+        "provider" => "untrusted-raw",
+        "model" => "untrusted-raw"
+      })
+
+      metrics_reporter!(c.issue.id)
+      {owner, worker, _entry} = start_controlled(c)
+      session_model = "session-" <> c.issue.id
+      turn_model = "turn-" <> c.issue.id
+      selected_model = if @metrics_selection == :session, do: session_model, else: turn_model
+
+      assert {:ok, _result} =
+               in_worker(worker, fn ->
+                 {:ok, session, binding} = AgentProvider.open_session(@metrics_provider, c.workspace, c.issue, :main, model: session_model)
+                 assert session.model == session_model
+                 workflow = Workflow.workflow_file_path()
+                 File.write!(workflow, String.replace(File.read!(workflow), "agent:\n", "agent:\n  model: global-drift\n"))
+                 assert :ok = WorkflowStore.force_reload()
+                 assert Config.agent_model() == "global-drift"
+                 opts = [execution_binding: binding, tool_executor: fn _, _ -> %{"success" => true} end]
+                 opts = if @metrics_selection == :turn, do: Keyword.put(opts, :model, turn_model), else: opts
+
+                 try do
+                   AgentProvider.run_turn(@metrics_provider, session, c.workspace, "local metrics proof", c.issue, opts, :delivery)
+                 after
+                   assert :ok = AgentProvider.close_session(@metrics_provider, session, binding)
+                 end
+               end)
+
+      assert_receive {:accounted_metric, %{input_tokens: 7, output_tokens: 3, total_tokens: 10, count: 1}, metadata}, 1_000
+      assert metadata.model_provider == @metrics_provider_name
+      assert metadata.model_name == selected_model
+      assert metadata.agent_event == "usage_observed"
+      refute_received {:accounted_metric, _, _}
+      assert GenServer.call(owner, :runtime).agent_totals.total_tokens == 10
+      assert {:ok, %{token_usage: %{input_tokens: 7, output_tokens: 3, total_tokens: 10}}} = RunStateStore.load(c.workspace)
+      body = TelemetryMetricsPrometheus.Core.scrape(:accounted_usage_metrics) |> IO.iodata_to_binary()
+      assert_token_metric!(body, "symphony_tokens_input_total", @metrics_provider_name, selected_model, 7)
+      assert_token_metric!(body, "symphony_tokens_output_total", @metrics_provider_name, selected_model, 3)
+      assert_token_metric!(body, "symphony_tokens_total", @metrics_provider_name, selected_model, 10)
+      assert_token_metric!(body, "symphony_tokens_turns_total", @metrics_provider_name, selected_model, 1)
+      refute body =~ "global-drift"
+      refute body =~ "untrusted-raw"
+    end
+  end
+
+  for {name, model, input, label} <- [
+        {"unreported", nil, 7, "unreported"},
+        {"explicit", "app-server-selected", 7, "app-server-selected"},
+        {"zero", nil, 0, "unreported"},
+        {"empty model omitted", "", 7, "unreported"},
+        {"false model omitted", false, 7, "unreported"},
+        {"map model omitted", %{ignored: true}, 7, "unreported"}
+      ] do
+    @metrics_model model
+    @metrics_name name
+    @metrics_input input
+    @metrics_label label
+    test "accounted AppServer #{@metrics_name} usage reaches the real metrics reporter", c do
+      consumer_fixture!(c, "codex", "implement")
+      request_path = metrics_app_server!(c, @metrics_input)
+      metrics_reporter!(c.issue.id)
+      {owner, worker, _entry} = start_controlled(c)
+      output = if @metrics_input == 0, do: 0, else: 3
+      total = @metrics_input + output
+
+      assert {:ok, %{result: :turn_completed}} =
+               in_worker(worker, fn ->
+                 {:ok, session, binding} = AgentProvider.open_session(Codex, c.workspace, c.issue, :main)
+                 opts = [execution_binding: binding, model: @metrics_model]
+
+                 try do
+                   AgentProvider.run_turn(Codex, session, c.workspace, "local metrics proof", c.issue, opts, :delivery)
+                 after
+                   assert :ok = AgentProvider.close_session(Codex, session, binding)
+                 end
+               end)
+
+      request = request_path |> File.read!() |> Jason.decode!()
+      assert request["method"] == "turn/start"
+
+      if @metrics_name == "explicit" do
+        assert request["params"]["model"] == "app-server-selected"
+      else
+        refute Map.has_key?(request["params"], "model")
+      end
+
+      assert GenServer.call(owner, :runtime).agent_totals.total_tokens == total
+      assert {:ok, %{token_usage: usage}} = RunStateStore.load(c.workspace)
+      assert usage == %{input_tokens: @metrics_input, output_tokens: output, total_tokens: total}
+      body = TelemetryMetricsPrometheus.Core.scrape(:accounted_usage_metrics) |> IO.iodata_to_binary()
+
+      if total == 0 do
+        refute_received {:accounted_metric, _, _}
+        refute body =~ "symphony_tokens"
+      else
+        assert_receive {:accounted_metric, %{total_tokens: ^total}, metadata}, 1_000
+        model = @metrics_label
+        assert metadata.model_provider == "codex"
+        assert metadata.model_name == model
+        refute_received {:accounted_metric, _, _}
+        assert_token_metric!(body, "symphony_tokens_input_total", "codex", model, @metrics_input)
+        assert_token_metric!(body, "symphony_tokens_output_total", "codex", model, output)
+        assert_token_metric!(body, "symphony_tokens_total", "codex", model, total)
+        assert_token_metric!(body, "symphony_tokens_turns_total", "codex", model, 1)
+      end
+    end
+  end
+
+  defp metrics_reporter!(issue_id) do
+    start_supervised!({TelemetryMetricsPrometheus.Core, metrics: SymphonyElixir.Observability.Metrics.metrics(), name: :accounted_usage_metrics, start_async: false})
+    handler = {__MODULE__, :accounted_usage_metrics, make_ref()}
+
+    assert :ok =
+             :telemetry.attach(
+               handler,
+               [:symphony, :tokens, :turn],
+               fn _, measurements, metadata, {observer, id} ->
+                 if metadata.issue_id == id, do: send(observer, {:accounted_metric, measurements, metadata})
+               end,
+               {self(), issue_id}
+             )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+  end
+
+  defp assert_token_metric!(body, name, provider, model, value) do
+    [line] = body |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, name <> "{"))
+    assert line =~ "model_provider=\"#{provider}\""
+    assert line =~ "model_name=\"#{model}\""
+    assert line =~ "stage=\"implement\""
+    assert String.ends_with?(line, " #{value}")
+  end
+
+  defp metrics_app_server!(c, input) do
+    request_path = Path.join(c.root, "metrics-turn-request.json")
+    output = if input == 0, do: 0, else: 3
+
+    observation = %{
+      "method" => "thread/tokenUsage/updated",
+      "params" => %{
+        "threadId" => "metrics-thread",
+        "tokenUsage" => %{
+          "total" => %{
+            "inputTokens" => input,
+            "outputTokens" => output,
+            "totalTokens" => input + output
+          }
+        }
+      }
+    }
+
+    write_script!(Path.join(c.bin, "codex"), """
+    while IFS= read -r line; do
+      case "$line" in
+        *'"method":"initialize"'*) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        *'"method":"thread/start"'*) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"metrics-thread"}}}' ;;
+        *'"method":"turn/start"'*)
+          printf '%s\\n' "$line" > #{consumer_quote(request_path)}
+          printf '%s\\n' #{consumer_quote(Jason.encode!(observation))}
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"metrics-turn"}}}'
+          printf '%s\\n' '{"method":"turn/completed"}'
+          ;;
+      esac
+    done
+    """)
+
+    request_path
+  end
+
   defp positive_app_server!(c, tool, arguments) do
     replies = Path.join(c.root, "positive-app-server-replies.jsonl")
     File.write!(replies, "")

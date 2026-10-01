@@ -9114,7 +9114,7 @@ defmodule SymphonyElixir.Orchestrator do
             |> Map.merge(%{agent_input_tokens: totals.input_tokens, agent_output_tokens: totals.output_tokens, agent_total_tokens: totals.total_tokens, issue_token_usage_base: base})
 
           next = state |> Map.put(:running, Map.put(state.running, issue_id, proposed)) |> apply_agent_token_delta(delta)
-          Observability.emit_token_delta(proposed, delta, %{event: :usage_observed})
+          Observability.emit_token_delta(proposed, delta, %{event: :usage_observed, usage: Map.get(invocation, :usage_metadata, %{})})
           next = maybe_stop_issue_for_token_budget(next, issue_id, proposed)
           notify_dashboard()
           next
