@@ -28,6 +28,13 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     def handle_call({:hold_down, value}, _from, state), do: {:reply, :ok, %{state | hold_down: value}}
     def handle_call({:hold_final_usage, value}, _from, state), do: {:reply, :ok, %{state | hold_final_usage: value}}
 
+    def handle_call(:enable_refresh_fixture, _from, state) do
+      # The existing fixture bypasses init/1. Supply only its real Config poll
+      # defaults before exercising request_refresh/1 and the actual reader flow.
+      runtime = %{state.runtime | poll_interval_ms: SymphonyElixir.Config.poll_interval_ms(), healing_poll_interval_ms: SymphonyElixir.Config.healing_poll_interval_ms(), poll_check_in_progress: false}
+      {:reply, :ok, state |> Map.put(:runtime, runtime) |> Map.put(:refresh_fixture, true)}
+    end
+
     def handle_call({:dispatch, issue, mode}, _from, state) do
       owner = self()
       observer = state.observer
@@ -112,6 +119,12 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
       {:reply, :ok, state}
     end
 
+    def handle_call({:release_down, before_down}, from, %{down: message} = state)
+        when not is_nil(message) and is_function(before_down, 0) do
+      before_down.()
+      handle_call(:release_down, from, state)
+    end
+
     def handle_call(:release_down, _from, %{down: message} = state) when not is_nil(message) do
       next = consume_down(message, %{state | hold_down: false, down: nil})
       {:reply, :ok, next}
@@ -140,6 +153,16 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
         _receipt ->
           send(state.observer, {:usage_held, self(), message})
           {:noreply, %{state | usage: state.usage ++ [message]}}
+      end
+    end
+
+    def handle_info({:DOWN, ref, :process, pid, _} = message, %{hold_down: true, refresh_fixture: true} = state) do
+      if Enum.any?(state.runtime.running, fn {_id, entry} -> entry.pid == pid and entry.ref == ref end) do
+        send(state.observer, {:down_held, self(), message})
+        {:noreply, %{state | down: message}}
+      else
+        {:noreply, runtime} = Orchestrator.handle_info(message, state.runtime)
+        {:noreply, %{state | runtime: runtime}}
       end
     end
 
@@ -594,6 +617,192 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     send(owner, old_down)
     assert runtime(owner) == before
     assert {:ok, _} = in_worker(next_pid, &AgentExecution.ensure_current/0)
+  end
+
+  for {observed_state, labels, code} <- [
+        {"Cancelled", ["required"], "tracker_terminal_state"},
+        {"Done", ["required"], "tracker_terminal_state"},
+        {"In Progress", [], "tracker_required_label_missing"}
+      ] do
+    @tag stop_observed_state: observed_state, stop_labels: labels, stop_code: code
+    test "refresh persists #{code} for #{observed_state} only after genuine DOWN", c do
+      c = tracker_stop_fixture!(c)
+      {owner, worker, entry} = start_refresh_worker(c)
+      assert :ok = GenServer.call(owner, {:hold_down, true})
+      before = raw!(c)
+      assert RunStateStore.material_projection(before) == entry.agent_execution.expected
+      observed = %{c.issue | state: c.stop_observed_state, labels: c.stop_labels}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [observed])
+
+      assert %{queued: true} = SymphonyElixir.Orchestrator.request_refresh(owner)
+      assert_receive {:down_held, ^owner, {:DOWN, ref, :process, ^worker, _} = down}, 5_000
+      assert ref == entry.ref
+      refute Process.alive?(worker)
+      assert RunStateStore.material_projection(raw!(c)) == entry.agent_execution.expected
+      assert finish_events(c) == []
+      request = runtime(owner).running[c.issue.id].execution_stop_requested
+      assert Atom.to_string(request.ineligibility.code) == c.stop_code
+      assert request.ineligibility.observed_state == c.stop_observed_state
+
+      assert :ok = GenServer.call(owner, :release_down)
+      assert_receive {:worker_down, ^owner, ^down, stopped}, 5_000
+      persisted = raw!(c)
+      assert persisted["stage"] == "blocked"
+      assert persisted["stop_reason"]["code"] == c.stop_code
+      assert persisted["stop_reason"]["details"] == "Observed tracker state: #{c.stop_observed_state}"
+      assert persisted["last_decision"]["target_state"] == c.stop_observed_state
+      assert persisted["next_human_action"] == persisted["stop_reason"]["human_action"]
+      assert is_binary(persisted["next_human_action"]) and persisted["next_human_action"] != ""
+
+      assert Map.take(persisted, ~w(run_id run_identity_event_id run_identity_ledger_path issue_id issue_identifier token_usage)) ==
+               Map.take(before, ~w(run_id run_identity_event_id run_identity_ledger_path issue_id issue_identifier token_usage))
+
+      assert {:ok, transition} = RunLedger.fetch_entry_checked(persisted["last_ledger_event_id"])
+      assert transition["event_type"] == "stage.transition"
+      assert transition["stage"] == "blocked"
+      assert transition["metadata"]["execution"]["run_id"] == entry.dispatch_ticket.run_id
+      assert transition["metadata"]["execution"]["dispatch_id"] == entry.dispatch_ticket.dispatch_id
+      assert stopped.running == %{} and stopped.retry_attempts == %{} and stopped.lease_claims == %{}
+      assert stopped.token_usage_errors == %{} and stopped.stale_execution_errors == %{}
+      refute Map.has_key?(stopped.completed, c.issue.id)
+      assert {:error, :missing} = LeaseManager.read_at(entry.lease_token.storage)
+      assert :ok = DispatchAudit.ensure_available(c.workspace)
+      assert length(finish_events(c)) == 1
+      assert File.read!(Path.join(c.workspace, "keep.txt")) == "preserve workspace"
+      refute_received {:memory_tracker_comment, _, _}
+      refute_received {:memory_tracker_state_update, _, _}
+
+      bytes = File.read!(RunStateStore.state_path(c.workspace))
+      events = File.read!(entry.dispatch_ticket.ledger_path)
+      send(owner, down)
+      send(owner, {:agent_execution_stale, entry.agent_execution.context, ids(entry), :late})
+      assert runtime(owner).stale_execution_errors == %{}
+      assert File.read!(RunStateStore.state_path(c.workspace)) == bytes
+      assert File.read!(entry.dispatch_ticket.ledger_path) == events
+    end
+  end
+
+  test "tracker stop cannot overwrite material changed after recognition or finish its ticket", c do
+    c = tracker_stop_fixture!(c)
+    {owner, worker, entry} = start_refresh_worker(c)
+    assert :ok = GenServer.call(owner, {:hold_down, true})
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{c.issue | state: "Cancelled"}])
+    assert %{queued: true} = SymphonyElixir.Orchestrator.request_refresh(owner)
+    assert_receive {:down_held, ^owner, {:DOWN, _, :process, ^worker, _}}, 5_000
+    observer = self()
+
+    # Synchronize with the owner, not merely the test's worker monitor: a queued
+    # reader result may still synchronize its lease before the terminal DOWN.
+    assert :ok =
+             GenServer.call(
+               owner,
+               {:release_down,
+                fn ->
+                  assert {:ok, _} = RunStateStore.update(c.workspace, &Map.put(&1, :policy_override, "operator-control"))
+                  send(observer, {:before_terminal_down, evidence(c, entry)})
+                end}
+             )
+
+    assert_received {:before_terminal_down, before}
+    assert_receive {:worker_down, ^owner, {:DOWN, _, :process, ^worker, _}, stopped}, 5_000
+    assert_hold(c, stopped, entry, :stale)
+    assert evidence(c, entry) == before
+    assert finish_events(c) == []
+    assert raw!(c)["stage"] == "implement"
+    refute_received {:memory_tracker_state_update, _, _}
+  end
+
+  test "tracker stop cannot release an authentic replacement physical lease after genuine DOWN", c do
+    c = tracker_stop_fixture!(c)
+    {owner, worker, entry} = start_refresh_worker(c)
+    assert :ok = GenServer.call(owner, {:hold_down, true})
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{c.issue | state: "Cancelled"}])
+    assert %{queued: true} = SymphonyElixir.Orchestrator.request_refresh(owner)
+    assert_receive {:down_held, ^owner, {:DOWN, _, :process, ^worker, _}}, 5_000
+    refute Process.alive?(worker)
+    assert {:ok, :released} = LeaseManager.release_token(entry.lease_token)
+    assert {:ok, replacement} = LeaseManager.acquire(c.issue.id, c.issue.identifier, "tracker-stop-successor", storage: entry.lease_token.storage)
+    refute replacement.token == entry.lease_token
+    before = evidence(c, entry)
+    assert :ok = GenServer.call(owner, :release_down)
+    assert_receive {:worker_down, ^owner, {:DOWN, _, :process, ^worker, _}, stopped}, 5_000
+    assert_hold(c, stopped, entry, :stale)
+    assert :ok = LeaseManager.ensure_current(replacement.token)
+    assert evidence(c, entry) == before
+    assert finish_events(c) == []
+    assert raw!(c)["stage"] == "implement"
+    # This is a real physical lease successor, not a second admitted dispatch:
+    # A's pending journal remains authoritative and is never manually closed.
+    assert {:error, {:dispatch_audit_pending, _}} = DispatchAudit.ensure_available(c.workspace)
+  end
+
+  for first <- [:stale, :accounting] do
+    @tag stop_first: first
+    test "tracker stop preserves a prior #{first} cause through genuine DOWN", c do
+      c = tracker_stop_fixture!(c)
+      {owner, worker, entry} = start_refresh_worker(c)
+
+      assert {:stop, _} =
+               in_worker(worker, fn ->
+                 if c.stop_first == :stale, do: AgentExecution.stale(:first_tracker_stop), else: AgentExecution.fail(:first_tracker_stop)
+               end)
+
+      before = evidence(c, entry)
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{c.issue | state: "Cancelled"}])
+      assert %{queued: true} = SymphonyElixir.Orchestrator.request_refresh(owner)
+      assert_receive {:worker_down, ^owner, {:DOWN, _, :process, ^worker, _}, stopped}, 5_000
+      assert_hold(c, stopped, entry, c.stop_first)
+      assert evidence(c, entry) == before
+      assert finish_events(c) == []
+      assert raw!(c)["stage"] == "implement"
+
+      if c.stop_first == :stale do
+        assert stopped.stale_execution_errors[c.issue.id].cause == :first_tracker_stop
+        assert stopped.token_usage_errors == %{}
+      else
+        assert {:accounting_uncertain, %{cause: :first_tracker_stop}} = stopped.token_usage_errors[c.issue.id]
+        assert stopped.stale_execution_errors == %{}
+      end
+    end
+  end
+
+  test "tracker stop write failure leaves its original journal and physical claim visible", c do
+    c = tracker_stop_fixture!(c)
+    {owner, worker, entry} = start_refresh_worker(c)
+    marker = marker!(c)
+    attach_fault(c, :policy_write)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{c.issue | state: "Cancelled"}])
+    assert %{queued: true} = SymphonyElixir.Orchestrator.request_refresh(owner)
+    assert_receive {:fault_applied, :policy_write}, 5_000
+    assert_receive {:worker_down, ^owner, {:DOWN, _, :process, ^worker, _}, stopped}, 5_000
+    assert_hold(c, stopped, entry, :accounting)
+    assert marker!(c) == marker
+    assert File.dir?(RunStateStore.state_path(c.workspace))
+    assert :ok = LeaseManager.ensure_current(entry.lease_token)
+    assert finish_events(c) == []
+    refute_received {:memory_tracker_comment, _, _}
+    refute_received {:memory_tracker_state_update, _, _}
+  end
+
+  defp tracker_stop_fixture!(c) do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_required_labels: ["required"],
+      workspace_root: c.root,
+      runner_install_root: Path.join(c.root, "runner-install"),
+      observability_tracing_enabled: false
+    )
+
+    assert :ok = WorkflowStore.force_reload()
+    issue = %{c.issue | labels: ["required"]}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    %{c | issue: issue}
+  end
+
+  defp start_refresh_worker(c) do
+    {owner, worker, entry} = start_worker(c)
+    assert :ok = GenServer.call(owner, :enable_refresh_fixture)
+    {owner, worker, entry}
   end
 
   def fault(_event, _measurements, metadata, {observer, c, kind}) do

@@ -6,6 +6,9 @@ defmodule SymphonyElixir.DispatchAudit do
   a worker has started. Only the owner may finish a ticket after observing worker
   exit or proving that no worker was created. Uncertain journals require explicit
   investigation; neither elapsed time nor lease takeover clears them.
+
+  Event workspace text is redacted for display. New events bind the captured
+  canonical workspace by SHA-256; older events retain exact literal matching.
   """
 
   alias SymphonyElixir.{RunIdentity, RunLedger, RunStateStore}
@@ -210,7 +213,16 @@ defmodule SymphonyElixir.DispatchAudit do
 
   defp prepare_dispatch(workspace, attrs) do
     dispatch_id = SymphonyElixir.Util.generate_id("dispatch_")
-    metadata = Map.merge(Map.delete(attrs.metadata, "runtime_build"), %{dispatch_id: dispatch_id, run_id: attrs.run_id, workspace: workspace, runtime_build: SymphonyElixir.BuildIdentity.summary()})
+
+    metadata =
+      Map.merge(Map.drop(attrs.metadata, ["runtime_build", "workspace_digest"]), %{
+        dispatch_id: dispatch_id,
+        run_id: attrs.run_id,
+        workspace: workspace,
+        workspace_digest: workspace_digest(workspace),
+        runtime_build: SymphonyElixir.BuildIdentity.summary()
+      })
+
     attrs = attrs |> Map.put(:metadata, metadata) |> Map.put(:actor_type, "runtime") |> Map.put(:actor_id, attrs.metadata.owner)
 
     with {:ok, ledger_path} <- RunLedger.ledger_file_path_checked(),
@@ -339,11 +351,20 @@ defmodule SymphonyElixir.DispatchAudit do
 
   defp matching_event?(%{"metadata" => %{} = metadata} = event, type, marker) do
     event["event_type"] == type and is_binary(event["event_id"]) and event["event_id"] != "" and
-      metadata["run_id"] == marker["run_id"] and metadata["dispatch_id"] == marker["dispatch_id"] and metadata["workspace"] == marker["workspace"] and
+      metadata["run_id"] == marker["run_id"] and metadata["dispatch_id"] == marker["dispatch_id"] and matching_workspace?(metadata, marker["workspace"]) and
       metadata["owner"] == marker["owner"] and metadata["epoch"] == marker["epoch"]
   end
 
   defp matching_event?(_event, _type, _marker), do: false
+
+  defp matching_workspace?(metadata, workspace) do
+    case Map.fetch(metadata, "workspace_digest") do
+      {:ok, digest} -> digest == workspace_digest(workspace)
+      :error -> metadata["workspace"] == workspace
+    end
+  end
+
+  defp workspace_digest(workspace), do: :crypto.hash(:sha256, workspace) |> Base.encode16(case: :lower)
 
   defp validated_ticket(%{workspace: workspace, dispatch_id: id, run_id: run_id, entry_event_id: event_id, owner: owner, epoch: epoch, ledger_path: ledger_path})
        when is_binary(workspace) do
@@ -410,6 +431,7 @@ defmodule SymphonyElixir.DispatchAudit do
         dispatch_id: marker["dispatch_id"],
         run_id: marker["run_id"],
         workspace: marker["workspace"],
+        workspace_digest: workspace_digest(marker["workspace"]),
         owner: marker["owner"],
         epoch: marker["epoch"],
         authorization_event_id: authorized["event_id"],

@@ -4531,7 +4531,7 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{SymphonyElixir.Util.issue_log_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        terminate_ineligible_running_issue(state, issue, :tracker_terminal_state, true)
 
       match?({:error, _}, resolve_policy(issue, state)) ->
         Logger.info("Issue has invalid policy routing: #{SymphonyElixir.Util.issue_log_context(issue)} labels=#{inspect(Issue.label_names(issue))}; moving issue to #{@blocked_state}")
@@ -4553,7 +4553,7 @@ defmodule SymphonyElixir.Orchestrator do
       !issue_matches_required_labels?(issue) ->
         Logger.info("Issue no longer matches the configured label gate: #{SymphonyElixir.Util.issue_log_context(issue)} labels=#{inspect(Issue.label_names(issue))}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_ineligible_running_issue(state, issue, :tracker_required_label_missing, false)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue, origin)
@@ -4566,6 +4566,26 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states, _origin), do: state
+
+  defp terminate_ineligible_running_issue(state, issue, code, cleanup_workspace) do
+    previous = Map.get(state.running, issue.id)
+    next = terminate_running_issue(state, issue.id, cleanup_workspace)
+
+    case {previous, Map.get(next.running, issue.id)} do
+      {%{execution_started?: true, agent_execution: _execution} = original, %{execution_stop_requested: request} = entry} ->
+        previous_request = Map.get(original, :execution_stop_requested, %{})
+
+        if not Map.has_key?(original, :execution_stop_requested) or Map.has_key?(previous_request, :retry) do
+          request = Map.put_new(request, :ineligibility, %{code: code, observed_state: issue.state})
+          %{next | running: Map.put(next.running, issue.id, %{entry | execution_stop_requested: request})}
+        else
+          next
+        end
+
+      _ ->
+        next
+    end
+  end
 
   defp refresh_running_issue_state(%State{} = state, %Issue{} = issue, origin) do
     state = invalidate_tracker_inbox_cache(state, [issue], origin)
@@ -7486,7 +7506,33 @@ defmodule SymphonyElixir.Orchestrator do
 
     case {queue_entries, Map.get(state, :candidate_fetch_error)} do
       {[], reason} when not is_nil(reason) -> [%{error: inspect(reason)}]
-      _ -> queue_entries
+      _ -> project_pending_dispatch_error(queue_entries, state.candidate_fetch_error)
+    end
+  end
+
+  defp project_pending_dispatch_error(entries, {:dispatch_audit_pending, workspace}) when is_binary(workspace),
+    do: project_pending_dispatch_error(entries, nil, workspace)
+
+  defp project_pending_dispatch_error(entries, {:dispatch_audit_failed, issue_id, {:dispatch_audit_pending, workspace}})
+       when is_binary(issue_id) and is_binary(workspace),
+       do: project_pending_dispatch_error(entries, issue_id, workspace)
+
+  defp project_pending_dispatch_error(entries, _reason), do: entries
+
+  defp project_pending_dispatch_error(entries, issue_id, workspace) do
+    matches =
+      Enum.filter(entries, fn entry ->
+        (is_nil(issue_id) or entry.issue_id == issue_id) and
+          Workspace.path_for_issue(entry.issue_identifier || entry.issue_id) == workspace
+      end)
+
+    case matches do
+      [matched] ->
+        error = {:dispatch_audit_pending, workspace} |> inspect() |> SymphonyElixir.SecretRedactor.redact()
+        Enum.map(entries, fn entry -> if entry == matched, do: Map.put(entry, :error, error), else: entry end)
+
+      _ ->
+        entries
     end
   end
 
@@ -8535,7 +8581,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp request_accounted_worker_stop(state, issue_id, entry, cleanup_workspace) do
-    requested = Map.put(entry, :execution_stop_requested, %{cleanup_workspace: cleanup_workspace})
+    request = entry |> Map.get(:execution_stop_requested, %{}) |> Map.take([:ineligibility]) |> Map.put(:cleanup_workspace, cleanup_workspace)
+    requested = Map.put(entry, :execution_stop_requested, request)
     next = %{state | running: Map.put(state.running, issue_id, requested)} |> cancel_dispatch_retry(issue_id)
 
     case terminate_task(entry.pid) do
@@ -8561,6 +8608,23 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp finish_requested_worker_down(state, issue_id, %{execution_stop_requested: %{ineligibility: cause}} = entry, reason) do
+    previous = entry.agent_execution.expected
+
+    with :ok <- execution_custody(state, issue_id, entry),
+         :ok <- DeployAudit.ensure_available(entry.dispatch_ticket.workspace),
+         {:ok, blocked} <- RunStateStore.transition_current(execution_authority(entry), previous, "blocked", tracker_stop_attrs(cause)) do
+      next = RunStateStore.material_projection(blocked)
+      known = %{previous: previous, next: next, stage: "blocked"}
+      execution = %{entry.agent_execution | expected: next, known_terminal: known}
+      entry = %{entry | agent_execution: execution, stage: "blocked", last_ledger_event_id: blocked.last_ledger_event_id}
+      state = %{state | running: Map.put(state.running, issue_id, entry)}
+      finish_known_terminal_worker_down(state, issue_id, entry, reason)
+    else
+      {:error, failure} -> finish_failed_current_worker_down(state, issue_id, entry, failure)
+    end
+  end
+
   defp finish_requested_worker_down(state, issue_id, entry, reason) do
     with :ok <- execution_custody(state, issue_id, entry),
          {:ok, _current} <- RunStateStore.ensure_current(execution_authority(entry), entry.agent_execution.expected),
@@ -8578,6 +8642,36 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} -> finish_failed_current_worker_down(state, issue_id, entry, reason)
       {:ownership_uncertain, reason} -> finish_failed_current_worker_down(state, issue_id, entry, reason)
     end
+  end
+
+  defp tracker_stop_attrs(%{code: code, observed_state: observed_state})
+       when code in [:tracker_terminal_state, :tracker_required_label_missing] do
+    rule = RuleCatalog.rule(code)
+
+    summary =
+      case code do
+        :tracker_terminal_state -> "The tracker moved the issue to a terminal state."
+        :tracker_required_label_missing -> "The issue no longer matches the configured required labels."
+      end
+
+    stop_reason = %{
+      code: Atom.to_string(code),
+      rule_id: rule.rule_id,
+      failure_class: rule.failure_class,
+      summary: summary,
+      details: "Observed tracker state: #{observed_state}",
+      human_action: rule.human_action
+    }
+
+    %{
+      reason: summary,
+      stop_reason: stop_reason,
+      last_decision: Map.put(stop_reason, :target_state, observed_state),
+      last_rule_id: rule.rule_id,
+      last_failure_class: rule.failure_class,
+      last_decision_summary: summary,
+      next_human_action: rule.human_action
+    }
   end
 
   defp finish_current_worker_down(state, issue_id, entry, reason) do

@@ -30,6 +30,16 @@ defmodule SymphonyElixir.RuleCatalog do
       failure_class: "environment",
       human_action: "Restore the missing release directory or roll back to an available release."
     },
+    tracker_terminal_state: %{
+      rule_id: "tracker.terminal_state",
+      failure_class: "coordination",
+      human_action: "Leave the issue stopped, or explicitly resume it after restoring an eligible tracker state."
+    },
+    tracker_required_label_missing: %{
+      rule_id: "tracker.required_label_missing",
+      failure_class: "coordination",
+      human_action: "Restore the configured required labels before explicitly resuming the issue."
+    },
     webhook_signature_invalid: %{
       rule_id: "webhook.signature_invalid",
       failure_class: "coordination",
