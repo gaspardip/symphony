@@ -151,8 +151,9 @@ defmodule SymphonyElixir.Workspace do
       true ->
         case validate_workspace_path(workspace) do
           :ok ->
-            maybe_run_before_remove_hook(workspace)
-            File.rm_rf(workspace)
+            with :ok <- maybe_run_before_remove_hook(workspace) do
+              File.rm_rf(workspace)
+            end
 
           {:error, reason} ->
             {:error, reason, ""}
@@ -354,6 +355,7 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp ignore_hook_failure(:ok), do: :ok
+  defp ignore_hook_failure({:error, {:workspace_hook_owned_execution, _hook, _reason}} = error), do: error
   defp ignore_hook_failure({:error, _reason}), do: :ok
 
   defp run_hook(command, workspace, issue_context, hook_name) do
@@ -372,23 +374,22 @@ defmodule SymphonyElixir.Workspace do
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace}")
 
-    task =
-      Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
-      end)
-
-    case Task.yield(task, timeout_ms) do
+    case SymphonyElixir.OwnedHook.run(command, workspace, timeout_ms) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
-      nil ->
-        Task.shutdown(task, :brutal_kill)
-
+      {:error, :timeout} ->
         Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} timeout_ms=#{timeout_ms}")
-
         {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+
+      {:error, reason} ->
+        Logger.error("Workspace hook owned execution failed hook=#{hook_name} phase=#{owned_hook_failure_tag(reason)}; evidence retained in returned error")
+        {:error, {:workspace_hook_owned_execution, hook_name, reason}}
     end
   end
+
+  defp owned_hook_failure_tag(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: elem(reason, 0)
+  defp owned_hook_failure_tag(reason) when is_atom(reason), do: reason
 
   defp handle_hook_command_result({_output, 0}, _workspace, _issue_id, _hook_name) do
     :ok

@@ -6,7 +6,7 @@ defmodule SymphonyElixir.MixProject do
       app: :symphony_elixir,
       version: "0.1.0",
       elixir: "~> 1.19",
-      compilers: [:phoenix_live_view] ++ Mix.compilers(),
+      compilers: [:owned_hook, :phoenix_live_view] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [
@@ -115,5 +115,47 @@ defmodule SymphonyElixir.MixProject do
       include_priv_for: [:symphony_elixir],
       path: "bin/symphony"
     ]
+  end
+end
+
+defmodule Mix.Tasks.Compile.OwnedHook do
+  use Mix.Task.Compiler
+
+  @impl true
+  @spec run([String.t()]) :: {:ok, []}
+  def run(_args) do
+    unless :os.type() in [{:unix, :darwin}, {:unix, :linux}],
+      do: Mix.raise("Owned hooks require a macOS or Linux native build")
+
+    compiler = System.find_executable(System.get_env("CC", "cc")) || Mix.raise("Owned hook C compiler is missing")
+    destination = Path.join(Mix.Project.build_path(), "native/symphony-owned-hook")
+    File.mkdir_p!(Path.dirname(destination))
+    temporary = destination <> ".#{System.pid()}.#{System.unique_integer([:positive])}"
+    if File.exists?(temporary), do: Mix.raise("Owned hook build output already exists")
+
+    args = ["-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "c_src/owned_hook.c", "-o", temporary]
+    {output, status} = System.cmd(compiler, args, stderr_to_stdout: true)
+
+    primary =
+      if status == 0,
+        do: File.rename(temporary, destination),
+        else: {:error, {:native_compiler_failed, status, output}}
+
+    cleanup = File.rm(temporary)
+
+    case {primary, cleanup} do
+      {:ok, {:error, :enoent}} -> {:ok, []}
+      {result, cleanup} -> Mix.raise("Owned hook build failed: #{inspect({result, cleanup})}")
+    end
+  end
+
+  @impl true
+  @spec clean() :: :ok
+  def clean do
+    case File.rm(Path.join(Mix.Project.build_path(), "native/symphony-owned-hook")) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> Mix.raise("Owned hook build cleanup failed: #{inspect(reason)}")
+    end
   end
 end
