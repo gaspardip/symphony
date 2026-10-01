@@ -556,6 +556,235 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     assert %{ok: true} = Orchestrator.stop_issue(pid, "ISSUE-A")
   end
 
+  for invalid <- [:missing, :id, :identifier, :source, :state] do
+    test "pause rejects #{invalid} retry authority before effects while lookup owns A" do
+      entry = retry_entry("A")
+
+      entry =
+        case unquote(invalid) do
+          :missing -> Map.delete(entry, :issue)
+          :id -> %{entry | issue: %{entry.issue | id: "OTHER"}}
+          :identifier -> %{entry | issue: %{entry.issue | identifier: "ISSUE-OTHER"}}
+          :source -> %{entry | issue: %{entry.issue | source: :manual}}
+          :state -> %{entry | issue: %{entry.issue | state: nil}}
+        end
+
+      pid = driver!(%{"A" => entry})
+      reader = held_phase(pid, :lookup)
+      before = runtime(pid)
+      ledger = File.read(RunLedger.ledger_file_path())
+      trace_control_writes!(pid)
+      assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Orchestrator.pause_issue(pid, "ISSUE-A")
+      assert_retry_control_unchanged!(pid, reader, before, ledger)
+      send(reader, {:answer, {:error, :controlled_read_failure}})
+      assert settled!(pid).running == %{}
+    end
+  end
+
+  test "stop revokes the current lookup identity without inventing an Issue state" do
+    pid = driver!(%{"A" => Map.delete(retry_entry("A"), :issue)})
+    reader = held_phase(pid, :lookup)
+    before = runtime(pid).admission_read
+    assert is_nil(before.issue.state)
+    assert %{ok: true} = Orchestrator.stop_issue(pid, "ISSUE-A")
+    state = runtime(pid)
+    assert state.admission_read == %{before | invalidated: true}
+    assert Process.alive?(reader)
+    assert state.retry_attempts == %{}
+    assert state.running == %{}
+    refute_receive {:retry_read, _, _, _}, 30
+    send(reader, {:answer, {:error, {:linear_api_status, 429, %{retry_after_ms: 60_000}}}})
+    state = settled!(pid)
+    assert state.retry_attempts == %{}
+    assert state.tracker_backoff_until_ms > System.monotonic_time(:millisecond)
+    assert {:error, :missing} = LeaseManager.read("A")
+  end
+
+  for changed <- [:generation, :fingerprint, :invalidated] do
+    test "pause cannot borrow a retry after #{changed} changes", ctx do
+      pid = driver!(%{"A" => retry_entry("A")})
+      reader = held_phase(pid, :lookup)
+
+      case unquote(changed) do
+        :generation ->
+          GenServer.call(pid, {:schedule, "A", 7, %{identifier: "ISSUE-A", issue: issue("A"), error: "new generation"}})
+
+        :fingerprint ->
+          write_config!(ctx.workflow, put_in(ctx.config, [:tracker, :project_slug], "different-project"))
+
+        :invalidated ->
+          Application.put_env(:symphony_elixir, :retry_fixture, %{owner: self(), webhook: {:ok, nil}})
+
+          event = %TrackerEvent{
+            provider: "linear",
+            event_id: "invalidate-control",
+            entity_type: "Issue",
+            entity_id: "A",
+            issue_identifier: "ISSUE-A",
+            action: "update",
+            updated_at: DateTime.utc_now(),
+            raw: %{}
+          }
+
+          assert {:ok, %{accepted: 1}} = TrackerEventInbox.enqueue([event])
+          send(pid, :run_webhook_cycle)
+          await_state!(pid, &match?(%DateTime{}, &1.inbox_last_drained_at))
+          assert runtime(pid).admission_read.invalidated
+      end
+
+      before = runtime(pid)
+      ledger = File.read(RunLedger.ledger_file_path())
+      trace_control_writes!(pid)
+      assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Orchestrator.pause_issue(pid, "ISSUE-A")
+      assert_retry_control_unchanged!(pid, reader, before, ledger)
+      send(reader, {:answer, {:ok, []}})
+      after_read = settled!(pid)
+      assert after_read.running == %{}
+      if unquote(changed) == :generation, do: assert(after_read.retry_attempts["A"] == before.retry_attempts["A"])
+    end
+  end
+
+  test "a control for another identity waits without borrowing the held retry" do
+    pid = driver!(%{"A" => retry_entry("A")})
+    reader = held_phase(pid, :lookup)
+    before = runtime(pid)
+    ledger = File.read(RunLedger.ledger_file_path())
+    trace_control_writes!(pid)
+    control = Task.async(fn -> Orchestrator.stop_issue(pid, "ISSUE-B") end)
+    state = await_state!(pid, &match?(%{operation: %{identifier: "ISSUE-B"}, read_ready: true}, &1.control_reservation))
+    assert state.admission_read == before.admission_read
+    assert state.retry_attempts == before.retry_attempts
+    assert Process.alive?(reader)
+    assert File.read(RunLedger.ledger_file_path()) == ledger
+    assert_no_control_writes!(pid)
+    send(reader, {:answer, {:ok, []}})
+    assert %{ok: true, issue_identifier: "ISSUE-B"} = Task.await(control, 2_000)
+    assert_receive {:trace, ^pid, :call, {HeldClient, :graphql, [_query, %{issueId: "B"}]}}, 500
+    assert settled!(pid).retry_attempts == %{}
+    assert {:error, :missing} = LeaseManager.read("A")
+  end
+
+  for phase <- [:lookup, :refresh] do
+    test "#{phase} read failure preserves only the last genuine Issue" do
+      original = %{issue("A") | state: "In Progress", description: "Known before scheduling"}
+      fresh = %{original | description: "Returned by lookup"}
+      pid = driver!(%{"A" => retry_entry("A", %{issue: original, budget_resume_context: %{focus: "saved"}})})
+      lookup = held_phase(pid, :lookup)
+
+      reader =
+        if unquote(phase) == :refresh do
+          send(lookup, {:answer, {:ok, [fresh]}})
+          assert_receive {:retry_read, :refresh, refresh, ["A"]}, 2_000
+          refresh
+        else
+          lookup
+        end
+
+      send(reader, {:answer, {:error, :read_failed}})
+      entry = settled!(pid).retry_attempts["A"]
+      assert entry.issue == if(unquote(phase) == :refresh, do: fresh, else: original)
+      assert entry.attempt == 3
+      assert entry.budget_resume_context == %{focus: "saved"}
+      assert entry.status == :scheduled
+    end
+  end
+
+  test "an actual legacy worker DOWN retains its known Issue in the retry" do
+    pid = driver!(%{})
+    worker = install_worker!(pid, "A")
+
+    # The existing task fixture installs its first monitor in the test process.
+    # Create the owner's real monitor inside its existing runtime callback.
+    replace_runtime(pid, fn state -> put_in(state.running["A"].ref, Process.monitor(worker)) end)
+    known = runtime(pid).running["A"].issue
+    Process.exit(worker, :kill)
+    state = await_state!(pid, &match?(%{status: :scheduled}, &1.retry_attempts["A"]))
+    assert state.retry_attempts["A"].issue == known
+    assert state.retry_attempts["A"].error == "agent exited: :killed"
+    assert state.retry_attempts["A"].attempt == 1
+    refute Map.has_key?(state.running, "A")
+  end
+
+  for action <- [:pause, :stop] do
+    test "#{action} resolves the physical manual issue while its retry lookup owns A" do
+      assert {:ok, manual} =
+               SymphonyElixir.ManualIssueStore.submit(%{
+                 "id" => "retry-local",
+                 "identifier" => "LOCAL-RETRY",
+                 "title" => "Local retry control",
+                 "acceptance_criteria" => ["Keep local control independent of a remote lookup"]
+               })
+
+      assert manual.source == :manual
+      entry = retry_entry("A", %{identifier: manual.identifier, issue: manual})
+      pid = driver!(%{manual.id => entry})
+      fire(pid, manual.id)
+      assert_receive {:retry_read, :candidates, reader, []}, 2_000
+      before = runtime(pid).admission_read
+      assert before.issue.id == manual.id
+      assert is_nil(before.issue.source)
+      trace_control_writes!(pid)
+
+      reply =
+        case unquote(action) do
+          :pause -> Orchestrator.pause_issue(pid, manual.identifier)
+          :stop -> Orchestrator.stop_issue(pid, manual.identifier)
+        end
+
+      assert %{ok: true, issue_identifier: identifier, ledger_event_id: event_id} = reply
+      assert identifier == manual.identifier
+      assert {:ok, rows, _sha} = RunLedger.CheckedStorage.entries_checked(RunLedger.ledger_file_path())
+      assert [event] = Enum.filter(rows, &(&1["event_id"] == event_id))
+      assert event["event"] == "operator.action" and event["issue_id"] == manual.id
+      assert event["metadata"]["action"] == Atom.to_string(unquote(action))
+      assert {:ok, record} = SymphonyElixir.ManualIssueStore.load_record_by_identifier(manual.identifier)
+      assert record.issue.id == manual.id
+      assert record.issue.state == if(unquote(action) == :pause, do: "Paused", else: "Blocked")
+      state = runtime(pid)
+      assert state.admission_read == %{before | invalidated: true}
+      assert Process.alive?(reader)
+      assert state.retry_attempts == %{}
+      assert state.running == %{}
+      assert_no_control_writes!(pid)
+      refute_receive {:retry_read, _, _, _}, 30
+      send(reader, {:answer, {:ok, []}})
+      assert settled!(pid).retry_attempts == %{}
+    end
+  end
+
+  defp trace_control_writes!(pid) do
+    target = {HeldClient, :graphql, 2}
+    assert {:traced, false} = :erlang.trace_info(target, :traced)
+    assert 1 == :erlang.trace_pattern(target, true, [:local])
+    assert 1 == :erlang.trace(pid, true, [:call, {:tracer, self()}])
+
+    on_exit(fn ->
+      assert 1 == :erlang.trace_pattern(target, false, [:local])
+      if Process.alive?(pid), do: assert(1 == :erlang.trace(pid, false, [:call]))
+    end)
+  end
+
+  defp assert_no_control_writes!(pid) do
+    delivered = :erlang.trace_delivered(pid)
+    assert_receive {:trace_delivered, ^pid, ^delivered}, 500
+    refute_receive {:trace, ^pid, :call, {HeldClient, :graphql, _}}, 0
+  end
+
+  defp assert_retry_control_unchanged!(pid, reader, before, ledger) do
+    after_control = runtime(pid)
+    assert after_control.admission_read == before.admission_read
+    assert after_control.retry_attempts == before.retry_attempts
+    assert after_control.paused_issue_states == before.paused_issue_states
+    assert after_control.running == before.running
+    assert after_control.lease_claims == before.lease_claims
+    assert Process.alive?(reader)
+    assert File.read(RunLedger.ledger_file_path()) == ledger
+    assert {:error, :missing} = LeaseManager.read("A")
+    refute File.exists?(Workspace.path_for_issue("ISSUE-A"))
+    assert_no_control_writes!(pid)
+    refute_receive {:retry_read, _, _, _}, 30
+  end
+
   defp identity_events do
     RunLedger.ledger_file_path()
     |> File.read!()
@@ -580,7 +809,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
   defp issue(id), do: %Issue{id: id, identifier: "ISSUE-" <> id, title: "Retry", description: "Local fixture", state: "Todo", labels: [], assigned_to_worker: true, source: :tracker}
 
   defp retry_entry(id, metadata \\ %{}) do
-    Map.merge(%{attempt: 2, retry_ref: make_ref(), status: :scheduled, timer_ref: nil, due_at_ms: 0, identifier: "ISSUE-" <> id, delay_type: :continuation}, metadata)
+    Map.merge(%{attempt: 2, retry_ref: make_ref(), status: :scheduled, timer_ref: nil, due_at_ms: 0, identifier: "ISSUE-" <> id, issue: issue(id), delay_type: :continuation}, metadata)
   end
 
   defp driver!(entries) do

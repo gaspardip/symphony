@@ -119,8 +119,10 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
       do: {:noreply, %{state | confirmation: {message, from}}}
 
     def handle_call(message, from, state) do
-      {:reply, reply, runtime} = Orchestrator.handle_call(message, from, state.runtime)
-      {:reply, reply, %{state | runtime: runtime}}
+      case Orchestrator.handle_call(message, from, state.runtime) do
+        {:reply, reply, runtime} -> {:reply, reply, %{state | runtime: runtime}}
+        {:noreply, runtime} -> {:noreply, %{state | runtime: runtime}}
+      end
     end
 
     @impl true
@@ -783,7 +785,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     test "#{@stop_order} preserves explicit stop over a queued stall retry until DOWN", c do
       {owner, worker, entry} = start_controlled(c)
       policy = {:restart_stalled, c.issue.id}
-      control = {:stop_issue, c.issue.identifier}
+      control = {:control, %{ref: make_ref(), deadline: System.monotonic_time(:millisecond) + 5_000, action: :stop, identifier: c.issue.identifier, args: []}}
       [first, second] = if @stop_order == :policy_then_control, do: [policy, control], else: [control, policy]
       :ok = :sys.suspend(owner)
       first_call = Task.async(fn -> GenServer.call(owner, first, 10_000) end)
@@ -1257,7 +1259,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     f3_budget_fixture!(c)
     {owner, worker, entry} = start_controlled(c)
     invocation = register_invocation(worker, Claude, c.workspace, :main)
-    control = {:stop_issue, c.issue.identifier}
+    control = {:control, %{ref: make_ref(), deadline: System.monotonic_time(:millisecond) + 5_000, action: :stop, identifier: c.issue.identifier, args: []}}
     :ok = :sys.suspend(owner)
     stopper = Task.async(fn -> GenServer.call(owner, control, 10_000) end)
 
@@ -1508,13 +1510,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
   defp start_driver do
     {:ok, owner} = GenServer.start(Driver, self())
 
-    on_exit(fn ->
-      if Process.alive?(owner) do
-        runtime = GenServer.call(owner, :runtime)
-        Enum.each(runtime.running, fn {_id, entry} -> Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, entry.pid) end)
-        GenServer.stop(owner)
-      end
-    end)
+    on_exit(fn -> cleanup_driver!(owner) end)
 
     owner
   end
@@ -1583,4 +1579,25 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
         File.write!(path, "#!/bin/sh\n" <> body)
         File.chmod!(path, 0o755)
       )
+
+  defp cleanup_driver!(owner) do
+    if Process.alive?(owner) do
+      assert :ok = :sys.suspend(owner)
+      runtime = :sys.get_state(owner).runtime
+      readers = Enum.reject([runtime.tracker_poll_read, runtime.admission_read], &is_nil/1)
+      workers = Enum.map(runtime.running, fn {_id, entry} -> entry.pid end)
+      monitors = Enum.map(Enum.uniq(Enum.map(readers, & &1.pid) ++ workers), &{&1, Process.monitor(&1)})
+
+      :sys.replace_state(owner, fn state ->
+        Enum.each(readers, fn reader -> assert :ok = SymphonyElixir.TrackerReader.cancel(reader) end)
+        Enum.each(state.runtime.retry_attempts, fn {_id, retry} -> if is_reference(retry[:timer_ref]), do: Process.cancel_timer(retry.timer_ref) end)
+        Enum.each(state.runtime.lease_claims, fn {_id, claim} -> if is_reference(claim[:timer]), do: Process.cancel_timer(claim.timer) end)
+        state
+      end)
+
+      GenServer.stop(owner)
+      Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
+      Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+    end
+  end
 end

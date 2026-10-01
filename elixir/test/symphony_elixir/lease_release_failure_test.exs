@@ -4,6 +4,22 @@ defmodule SymphonyElixir.LeaseReleaseFailureTest do
   alias SymphonyElixir.{LeaseManager, RunLedger, RunStateStore}
   alias SymphonyElixir.Orchestrator.State
 
+  # The fixture owns this State in one real GenServer. Control continuations,
+  # reader results and replies are handled by production callbacks.
+  defmodule ControlDriver do
+    use GenServer
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(:runtime, _from, state), do: {:reply, state, state}
+    def handle_call(message, from, state), do: Orchestrator.handle_call(message, from, state)
+
+    @impl true
+    def handle_info(message, state), do: Orchestrator.handle_info(message, state)
+  end
+
   setup do
     root = Path.join(System.tmp_dir!(), "lease-release-failure-#{System.unique_integer([:positive])}")
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: root)
@@ -86,7 +102,9 @@ defmodule SymphonyElixir.LeaseReleaseFailureTest do
     snapshot = File.read!(RunStateStore.state_path(c.workspace))
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [c.issue])
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
-    {reply, released} = SymphonyElixir.Orchestrator.Controls.retry_issue_now_runtime(c.state, c.issue.identifier)
+    owner = start_control_owner!(c.state)
+    reply = Orchestrator.retry_issue_now(owner, c.issue.identifier)
+    released = GenServer.call(owner, :runtime)
     refute reply.ok
     assert reply.error =~ "lease_release_audit_failed"
     assert {:lease_release_audit_failed, id, %RunLedger.PersistenceError{}} = released.candidate_fetch_error
@@ -143,5 +161,32 @@ defmodule SymphonyElixir.LeaseReleaseFailureTest do
     assert {:ok, snapshot} = RunStateStore.load(context.workspace)
     assert snapshot.lease_owner == context.owner
     assert snapshot.lease_status == "held"
+  end
+
+  defp start_control_owner!(state) do
+    {:ok, owner} = GenServer.start(ControlDriver, state)
+
+    on_exit(fn ->
+      if Process.alive?(owner) do
+        assert :ok = :sys.suspend(owner)
+        current = :sys.get_state(owner)
+        readers = Enum.reject([current.tracker_poll_read, current.admission_read], &is_nil/1)
+        workers = Enum.map(current.running, fn {_id, entry} -> entry.pid end)
+        monitors = Enum.map(Enum.uniq(Enum.map(readers, & &1.pid) ++ workers), &{&1, Process.monitor(&1)})
+
+        :sys.replace_state(owner, fn runtime ->
+          Enum.each(readers, fn reader -> assert :ok = SymphonyElixir.TrackerReader.cancel(reader) end)
+          Enum.each(runtime.retry_attempts, fn {_id, retry} -> if is_reference(retry[:timer_ref]), do: Process.cancel_timer(retry.timer_ref) end)
+          Enum.each(runtime.lease_claims, fn {_id, claim} -> if is_reference(claim[:timer]), do: Process.cancel_timer(claim.timer) end)
+          runtime
+        end)
+
+        GenServer.stop(owner)
+        Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
+        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+      end
+    end)
+
+    owner
   end
 end

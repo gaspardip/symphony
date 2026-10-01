@@ -589,7 +589,62 @@ defmodule SymphonyElixir.DeliveryExecutionCurrentTest do
     refute_received {:github_effect, :post}
     refute_received {:github_effect, :resolve}
     assert_received {:control_evidence, before}
-    assert evidence(c) == before
+    after_observation = evidence(c)
+    assert Map.delete(after_observation, :ledger) == Map.delete(before, :ledger)
+    assert String.starts_with?(after_observation.ledger, before.ledger)
+    suffix = binary_part(after_observation.ledger, byte_size(before.ledger), byte_size(after_observation.ledger) - byte_size(before.ledger))
+    assert [observed_line, ""] = String.split(suffix, "\n")
+    observed = Jason.decode!(observed_line)
+    prefix_rows = before.ledger |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    assert rows() == prefix_rows ++ [observed]
+    refute Enum.any?(prefix_rows, &(&1["event_type"] == "review.publication.observed"))
+    assert [location] = Enum.filter(prefix_rows, &(&1["event_type"] == "review.publication.location"))
+    assert [intent] = Enum.filter(prefix_rows, &(&1["event_type"] == "review.publication.intent"))
+    assert location["issue_id"] == c.issue.id
+    assert location["issue_identifier"] == c.issue.identifier
+    assert intent["issue_id"] == c.issue.id
+    assert intent["issue_identifier"] == c.issue.identifier
+    assert observed["schema_version"] == 1
+    assert observed["event"] == "review.publication.observed"
+    assert observed["event_type"] == "review.publication.observed"
+    assert observed["issue_id"] == c.issue.id
+    assert observed["issue_identifier"] == c.issue.identifier
+    assert observed["event_id"] == intent["metadata"]["observation_event_id"]
+    assert {:ok, _, _} = DateTime.from_iso8601(observed["at"])
+
+    common = %{
+      "publication_version" => 1,
+      "location_event_id" => location["event_id"],
+      "workspace" => c.workspace,
+      "pr_url" => c.pr_url,
+      "pr_identity" => %{"host" => "github.com", "owner" => "example", "repo" => "repo", "number" => 1},
+      "pr_source" => "caller_result",
+      "raw_pr" => Map.take(c.raw, ["pr_url"]),
+      "thread_key" => "comment:1",
+      "operation" => "post",
+      "reply_target" => "1",
+      "draft_sha256" => :crypto.hash(:sha256, c.raw["review_threads"]["comment:1"]["draft_reply"]) |> Base.encode16(case: :lower),
+      "binding" => Map.take(c.raw, ~w(run_id run_identity_event_id run_identity_ledger_path)),
+      "dispatch_id" => c.ticket.dispatch_id
+    }
+
+    assert intent["metadata"] == Map.put(common, "observation_event_id", observed["event_id"])
+
+    assert observed["metadata"] ==
+             Map.merge(common, %{
+               "intent_event_id" => intent["event_id"],
+               "outcome" => "returned_success",
+               "cause" => nil,
+               "posted_reply_id" => "reply-1",
+               "posted_reply_url" => c.pr_url <> "#reply",
+               "posted_at" => observed["at"]
+             })
+
+    assert {:ok, ^observed} = RunLedger.CheckedStorage.fetch(c.ticket.ledger_path, observed["event_id"])
+    assert {:stop, {:stale_execution, _, :material_state_changed}} = within(c, fn -> run(c, github_effect: effect) end)
+    assert evidence(c) == after_observation
+    refute_received {:github_effect, :post}
+    refute_received {:github_effect, :resolve}
     refute_received {:tracker_effect, _, _}
   end
 

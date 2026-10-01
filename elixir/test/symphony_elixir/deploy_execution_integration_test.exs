@@ -89,8 +89,10 @@ defmodule SymphonyElixir.DeployExecutionIntegrationTest do
     def handle_call(call, from, state), do: delegate(call, from, state)
 
     defp delegate(call, from, state) do
-      {:reply, reply, runtime} = Orchestrator.handle_call(call, from, state.runtime)
-      {:reply, reply, %{state | runtime: runtime}}
+      case Orchestrator.handle_call(call, from, state.runtime) do
+        {:reply, reply, runtime} -> {:reply, reply, %{state | runtime: runtime}}
+        {:noreply, runtime} -> {:noreply, %{state | runtime: runtime}}
+      end
     end
 
     @impl true
@@ -245,8 +247,8 @@ defmodule SymphonyElixir.DeployExecutionIntegrationTest do
     assert_receive {:worker_ready, ^worker}, 5_000
 
     on_exit(fn ->
+      cleanup_driver!(owner)
       if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker)
-      if Process.alive?(owner), do: GenServer.stop(owner)
     end)
 
     %{root: root, workspace: workspace, issue: issue, owner: owner, worker: worker, entry: entry, command: command, target: target}
@@ -395,7 +397,7 @@ defmodule SymphonyElixir.DeployExecutionIntegrationTest do
     assert usage == %{input_tokens: 7, output_tokens: 3, total_tokens: 10}
     assert :ok = DeployAudit.ensure_available(c.workspace)
     assert events(c, "requested") == [] and events(c, "observed") == []
-    assert %{ok: true, action: "stop"} = GenServer.call(c.owner, {:stop_issue, c.issue.identifier}, 10_000)
+    assert %{ok: true, action: "stop"} = Orchestrator.stop_issue(c.owner, c.issue.identifier)
     owner = c.owner
     worker = c.worker
     assert_receive {:worker_down, ^owner, {:DOWN, ref, :process, ^worker, :shutdown}, stopped}, 5_000
@@ -550,7 +552,7 @@ defmodule SymphonyElixir.DeployExecutionIntegrationTest do
     authority_before = authority_bytes(c)
     before = marker_bytes(c)
     assert marker!(c)["status"] == "authorized"
-    assert %{ok: true, action: "stop"} = GenServer.call(c.owner, {:stop_issue, c.issue.identifier}, 10_000)
+    assert %{ok: true, action: "stop"} = Orchestrator.stop_issue(c.owner, c.issue.identifier)
     owner = c.owner
     assert_receive {:worker_down, ^owner, {:DOWN, _, :process, ^worker, _}, stopped}, 5_000
     refute Process.alive?(worker)
@@ -1179,5 +1181,26 @@ defmodule SymphonyElixir.DeployExecutionIntegrationTest do
     refute_received {:memory_tracker_state_update, _, "Done"}
     refute File.exists?(Path.join(c.root, "after-run"))
     assert {:error, {:deploy_audit_pending, _}} = DeployAudit.ensure_available(c.workspace)
+  end
+
+  defp cleanup_driver!(owner) do
+    if Process.alive?(owner) do
+      assert :ok = :sys.suspend(owner)
+      runtime = :sys.get_state(owner).runtime
+      readers = Enum.reject([runtime.tracker_poll_read, runtime.admission_read], &is_nil/1)
+      workers = Enum.map(runtime.running, fn {_id, entry} -> entry.pid end)
+      monitors = Enum.map(Enum.uniq(Enum.map(readers, & &1.pid) ++ workers), &{&1, Process.monitor(&1)})
+
+      :sys.replace_state(owner, fn state ->
+        Enum.each(readers, fn reader -> assert :ok = SymphonyElixir.TrackerReader.cancel(reader) end)
+        Enum.each(state.runtime.retry_attempts, fn {_id, retry} -> if is_reference(retry[:timer_ref]), do: Process.cancel_timer(retry.timer_ref) end)
+        Enum.each(state.runtime.lease_claims, fn {_id, claim} -> if is_reference(claim[:timer]), do: Process.cancel_timer(claim.timer) end)
+        state
+      end)
+
+      GenServer.stop(owner)
+      Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
+      Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+    end
   end
 end

@@ -6,6 +6,22 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
   alias SymphonyElixir.{LeaseManager, RunLedger, RunStateStore}
   alias SymphonyElixir.Orchestrator.{Controls, State}
 
+  # The fixture owns this State in one real GenServer. Control continuations,
+  # reader results and replies are handled by production callbacks.
+  defmodule ControlDriver do
+    use GenServer
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(:runtime, _from, state), do: {:reply, state, state}
+    def handle_call(message, from, state), do: Orchestrator.handle_call(message, from, state)
+
+    @impl true
+    def handle_info(message, state), do: Orchestrator.handle_info(message, state)
+  end
+
   setup do
     root =
       Path.join(System.tmp_dir!(), "redispatch-terminal-#{System.unique_integer([:positive])}")
@@ -467,8 +483,9 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
                stop_reason: %{code: "environment_blocker"}
              })
 
-    {reply, next} =
-      Controls.retry_issue_now_runtime(%{state | max_concurrent_agents: 0}, issue.identifier)
+    owner = start_control_owner!(%{state | max_concurrent_agents: 0})
+    reply = Orchestrator.retry_issue_now(owner, issue.identifier)
+    next = GenServer.call(owner, :runtime)
 
     try do
       assert reply.ok
@@ -1013,5 +1030,32 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
 
     assert_received :authorized_spawn_boundary
     assert {:ok, :released} = LeaseManager.release_token(admitted.lease_claims[issue.id].token)
+  end
+
+  defp start_control_owner!(state) do
+    {:ok, owner} = GenServer.start(ControlDriver, state)
+
+    on_exit(fn ->
+      if Process.alive?(owner) do
+        assert :ok = :sys.suspend(owner)
+        current = :sys.get_state(owner)
+        readers = Enum.reject([current.tracker_poll_read, current.admission_read], &is_nil/1)
+        workers = Enum.map(current.running, fn {_id, entry} -> entry.pid end)
+        monitors = Enum.map(Enum.uniq(Enum.map(readers, & &1.pid) ++ workers), &{&1, Process.monitor(&1)})
+
+        :sys.replace_state(owner, fn runtime ->
+          Enum.each(readers, fn reader -> assert :ok = SymphonyElixir.TrackerReader.cancel(reader) end)
+          Enum.each(runtime.retry_attempts, fn {_id, retry} -> if is_reference(retry[:timer_ref]), do: Process.cancel_timer(retry.timer_ref) end)
+          Enum.each(runtime.lease_claims, fn {_id, claim} -> if is_reference(claim[:timer]), do: Process.cancel_timer(claim.timer) end)
+          runtime
+        end)
+
+        GenServer.stop(owner)
+        Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
+        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+      end
+    end)
+
+    owner
   end
 end

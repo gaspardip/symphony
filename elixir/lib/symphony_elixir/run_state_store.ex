@@ -1284,6 +1284,53 @@ defmodule SymphonyElixir.RunStateStore do
   defp canonical_snapshot(value) when is_list(value), do: Enum.map(value, &canonical_snapshot/1)
   defp canonical_snapshot(value), do: value
 
+  @doc "Applies only confirmed review reply fields after a local owner has revalidated its control permission."
+  @spec apply_review_publication(Path.t(), map(), map(), map(), integer()) :: {:ok, map()} | {:error, term()}
+  def apply_review_publication(workspace, %{id: id, identifier: identifier}, expected, patches, deadline)
+      when is_binary(workspace) and is_map(expected) and is_map(patches) and is_integer(deadline) do
+    with_workspace_lock(workspace, fn ->
+      with :ok <- DeployAudit.ensure_available(workspace),
+           {:ok, raw} <- read_canonical_snapshot(workspace),
+           :ok <- publication_assert(raw["issue_id"] == id and raw["issue_identifier"] == identifier),
+           :ok <-
+             publication_assert(
+               Map.take(raw, ~w(issue_id issue_identifier run_id run_identity_event_id run_identity_ledger_path)) ==
+                 Map.take(expected, ~w(issue_id issue_identifier run_id run_identity_event_id run_identity_ledger_path)) and
+                 coordinator_projection(raw) == coordinator_projection(expected)
+             ),
+           {:ok, threads} <- apply_publication_patches(raw["review_threads"], patches),
+           updated =
+             raw
+             |> Map.put("review_threads", threads)
+             |> Map.put("last_decision_summary", "Posted approved PR review replies.")
+             |> Map.put("next_human_action", "Resolve the review threads once the reply has been acknowledged."),
+           :ok <- write_coordinator_snapshot(workspace, updated, deadline) do
+        {:ok, atomize(updated)}
+      end
+    end)
+  end
+
+  defp publication_assert(true), do: :ok
+  defp publication_assert(false), do: {:error, :review_publication_snapshot_changed}
+
+  defp apply_publication_patches(threads, patches) when is_map(threads) and map_size(patches) > 0 do
+    Enum.reduce_while(patches, {:ok, threads}, fn {key, patch}, {:ok, updated} ->
+      fields = ~w(draft_state posted_reply_id posted_reply_url posted_at reply_refresh_needed)
+
+      valid =
+        is_binary(key) and is_map(threads[key]) and is_map(patch) and
+          MapSet.new(Map.keys(patch)) == MapSet.new(fields) and patch["draft_state"] == "posted" and
+          patch["reply_refresh_needed"] == false and
+          Enum.all?(~w(posted_reply_id posted_reply_url posted_at), &(is_binary(patch[&1]) and patch[&1] != ""))
+
+      if valid,
+        do: {:cont, {:ok, Map.update!(updated, key, &Map.merge(&1, patch))}},
+        else: {:halt, {:error, :invalid_review_publication_patch}}
+    end)
+  end
+
+  defp apply_publication_patches(_threads, _patches), do: {:error, :invalid_review_publication_patch}
+
   @spec update(Path.t(), (map() -> map())) :: {:ok, map()} | {:error, term()}
   def update(workspace, fun) when is_binary(workspace) and is_function(fun, 1) do
     with_workspace_lock(workspace, fn ->

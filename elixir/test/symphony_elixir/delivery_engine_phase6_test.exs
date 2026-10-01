@@ -344,10 +344,13 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
   end
 
   test "merge readiness refreshes and resolves posted review threads during await_checks" do
-    workspace = "/tmp/symphony-merge-readiness"
+    {workspace, issue} = stage_workspace!("review-refresh")
+    on_exit(fn -> File.rm_rf!(Path.dirname(workspace)) end)
     pr_url = "https://github.com/example/repo/pull/42"
 
     state = %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
       stage: "await_checks",
       pr_url: pr_url,
       policy_pack: :private_autopilot,
@@ -366,10 +369,14 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
       }
     }
 
+    assert :ok = RunStateStore.save(workspace, state)
+    snapshot_before = File.read!(RunStateStore.state_path(workspace))
+    refute Map.has_key?(Jason.decode!(snapshot_before), "run_id")
+
     assert {:ok, updated_state} =
              DeliveryEngine.maintain_merge_readiness_for_test(
                workspace,
-               %{},
+               issue,
                state,
                %{pr_url: pr_url},
                github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient,
@@ -382,13 +389,17 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert_receive {:merge_readiness_review_resolved, ^pr_url, "2926989348"}
     assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolution_state"]) == "resolved"
     assert get_in(updated_state, [:last_merge_readiness, :resolved_review_threads]) == 1
+    assert File.read!(RunStateStore.state_path(workspace)) == snapshot_before
   end
 
   test "merge readiness preserves addressed reply intent through live reconciliation before refreshing and resolving" do
-    workspace = "/tmp/symphony-merge-readiness"
+    {workspace, issue} = stage_workspace!("review-reconcile")
+    on_exit(fn -> File.rm_rf!(Path.dirname(workspace)) end)
     pr_url = "https://github.com/example/repo/pull/42"
 
     state = %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
       stage: "await_checks",
       pr_url: pr_url,
       policy_pack: :private_autopilot,
@@ -417,10 +428,14 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
       }
     }
 
+    assert :ok = RunStateStore.save(workspace, state)
+    snapshot_before = File.read!(RunStateStore.state_path(workspace))
+    refute Map.has_key?(Jason.decode!(snapshot_before), "run_id")
+
     assert {:ok, updated_state} =
              DeliveryEngine.maintain_merge_readiness_for_test(
                workspace,
-               %{},
+               issue,
                state,
                %{pr_url: pr_url},
                github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient,
@@ -433,13 +448,17 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert_receive {:merge_readiness_review_resolved, ^pr_url, "2926989348"}
     assert get_in(updated_state, [:review_threads, "comment:2926989348", "implementation_status"]) == "addressed"
     assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolution_state"]) == "resolved"
+    assert File.read!(RunStateStore.state_path(workspace)) == snapshot_before
   end
 
   test "merge readiness preserves resolved thread bookkeeping across later live reconciliation" do
-    workspace = "/tmp/symphony-merge-readiness"
+    {workspace, issue} = stage_workspace!("review-resolved")
+    on_exit(fn -> File.rm_rf!(Path.dirname(workspace)) end)
     pr_url = "https://github.com/example/repo/pull/42"
 
     state = %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
       stage: "await_checks",
       pr_url: pr_url,
       policy_pack: :private_autopilot,
@@ -469,10 +488,14 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
       }
     }
 
+    assert :ok = RunStateStore.save(workspace, state)
+    snapshot_before = File.read!(RunStateStore.state_path(workspace))
+    refute Map.has_key?(Jason.decode!(snapshot_before), "run_id")
+
     assert {:ok, updated_state} =
              DeliveryEngine.maintain_merge_readiness_for_test(
                workspace,
-               %{},
+               issue,
                state,
                %{pr_url: pr_url},
                github_client: SymphonyElixir.DeliveryEnginePhase6Test.MergeReadinessGitHubClient,
@@ -484,6 +507,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolution_state"]) == "resolved"
     assert get_in(updated_state, [:review_threads, "comment:2926989348", "resolved_at"]) == "2026-03-17T21:10:36Z"
     assert get_in(updated_state, [:last_merge_readiness, :resolved_review_threads]) == 1
+    assert File.read!(RunStateStore.state_path(workspace)) == snapshot_before
   end
 
   test "merge_readiness blocks when PR maintenance fails" do

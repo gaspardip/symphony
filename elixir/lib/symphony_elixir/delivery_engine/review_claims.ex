@@ -13,6 +13,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   alias SymphonyElixir.PRWatcher
   alias SymphonyElixir.PullRequestManager
   alias SymphonyElixir.ReviewEvidenceCollector
+  alias SymphonyElixir.ReviewPublication
   alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.TurnResult
 
@@ -185,7 +186,7 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
   # Autonomous review posting
   # ---------------------------------------------------------------------------
 
-  @spec maybe_post_autonomous_review_replies(map(), String.t(), String.t() | nil, map(), keyword()) :: map() | AgentExecution.terminal()
+  @spec maybe_post_autonomous_review_replies(map(), String.t(), String.t() | nil, map(), keyword()) :: map() | {:error, term()} | AgentExecution.terminal()
   def maybe_post_autonomous_review_replies(review_threads, workspace, pr_url, state, opts)
       when is_map(review_threads) and is_binary(workspace) and is_map(state) do
     pack = PolicyPack.resolve(Map.get(state, :policy_pack) || Config.policy_pack_name())
@@ -208,12 +209,13 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
           |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
 
         with :ok <- execution_guard(workspace),
-             result = PRWatcher.post_approved_drafts(workspace, pr_url, prepared_threads, watcher_opts),
+             issue = %{id: Map.get(state, :issue_id), identifier: Map.get(state, :issue_identifier)},
+             result = ReviewPublication.publish(workspace, issue, pr_url, prepared_threads, :execution, watcher_opts),
              :ok <- execution_guard(workspace) do
           case result do
             {:ok, updated_threads, _stats} -> updated_threads
             {:error, :no_postable_review_threads} -> prepared_threads
-            {:error, _reason} -> prepared_threads
+            failure -> failure
           end
         end
     end

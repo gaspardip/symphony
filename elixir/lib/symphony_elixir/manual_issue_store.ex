@@ -122,6 +122,39 @@ defmodule SymphonyElixir.ManualIssueStore do
      end)}
   end
 
+  @doc "Scans captured-root records completely; only an absent collection or unmatched identifier returns nil."
+  @spec fetch_issue_by_identifier_checked(String.t(), Path.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
+  def fetch_issue_by_identifier_checked(identifier, root_path)
+      when is_binary(identifier) and identifier != "" and is_binary(root_path) do
+    case File.ls(root_path) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(&String.ends_with?(&1, ".json"))
+        |> Enum.sort()
+        |> Enum.reduce_while({:ok, nil}, fn name, {:ok, found} ->
+          case read_checked_identifier_record(root_path, name) do
+            {:ok, %Issue{identifier: ^identifier} = issue} when is_nil(found) ->
+              {:cont, {:ok, issue}}
+
+            {:ok, %Issue{identifier: ^identifier}} ->
+              {:halt, {:error, :duplicate_manual_issue_identifier}}
+
+            {:ok, %Issue{}} ->
+              {:cont, {:ok, found}}
+
+            {:error, _reason} = error ->
+              {:halt, error}
+          end
+        end)
+
+      {:error, :enoent} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        {:error, {:manual_issue_list_failed, reason}}
+    end
+  end
+
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
     update_record(issue_id, fn record ->
@@ -283,6 +316,32 @@ defmodule SymphonyElixir.ManualIssueStore do
       record
     else
       _ -> nil
+    end
+  end
+
+  defp read_checked_identifier_record(root_path, name) do
+    encoded_id = Path.rootname(name, ".json")
+
+    with {:ok, id} <- checked_filename_id(encoded_id),
+         {:ok, payload} <- File.read(Path.join(root_path, name)),
+         {:ok, record} <- Jason.decode(payload) do
+      decode_checked_issue(record, id)
+    else
+      {:error, %Jason.DecodeError{} = reason} -> {:error, {:manual_issue_decode_failed, reason}}
+      {:error, :invalid_manual_issue_filename} = error -> error
+      {:error, reason} -> {:error, {:manual_issue_read_failed, reason}}
+    end
+  end
+
+  defp checked_filename_id(encoded_id) do
+    case Base.url_decode64(encoded_id, padding: false) do
+      {:ok, id} when id != "" ->
+        if String.valid?(id) and Base.url_encode64(id, padding: false) == encoded_id,
+          do: {:ok, id},
+          else: {:error, :invalid_manual_issue_filename}
+
+      _ ->
+        {:error, :invalid_manual_issue_filename}
     end
   end
 

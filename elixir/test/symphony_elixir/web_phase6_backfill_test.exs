@@ -49,6 +49,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       {:reply, :ok, Keyword.put(state, :responses, merged)}
     end
 
+    def handle_call({:control, %{ref: ref, deadline: deadline, action: action, identifier: identifier, args: args}} = message, _from, state)
+        when is_reference(ref) and is_integer(deadline) and is_atom(action) and is_binary(identifier) and is_list(args) do
+      true = deadline > System.monotonic_time(:millisecond)
+      send(Keyword.fetch!(state, :test_pid), {:orchestrator_call, message})
+      {:reply, Map.get(Keyword.get(state, :responses, %{}), {action, identifier, args}, :unavailable), state}
+    end
+
     def handle_call(message, _from, state) do
       send(Keyword.fetch!(state, :test_pid), {:orchestrator_call, message})
       {:reply, Map.get(Keyword.get(state, :responses, %{}), message, :unavailable), state}
@@ -146,13 +153,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
        snapshot: base_snapshot(),
        refresh: :unavailable,
        responses: %{
-         {:pause_issue, "MT-WEB"} => %{
+         {:pause, "MT-WEB", []} => %{
            ok: false,
            action: "pause",
            issue_identifier: "MT-WEB",
            error: "already paused"
          },
-         {:stop_issue, "MT-WEB"} => :unavailable
+         {:stop, "MT-WEB", []} => :unavailable
        }}
     )
 
@@ -171,7 +178,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       })
 
     assert pause_html =~ "Operations Dashboard"
-    assert_receive {:orchestrator_call, {:pause_issue, "MT-WEB"}}
+    assert_receive {:orchestrator_call, {:control, %{action: :pause, identifier: "MT-WEB", args: []}}}
 
     stop_html =
       render_click(view, "control", %{
@@ -180,7 +187,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       })
 
     assert stop_html =~ "Operations Dashboard"
-    assert_receive {:orchestrator_call, {:stop_issue, "MT-WEB"}}
+    assert_receive {:orchestrator_call, {:control, %{action: :stop, identifier: "MT-WEB", args: []}}}
   end
 
   test "presenter issue payload falls back to tracked issue and persisted run state" do
@@ -314,13 +321,13 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
        test_pid: self(),
        refresh: %{queued: true, requested_at: requested_at},
        responses: %{
-         {:reprioritize_issue, "MT-WEB", nil} => %{
+         {:reprioritize, "MT-WEB", [nil]} => %{
            ok: true,
            action: "reprioritize",
            issue_identifier: "MT-WEB",
            override_rank: nil
          },
-         {:resume_issue, "MT-WEB"} => :unexpected
+         {:resume, "MT-WEB", []} => :unexpected
        }}
     )
 
@@ -336,12 +343,12 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
              )
 
     assert control_payload.override_rank == nil
-    assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-WEB", nil}}
+    assert_receive {:orchestrator_call, {:control, %{action: :reprioritize, identifier: "MT-WEB", args: [nil]}}}
 
     assert {:error, :unknown_action} =
              Presenter.control_payload("resume", "MT-WEB", %{}, orchestrator_name)
 
-    assert_receive {:orchestrator_call, {:resume_issue, "MT-WEB"}}
+    assert_receive {:orchestrator_call, {:control, %{action: :resume, identifier: "MT-WEB", args: []}}}
 
     assert {:error, :unknown_action} =
              Presenter.control_payload("bogus", "MT-WEB", %{}, orchestrator_name)
@@ -395,7 +402,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
   test "observability api control returns 400 for unknown actions and 503 for unavailable orchestrators" do
     orchestrator_name = Module.concat(__MODULE__, :ApiControlOrchestrator)
 
-    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot(), responses: %{{:pause_issue, "MT-WEB"} => :unavailable}})
+    start_supervised!({BackfillOrchestrator, name: orchestrator_name, test_pid: self(), snapshot: base_snapshot(), responses: %{{:pause, "MT-WEB", []} => :unavailable}})
 
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
@@ -922,7 +929,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
        snapshot: rich_snapshot(),
        refresh: %{queued: true, requested_at: ~U[2026-03-07 16:00:00Z]},
        responses: %{
-         {:reprioritize_issue, "MT-QUEUE", 0} => %{
+         {:reprioritize, "MT-QUEUE", [0]} => %{
            ok: true,
            action: "boost",
            issue_identifier: "MT-QUEUE",
@@ -966,7 +973,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       })
 
     assert boost_html =~ "operator override"
-    assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-QUEUE", 0}}
+    assert_receive {:orchestrator_call, {:control, %{action: :reprioritize, identifier: "MT-QUEUE", args: [0]}}}
 
     assert :ok = BackfillOrchestrator.put_snapshot(orchestrator_name, :timeout)
     send(view.pid, :observability_updated)
@@ -1180,40 +1187,40 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
        name: orchestrator_name,
        test_pid: self(),
        responses: %{
-         {:pause_issue, "MT-ACTION"} => %{ok: true, action: "pause", issue_identifier: "MT-ACTION"},
-         {:stop_issue, "MT-ACTION"} => %{ok: true, action: "stop", issue_identifier: "MT-ACTION"},
-         {:hold_issue_for_human_review, "MT-ACTION"} => %{
+         {:pause, "MT-ACTION", []} => %{ok: true, action: "pause", issue_identifier: "MT-ACTION"},
+         {:stop, "MT-ACTION", []} => %{ok: true, action: "stop", issue_identifier: "MT-ACTION"},
+         {:hold_for_human_review, "MT-ACTION", []} => %{
            ok: true,
            action: "hold_for_human_review",
            issue_identifier: "MT-ACTION"
          },
-         {:retry_issue_now, "MT-ACTION"} => %{ok: true, action: "retry_now", issue_identifier: "MT-ACTION"},
-         {:refresh_merge_readiness, "MT-ACTION"} => %{
+         {:retry_now, "MT-ACTION", []} => %{ok: true, action: "retry_now", issue_identifier: "MT-ACTION"},
+         {:refresh_merge_readiness, "MT-ACTION", []} => %{
            ok: true,
            action: "refresh_merge_readiness",
            issue_identifier: "MT-ACTION",
            stage: "merge_readiness"
          },
-         {:approve_issue_for_merge, "MT-ACTION"} => {:error, :not_ready},
-         {:reprioritize_issue, "MT-ACTION", 0} => %{
+         {:approve_for_merge, "MT-ACTION", []} => {:error, :not_ready},
+         {:reprioritize, "MT-ACTION", [0]} => %{
            ok: true,
            action: "boost",
            issue_identifier: "MT-ACTION",
            override_rank: 0
          },
-         {:reprioritize_issue, "MT-ACTION", nil} => %{
+         {:reprioritize, "MT-ACTION", [nil]} => %{
            ok: true,
            action: "reset_priority",
            issue_identifier: "MT-ACTION",
            override_rank: nil
          },
-         {:set_policy_class, "MT-ACTION", "review_required"} => %{
+         {:set_policy_class, "MT-ACTION", ["review_required"]} => %{
            ok: true,
            action: "set_policy_class",
            issue_identifier: "MT-ACTION",
            policy_class: "review_required"
          },
-         {:clear_policy_override, "MT-ACTION"} => :unavailable
+         {:clear_policy_override, "MT-ACTION", []} => :unavailable
        }}
     )
 
@@ -1255,16 +1262,16 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert {:error, :unavailable} =
              Presenter.control_payload("clear_policy_override", "MT-ACTION", %{}, orchestrator_name)
 
-    assert_receive {:orchestrator_call, {:pause_issue, "MT-ACTION"}}
-    assert_receive {:orchestrator_call, {:stop_issue, "MT-ACTION"}}
-    assert_receive {:orchestrator_call, {:hold_issue_for_human_review, "MT-ACTION"}}
-    assert_receive {:orchestrator_call, {:retry_issue_now, "MT-ACTION"}}
-    assert_receive {:orchestrator_call, {:refresh_merge_readiness, "MT-ACTION"}}
-    assert_receive {:orchestrator_call, {:approve_issue_for_merge, "MT-ACTION"}}
-    assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-ACTION", 0}}
-    assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-ACTION", nil}}
-    assert_receive {:orchestrator_call, {:set_policy_class, "MT-ACTION", "review_required"}}
-    assert_receive {:orchestrator_call, {:clear_policy_override, "MT-ACTION"}}
+    assert_receive {:orchestrator_call, {:control, %{action: :pause, identifier: "MT-ACTION", args: []}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :stop, identifier: "MT-ACTION", args: []}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :hold_for_human_review, identifier: "MT-ACTION", args: []}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :retry_now, identifier: "MT-ACTION", args: []}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :refresh_merge_readiness, identifier: "MT-ACTION", args: []}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :approve_for_merge, identifier: "MT-ACTION", args: []}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :reprioritize, identifier: "MT-ACTION", args: [0]}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :reprioritize, identifier: "MT-ACTION", args: [nil]}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :set_policy_class, identifier: "MT-ACTION", args: ["review_required"]}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :clear_policy_override, identifier: "MT-ACTION", args: []}}}
   end
 
   test "dashboard live handles runtime ticks, unknown controls, and unavailable snapshot updates" do
@@ -1338,7 +1345,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
        test_pid: self(),
        snapshot: policy_matrix_snapshot(),
        responses: %{
-         {:set_policy_class, "MT-QUEUE-POLICY", "review_required"} => %{
+         {:set_policy_class, "MT-QUEUE-POLICY", ["review_required"]} => %{
            ok: true,
            action: "set_policy_class",
            issue_identifier: "MT-QUEUE-POLICY",
@@ -1377,7 +1384,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
       })
 
     assert queue_html =~ "Ranked queue"
-    assert_receive {:orchestrator_call, {:set_policy_class, "MT-QUEUE-POLICY", "review_required"}}
+    assert_receive {:orchestrator_call, {:control, %{action: :set_policy_class, identifier: "MT-QUEUE-POLICY", args: ["review_required"]}}}
   end
 
   test "presenter state payload covers optional policies, merge ready branches, and running issue payloads" do
@@ -1520,8 +1527,8 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
        test_pid: self(),
        snapshot: empty_snapshot(),
        responses: %{
-         {:resume_issue, "MT-CONTROL"} => %{ok: true, action: "resume", issue_identifier: "MT-CONTROL"},
-         {:reprioritize_issue, "MT-CONTROL", 5} => %{
+         {:resume, "MT-CONTROL", []} => %{ok: true, action: "resume", issue_identifier: "MT-CONTROL"},
+         {:reprioritize, "MT-CONTROL", [5]} => %{
            ok: true,
            action: "reprioritize",
            issue_identifier: "MT-CONTROL",
@@ -1550,8 +1557,8 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
                orchestrator_name
              )
 
-    assert_receive {:orchestrator_call, {:resume_issue, "MT-CONTROL"}}
-    assert_receive {:orchestrator_call, {:reprioritize_issue, "MT-CONTROL", 5}}
+    assert_receive {:orchestrator_call, {:control, %{action: :resume, identifier: "MT-CONTROL", args: []}}}
+    assert_receive {:orchestrator_call, {:control, %{action: :reprioritize, identifier: "MT-CONTROL", args: [5]}}}
   end
 
   test "issue payload keeps harness and publish detail for waiting deploy-approval issues" do

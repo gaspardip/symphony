@@ -5,6 +5,22 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
   alias SymphonyElixir.Orchestrator.Controls
   alias SymphonyElixir.Orchestrator.State
 
+  # The fixture owns this State in one real GenServer. Control continuations,
+  # reader results and replies are handled by production callbacks.
+  defmodule ControlDriver do
+    use GenServer
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(:runtime, _from, state), do: {:reply, state, state}
+    def handle_call(message, from, state), do: Orchestrator.handle_call(message, from, state)
+
+    @impl true
+    def handle_info(message, state), do: Orchestrator.handle_info(message, state)
+  end
+
   setup context do
     root = Path.join(System.tmp_dir!(), "deploy-audit-barriers-#{System.pid()}-#{System.unique_integer([:positive])}")
     File.mkdir_p!(root)
@@ -318,7 +334,7 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
 
   @tag incomplete: true
   test "an incomplete deploy marker blocks retry and cleanup without repairing the marker", context do
-    {reply, state} = Controls.retry_issue_now_runtime(context.state, context.issue.identifier)
+    {reply, state} = control(:retry, context.state, context.issue.identifier)
     assert reply.ok == false
     assert reply.error =~ "deploy_audit_pending"
     assert state == context.state
@@ -341,7 +357,7 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
       company_credential_registry_path: Path.join(context.root, "credentials.json")
     )
 
-    {reply, state} = Controls.retry_issue_now_runtime(context.state, context.issue.identifier)
+    {reply, state} = control(:retry, context.state, context.issue.identifier)
     assert reply.ok == false
     assert reply.error =~ "deploy_audit_read_failed"
     assert reply.error =~ "enotdir"
@@ -354,12 +370,13 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
 
   test "pause and stop remain available and retain the deploy journal", context do
     marker_before = journal_bytes(context.workspace)
-    {paused_reply, paused} = Controls.pause_issue_runtime(context.state, context.issue.identifier)
+    owner = start_control_owner!(context.state)
+    {paused_reply, _paused} = control(:pause, owner, context.issue.identifier)
     assert paused_reply.ok
     assert_received {:memory_tracker_state_update, "deploy-barrier", "Paused"}
     assert journal_bytes(context.workspace) == marker_before
 
-    {stop_reply, _stopped} = Controls.stop_issue_runtime(paused, context.issue.identifier)
+    {stop_reply, _stopped} = control(:stop, owner, context.issue.identifier)
     assert stop_reply.ok
     assert_received {:memory_tracker_state_update, "deploy-barrier", "Blocked"}
     assert_received {:memory_tracker_comment, "deploy-barrier", _}
@@ -367,13 +384,26 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
     assert {:ok, _state} = RunStateStore.load(context.workspace)
   end
 
-  defp control(:retry, state, identifier), do: Controls.retry_issue_now_runtime(state, identifier)
-  defp control(:resume, state, identifier), do: Controls.resume_issue_runtime(state, identifier)
-  defp control(:refresh_merge, state, identifier), do: Controls.refresh_merge_readiness_runtime(state, identifier)
-  defp control(:approve_merge, state, identifier), do: Controls.approve_issue_for_merge_runtime(state, identifier)
-  defp control(:approve_deploy, state, identifier), do: Controls.approve_issue_for_deploy_runtime(state, identifier)
-  defp control(:approve_drafts, state, identifier), do: Controls.review_thread_action_runtime(state, identifier, "approve_review_drafts")
-  defp control(:post_drafts, state, identifier), do: Controls.post_review_drafts_runtime(state, identifier)
+  defp control(action, %State{} = state, identifier) do
+    control(action, start_control_owner!(state), identifier)
+  end
+
+  defp control(action, owner, identifier) when is_pid(owner) do
+    reply =
+      case action do
+        :retry -> Orchestrator.retry_issue_now(owner, identifier)
+        :resume -> Orchestrator.resume_issue(owner, identifier)
+        :refresh_merge -> Orchestrator.refresh_merge_readiness(owner, identifier)
+        :approve_merge -> Orchestrator.approve_issue_for_merge(owner, identifier)
+        :approve_deploy -> Orchestrator.approve_issue_for_deploy(owner, identifier)
+        :approve_drafts -> Orchestrator.approve_review_drafts(owner, identifier)
+        :post_drafts -> Orchestrator.post_review_drafts(owner, identifier)
+        :pause -> Orchestrator.pause_issue(owner, identifier)
+        :stop -> Orchestrator.stop_issue(owner, identifier)
+      end
+
+    {reply, GenServer.call(owner, :runtime)}
+  end
 
   defp paused_state(context) do
     %{
@@ -402,5 +432,32 @@ defmodule SymphonyElixir.DeployAuditBarriersTest do
   defp journal_bytes(workspace) do
     directory = DeployAudit.marker_directory(workspace)
     Map.new(File.ls!(directory), fn name -> {name, File.read!(Path.join(directory, name))} end)
+  end
+
+  defp start_control_owner!(state) do
+    {:ok, owner} = GenServer.start(ControlDriver, state)
+
+    on_exit(fn ->
+      if Process.alive?(owner) do
+        assert :ok = :sys.suspend(owner)
+        current = :sys.get_state(owner)
+        readers = Enum.reject([current.tracker_poll_read, current.admission_read], &is_nil/1)
+        workers = Enum.map(current.running, fn {_id, entry} -> entry.pid end)
+        monitors = Enum.map(Enum.uniq(Enum.map(readers, & &1.pid) ++ workers), &{&1, Process.monitor(&1)})
+
+        :sys.replace_state(owner, fn runtime ->
+          Enum.each(readers, fn reader -> assert :ok = SymphonyElixir.TrackerReader.cancel(reader) end)
+          Enum.each(runtime.retry_attempts, fn {_id, retry} -> if is_reference(retry[:timer_ref]), do: Process.cancel_timer(retry.timer_ref) end)
+          Enum.each(runtime.lease_claims, fn {_id, claim} -> if is_reference(claim[:timer]), do: Process.cancel_timer(claim.timer) end)
+          runtime
+        end)
+
+        GenServer.stop(owner)
+        Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
+        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+      end
+    end)
+
+    owner
   end
 end

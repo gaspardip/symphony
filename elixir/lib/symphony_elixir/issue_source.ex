@@ -132,6 +132,34 @@ defmodule SymphonyElixir.IssueSource do
     end
   end
 
+  @doc "Resolves an exact identifier on one explicit source without fallback or a fabricated id."
+  @spec fetch_issue_by_identifier_checked(term(), term(), TrackerReadContext.t()) :: {:ok, checked_outcome()}
+  def fetch_issue_by_identifier_checked(identifier, source, %TrackerReadContext{} = context) do
+    cond do
+      not is_binary(identifier) or identifier == "" ->
+        {:ok, {:invalid, :reference, {:invalid_issue_ref, :identifier}}}
+
+      source not in [:manual, :tracker] ->
+        {:ok, {:invalid, :reference, {:invalid_issue_ref, :source}}}
+
+      source == :manual and not context.manual_enabled ->
+        {:ok, {:disabled, :manual}}
+
+      source == :tracker and not tracker_enabled?(context) ->
+        {:ok, {:disabled, :tracker}}
+
+      true ->
+        outcome =
+          observe_checked_outcome(source, "lookup_by_identifier", fn ->
+            source
+            |> read_checked_identifier(identifier, context)
+            |> checked_identifier_result(source, identifier)
+          end)
+
+        {:ok, outcome}
+    end
+  end
+
   @spec fetch_issue_by_id(String.t()) :: {:ok, Issue.t() | nil} | {:error, term()}
   def fetch_issue_by_id(issue_id) when is_binary(issue_id), do: fetch_issue_by_id(issue_id, Config.tracker_read_context())
 
@@ -296,6 +324,27 @@ defmodule SymphonyElixir.IssueSource do
   defp read_checked_source(:tracker, id, %TrackerReadContext{linear_client_module: client}),
     do: client.fetch_issue_by_id(id)
 
+  defp read_checked_identifier(:manual, identifier, context),
+    do: ManualIssueStore.fetch_issue_by_identifier_checked(identifier, context.manual_store_root)
+
+  defp read_checked_identifier(:tracker, identifier, %TrackerReadContext{tracker_kind: "memory"}),
+    do: SymphonyElixir.Tracker.Memory.fetch_issue_by_identifier(identifier)
+
+  defp read_checked_identifier(:tracker, identifier, %TrackerReadContext{linear_client_module: SymphonyElixir.Linear.Client} = context),
+    do: SymphonyElixir.Linear.Client.fetch_issue_by_identifier(identifier, context)
+
+  defp read_checked_identifier(:tracker, identifier, %TrackerReadContext{linear_client_module: client}),
+    do: client.fetch_issue_by_identifier(identifier)
+
+  defp checked_identifier_result({:ok, %Issue{} = issue} = result, source, identifier) do
+    if is_binary(issue.id) and issue.id != "",
+      do: checked_source_result(result, source, issue.id, identifier),
+      else: checked_identity_error(source, :id)
+  end
+
+  defp checked_identifier_result(result, source, _identifier),
+    do: checked_non_issue_result(result, source)
+
   defp checked_source_result({:ok, %Issue{} = issue}, source, id, identifier) do
     cond do
       issue.id != id -> checked_identity_error(source, :id)
@@ -305,17 +354,19 @@ defmodule SymphonyElixir.IssueSource do
     end
   end
 
-  defp checked_source_result({:ok, nil}, source, _id, _identifier), do: {:missing, source}
+  defp checked_source_result(result, source, _id, _identifier), do: checked_non_issue_result(result, source)
 
-  defp checked_source_result({:error, {:linear_rate_limited, metadata} = reason}, :tracker, _id, _identifier),
+  defp checked_non_issue_result({:ok, nil}, source), do: {:missing, source}
+
+  defp checked_non_issue_result({:error, {:linear_rate_limited, metadata} = reason}, :tracker),
     do: checked_rate_limit(reason, metadata)
 
-  defp checked_source_result({:error, {:linear_api_status, 429, metadata} = reason}, :tracker, _id, _identifier),
+  defp checked_non_issue_result({:error, {:linear_api_status, 429, metadata} = reason}, :tracker),
     do: checked_rate_limit(reason, metadata)
 
-  defp checked_source_result({:error, reason}, source, _id, _identifier), do: {:read_error, source, reason}
-  defp checked_source_result({:ok, _value}, _source, _id, _identifier), do: {:invalid, :issue, :invalid_issue}
-  defp checked_source_result(_result, _source, _id, _identifier), do: {:invalid, :response, :invalid_source_result}
+  defp checked_non_issue_result({:error, reason}, source), do: {:read_error, source, reason}
+  defp checked_non_issue_result({:ok, _value}, _source), do: {:invalid, :issue, :invalid_issue}
+  defp checked_non_issue_result(_result, _source), do: {:invalid, :response, :invalid_source_result}
 
   defp checked_issue_source?(:manual, :manual), do: true
   defp checked_issue_source?(:tracker, source) when source in [nil, :tracker], do: true
@@ -329,10 +380,14 @@ defmodule SymphonyElixir.IssueSource do
 
   @spec observe_checked_lookup(:manual | :tracker, String.t(), String.t(), (-> term())) :: checked_outcome()
   defp observe_checked_lookup(source, id, identifier, fun) do
-    metadata = %{source: Atom.to_string(source), operation: "lookup"}
+    observe_checked_outcome(source, "lookup", fn -> checked_source_result(fun.(), source, id, identifier) end)
+  end
+
+  defp observe_checked_outcome(source, operation, fun) do
+    metadata = %{source: Atom.to_string(source), operation: operation}
     start_time = System.monotonic_time()
     Observability.emit([:symphony, :issue_source, :start], %{count: 1}, metadata)
-    outcome = checked_source_result(fun.(), source, id, identifier)
+    outcome = fun.()
 
     label =
       case outcome do

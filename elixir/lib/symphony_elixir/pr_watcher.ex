@@ -680,48 +680,78 @@ defmodule SymphonyElixir.PRWatcher do
     end
   end
 
+  @type reply_transport :: %{operation: :post | :edit, target: String.t(), body: String.t(), pr_url: String.t(), client: module(), client_opts: keyword()}
+
+  @doc "Prepares one existing reply transport after policy/scope checks. This plan is not execution authority."
+  @spec prepare_review_reply(String.t(), term(), map(), keyword()) :: {:ok, reply_transport()} | :skip | {:error, term()}
+  def prepare_review_reply(pr_url, thread_key, thread_state, opts) do
+    pack = PolicyPack.resolve(Keyword.get(opts, :policy_pack))
+
+    with true <- PolicyPack.external_comment_posting_allowed?(pack) or {:error, {:external_comment_posting_forbidden, PolicyPack.name_string(pack)}},
+         :ok <- ensure_comment_post_scope(opts),
+         {:ok, request} <- reply_request(thread_key, thread_state),
+         true <- (is_binary(request.target) and request.target != "" and is_binary(request.body) and String.trim(request.body) != "") or {:error, :invalid_review_reply} do
+      {:ok,
+       Map.merge(request, %{
+         pr_url: pr_url,
+         client: Keyword.get(opts, :github_client, configured_github_client()),
+         client_opts: Keyword.merge(configured_github_client_opts(), Keyword.get(opts, :github_client_opts, []))
+       })}
+    else
+      :not_postable -> :skip
+      result -> result
+    end
+  end
+
+  @doc "Returns the raw, unvalidated client response from one prepared transport; the caller owns permission, validation, and durable observation."
+  @spec execute_review_reply(reply_transport()) :: term()
+  def execute_review_reply(%{operation: operation, pr_url: pr_url, target: target, body: body, client: client, client_opts: opts}) do
+    send_review_reply(operation, client, pr_url, target, body, opts)
+  end
+
+  defp reply_request(thread_key, thread_state) do
+    draft_state = thread_state |> Map.get("draft_state", "drafted") |> to_string()
+    draft_reply = Map.get(thread_state, "draft_reply")
+
+    cond do
+      draft_state not in ["approved_to_post", "approved_to_update"] or not present?(draft_reply) ->
+        :not_postable
+
+      String.starts_with?(to_string(thread_key), "comment:") ->
+        operation = if draft_state == "approved_to_update", do: :edit, else: :post
+
+        target =
+          if operation == :edit,
+            do: Map.get(thread_state, "posted_reply_id"),
+            else: thread_key |> to_string() |> String.split(":", parts: 2) |> List.last()
+
+        {:ok, %{operation: operation, target: target, body: draft_reply}}
+
+      true ->
+        :skip
+    end
+  end
+
+  defp send_review_reply(:edit, client, pr_url, target, body, opts) do
+    if function_exported?(client, :edit_review_comment_reply, 4),
+      do: client.edit_review_comment_reply(pr_url, target, body, opts),
+      else: {:error, :review_reply_update_unsupported}
+  end
+
+  defp send_review_reply(:post, client, pr_url, target, body, opts),
+    do: client.post_review_comment_reply(pr_url, target, body, opts)
+
   defp do_post_approved_drafts(_workspace, pr_url, thread_states, github_client, github_opts) do
     Enum.reduce(thread_states, {thread_states, 0, 0}, fn {thread_key, thread_state}, {acc, posted, skipped} ->
-      draft_state = thread_state |> Map.get("draft_state", "drafted") |> to_string()
-      draft_reply = Map.get(thread_state, "draft_reply")
-
-      cond do
-        draft_state not in ["approved_to_post", "approved_to_update"] or not present?(draft_reply) ->
+      case reply_request(thread_key, thread_state) do
+        :not_postable ->
           {acc, posted, skipped}
 
-        String.starts_with?(to_string(thread_key), "comment:") ->
-          target_comment_id =
-            if draft_state == "approved_to_update" do
-              Map.get(thread_state, "posted_reply_id")
-            else
-              thread_key
-              |> to_string()
-              |> String.split(":", parts: 2)
-              |> List.last()
-            end
+        :skip ->
+          {acc, posted, skipped + 1}
 
-          post_result =
-            if draft_state == "approved_to_update" do
-              if function_exported?(github_client, :edit_review_comment_reply, 4) do
-                github_client.edit_review_comment_reply(
-                  pr_url,
-                  target_comment_id,
-                  draft_reply,
-                  github_opts
-                )
-              else
-                {:error, :review_reply_update_unsupported}
-              end
-            else
-              github_client.post_review_comment_reply(
-                pr_url,
-                target_comment_id,
-                draft_reply,
-                github_opts
-              )
-            end
-
-          case post_result do
+        {:ok, request} ->
+          case send_review_reply(request.operation, github_client, pr_url, request.target, request.body, github_opts) do
             {:ok, reply} ->
               updated =
                 thread_state
@@ -736,9 +766,6 @@ defmodule SymphonyElixir.PRWatcher do
             {:error, _reason} ->
               {acc, posted, skipped + 1}
           end
-
-        true ->
-          {acc, posted, skipped + 1}
       end
     end)
   end

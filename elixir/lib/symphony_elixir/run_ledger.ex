@@ -130,6 +130,155 @@ defmodule SymphonyElixir.RunLedger do
       end)
     end
 
+    @type fingerprint :: String.t()
+    @type deadline :: integer() | :not_pending
+
+    @doc "Reads every row under the checked lock. Missing files are errors, never empty history."
+    @spec entries_checked(Path.t()) :: {:ok, [map()], fingerprint()} | {:error, PersistenceError.t()}
+    def entries_checked(path) do
+      with_checked_lock(path, nil, :uncertain, fn -> read_entries(path, nil) end)
+    end
+
+    @doc "Compares the complete captured history and appends once under the same physical lock."
+    @spec persist_if_current(map(), Path.t(), fingerprint(), deadline(), io_callbacks(), (String.t(), map() -> term())) ::
+            {:ok, map()} | {:error, PersistenceError.t()}
+    def persist_if_current(entry, path, expected, deadline, io \\ filesystem(), observer \\ &Observability.emit_ledger_event/2)
+        when is_binary(expected) and (is_integer(deadline) or deadline == :not_pending) do
+      id = event_id(entry)
+
+      with :ok <- validate_prepared(entry),
+           {:ok, payload} <- encode_checked(entry) do
+        result =
+          with_checked_lock(path, id, :not_confirmed, fn ->
+            with {:ok, rows, actual} <- read_entries(path, id),
+                 :ok <- checked_condition(actual == expected, :compare, id, :ledger_changed),
+                 :ok <- checked_condition(not Enum.any?(rows, &(&1["event_id"] == id)), :preflight, id, :event_id_already_present),
+                 :ok <- checked_condition(deadline == :not_pending or System.monotonic_time(:millisecond) < deadline, :deadline, id, :deadline_expired),
+                 {:ok, file_info} <- conditional_file_info(path, id, :compare) do
+              write_current(path, payload <> "\n", entry, expected, file_info, deadline, io)
+            end
+          end)
+
+        case result do
+          {:ok, ^entry} ->
+            emit_confirmed_event(entry, observer)
+            {:ok, entry}
+
+          {:error, %PersistenceError{}} = error ->
+            error
+        end
+      end
+    end
+
+    # OTP append may create an empty file after a concurrent unlink. That is not
+    # a confirmed history: compare the opened object and complete prefix before
+    # writing, then verify the final pathname after checked sync/close. Initial
+    # persist retains its separate create-capable contract.
+    defp write_current(path, payload, entry, expected, file_info, deadline, io) do
+      id = event_id(entry)
+
+      case io.open.(String.to_charlist(path), [:read, :append, :binary, :raw]) do
+        {:ok, device} ->
+          result =
+            checked_cleanup(
+              fn ->
+                with {:ok, opened} <- conditional_file_info(device, id, :compare),
+                     :ok <- same_conditional_file(file_info, opened, id, :compare),
+                     {:ok, prefix} <- conditional_prefix(device, opened.size, id),
+                     :ok <- conditional_fingerprint(prefix, expected, id, :compare),
+                     {:ok, current} <- conditional_file_info(path, id, :compare),
+                     :ok <- same_conditional_file(opened, current, id, :compare),
+                     :ok <- checked_condition(deadline == :not_pending or System.monotonic_time(:millisecond) < deadline, :deadline, id, :deadline_expired),
+                     :ok <- checked_io_result(io.write.(device, payload), :write, id),
+                     :ok <- checked_io_result(io.sync.(device), :sync, id) do
+                  {:ok, {opened, prefix <> payload}}
+                end
+              end,
+              fn -> io.close.(device) end,
+              :close,
+              id
+            )
+
+          case result do
+            {:ok, {opened, confirmed_bytes}} ->
+              with {:ok, current} <- conditional_file_info(path, id, :confirm),
+                   :ok <- same_conditional_file(%{opened | size: byte_size(confirmed_bytes)}, current, id, :confirm),
+                   {:ok, bytes} <- conditional_path_bytes(path, id),
+                   :ok <- conditional_fingerprint(bytes, ledger_fingerprint(confirmed_bytes), id, :confirm),
+                   {:ok, final} <- conditional_file_info(path, id, :confirm),
+                   :ok <- same_conditional_file(current, final, id, :confirm) do
+                {:ok, entry}
+              end
+
+            {:error, %PersistenceError{}} = error ->
+              error
+          end
+
+        {:error, reason} ->
+          checked_error(:open, id, :not_confirmed, reason)
+      end
+    end
+
+    defp conditional_file_info(file, id, phase) do
+      case :file.read_file_info(file) do
+        {:ok, record} ->
+          info = File.Stat.from_record(record)
+
+          if info.type == :regular and is_integer(info.inode) and info.inode > 0 do
+            {:ok, Map.take(info, [:type, :major_device, :minor_device, :inode, :size])}
+          else
+            checked_error(phase, id, :uncertain, :unsupported_ledger_file_identity)
+          end
+
+        {:error, reason} ->
+          checked_error(phase, id, :uncertain, reason)
+      end
+    end
+
+    defp same_conditional_file(expected, actual, _id, _phase) when expected === actual, do: :ok
+
+    defp same_conditional_file(_expected, _actual, id, phase),
+      do: checked_error(phase, id, :uncertain, :ledger_file_changed)
+
+    defp conditional_prefix(device, size, id) do
+      # One extra byte detects growth on the opened descriptor. No read-ahead or
+      # delayed-write cache can make this a different file's path-based prefix.
+      case :file.pread(device, 0, size + 1) do
+        {:ok, bytes} when byte_size(bytes) == size -> {:ok, bytes}
+        :eof when size == 0 -> {:ok, ""}
+        {:error, reason} -> checked_error(:read, id, :uncertain, reason)
+        _changed -> checked_error(:compare, id, :uncertain, :ledger_changed)
+      end
+    end
+
+    defp conditional_path_bytes(path, id) do
+      case File.read(path) do
+        {:ok, bytes} -> {:ok, bytes}
+        {:error, reason} -> checked_error(:confirm, id, :uncertain, reason)
+      end
+    end
+
+    defp conditional_fingerprint(bytes, expected, id, phase) do
+      if ledger_fingerprint(bytes) == expected,
+        do: :ok,
+        else: checked_error(phase, id, :uncertain, :ledger_changed)
+    end
+
+    defp ledger_fingerprint(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+
+    defp checked_condition(true, _phase, _id, _reason), do: :ok
+    defp checked_condition(false, phase, id, reason), do: checked_error(phase, id, :not_confirmed, reason)
+
+    defp read_entries(path, id) do
+      with {:ok, payload} <- File.read(path),
+           {:ok, rows} <- decode_ledger_rows(payload, id) do
+        {:ok, rows, Base.encode16(:crypto.hash(:sha256, payload), case: :lower)}
+      else
+        {:error, %PersistenceError{}} = error -> error
+        {:error, reason} -> checked_error(:read, id, :uncertain, reason)
+      end
+    end
+
     @spec event_id(map()) :: String.t() | nil
     def event_id(entry) do
       case field(entry, :event_id) do
@@ -293,15 +442,24 @@ defmodule SymphonyElixir.RunLedger do
       end
     end
 
-    defp decode_complete_ledger("", _id), do: {:error, :not_found}
-
     defp decode_complete_ledger(payload, id) do
+      with {:ok, rows} <- decode_ledger_rows(payload, id) do
+        case Enum.find(rows, &(&1["event_id"] == id)) do
+          nil -> {:error, :not_found}
+          entry -> {:ok, entry}
+        end
+      end
+    end
+
+    defp decode_ledger_rows("", _id), do: {:ok, []}
+
+    defp decode_ledger_rows(payload, id) do
       if String.ends_with?(payload, "\n") do
         payload
         |> String.split("\n")
         |> Enum.drop(-1)
         |> Enum.with_index(1)
-        |> Enum.reduce_while({:ok, nil, MapSet.new()}, fn {line, number}, {:ok, found, ids} ->
+        |> Enum.reduce_while({:ok, [], MapSet.new()}, fn {line, number}, {:ok, rows, ids} ->
           case Jason.decode(line) do
             {:ok, %{} = entry} ->
               row_id = Map.get(entry, "event_id")
@@ -315,8 +473,7 @@ defmodule SymphonyElixir.RunLedger do
 
                 true ->
                   next_ids = if row_id == nil, do: ids, else: MapSet.put(ids, row_id)
-                  next_found = if row_id == id, do: entry, else: found
-                  {:cont, {:ok, next_found, next_ids}}
+                  {:cont, {:ok, [entry | rows], next_ids}}
               end
 
             _ ->
@@ -324,8 +481,7 @@ defmodule SymphonyElixir.RunLedger do
           end
         end)
         |> case do
-          {:ok, nil, _ids} -> {:error, :not_found}
-          {:ok, entry, _ids} -> {:ok, entry}
+          {:ok, rows, _ids} -> {:ok, Enum.reverse(rows)}
           {:error, %PersistenceError{}} = error -> error
         end
       else

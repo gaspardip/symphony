@@ -436,6 +436,214 @@ defmodule SymphonyElixir.IssueSourceTest do
     end
   end
 
+  defmodule CheckedIdentifierClient do
+    def fetch_issue_by_identifier(identifier) do
+      {owner, action} = Application.fetch_env!(:symphony_elixir, :c6_checked_identifier_response)
+      send(owner, {:checked_identifier_called, self(), identifier})
+
+      case action do
+        {:return, result} ->
+          result
+
+        {:raise, message} ->
+          raise ArgumentError, message
+
+        {:hold, ref} ->
+          send(owner, {:checked_identifier_held, self(), ref})
+
+          receive do
+            {:release_checked_identifier, ^ref, result} -> result
+          end
+      end
+    end
+
+    def telemetry(event, measurements, metadata, owner) do
+      if self() == owner, do: send(owner, {:checked_identifier_event, event, measurements, metadata})
+    end
+  end
+
+  describe "checked identifier lookup" do
+    setup do
+      previous = for key <- [:linear_client_module, :c6_checked_identifier_response], do: {key, Application.fetch_env(:symphony_elixir, key)}
+
+      on_exit(fn ->
+        Enum.each(previous, fn
+          {key, :error} -> Application.delete_env(:symphony_elixir, key)
+          {key, {:ok, value}} -> Application.put_env(:symphony_elixir, key, value)
+        end)
+      end)
+
+      context = %{Config.tracker_read_context() | tracker_kind: "linear", linear_client_module: CheckedIdentifierClient}
+      {:ok, identifier_context: context}
+    end
+
+    test "uses only the requested source when both sources share an identifier", c do
+      assert {:ok, manual} = ManualIssueStore.submit(%{"id" => "shared-identifier", "identifier" => "TRK-123", "title" => "Manual", "acceptance_criteria" => ["Explicit source"]})
+      context = %{c.identifier_context | tracker_kind: "memory"}
+      assert {:ok, {:issue, :manual, %{id: manual_id}}} = IssueSource.fetch_issue_by_identifier_checked("TRK-123", :manual, context)
+      assert manual_id == manual.id
+      assert {:ok, {:issue, :tracker, %Issue{id: "tracker-123"}}} = IssueSource.fetch_issue_by_identifier_checked("TRK-123", :tracker, context)
+      refute_received {:checked_identifier_called, _, _}
+    end
+
+    test "keeps captured client and root after current configuration changes", c do
+      issue = %Issue{id: "resolved-id", identifier: "REQUEST-1", source: nil}
+      identifier_reply!({:ok, issue})
+      Application.put_env(:symphony_elixir, :linear_client_module, ReplacementCheckedClient)
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", manual_enabled: false)
+      assert {:ok, {:issue, :tracker, ^issue}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+      assert_received {:checked_identifier_called, _, "REQUEST-1"}
+      refute_received {:checked_source_called, _, _}
+    end
+
+    test "rejects invalid identifier or unspecified source before lookup", c do
+      for identifier <- [nil, "", 42, %{}, []] do
+        assert {:ok, {:invalid, :reference, {:invalid_issue_ref, :identifier}}} = IssueSource.fetch_issue_by_identifier_checked(identifier, :tracker, c.identifier_context)
+      end
+
+      for source <- [nil, "tracker", "manual", :unknown, false, %{}] do
+        assert {:ok, {:invalid, :reference, {:invalid_issue_ref, :source}}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", source, c.identifier_context)
+      end
+
+      refute_received {:checked_identifier_called, _, _}
+    end
+
+    test "disabled sources are explicit and never invoke backend or manual scan", c do
+      context = %{c.identifier_context | manual_enabled: false, tracker_kind: nil}
+      File.mkdir_p!(context.manual_store_root)
+      File.write!(Path.join(context.manual_store_root, "invalid.json"), "broken")
+      assert {:ok, {:disabled, :manual}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :manual, context)
+      assert {:ok, {:disabled, :tracker}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, context)
+      refute_received {:checked_identifier_called, _, _}
+    end
+
+    test "manual absence and corrupt manual records never fall through to tracker", c do
+      assert {:ok, {:missing, :manual}} = IssueSource.fetch_issue_by_identifier_checked("TRK-123", :manual, c.identifier_context)
+      path = checked_manual_record!(c.identifier_context.manual_store_root, "manual:corrupt", %{"identifier" => "TRK-123"})
+      File.write!(path, "{bad record")
+      assert {:ok, {:read_error, :manual, {:manual_issue_decode_failed, %Jason.DecodeError{}}}} = IssueSource.fetch_issue_by_identifier_checked("TRK-123", :manual, c.identifier_context)
+      assert File.read!(path) == "{bad record"
+      refute_received {:checked_identifier_called, _, _}
+    end
+
+    test "manual duplicate identifier is an explicit read error", c do
+      checked_manual_record!(c.identifier_context.manual_store_root, "manual:first", %{"identifier" => "DUP-1"})
+      checked_manual_record!(c.identifier_context.manual_store_root, "manual:second", %{"identifier" => "DUP-1"})
+      assert {:ok, {:read_error, :manual, :duplicate_manual_issue_identifier}} = IssueSource.fetch_issue_by_identifier_checked("DUP-1", :manual, c.identifier_context)
+      refute_received {:checked_identifier_called, _, _}
+    end
+
+    test "checks real returned id, exact identifier and tracker source without fabricating an id", c do
+      valid = %Issue{id: "real-id", identifier: "REQUEST-1", source: nil}
+
+      for {issue, field} <- [
+            {%{valid | id: nil}, :id},
+            {%{valid | id: ""}, :id},
+            {%{valid | id: 42}, :id},
+            {%{valid | identifier: "OTHER-1"}, :identifier},
+            {%{valid | identifier: nil}, :identifier},
+            {%{valid | source: :manual}, :source},
+            {%{valid | source: "tracker"}, :source}
+          ] do
+        identifier_reply!({:ok, issue})
+        assert {:ok, {:invalid, :issue, {:issue_identity_mismatch, ^field}}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+        assert_received {:checked_identifier_called, _, "REQUEST-1"}
+      end
+
+      for source <- [nil, :tracker] do
+        expected = %{valid | source: source}
+        identifier_reply!({:ok, expected})
+        assert {:ok, {:issue, :tracker, ^expected}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+        assert_received {:checked_identifier_called, _, "REQUEST-1"}
+      end
+    end
+
+    test "distinguishes missing, malformed issue and malformed backend envelope", c do
+      identifier_reply!({:ok, nil})
+      assert {:ok, {:missing, :tracker}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+      assert_received {:checked_identifier_called, _, "REQUEST-1"}
+
+      for value <- [false, [], %{}, %{id: "real-id", identifier: "REQUEST-1"}] do
+        identifier_reply!({:ok, value})
+        assert {:ok, {:invalid, :issue, :invalid_issue}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+        assert_received {:checked_identifier_called, _, "REQUEST-1"}
+      end
+
+      for result <- [:ok, nil, {:ok, nil, :extra}, {:error, :bad, :extra}] do
+        identifier_reply!(result)
+        assert {:ok, {:invalid, :response, :invalid_source_result}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+        assert_received {:checked_identifier_called, _, "REQUEST-1"}
+      end
+    end
+
+    test "preserves supported 429 forms and rejects malformed rate metadata", c do
+      for reason <- [{:linear_rate_limited, %{}}, {:linear_api_status, 429, %{retry_after_ms: 2_000}}] do
+        identifier_reply!({:error, reason})
+        assert {:ok, {:rate_limited, ^reason}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+        assert_received {:checked_identifier_called, _, "REQUEST-1"}
+      end
+
+      for metadata <- [nil, [], "retry", 42], reason <- [{:linear_rate_limited, metadata}, {:linear_api_status, 429, metadata}] do
+        identifier_reply!({:error, reason})
+        assert {:ok, {:invalid, :response, :invalid_rate_limit_metadata}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+        assert_received {:checked_identifier_called, _, "REQUEST-1"}
+      end
+    end
+
+    test "returned backend reader-like tags remain nested read errors", c do
+      for reason <- [{:tracker_reader_exit, :killed}, {:tracker_reader_down, :shutdown}, {:tracker_read_exception, :error, ArgumentError.exception("backend data")}, {:linear_api_status, 503, %{}}] do
+        identifier_reply!({:error, reason})
+        assert {:ok, {:read_error, :tracker, ^reason}} = IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context)
+        assert_received {:checked_identifier_called, _, "REQUEST-1"}
+      end
+    end
+
+    test "real backend exceptions stay outside semantic outcome through TrackerReader", c do
+      supervisor = start_supervised!(Task.Supervisor)
+      identifier_action!({:raise, "identifier reader exception"})
+      assert {:ok, reader} = SymphonyElixir.TrackerReader.start(fn -> IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context) end, supervisor: supervisor)
+      expected = {:error, {:tracker_read_exception, :error, ArgumentError.exception("identifier reader exception")}}
+      assert_checked_reader_result(reader, expected)
+    end
+
+    test "actual reader child death stays distinct from a returned backend exit reason", c do
+      supervisor = start_supervised!(Task.Supervisor)
+      ref = make_ref()
+      identifier_action!({:hold, ref})
+      assert {:ok, reader} = SymphonyElixir.TrackerReader.start(fn -> IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context) end, supervisor: supervisor)
+      assert_receive {:checked_identifier_held, child, ^ref}, 1_000
+      Process.exit(child, :kill)
+      assert_checked_reader_result(reader, {:error, {:tracker_reader_exit, :killed}})
+    end
+
+    test "telemetry has semantic labels without identifier, id or private backend payload", c do
+      handler = "checked-identifier-#{System.unique_integer([:positive])}"
+      events = [[:symphony, :issue_source, :start], [:symphony, :issue_source, :stop]]
+      assert :ok = :telemetry.attach_many(handler, events, &CheckedIdentifierClient.telemetry/4, self())
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      for {result, label} <- [
+            {{:ok, %Issue{id: "private-id", identifier: "PRIVATE-1", source: nil}}, "ok"},
+            {{:ok, nil}, "missing"},
+            {{:error, {:backend, "private payload"}}, "error"},
+            {{:error, {:linear_api_status, 429, %{body: "private body"}}}, "rate_limited"},
+            {:bad_response, "invalid"}
+          ] do
+        identifier_reply!(result)
+        assert {:ok, _outcome} = IssueSource.fetch_issue_by_identifier_checked("PRIVATE-1", :tracker, c.identifier_context)
+        assert_received {:checked_identifier_called, _, "PRIVATE-1"}
+        assert_received {:checked_identifier_event, [:symphony, :issue_source, :start], %{count: 1}, %{source: "tracker", operation: "lookup_by_identifier"}}
+        assert_received {:checked_identifier_event, [:symphony, :issue_source, :stop], measurements, metadata}
+        assert measurements.count == 1
+        assert is_integer(measurements.duration) and measurements.duration >= 0
+        assert metadata == %{source: "tracker", operation: "lookup_by_identifier", outcome: label}
+      end
+    end
+  end
+
+  defp identifier_reply!(result), do: identifier_action!({:return, result})
+  defp identifier_action!(action), do: Application.put_env(:symphony_elixir, :c6_checked_identifier_response, {self(), action})
+
   defp checked_reply!(result), do: checked_action!({:return, result})
 
   defp checked_action!(action),

@@ -56,7 +56,9 @@ defmodule SymphonyElixir.OrchestratorRetryDriver do
   end
 
   def handle_call(message, from, state) do
-    {:reply, reply, runtime} = Orchestrator.handle_call(message, from, state.runtime)
-    {:reply, reply, %{state | runtime: runtime}}
+    case Orchestrator.handle_call(message, from, state.runtime) do
+      {:reply, reply, runtime} -> {:reply, reply, %{state | runtime: runtime}}
+      {:noreply, runtime} -> {:noreply, %{state | runtime: runtime}}
+    end
   end
 end

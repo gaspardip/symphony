@@ -120,8 +120,10 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     end
 
     def handle_call(message, from, state) do
-      {:reply, reply, runtime} = Orchestrator.handle_call(message, from, state.runtime)
-      {:reply, reply, %{state | runtime: runtime}}
+      case Orchestrator.handle_call(message, from, state.runtime) do
+        {:reply, reply, runtime} -> {:reply, reply, %{state | runtime: runtime}}
+        {:noreply, runtime} -> {:noreply, %{state | runtime: runtime}}
+      end
     end
 
     defp intercept(kind, message, state) do
@@ -405,6 +407,67 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
       ack!(c.pid)
       assert pending_ids() == []
     end
+  end
+
+  test "stop uses the current admission head Issue while its real guardian remains suspended", c do
+    reader = held_head!(c.pid, :admission)
+    operation = runtime(c.pid).admission_read
+    assert :erlang.suspend_process(operation.pid)
+
+    try do
+      assert %{ok: true} = Orchestrator.stop_issue(c.pid, "ISSUE-A")
+      state = runtime(c.pid)
+      assert state.admission_read.ref == operation.ref
+      assert state.admission_read.monitor == operation.monitor
+      assert state.admission_read.invalidated
+      assert Process.alive?(operation.pid)
+      assert state.inbox_ack_pending == nil
+      assert pending_ids() == ["A"]
+      answer(reader, {:ok, [issue("A")]})
+      refute_receive {:inbox_read, _, _, _}, 30
+      refute_receive {:inbox_callback, :gate, _, _}, 30
+    after
+      assert :erlang.resume_process(operation.pid)
+    end
+
+    fresh = read!(:lookup, ["A"])
+    assert is_nil(runtime(c.pid).admission_read)
+    answer(fresh, {:ok, nil})
+    ack!(c.pid)
+    assert pending_ids() == []
+    assert runtime(c.pid).running == %{}
+    assert {:error, :missing} = LeaseManager.read("A")
+  end
+
+  test "expired stop cannot revoke a genuine held admission or consume its physical slot", c do
+    reader = held_head!(c.pid, :admission)
+    before = runtime(c.pid)
+    operation = before.admission_read
+    assert :erlang.suspend_process(operation.pid)
+
+    try do
+      request = %{ref: make_ref(), deadline: System.monotonic_time(:millisecond) - 1, action: :stop, identifier: "ISSUE-A", args: []}
+      assert %{ok: false, error: "control_deadline_exceeded", effect_status: "not_started"} = GenServer.call(c.pid, {:control, request})
+      assert runtime(c.pid) == before
+      assert Process.alive?(operation.pid)
+      refute_receive {:inbox_read, _, _, _}, 30
+      refute_receive {:inbox_callback, :ack, _, _}, 30
+
+      assert %{ok: true} = Orchestrator.pause_issue(c.pid, "ISSUE-A")
+      assert runtime(c.pid).admission_read.ref == operation.ref
+      assert runtime(c.pid).admission_read.invalidated
+      answer(reader, {:ok, [issue("A")]})
+    after
+      assert :erlang.resume_process(operation.pid)
+    end
+
+    fresh = read!(:lookup, ["A"])
+    assert is_nil(runtime(c.pid).admission_read)
+    answer(fresh, {:ok, nil})
+    ack!(c.pid)
+    assert pending_ids() == []
+    assert runtime(c.pid).running == %{}
+    assert {:error, :missing} = LeaseManager.read("A")
   end
 
   test "cancelling a suspended guardian retains the physical reader slot until DOWN", c do
@@ -1716,7 +1779,8 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
 
   defp cleanup_driver!(pid) do
     if Process.alive?(pid) do
-      state = runtime(pid)
+      assert :ok = :sys.suspend(pid)
+      state = :sys.get_state(pid).runtime
       operations = Enum.reject([state.tracker_poll_read, state.admission_read], &is_nil/1)
       workers = Enum.map(state.running, fn {_id, entry} -> entry.pid end)
       refs = Enum.map(Enum.uniq(Enum.map(operations, & &1.pid) ++ workers), &{&1, Process.monitor(&1)})

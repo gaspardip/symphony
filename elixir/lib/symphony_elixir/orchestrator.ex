@@ -43,6 +43,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Orchestrator.GitHubFollowUp
   alias SymphonyElixir.Workspace
 
+  @accounted_worker_shutdown_ms 5_000
   @continuation_retry_delay_ms 1_000
   @passive_continuation_retry_delay_ms 5_000
   @passive_continuation_retry_delay_mid_ms 15_000
@@ -83,6 +84,8 @@ defmodule SymphonyElixir.Orchestrator do
       admission_read: nil,
       admission_batch: nil,
       next_admission_kind: :poll,
+      control_reservation: nil,
+      control_admission: nil,
       running: %{},
       completed: %{},
       claimed: MapSet.new(),
@@ -312,6 +315,29 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:github_inbox_wakeup, _ref, _location, _generation}, state), do: {:noreply, state}
 
+  def handle_info({:accounted_worker_stop_deadline, context, monitor, stop_ref}, state) do
+    case matching_execution_entry(state, context) do
+      {:ok, issue_id, %{ref: ^monitor, execution_stop_requested: %{shutdown: %{ref: ^stop_ref, kill_sent?: false} = shutdown}} = entry} ->
+        if System.monotonic_time(:millisecond) >= shutdown.deadline do
+          Process.exit(entry.pid, :kill)
+          shutdown = %{shutdown | kill_sent?: true}
+          {:noreply, put_in(state.running[issue_id].execution_stop_requested.shutdown, shutdown)}
+        else
+          {:noreply, state}
+        end
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:control_timeout, ref}, state) do
+    case find_control(state, ref) do
+      nil -> {:noreply, state}
+      control -> {:noreply, expire_control(state, control, true)}
+    end
+  end
+
   def handle_info({:github_deadline, ref}, %{github_inbox_batch: %{head: %{operation: %{ref: ref}}}} = state),
     do: {:noreply, invalidate_github_head(state, :github_deadline_expired)}
 
@@ -411,6 +437,8 @@ defmodule SymphonyElixir.Orchestrator do
       %{promotion_ref: ^promotion_ref, deadline: deadline} = claim when is_integer(deadline) ->
         if System.monotonic_time(:millisecond) >= deadline do
           completion = Map.get(claim, :completion)
+          control = Map.get(claim, :control)
+          state = complete_control_gate(state, control, {:error, :promotion_deadline_expired})
           outcome = tracker_inbox_cleanup_outcome(state, completion)
           next = if Map.has_key?(state.running, id), do: do_terminate_running_issue(state, id, false), else: release_issue_claim(state, id)
           next = next |> tracker_inbox_outcome(id, outcome) |> finish_tracker_inbox_action(completion, nil)
@@ -453,32 +481,37 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(state.running, issue_id) do
       %{pid: ^pid, dispatch_ticket: %{dispatch_id: ^dispatch_id} = ticket} = entry ->
         completion = Map.get(entry, :completion)
+        control = Map.get(entry, :control_guard)
 
         with {:ok, %{holder: :gated} = claim} <- current_issue_custody(state, issue_id, entry.custody_ref),
              :ok <- tracker_inbox_boundary(state, completion),
              {:ok, _workspace} <- current_custody_workspace(state, entry.issue),
              :ok <- DispatchAudit.with_authorization(ticket, fn -> DispatchAudit.ensure_workspace_access(ticket.workspace) end),
              :ok <- github_gate_recheck(state, completion),
+             :ok <- control_gate_boundary(state, control),
              :ok <- LeaseManager.activate_dispatch(claim.token, claim.deadline, pid, dispatch_id) do
           state = transfer_issue_custody(state, issue_id, :running)
           claim = Map.fetch!(state.lease_claims, issue_id)
           if is_reference(claim.timer), do: Process.cancel_timer(claim.timer)
-          claim = %{claim | promotion_ref: nil, timer: nil} |> Map.put(:completion, nil)
+          claim = %{claim | promotion_ref: nil, timer: nil} |> Map.put(:completion, nil) |> Map.put(:control_guard, nil)
           state = put_in(state.lease_claims[issue_id], claim)
-          entry = %{entry | custody_ref: claim.custody_ref} |> Map.put(:completion, nil) |> Map.put(:execution_started?, true)
+          entry = %{entry | custody_ref: claim.custody_ref} |> Map.put(:completion, nil) |> Map.put(:control_guard, nil) |> Map.put(:execution_started?, true)
           state = %{state | running: Map.put(state.running, issue_id, entry)}
           state = tracker_inbox_outcome(state, issue_id, {:applied, :dispatch_authorized})
+          state = complete_control_gate(state, control, :dispatched)
           {:noreply, finish_tracker_inbox_action(state, completion, nil)}
         else
           {:ok, _already_transferred_claim} ->
             {:noreply, state}
 
           {kind, reason} when kind in [:blocked, :recheck] ->
+            state = complete_control_gate(state, control, {:error, reason})
             state = do_terminate_running_issue(state, issue_id, false)
             state = tracker_inbox_outcome(state, issue_id, {kind, reason})
             {:noreply, finish_tracker_inbox_action(state, completion, nil)}
 
           {:error, reason} ->
+            state = complete_control_gate(state, control, {:error, reason})
             stopped = state |> do_terminate_running_issue(issue_id, false) |> halt_dispatch_audit(issue_id, reason)
             {:noreply, finish_tracker_inbox_action(stopped, completion, nil)}
         end
@@ -494,10 +527,15 @@ defmodule SymphonyElixir.Orchestrator do
       ) do
     case find_issue_id_for_ref(running, ref) do
       nil ->
-        {:noreply, state}
+        {:noreply, control_caller_down(state, ref, pid)}
 
       issue_id ->
         entry = Map.fetch!(state.running, issue_id)
+        if entry.pid == pid, do: cancel_accounted_worker_stop(entry)
+
+        state =
+          if entry.pid == pid and not Map.get(entry, :execution_started?, false), do: complete_control_gate(state, Map.get(entry, :control), {:error, {:worker_down_before_gate, reason}}), else: state
+
         state = if entry.pid == pid, do: github_worker_down(state, issue_id, reason), else: state
 
         cond do
@@ -584,6 +622,7 @@ defmodule SymphonyElixir.Orchestrator do
 
                       schedule_issue_retry(state, issue_id, next_attempt, %{
                         identifier: running_entry.identifier,
+                        issue: issue,
                         error: "agent exited: #{inspect(reason)}"
                       })
                   end
@@ -1109,15 +1148,17 @@ defmodule SymphonyElixir.Orchestrator do
       poll: match?(%{issues: [_ | _]}, state.admission_batch),
       retry: retry != nil,
       inbox: match?(%{head: %{phase: :admission_ready}}, state.tracker_inbox_batch) and is_nil(state.inbox_ack_pending),
-      github: github_admission_ready?(state)
+      github: github_admission_ready?(state),
+      control: control_admission_ready?(state)
     }
 
     order =
       case state.next_admission_kind do
-        :retry -> [:retry, :inbox, :github, :poll]
-        :inbox -> [:inbox, :github, :poll, :retry]
-        :github -> [:github, :poll, :retry, :inbox]
-        _ -> [:poll, :retry, :inbox, :github]
+        :retry -> [:retry, :inbox, :github, :control, :poll]
+        :inbox -> [:inbox, :github, :control, :poll, :retry]
+        :github -> [:github, :control, :poll, :retry, :inbox]
+        :control -> [:control, :poll, :retry, :inbox, :github]
+        _ -> [:poll, :retry, :inbox, :github, :control]
       end
 
     case Enum.find(order, &Map.fetch!(ready, &1)) do
@@ -1131,7 +1172,11 @@ defmodule SymphonyElixir.Orchestrator do
         advance_admission(state, context)
 
       :github ->
-        state = select_github_admission(%{state | next_admission_kind: :poll}, context)
+        state = select_github_admission(%{state | next_admission_kind: :control}, context)
+        advance_admission(state, context)
+
+      :control ->
+        state = select_control_read(%{state | next_admission_kind: :poll}, context)
         advance_admission(state, context)
 
       :inbox ->
@@ -1295,6 +1340,12 @@ defmodule SymphonyElixir.Orchestrator do
       run_identity = Map.take(run_state, [:run_id, :run_identity_event_id, :run_identity_ledger_path])
       deadline = claim.started_at_ms + div(claim.token.storage.ttl_ms, 2)
 
+      deadline =
+        case Map.get(claim, :control) do
+          nil -> deadline
+          control -> min(deadline, control.operation.deadline)
+        end
+
       if System.monotonic_time(:millisecond) < deadline and is_nil(state.admission_read) and
            (ManualIssueSpec.runtime_issue_id?(issue.id) or not tracker_backoff_active?(state)) do
         promotion_ref = make_ref()
@@ -1318,6 +1369,7 @@ defmodule SymphonyElixir.Orchestrator do
                 token: claim.token,
                 custody_ref: claim.custody_ref,
                 completion: Map.get(claim, :completion),
+                control: Map.get(claim, :control),
                 head_ref: Map.get(Map.get(claim, :completion) || %{}, :head_ref),
                 deadline: deadline,
                 fingerprint: context.fingerprint,
@@ -1346,9 +1398,26 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp receive_admission_result(state, %{purpose: :control} = reader, result),
+    do: state |> receive_control_result(reader, result) |> advance_admission()
+
   defp receive_admission_result(state, %{purpose: :promotion} = operation, result) do
     {state, result} = observe_promotion_result(state, operation, result)
     completion = Map.get(operation, :completion)
+
+    control =
+      case Map.get(operation, :control) do
+        nil ->
+          nil
+
+        captured ->
+          case find_control(state, captured.operation.ref) do
+            %{monitor: monitor} = current when monitor == captured.monitor -> current
+            _ -> nil
+          end
+      end
+
+    state = %{state | control_admission: control}
 
     state =
       case tracker_inbox_boundary(state, completion) do
@@ -1369,7 +1438,8 @@ defmodule SymphonyElixir.Orchestrator do
           tracker_inbox_outcome(state, operation.issue.id, {kind, reason})
       end
 
-    state |> finish_tracker_inbox_action(completion, nil) |> advance_admission() |> resume_tracker_inbox_after_reader()
+    state = if control, do: settle_control_admission(state, control), else: state
+    %{state | control_admission: nil} |> finish_tracker_inbox_action(completion, nil) |> advance_admission() |> resume_tracker_inbox_after_reader()
   end
 
   defp receive_admission_result(state, %{purpose: :inbox_admission} = operation, result) do
@@ -4607,6 +4677,8 @@ defmodule SymphonyElixir.Orchestrator do
   @doc false
   @spec terminate_running_issue(State.t(), String.t(), boolean()) :: State.t()
   def terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+    control = control_for_issue(state, issue_id)
+    state = if control, do: finish_control(state, control, control_payload(control.operation, "control_invalidated", control_effect_status(control))), else: state
     completion = Map.get(Map.get(state.running, issue_id) || Map.get(state.lease_claims, issue_id) || %{}, :completion)
     outcome = tracker_inbox_cleanup_outcome(state, completion)
     state |> do_terminate_running_issue(issue_id, cleanup_workspace) |> tracker_inbox_outcome(issue_id, outcome) |> finish_tracker_inbox_action(completion, nil)
@@ -4693,6 +4765,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> terminate_running_issue(issue_id, false)
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
+        issue: Map.get(running_entry, :issue),
         error: "stalled for #{elapsed_ms}ms without agent activity"
       })
     else
@@ -5082,8 +5155,10 @@ defmodule SymphonyElixir.Orchestrator do
     recipient = self()
 
     with false <- github_reserved?(state, issue.id),
+         :ok <- control_pre_admission(state, issue.id),
          {:ok, workspace} <- current_custody_workspace(state, issue),
-         :ok <- DeployAudit.ensure_available(workspace) do
+         :ok <- DeployAudit.ensure_available(workspace),
+         :ok <- control_pre_admission(state, issue.id) do
       case acquire_dispatch_custody(state, issue, acquire_fun, workspace) do
         {:ok, state, {:github_disabled, stage}} ->
           state = start_active_issue_worker(state, issue, attempt, recipient, &Task.Supervisor.start_child/2, stage)
@@ -5098,7 +5173,10 @@ defmodule SymphonyElixir.Orchestrator do
             {:error, reason} ->
               Logger.warning("Skipping dispatch; failed to persist lease state for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
 
-              state |> release_issue_claim(issue.id) |> tracker_inbox_outcome(issue.id, {:blocked, {:lease_snapshot_failed, reason}})
+              state
+              |> record_control_admission_failure(issue.id, {:lease_snapshot_failed, reason})
+              |> release_issue_claim(issue.id)
+              |> tracker_inbox_outcome(issue.id, {:blocked, {:lease_snapshot_failed, reason}})
           end
 
         {:error, :claimed} ->
@@ -5107,7 +5185,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         {:error, reason} ->
           Logger.warning("Skipping dispatch; failed to acquire lease for #{SymphonyElixir.Util.issue_log_context(issue)}: #{inspect(reason)}")
-          tracker_inbox_outcome(state, issue.id, {:blocked, {:lease_acquire_failed, reason}})
+          state |> record_control_admission_failure(issue.id, {:lease_acquire_failed, reason}) |> tracker_inbox_outcome(issue.id, {:blocked, {:lease_acquire_failed, reason}})
       end
     else
       true -> state
@@ -5149,8 +5227,10 @@ defmodule SymphonyElixir.Orchestrator do
     workspace = workspace_for_issue_id(state, issue.id)
 
     with {:ok, initial_stage} <- persisted_dispatch_stage(issue, workspace),
+         :ok <- control_pre_admission(state, issue.id),
          _normalized_stage <- normalize_dispatch_stage(issue, workspace),
-         {:ok, stage} <- persisted_dispatch_stage(issue, workspace) do
+         {:ok, stage} <- persisted_dispatch_stage(issue, workspace),
+         :ok <- control_pre_admission(state, issue.id) do
       if stage in ["merge_readiness", "await_checks", "merge", "post_merge"] do
         start_passive_issue_worker(state, issue, attempt, recipient, start_child_fun, stage)
       else
@@ -5181,13 +5261,14 @@ defmodule SymphonyElixir.Orchestrator do
          run_state = merge_retry_budget_resume_context(view, retry_metadata),
          stage = view.stage,
          :ok <- github_pre_admission(state, issue.id, stage),
-         {:ok, pid, ticket, admitted_raw} <-
+         {:ok, pid, ticket, admitted_raw, control_guard} <-
            start_audited_worker(
              state,
              issue,
              attempt,
              run_state,
              source,
+             view,
              start_child_fun,
              fn ->
                AgentRunner.run(issue, recipient, attempt: attempt, policy_override: policy_override)
@@ -5195,7 +5276,8 @@ defmodule SymphonyElixir.Orchestrator do
              false
            ) do
       state = transfer_issue_custody(state, issue.id, :gated)
-      claim = Map.fetch!(state.lease_claims, issue.id)
+      claim = Map.put(Map.fetch!(state.lease_claims, issue.id), :control_guard, control_guard)
+      state = put_in(state.lease_claims[issue.id], claim)
       ref = Process.monitor(pid)
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
@@ -5244,6 +5326,8 @@ defmodule SymphonyElixir.Orchestrator do
           lease_token: claim.token,
           custody_ref: claim.custody_ref,
           completion: Map.get(claim, :completion),
+          control: Map.get(claim, :control),
+          control_guard: Map.get(claim, :control_guard),
           promotion_deadline: claim.deadline,
           started_at: DateTime.utc_now()
         })
@@ -5259,6 +5343,12 @@ defmodule SymphonyElixir.Orchestrator do
       |> bind_github_admission(issue.id, ticket, admitted_raw)
       |> tracker_inbox_wait(issue.id, :gate)
     else
+      {:error, {:control_admission_close_failed, ticket, cause, close_error}} ->
+        retain_control_admission_close(state, issue.id, ticket, cause, close_error)
+
+      {:error, {:control_admission_rejected, reason}} ->
+        state |> stop_terminal_dispatch(issue, reason) |> record_control_admission_failure(issue.id, reason)
+
       {:error, {:github_admission_close_failed, ticket, cause, close_error}} ->
         retain_github_admission_close(state, ticket, cause, close_error)
 
@@ -5291,6 +5381,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           schedule_issue_retry(state, issue.id, next_attempt, %{
             identifier: issue.identifier,
+            issue: issue,
             error: "failed to spawn agent: #{inspect(reason)}"
           })
         end
@@ -5322,6 +5413,7 @@ defmodule SymphonyElixir.Orchestrator do
             stop_terminal_dispatch(state, issue, reason)
 
           {:error, reason} ->
+            state = record_control_admission_failure(state, issue.id, reason)
             state = tracker_inbox_outcome(state, issue.id, tracker_inbox_validation_outcome(reason))
             %{state | candidate_fetch_error: reason}
         end
@@ -5352,13 +5444,14 @@ defmodule SymphonyElixir.Orchestrator do
          true <- view.stage == dispatch_stage or {:error, :admission_stage_changed},
          run_state = merge_retry_budget_resume_context(view, retry_metadata),
          stage = view.stage,
-         {:ok, pid, ticket, admitted_raw} <-
+         {:ok, pid, ticket, admitted_raw, control_guard} <-
            start_audited_worker(
              state,
              issue,
              attempt,
              run_state,
              source,
+             view,
              start_child_fun,
              fn ->
                case AgentExecution.entry_context(Workspace.path_for_issue(issue), issue) do
@@ -5406,7 +5499,8 @@ defmodule SymphonyElixir.Orchestrator do
              true
            ) do
       state = transfer_issue_custody(state, issue.id, :gated)
-      claim = Map.fetch!(state.lease_claims, issue.id)
+      claim = Map.put(Map.fetch!(state.lease_claims, issue.id), :control_guard, control_guard)
+      state = put_in(state.lease_claims[issue.id], claim)
       ref = Process.monitor(pid)
       {policy_class, policy_source, _policy_override} = policy_snapshot_values(issue, state, run_state)
 
@@ -5455,6 +5549,8 @@ defmodule SymphonyElixir.Orchestrator do
           lease_token: claim.token,
           custody_ref: claim.custody_ref,
           completion: Map.get(claim, :completion),
+          control: Map.get(claim, :control),
+          control_guard: Map.get(claim, :control_guard),
           promotion_deadline: claim.deadline,
           passive?: true,
           started_at: DateTime.utc_now()
@@ -5470,6 +5566,12 @@ defmodule SymphonyElixir.Orchestrator do
       }
       |> tracker_inbox_wait(issue.id, :gate)
     else
+      {:error, {:control_admission_close_failed, ticket, cause, close_error}} ->
+        retain_control_admission_close(state, issue.id, ticket, cause, close_error)
+
+      {:error, {:control_admission_rejected, reason}} ->
+        state |> stop_terminal_dispatch(issue, reason) |> record_control_admission_failure(issue.id, reason)
+
       {:error, {tag, _} = reason} when tag in [:deploy_audit_pending, :deploy_audit_read_failed] ->
         halt_dispatch_audit(state, issue.id, reason)
 
@@ -5499,13 +5601,14 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp start_audited_worker(state, issue, attempt, run_state, source, start_child_fun, worker_fun, passive?) do
+  defp start_audited_worker(state, issue, attempt, run_state, source, admission_view, start_child_fun, worker_fun, passive?) do
     workspace = workspace_for_issue_id(state, issue.id)
     owner = self()
     {policy_class, policy_source, _override} = policy_snapshot_values(issue, state, run_state)
 
     with {:ok, claim} <- current_issue_custody(state, issue.id),
          :ok <- github_pre_admission(state, issue.id, run_state.stage),
+         :ok <- control_pre_admission(state, issue.id),
          lease = claim.lease,
          {:ok, ticket, admitted_raw} <-
            DispatchAudit.begin(
@@ -5520,7 +5623,9 @@ defmodule SymphonyElixir.Orchestrator do
              },
              source
            ) do
-      with :ok <- github_post_admission(state, issue.id, ticket, admitted_raw) do
+      with :ok <- github_post_admission(state, issue.id, ticket, admitted_raw),
+           {:ok, control_guard} <- control_admitted_guard(state, issue.id, source, admission_view, ticket, admitted_raw),
+           :ok <- control_pre_admission(state, issue.id) do
         case start_child_fun.(SymphonyElixir.TaskSupervisor, fn ->
                DispatchGate.run(owner, ticket.dispatch_id, fn ->
                  case DispatchAudit.with_authorization(ticket, fn ->
@@ -5535,22 +5640,27 @@ defmodule SymphonyElixir.Orchestrator do
                end)
              end) do
           {:ok, pid} ->
-            {:ok, pid, ticket, admitted_raw}
+            {:ok, pid, ticket, admitted_raw, control_guard}
 
           {:error, reason} ->
-            case state.github_inbox_batch do
-              %{head: %{operation: %{issue_ref: %{id: id}, phase: :admitting}}} when id == issue.id ->
-                close_rejected_github_admission(ticket, {:dispatch_worker_start_failed, reason})
+            if control_for_issue(state, issue.id) do
+              close_rejected_control_admission(ticket, {:dispatch_worker_start_failed, reason})
+            else
+              case state.github_inbox_batch do
+                %{head: %{operation: %{issue_ref: %{id: id}, phase: :admitting}}} when id == issue.id ->
+                  close_rejected_github_admission(ticket, {:dispatch_worker_start_failed, reason})
 
-              _ ->
-                case DispatchAudit.finish(ticket, :not_started) do
-                  :ok -> {:error, {:dispatch_worker_start_failed, reason}}
-                  {:error, audit_reason} -> {:error, {:dispatch_audit_failed, audit_reason}}
-                end
+                _ ->
+                  case DispatchAudit.finish(ticket, :not_started) do
+                    :ok -> {:error, {:dispatch_worker_start_failed, reason}}
+                    {:error, audit_reason} -> {:error, {:dispatch_audit_failed, audit_reason}}
+                  end
+              end
             end
         end
       else
-        {:error, reason} -> close_rejected_github_admission(ticket, reason)
+        {:error, reason} ->
+          if control_for_issue(state, issue.id), do: close_rejected_control_admission(ticket, reason), else: close_rejected_github_admission(ticket, reason)
       end
     else
       {:error, reason} -> {:error, {:dispatch_audit_failed, reason}}
@@ -5601,6 +5711,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp halt_dispatch_audit(state, issue_id, reason) do
+    state = record_control_admission_failure(state, issue_id, reason)
     Logger.error("Dispatch audit blocked issue_id=#{issue_id}; preserve its journal: #{inspect(reason)}")
     state = cancel_dispatch_retry(state, issue_id)
     state = tracker_inbox_failure(state, issue_id, {:dispatch_audit_failed, reason})
@@ -6020,7 +6131,7 @@ defmodule SymphonyElixir.Orchestrator do
           if dispatch_slots_available?(issue, state) and company_slots_available?(state, PolicyPack.resolve(policy_pack_name(issue, state))) do
             dispatch_runtime_issue(state, issue, entry.attempt, &do_dispatch_issue/3, &dispatch_passive_issue/3)
           else
-            schedule_issue_retry(state, issue.id, entry.attempt + 1, Map.put(retry_metadata(entry), :error, "no available orchestrator slots"))
+            schedule_issue_retry(state, issue.id, entry.attempt + 1, Map.merge(retry_metadata(entry), %{issue: issue, error: "no available orchestrator slots"}))
           end
         else
           admission_discard(state, operation.issue, :admission_refresh_ineligible)
@@ -6055,7 +6166,9 @@ defmodule SymphonyElixir.Orchestrator do
         true -> "retry poll failed"
       end
 
-    schedule_issue_retry(state, operation.issue.id, entry.attempt + 1, Map.put(retry_metadata(entry), :error, "#{prefix}: #{inspect(reason)}"))
+    metadata = retry_metadata(entry)
+    metadata = if operation.phase == :refresh, do: Map.put(metadata, :issue, operation.issue), else: metadata
+    schedule_issue_retry(state, operation.issue.id, entry.attempt + 1, Map.put(metadata, :error, "#{prefix}: #{inspect(reason)}"))
   end
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
@@ -6216,7 +6329,7 @@ defmodule SymphonyElixir.Orchestrator do
            %{state | candidate_fetch_error: {:retry_resume_lease_failed, issue.id, reason}},
            issue.id,
            attempt + 1,
-           Map.merge(metadata, %{identifier: issue.identifier, error: "review continuation lease unavailable: #{inspect(reason)}"})
+           Map.merge(metadata, %{identifier: issue.identifier, issue: issue, error: "review continuation lease unavailable: #{inspect(reason)}"})
          )}
     end
   end
@@ -6245,6 +6358,7 @@ defmodule SymphonyElixir.Orchestrator do
            attempt + 1,
            Map.merge(metadata, %{
              identifier: issue.identifier,
+             issue: issue,
              error: "no available orchestrator slots"
            })
          )}
@@ -6252,7 +6366,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
-    if execution_hold?(state, issue_id) or github_admission_close_held?(state, issue_id), do: state, else: release_healthy_issue_claim(state, issue_id)
+    if execution_hold?(state, issue_id) or github_admission_close_held?(state, issue_id) or control_admission_close_held?(state, issue_id),
+      do: state,
+      else: release_healthy_issue_claim(state, issue_id)
   end
 
   defp release_healthy_issue_claim(%State{} = state, issue_id) do
@@ -6410,7 +6526,9 @@ defmodule SymphonyElixir.Orchestrator do
           started_at_ms: started,
           deadline: :not_pending,
           promotion_ref: nil,
-          timer: nil
+          timer: nil,
+          control: control_for_issue(state, issue.id),
+          control_guard: control_for_issue(state, issue.id)
         }
 
         state = %{state | lease_claims: Map.put(state.lease_claims, issue.id, claim), claimed: MapSet.put(state.claimed, issue.id)}
@@ -6785,7 +6903,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec pause_issue(GenServer.server(), String.t()) :: map() | :unavailable
   def pause_issue(server, issue_identifier) do
-    call_if_available(server, {:pause_issue, issue_identifier})
+    call_control(server, :pause, issue_identifier, [])
   end
 
   @spec resume_issue(String.t()) :: map() | :unavailable
@@ -6793,7 +6911,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec resume_issue(GenServer.server(), String.t()) :: map() | :unavailable
   def resume_issue(server, issue_identifier) do
-    call_if_available(server, {:resume_issue, issue_identifier})
+    call_control(server, :resume, issue_identifier, [])
   end
 
   @spec stop_issue(String.t()) :: map() | :unavailable
@@ -6801,7 +6919,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec stop_issue(GenServer.server(), String.t()) :: map() | :unavailable
   def stop_issue(server, issue_identifier) do
-    call_if_available(server, {:stop_issue, issue_identifier})
+    call_control(server, :stop, issue_identifier, [])
   end
 
   @spec hold_issue_for_human_review(String.t()) :: map() | :unavailable
@@ -6810,7 +6928,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec hold_issue_for_human_review(GenServer.server(), String.t()) :: map() | :unavailable
   def hold_issue_for_human_review(server, issue_identifier) do
-    call_if_available(server, {:hold_issue_for_human_review, issue_identifier})
+    call_control(server, :hold_for_human_review, issue_identifier, [])
   end
 
   @spec retry_issue_now(String.t()) :: map() | :unavailable
@@ -6818,7 +6936,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec retry_issue_now(GenServer.server(), String.t()) :: map() | :unavailable
   def retry_issue_now(server, issue_identifier) do
-    call_if_available(server, {:retry_issue_now, issue_identifier})
+    call_control(server, :retry_now, issue_identifier, [])
   end
 
   @spec refresh_merge_readiness(String.t()) :: map() | :unavailable
@@ -6827,7 +6945,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec refresh_merge_readiness(GenServer.server(), String.t()) :: map() | :unavailable
   def refresh_merge_readiness(server, issue_identifier) do
-    call_if_available(server, {:refresh_merge_readiness, issue_identifier})
+    call_control(server, :refresh_merge_readiness, issue_identifier, [])
   end
 
   @spec reprioritize_issue(String.t(), integer() | nil) :: map() | :unavailable
@@ -6838,7 +6956,7 @@ defmodule SymphonyElixir.Orchestrator do
   @spec reprioritize_issue(GenServer.server(), String.t(), integer() | nil) ::
           map() | :unavailable
   def reprioritize_issue(server, issue_identifier, override_rank) do
-    call_if_available(server, {:reprioritize_issue, issue_identifier, override_rank})
+    call_control(server, :reprioritize, issue_identifier, [override_rank])
   end
 
   @spec approve_issue_for_merge(String.t()) :: map() | :unavailable
@@ -6847,7 +6965,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec approve_issue_for_merge(GenServer.server(), String.t()) :: map() | :unavailable
   def approve_issue_for_merge(server, issue_identifier) do
-    call_if_available(server, {:approve_issue_for_merge, issue_identifier})
+    call_control(server, :approve_for_merge, issue_identifier, [])
   end
 
   @spec approve_issue_for_deploy(String.t()) :: map() | :unavailable
@@ -6856,7 +6974,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec approve_issue_for_deploy(GenServer.server(), String.t()) :: map() | :unavailable
   def approve_issue_for_deploy(server, issue_identifier) do
-    call_if_available(server, {:approve_issue_for_deploy, issue_identifier})
+    call_control(server, :approve_for_deploy, issue_identifier, [])
   end
 
   @spec approve_review_drafts(String.t()) :: map() | :unavailable
@@ -6865,7 +6983,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec approve_review_drafts(GenServer.server(), String.t()) :: map() | :unavailable
   def approve_review_drafts(server, issue_identifier) do
-    call_if_available(server, {:approve_review_drafts, issue_identifier})
+    call_control(server, :approve_review_drafts, issue_identifier, [])
   end
 
   @spec reject_review_drafts(String.t()) :: map() | :unavailable
@@ -6874,7 +6992,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec reject_review_drafts(GenServer.server(), String.t()) :: map() | :unavailable
   def reject_review_drafts(server, issue_identifier) do
-    call_if_available(server, {:reject_review_drafts, issue_identifier})
+    call_control(server, :reject_review_drafts, issue_identifier, [])
   end
 
   @spec mark_review_threads_posted(String.t()) :: map() | :unavailable
@@ -6883,7 +7001,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec mark_review_threads_posted(GenServer.server(), String.t()) :: map() | :unavailable
   def mark_review_threads_posted(server, issue_identifier) do
-    call_if_available(server, {:mark_review_threads_posted, issue_identifier})
+    call_control(server, :mark_review_threads_posted, issue_identifier, [])
   end
 
   @spec post_review_drafts(String.t()) :: map() | :unavailable
@@ -6891,7 +7009,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec post_review_drafts(GenServer.server(), String.t()) :: map() | :unavailable
   def post_review_drafts(server, issue_identifier) do
-    call_if_available(server, {:post_review_drafts, issue_identifier})
+    call_control(server, :post_review_drafts, issue_identifier, [])
   end
 
   @spec resolve_review_threads(String.t()) :: map() | :unavailable
@@ -6900,7 +7018,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec resolve_review_threads(GenServer.server(), String.t()) :: map() | :unavailable
   def resolve_review_threads(server, issue_identifier) do
-    call_if_available(server, {:resolve_review_threads, issue_identifier})
+    call_control(server, :resolve_review_threads, issue_identifier, [])
   end
 
   @spec set_policy_class(String.t(), String.t()) :: map() | :unavailable
@@ -6910,7 +7028,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec set_policy_class(GenServer.server(), String.t(), String.t()) :: map() | :unavailable
   def set_policy_class(server, issue_identifier, policy_class) do
-    call_if_available(server, {:set_policy_class, issue_identifier, policy_class})
+    call_control(server, :set_policy_class, issue_identifier, [policy_class])
   end
 
   @spec clear_policy_override(String.t()) :: map() | :unavailable
@@ -6920,7 +7038,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec clear_policy_override(GenServer.server(), String.t()) :: map() | :unavailable
   def clear_policy_override(server, issue_identifier) do
-    call_if_available(server, {:clear_policy_override, issue_identifier})
+    call_control(server, :clear_policy_override, issue_identifier, [])
   end
 
   @spec snapshot() :: map() | :timeout | :unavailable
@@ -6954,6 +7072,620 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp server_pid(server) do
     GenServer.whereis(server)
+  end
+
+  # Operator calls retain one original deadline through reads, writers and gate.
+  defp call_control(server, action, identifier, args) do
+    ref = make_ref()
+    deadline = System.monotonic_time(:millisecond) + 5_000
+    request = %{ref: ref, deadline: deadline, action: action, identifier: identifier, args: args}
+
+    destination = if is_pid(server), do: server, else: GenServer.whereis(server)
+
+    case destination do
+      {_name, remote_node} when remote_node != node() ->
+        control_payload(request, "control_server_not_local", "not_started")
+
+      pid when is_pid(pid) and node(pid) != node() ->
+        control_payload(request, "control_server_not_local", "not_started")
+
+      pid when is_pid(pid) ->
+        remaining = deadline - System.monotonic_time(:millisecond)
+
+        cond do
+          not Process.alive?(pid) ->
+            :unavailable
+
+          remaining <= 0 ->
+            control_payload(request, "control_deadline_exceeded", "not_started")
+
+          true ->
+            try do
+              GenServer.call(pid, {:control, request}, remaining)
+            catch
+              :exit, {:timeout, {GenServer, :call, [^pid, {:control, ^request}, ^remaining]}} -> control_payload(request, "control_deadline_exceeded", "unknown")
+              :exit, {:noproc, {GenServer, :call, [^pid, {:control, ^request}, ^remaining]}} -> :unavailable
+            end
+        end
+
+      nil ->
+        :unavailable
+    end
+  end
+
+  defp control_payload(request, code, status) do
+    %{ok: false, action: Atom.to_string(request.action), issue_identifier: request.identifier, error: code, effect_status: status}
+  end
+
+  defp begin_control(state, request, {caller, _tag} = from) when is_pid(caller) and node(caller) == node() do
+    case Controls.prepare(state, request) do
+      {:error, payload} ->
+        {:reply, payload, state}
+
+      {:ok, operation} ->
+        cond do
+          not Process.alive?(caller) ->
+            {:noreply, state}
+
+          operation.remote? and not is_nil(state.control_reservation) ->
+            {:reply, control_payload(operation, "control_busy", "not_started"), state}
+
+          true ->
+            timer = Process.send_after(self(), {:control_timeout, operation.ref}, max(0, operation.deadline - System.monotonic_time(:millisecond)))
+
+            control = %{
+              operation: operation,
+              from: from,
+              caller: caller,
+              monitor: Process.monitor(caller),
+              timer: timer,
+              invalidated: false,
+              read_ready: false,
+              query: nil,
+              read_custody: nil,
+              admission_result: nil,
+              backoff: tracker_poll_backoff_identity(state)
+            }
+
+            state = if operation.remote?, do: %{state | control_reservation: control}, else: state
+            {:noreply, continue_control(state, control, :start)}
+        end
+    end
+  end
+
+  defp begin_control(state, request, _from), do: {:reply, %{ok: false, action: "invalid", issue_identifier: Map.get(request, :identifier), error: "invalid_control_request"}, state}
+
+  defp continue_control(state, control, input) do
+    case control_boundary(control) do
+      :ok ->
+        {state, control} = start_control_effects(state, control, input)
+
+        case control_boundary(control) do
+          :ok ->
+            operation = Map.put(control.operation, :caller, control.caller)
+            handle_control_step(Controls.advance(state, operation, input), control)
+
+          {:error, code} ->
+            finish_control(state, control, control_payload(control.operation, code, control_effect_status(control)))
+        end
+
+      {:error, code} ->
+        finish_control(state, control, control_payload(control.operation, code, control_effect_status(control)))
+    end
+  end
+
+  defp start_control_effects(state, %{operation: %{effect?: true}} = control, _input), do: {state, control}
+
+  defp start_control_effects(state, control, input) do
+    early_revocation? = input == :start and control.operation.phase == :resolve and control.operation.action in [:pause, :stop]
+
+    first_effect? =
+      control.operation.phase == :ready or
+        match?({:ok, {:issue, :tracker, %Issue{}}}, input) or early_revocation?
+
+    if first_effect? do
+      operation = control.operation
+      before_invalidation = state
+      state = invalidate_other_control(state, operation.identifier, operation.ref)
+
+      state =
+        if operation.action in [:pause, :resume, :stop, :hold_for_human_review, :set_policy_class, :clear_policy_override],
+          do: invalidate_tracker_poll_issue(state, operation.identifier),
+          else: invalidate_github_issue(state, operation.identifier, nil)
+
+      if early_revocation? and state == before_invalidation do
+        {state, control}
+      else
+        control = %{control | operation: %{operation | effect?: true, last_effect: {:invalidation, :ok}}}
+        {store_control_reservation(state, control), control}
+      end
+    else
+      {state, control}
+    end
+  end
+
+  defp handle_control_step({:read, operation, query, state}, control) do
+    custody = if operation.issue, do: github_custody_identity(state, operation.issue.id), else: nil
+    control = %{control | operation: operation, query: query, read_ready: true, read_custody: custody}
+
+    case query do
+      {:refresh, ref} ->
+        if ref.source == :manual or (is_nil(ref.source) and ManualIssueSpec.runtime_issue_id?(ref.id)) do
+          result = IssueSource.fetch_issue_checked(ref, operation.context)
+          continue_control(state, control, result)
+        else
+          state |> store_control_reservation(control) |> advance_admission()
+        end
+
+      {:identifier, _identifier, :tracker} ->
+        state |> store_control_reservation(control) |> advance_admission()
+    end
+  end
+
+  defp handle_control_step({:admit, operation, issue, attempt, state}, control) do
+    control = %{control | operation: operation, read_ready: false, query: nil}
+    state = store_control_reservation(state, control)
+
+    case control_boundary(control) do
+      :ok ->
+        state = %{state | control_admission: control}
+        state = dispatch_runtime_issue(state, issue, attempt, &do_dispatch_issue/3, &dispatch_passive_issue/3)
+        state = settle_control_admission(state, control)
+        %{state | control_admission: nil}
+
+      {:error, code} ->
+        finish_control(state, control, control_payload(operation, code, control_effect_status(control)))
+    end
+  end
+
+  defp handle_control_step({kind, operation, payload, state}, control) when kind in [:done, :rejected] do
+    control = %{control | operation: operation}
+    state = observe_control_writer(state, control)
+    finish_control(state, control, payload)
+  end
+
+  defp control_boundary(control) do
+    operation = control.operation
+
+    cond do
+      control.invalidated ->
+        {:error, "control_invalidated"}
+
+      not Process.alive?(control.caller) ->
+        {:error, "control_invalidated"}
+
+      System.monotonic_time(:millisecond) >= operation.deadline ->
+        {:error, "control_deadline_exceeded"}
+
+      true ->
+        with {:ok, context} <- capture_tracker_poll_context(),
+             true <- context.fingerprint == operation.context.fingerprint,
+             true <- Workspace.path_for_issue(operation.identifier) == operation.workspace,
+             true <- System.monotonic_time(:millisecond) < operation.deadline do
+          :ok
+        else
+          false -> {:error, if(System.monotonic_time(:millisecond) >= operation.deadline, do: "control_deadline_exceeded", else: "control_invalidated")}
+          {:error, _} -> {:error, "control_invalidated"}
+        end
+    end
+  end
+
+  defp control_effect_status(control), do: if(control.operation.effect?, do: "unknown", else: "not_started")
+
+  defp store_control_reservation(state, %{operation: %{remote?: false}}), do: state
+  defp store_control_reservation(%{control_reservation: %{operation: %{ref: ref}}} = state, %{operation: %{ref: ref}} = control), do: %{state | control_reservation: control}
+
+  defp control_admission_ready?(state), do: match?(%{read_ready: true, invalidated: false}, state.control_reservation)
+
+  defp select_control_read(state, _current_context) do
+    control = state.control_reservation
+
+    case control_boundary(control) do
+      :ok ->
+        if tracker_backoff_active?(state) do
+          finish_control(state, control, control_payload(control.operation, "control_read_failed", control_effect_status(control)))
+        else
+          context = control.operation.context
+          query = control.query
+
+          read = fn ->
+            case query do
+              {:identifier, identifier, :tracker} -> IssueSource.fetch_issue_by_identifier_checked(identifier, :tracker, context)
+              {:refresh, ref} -> IssueSource.fetch_issue_checked(ref, context)
+            end
+          end
+
+          case TrackerReader.start(read) do
+            {:ok, reader} ->
+              reader =
+                Map.merge(reader, %{
+                  purpose: :control,
+                  control_ref: control.operation.ref,
+                  phase: control.operation.phase,
+                  fingerprint: context.fingerprint,
+                  backoff: tracker_poll_backoff_identity(state),
+                  invalidated: false
+                })
+
+              %{state | admission_read: reader, control_reservation: %{control | read_ready: false}}
+
+            {:error, _reason} ->
+              finish_control(state, control, control_payload(control.operation, "control_read_failed", control_effect_status(control)))
+          end
+        end
+
+      {:error, code} ->
+        finish_control(state, control, control_payload(control.operation, code, control_effect_status(control)))
+    end
+  end
+
+  defp receive_control_result(state, reader, result) do
+    state = observe_control_read(state, reader, result)
+
+    case state.control_reservation do
+      %{operation: %{ref: ref, phase: phase}} = control when ref == reader.control_ref and phase == reader.phase ->
+        cond do
+          reader.invalidated ->
+            state
+
+          control.operation.phase == :refresh and github_custody_identity(state, control.operation.issue.id) != control.read_custody ->
+            finish_control(state, control, control_payload(control.operation, "control_invalidated", control_effect_status(control)))
+
+          tracker_poll_backoff_identity(state) != reader.backoff and tracker_backoff_active?(state) ->
+            finish_control(state, control, control_payload(control.operation, "control_read_failed", control_effect_status(control)))
+
+          true ->
+            continue_control(state, control, result)
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp observe_control_read(state, reader, {:ok, {:rate_limited, reason}}) do
+    case capture_tracker_poll_context() do
+      {:ok, context} when context.fingerprint == reader.fingerprint -> elem(tracker_read(state, fn -> {:error, reason} end), 0)
+      _ -> state
+    end
+  end
+
+  defp observe_control_read(state, _reader, _result), do: state
+
+  defp observe_control_writer(state, %{operation: %{issue: %Issue{} = issue, last_effect: {_phase, {:error, reason}}, context: captured}}) do
+    rate_limited? =
+      case reason do
+        {:linear_rate_limited, metadata} when is_map(metadata) -> true
+        {:linear_api_status, 429, metadata} when is_map(metadata) -> true
+        _ -> false
+      end
+
+    with true <- rate_limited? and issue.source != :manual and not ManualIssueSpec.runtime_issue_id?(issue.id),
+         {:ok, context} <- capture_tracker_poll_context(),
+         true <- context.fingerprint == captured.fingerprint do
+      elem(tracker_read(state, fn -> {:error, reason} end), 0)
+    else
+      _ -> state
+    end
+  end
+
+  defp observe_control_writer(state, _control), do: state
+
+  defp finish_control(state, control, payload, reply? \\ true) do
+    ref = control.operation.ref
+
+    state =
+      case state.control_reservation do
+        %{operation: %{ref: ^ref}} -> %{state | control_reservation: nil}
+        _ -> state
+      end
+
+    state =
+      case state.admission_read do
+        %{purpose: :control, control_ref: ^ref} = reader ->
+          :ok = TrackerReader.cancel(Map.take(reader, [:owner, :pid, :monitor, :ref]))
+          %{state | admission_read: %{reader | invalidated: true}}
+
+        _ ->
+          state
+      end
+
+    claims = Map.new(state.lease_claims, fn {id, claim} -> {id, clear_control_reference(claim, ref)} end)
+    running = Map.new(state.running, fn {id, entry} -> {id, clear_control_reference(entry, ref)} end)
+    state = %{state | lease_claims: claims, running: running}
+
+    state =
+      case state.control_admission do
+        %{operation: %{ref: ^ref}} -> %{state | control_admission: nil}
+        _ -> state
+      end
+
+    Process.cancel_timer(control.timer)
+    Process.demonitor(control.monitor, [:flush])
+    if reply? and Process.alive?(control.caller), do: GenServer.reply(control.from, payload)
+    notify_dashboard()
+    state
+  end
+
+  defp clear_control_reference(%{control: %{operation: %{ref: ref}}} = value, ref), do: Map.put(value, :control, nil)
+  defp clear_control_reference(value, _ref), do: value
+
+  defp find_control(state, ref) do
+    case state.control_reservation do
+      %{operation: %{ref: ^ref}} = control ->
+        control
+
+      _ ->
+        Enum.find_value(state.lease_claims, fn {_id, claim} ->
+          case Map.get(claim, :control) do
+            %{operation: %{ref: ^ref}} = control -> control
+            _ -> nil
+          end
+        end)
+    end
+  end
+
+  defp control_caller_down(state, monitor, pid) do
+    controls = [state.control_reservation | Enum.map(state.lease_claims, fn {_id, claim} -> Map.get(claim, :control) end)]
+
+    case Enum.find(controls, &match?(%{monitor: ^monitor, caller: ^pid}, &1)) do
+      nil -> state
+      control -> expire_control(state, control, false)
+    end
+  end
+
+  defp expire_control(state, control, reply?) do
+    issue = control.operation.issue
+
+    custody =
+      if issue do
+        case Map.get(state.lease_claims, issue.id) do
+          %{control: %{operation: %{ref: ref}, monitor: monitor}, token: token, custody_ref: custody_ref}
+          when ref == control.operation.ref and monitor == control.monitor ->
+            {token, custody_ref}
+
+          _ ->
+            nil
+        end
+      end
+
+    state = finish_control(state, control, control_payload(control.operation, "control_deadline_exceeded", control_effect_status(control)), reply?)
+
+    case custody do
+      {token, custody_ref} ->
+        case current_issue_custody(state, issue.id, custody_ref) do
+          {:ok, %{token: ^token}} ->
+            case Map.get(state.running, issue.id) do
+              %{execution_started?: true} -> state
+              %{pid: _} -> do_terminate_running_issue(state, issue.id, false)
+              nil -> release_issue_claim(state, issue.id)
+            end
+
+          {:ok, _different_token} ->
+            state
+
+          {:error, _reason} ->
+            state
+        end
+
+      nil ->
+        state
+    end
+  end
+
+  defp invalidate_other_control(state, identifier, origin_ref) do
+    controls = [state.control_reservation | Enum.map(state.lease_claims, fn {_id, claim} -> Map.get(claim, :control) end)]
+
+    controls
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq_by(& &1.operation.ref)
+    |> Enum.reduce(state, fn control, current ->
+      if control.operation.identifier == identifier and control.operation.ref != origin_ref do
+        finish_control(current, control, control_payload(control.operation, "control_invalidated", control_effect_status(control)))
+      else
+        current
+      end
+    end)
+  end
+
+  defp control_for_issue(state, id) do
+    case state.control_admission do
+      %{operation: %{issue: %{id: ^id}}} = control -> control
+      _ -> get_in(state.lease_claims, [id, :control])
+    end
+  end
+
+  defp control_pre_admission(state, id) do
+    case control_for_issue(state, id) || get_in(state.lease_claims, [id, :control_guard]) do
+      nil ->
+        :ok
+
+      control ->
+        with true <- control_live?(state, control) or {:error, :control_invalidated},
+             :ok <- control_boundary(control),
+             true <- not (execution_hold?(state, id) or control_admission_close_held?(state, id)) or {:error, :control_custody_held},
+             {:ok, workspace} <- current_custody_workspace(state, control.operation.issue),
+             true <- workspace == control.operation.workspace or {:error, :control_workspace_changed},
+             :ok <- current_control_lease(state, id),
+             :ok <- control_boundary(control),
+             do: :ok
+    end
+  end
+
+  defp control_live?(state, control) do
+    current = control_for_issue(state, control.operation.issue.id) || find_control(state, control.operation.ref)
+    match?(%{operation: %{ref: ref}, monitor: monitor} when ref == control.operation.ref and monitor == control.monitor, current)
+  end
+
+  defp current_control_lease(state, id) do
+    case Map.get(state.lease_claims, id) do
+      nil -> :ok
+      %{token: token} -> LeaseManager.ensure_current(token)
+    end
+  end
+
+  defp control_admitted_guard(state, id, source, view, ticket, admitted_raw) do
+    case control_for_issue(state, id) do
+      nil ->
+        {:ok, nil}
+
+      control ->
+        {expected, previous_binding} = control_admission_source(source, view)
+        binding = Map.take(admitted_raw, ~w(run_id run_identity_event_id run_identity_ledger_path))
+
+        with {:ok, claim} <- current_issue_custody(state, id),
+             true <-
+               (ticket.workspace == control.operation.workspace and ticket.owner == claim.token.owner and ticket.epoch == claim.token.epoch and
+                  admitted_raw["issue_id"] == id and admitted_raw["issue_identifier"] == control.operation.identifier and
+                  binding["run_id"] == ticket.run_id and binding["run_identity_ledger_path"] == ticket.ledger_path and
+                  is_binary(binding["run_identity_event_id"]) and binding["run_identity_event_id"] != "") or {:error, :control_admission_ticket_changed},
+             true <- previous_binding == %{} or previous_binding == binding or {:error, :control_admission_binding_changed},
+             true <- RunStateStore.coordinator_projection(admitted_raw) == expected or {:error, :control_admission_material_changed},
+             guard =
+               Map.put(control, :admission, %{
+                 ticket: ticket,
+                 token: claim.token,
+                 expected: expected,
+                 identity: Map.take(admitted_raw, ~w(issue_id issue_identifier run_id run_identity_event_id run_identity_ledger_path))
+               }),
+             :ok <- control_admitted_current(state, guard) do
+          {:ok, guard}
+        end
+    end
+  end
+
+  defp control_admission_source({:present, raw}, _view),
+    do: {RunStateStore.coordinator_projection(raw), Map.take(raw, ~w(run_id run_identity_event_id run_identity_ledger_path))}
+
+  defp control_admission_source(:missing, view),
+    do: {RunStateStore.coordinator_projection(view), %{}}
+
+  defp control_admitted_current(state, %{admission: admission} = control) do
+    id = control.operation.issue.id
+
+    with :ok <- control_pre_admission(state, id),
+         {:ok, claim} <- current_issue_custody(state, id),
+         true <- claim.token == admission.token or {:error, :control_custody_changed},
+         {:ok, {:present, raw}, _view} <- RunStateStore.read_admission_source(control.operation.workspace, control.operation.issue),
+         true <- Map.take(raw, ~w(issue_id issue_identifier run_id run_identity_event_id run_identity_ledger_path)) == admission.identity or {:error, :control_admission_binding_changed},
+         true <- RunStateStore.coordinator_projection(raw) == admission.expected or {:error, :control_admission_material_changed},
+         :ok <- control_pre_admission(state, id) do
+      :ok
+    else
+      {:ok, :missing, _view} -> {:error, :control_admission_snapshot_missing}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp control_gate_boundary(_state, nil), do: :ok
+
+  defp control_gate_boundary(state, control) do
+    case find_control(state, control.operation.ref) do
+      %{monitor: monitor} when monitor == control.monitor ->
+        with %{dispatch_ticket: ticket} <- Map.fetch!(state.running, control.operation.issue.id),
+             true <- ticket == control.admission.ticket or {:error, :control_admission_ticket_changed},
+             do: control_admitted_current(state, control)
+
+      _ ->
+        {:error, :control_invalidated}
+    end
+  end
+
+  defp settle_control_admission(state, control) do
+    current = control_for_issue(state, control.operation.issue.id) || find_control(state, control.operation.ref)
+
+    if match?(%{operation: %{ref: ref}} when ref == control.operation.ref, current) do
+      settle_current_control_admission(state, control)
+    else
+      state
+    end
+  end
+
+  defp settle_current_control_admission(state, control) do
+    id = control.operation.issue.id
+
+    cond do
+      control_admission_close_held?(state, id) ->
+        finish_control(state, control, control_payload(control.operation, "control_invalidated", "unknown"))
+
+      match?(%{control: %{operation: %{ref: ref}}} when ref == control.operation.ref, Map.get(state.running, id)) ->
+        state
+
+      match?(%{purpose: :promotion, control: %{operation: %{ref: ref}}} when ref == control.operation.ref, state.admission_read) ->
+        state
+
+      true ->
+        current = control_for_issue(state, id) || find_control(state, control.operation.ref) || control
+        outcome = current.admission_result || if(Map.has_key?(state.retry_attempts, id), do: :retry_scheduled, else: :deferred)
+        continue_control(state, control, {:admission, outcome})
+    end
+  end
+
+  defp record_control_admission_failure(state, id, reason) do
+    case control_for_issue(state, id) do
+      nil ->
+        state
+
+      control ->
+        control = %{control | admission_result: control.admission_result || {:error, reason}}
+        state = store_control_reservation(state, control)
+
+        state =
+          case state.control_admission do
+            %{operation: %{ref: ref}} when ref == control.operation.ref -> %{state | control_admission: control}
+            _ -> state
+          end
+
+        case Map.get(state.lease_claims, id) do
+          %{control: %{operation: %{ref: ref}}} = claim when ref == control.operation.ref -> put_in(state.lease_claims[id], %{claim | control: control})
+          _ -> state
+        end
+    end
+  end
+
+  defp complete_control_gate(state, nil, _outcome), do: state
+
+  defp complete_control_gate(state, control, outcome) do
+    case find_control(state, control.operation.ref) do
+      nil -> state
+      current -> continue_control(state, current, {:admission, outcome})
+    end
+  end
+
+  defp close_rejected_control_admission(ticket, cause) do
+    case DispatchAudit.finish(ticket, :not_started) do
+      :ok -> {:error, {:control_admission_rejected, cause}}
+      {:error, reason} -> {:error, {:control_admission_close_failed, ticket, cause, reason}}
+    end
+  catch
+    kind, reason -> {:error, {:control_admission_close_failed, ticket, cause, {kind, reason}}}
+  end
+
+  defp retain_control_admission_close(state, issue_id, ticket, cause, close_error) do
+    claim = Map.fetch!(state.lease_claims, issue_id)
+    %{operation: %{issue: %{id: ^issue_id}}} = control = control_for_issue(state, issue_id)
+    true = ticket.workspace == claim.workspace and ticket.owner == claim.token.owner and ticket.epoch == claim.token.epoch
+
+    hold = %{
+      issue_id: issue_id,
+      ticket: ticket,
+      cause: cause,
+      error: close_error,
+      token: claim.token,
+      custody_ref: claim.custody_ref,
+      control_ref: control.operation.ref,
+      deadline: control.operation.deadline
+    }
+
+    state = put_in(state.lease_claims[issue_id], Map.put(claim, :control_close, hold))
+    %{state | candidate_fetch_error: {:control_admission_closure_uncertain, issue_id}}
+  end
+
+  defp control_admission_close_held?(state, id) do
+    case Map.get(state.lease_claims, id) do
+      %{token: token, custody_ref: ref, control_close: %{token: token, custody_ref: ref}} -> true
+      _ -> false
+    end
   end
 
   @impl true
@@ -7110,125 +7842,29 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
-  def handle_call({:pause_issue, issue_identifier}, _from, state) do
-    state = invalidate_tracker_poll_issue(state, issue_identifier)
-    {reply, state} = Controls.pause_issue_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
+  def handle_call({:control, request}, from, state) when is_map(request), do: begin_control(state, request, from)
 
-  def handle_call({:resume_issue, issue_identifier}, _from, state) do
-    state = invalidate_tracker_poll_issue(state, issue_identifier)
-    {reply, state} = Controls.resume_issue_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:stop_issue, issue_identifier}, _from, state) do
-    state = invalidate_tracker_poll_issue(state, issue_identifier)
-    {reply, state} = Controls.stop_issue_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:hold_issue_for_human_review, issue_identifier}, _from, state) do
-    state = invalidate_tracker_poll_issue(state, issue_identifier)
-    {reply, state} = Controls.hold_issue_for_human_review_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:retry_issue_now, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-    {reply, state} = Controls.retry_issue_now_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:refresh_merge_readiness, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-    {reply, state} = Controls.refresh_merge_readiness_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:reprioritize_issue, issue_identifier, override_rank}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-    {reply, state} = Controls.reprioritize_issue_runtime(state, issue_identifier, override_rank)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:approve_issue_for_merge, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-    {reply, state} = Controls.approve_issue_for_merge_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:approve_issue_for_deploy, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-    {reply, state} = Controls.approve_issue_for_deploy_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:approve_review_drafts, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-
-    {reply, state} =
-      Controls.review_thread_action_runtime(state, issue_identifier, "approve_review_drafts")
-
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:reject_review_drafts, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-    {reply, state} = Controls.review_thread_action_runtime(state, issue_identifier, "reject_review_drafts")
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:mark_review_threads_posted, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-
-    {reply, state} =
-      Controls.review_thread_action_runtime(state, issue_identifier, "mark_review_threads_posted")
-
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:post_review_drafts, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-    {reply, state} = Controls.post_review_drafts_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:resolve_review_threads, issue_identifier}, _from, state) do
-    state = invalidate_github_issue(state, issue_identifier, nil)
-
-    {reply, state} =
-      Controls.review_thread_action_runtime(state, issue_identifier, "resolve_review_threads")
-
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:set_policy_class, issue_identifier, policy_class}, _from, state) do
-    state = invalidate_tracker_poll_issue(state, issue_identifier)
-    {reply, state} = Controls.set_policy_class_runtime(state, issue_identifier, policy_class)
-    notify_dashboard()
-    {:reply, reply, state}
-  end
-
-  def handle_call({:clear_policy_override, issue_identifier}, _from, state) do
-    state = invalidate_tracker_poll_issue(state, issue_identifier)
-    {reply, state} = Controls.clear_policy_override_runtime(state, issue_identifier)
-    notify_dashboard()
-    {:reply, reply, state}
+  def handle_call(message, _from, state)
+      when is_tuple(message) and tuple_size(message) in [2, 3] and
+             elem(message, 0) in [
+               :pause_issue,
+               :resume_issue,
+               :stop_issue,
+               :hold_issue_for_human_review,
+               :retry_issue_now,
+               :refresh_merge_readiness,
+               :reprioritize_issue,
+               :approve_issue_for_merge,
+               :approve_issue_for_deploy,
+               :approve_review_drafts,
+               :reject_review_drafts,
+               :mark_review_threads_posted,
+               :post_review_drafts,
+               :resolve_review_threads,
+               :set_policy_class,
+               :clear_policy_override
+             ] do
+    {:reply, %{ok: false, error: "control_envelope_required"}, state}
   end
 
   def handle_call({:submit_manual_issue, spec}, _from, state) do
@@ -7564,8 +8200,10 @@ defmodule SymphonyElixir.Orchestrator do
          :ok <- DeployAudit.ensure_available(workspace),
          :ok <- DispatchAudit.ensure_available(workspace),
          :ok <- RunStateStore.ensure_readable(workspace),
+         :ok <- control_pre_admission(state, issue.id),
          :ok <- persisted_issue_token_budget_guard(issue, workspace),
-         {:ok, dispatch_stage} <- persisted_dispatch_stage(issue, workspace) do
+         {:ok, dispatch_stage} <- persisted_dispatch_stage(issue, workspace),
+         :ok <- control_pre_admission(state, issue.id) do
       case dispatch_stage do
         stage when stage in ["merge_readiness", "await_checks", "merge", "post_merge"] ->
           passive_dispatch_fun.(state, issue, attempt)
@@ -7575,9 +8213,11 @@ defmodule SymphonyElixir.Orchestrator do
       end
     else
       {:error, {:persisted_stage_requires_explicit_resume, _stage} = reason} ->
-        stop_terminal_dispatch(state, issue, reason)
+        state |> record_control_admission_failure(issue.id, reason) |> stop_terminal_dispatch(issue, reason)
 
       {:error, reason} ->
+        state = record_control_admission_failure(state, issue.id, reason)
+
         if github_reserved?(state, issue.id) do
           block_github_head(state, {:github_dispatch_validation_failed, reason})
         else
@@ -7589,12 +8229,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp persist_dispatchable_issue_lease(state, workspace, issue) do
-    with {:ok, _stage} <- persisted_dispatch_stage(issue, workspace) do
+    with {:ok, _stage} <- persisted_dispatch_stage(issue, workspace),
+         :ok <- control_pre_admission(state, issue.id) do
       persist_live_issue_lease(state, workspace, issue)
     end
   end
 
   defp stop_terminal_dispatch(state, issue, reason) do
+    state = record_control_admission_failure(state, issue.id, reason)
     state = tracker_inbox_outcome(state, issue.id, {:applied, :dispatch_rejected})
     released = release_issue_claim(state, issue.id)
 
@@ -8581,15 +9223,30 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp request_accounted_worker_stop(state, issue_id, entry, cleanup_workspace) do
-    request = entry |> Map.get(:execution_stop_requested, %{}) |> Map.take([:ineligibility]) |> Map.put(:cleanup_workspace, cleanup_workspace)
+    request = entry |> Map.get(:execution_stop_requested, %{}) |> Map.take([:ineligibility, :shutdown]) |> Map.put(:cleanup_workspace, cleanup_workspace)
+    request = start_accounted_worker_stop(entry, request)
     requested = Map.put(entry, :execution_stop_requested, request)
-    next = %{state | running: Map.put(state.running, issue_id, requested)} |> cancel_dispatch_retry(issue_id)
-
-    case terminate_task(entry.pid) do
-      :ok -> next
-      {:error, reason} -> %{next | candidate_fetch_error: {:accounting_worker_termination_unconfirmed, issue_id, reason}}
-    end
+    %{state | running: Map.put(state.running, issue_id, requested)} |> cancel_dispatch_retry(issue_id)
   end
+
+  defp start_accounted_worker_stop(_entry, %{shutdown: _shutdown} = request), do: request
+
+  # Retirement confirms with this owner; joining the worker here would block that call.
+  defp start_accounted_worker_stop(entry, request) do
+    ref = make_ref()
+    deadline = System.monotonic_time(:millisecond) + @accounted_worker_shutdown_ms
+    message = {:accounted_worker_stop_deadline, entry.agent_execution.context, entry.ref, ref}
+    timer = Process.send_after(self(), message, max(0, deadline - System.monotonic_time(:millisecond)))
+    Process.exit(entry.pid, :shutdown)
+    Map.put(request, :shutdown, %{ref: ref, deadline: deadline, timer: timer, kill_sent?: false})
+  end
+
+  defp cancel_accounted_worker_stop(%{execution_stop_requested: %{shutdown: %{timer: timer}}}) do
+    Process.cancel_timer(timer)
+    :ok
+  end
+
+  defp cancel_accounted_worker_stop(_entry), do: :ok
 
   defp finish_known_terminal_worker_down(state, issue_id, entry, reason) do
     next = entry.agent_execution.known_terminal.next
@@ -8739,7 +9396,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp finish_current_policy_result(state, issue_id, entry, reason, _policy_result, _continuation) do
     Logger.warning("Agent task exited for issue_id=#{issue_id} reason=#{inspect(reason)}; scheduling retry")
-    schedule_issue_retry(state, issue_id, next_retry_attempt_from_running(entry) || 1, %{identifier: entry.identifier, error: "agent exited: #{inspect(reason)}"})
+    schedule_issue_retry(state, issue_id, next_retry_attempt_from_running(entry) || 1, %{identifier: entry.identifier, issue: entry.issue, error: "agent exited: #{inspect(reason)}"})
   end
 
   defp checked_running_policy(state, issue_id, entry) do

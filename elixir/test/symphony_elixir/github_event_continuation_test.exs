@@ -193,8 +193,10 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     end
 
     def handle_call(message, from, state) do
-      {:reply, result, runtime} = Orchestrator.handle_call(message, from, state.runtime)
-      {:reply, result, %{state | runtime: runtime}}
+      case Orchestrator.handle_call(message, from, state.runtime) do
+        {:reply, result, runtime} -> {:reply, result, %{state | runtime: runtime}}
+        {:noreply, runtime} -> {:noreply, %{state | runtime: runtime}}
+      end
     end
 
     defp intercept(kind, message, state) do
@@ -1819,6 +1821,100 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     refute File.exists?(c.ready)
     refute_received {:github_callback, :gate, _}
     refute_received {:github_callback, :ack, _}
+  end
+
+  for control <- [:pause, :stop] do
+    @tag retained_control: control
+    test "#{control} reuses only the authentic retained GitHub Issue without another reader", c do
+      {workspace, _before, tracer, extra} = reject_admission_during_begin!(c, true)
+      failed = runtime(c.pid)
+      retained = operation(failed)
+      claim = failed.lease_claims["A"]
+      marker = Path.join(DispatchAudit.marker_directory(workspace), "marker.json")
+      marker_bytes = File.read!(marker)
+      snapshot = bytes(workspace)
+      counts_before = trace_counts(tracer, c.pid)
+      fixture(%{control_issue: nil})
+
+      reply =
+        case c.retained_control do
+          :pause -> Orchestrator.pause_issue(c.pid, "ISSUE-A")
+          :stop -> Orchestrator.stop_issue(c.pid, "ISSUE-A")
+        end
+
+      assert %{ok: true} = reply
+      assert_receive {:github_writer, "A"}, 2_000
+      current = runtime(c.pid)
+      assert operation(current) == retained
+      assert current.lease_claims["A"] == claim
+      assert current.running == %{}
+      assert current.github_inbox_ack_pending == nil
+      assert File.read!(marker) == marker_bytes
+      assert File.read!(extra) == "real close failure"
+      assert bytes(workspace) == snapshot
+      assert :ok = LeaseManager.ensure_current(claim.token)
+      counts = trace_counts(tracer, c.pid)
+      assert counts.read == counts_before.read
+      assert counts.writer == counts_before.writer + 1
+      assert Map.take(counts, [:cas, :ledger, :children, :gate, :ack, :finishes]) == Map.take(counts_before, [:cas, :ledger, :children, :gate, :ack, :finishes])
+      assert effect_count("A", "dispatch.finished") == 0
+      refute_received {:github_callback, :gate, _}
+      refute_received {:github_callback, :ack, _}
+    end
+  end
+
+  test "changed tracker context cannot resolve a stop from retained GitHub knowledge", c do
+    {workspace, _before, tracer, _extra} = reject_admission_during_begin!(c, true)
+    failed = runtime(c.pid)
+    retained = operation(failed)
+    claim = failed.lease_claims["A"]
+    marker = Path.join(DispatchAudit.marker_directory(workspace), "marker.json")
+    marker_bytes = File.read!(marker)
+    snapshot = bytes(workspace)
+    counts_before = trace_counts(tracer, c.pid)
+    fixture(%{control_issue: nil})
+    write_config!(c.workflow, put_in(c.config, [:tracker, :project_slug], "changed-stop-context"))
+
+    assert %{ok: false, error: ":issue_not_found"} = Orchestrator.stop_issue(c.pid, "ISSUE-A")
+    current = runtime(c.pid)
+    assert operation(current) == retained
+    assert current.lease_claims["A"] == claim
+    assert bytes(workspace) == snapshot
+    assert File.read!(marker) == marker_bytes
+    assert current.running == %{}
+    assert current.github_inbox_ack_pending == nil
+    counts = trace_counts(tracer, c.pid)
+    assert counts.read == counts_before.read + 1
+    assert Map.take(counts, [:cas, :writer, :ledger, :children, :gate, :ack, :finishes]) == Map.take(counts_before, [:cas, :writer, :ledger, :children, :gate, :ack, :finishes])
+    refute_received {:github_writer, _}
+  end
+
+  test "a real physical lease successor denies retained GitHub Issue reuse without cleanup", c do
+    {workspace, _before, tracer, _extra} = reject_admission_during_begin!(c, true)
+    failed = runtime(c.pid)
+    retained = operation(failed)
+    own = failed.lease_claims["A"]
+    marker = Path.join(DispatchAudit.marker_directory(workspace), "marker.json")
+    marker_bytes = File.read!(marker)
+    snapshot = bytes(workspace)
+    assert {:ok, :released} = LeaseManager.release_token(own.token)
+    assert {:ok, successor} = LeaseManager.acquire("A", "ISSUE-A", "stop-resolution-successor", storage: own.token.storage)
+    lease_bytes = File.read!(successor.token.storage.lease_path)
+    counts_before = trace_counts(tracer, c.pid)
+    fixture(%{control_issue: nil})
+
+    assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Orchestrator.pause_issue(c.pid, "ISSUE-A")
+    current = runtime(c.pid)
+    assert operation(current) == retained
+    assert current.lease_claims["A"] == own
+    assert current.running == %{}
+    assert current.github_inbox_ack_pending == nil
+    assert File.read!(successor.token.storage.lease_path) == lease_bytes
+    assert :ok = LeaseManager.ensure_current(successor.token)
+    assert File.read!(marker) == marker_bytes
+    assert bytes(workspace) == snapshot
+    assert trace_counts(tracer, c.pid) == counts_before
+    refute_received {:github_writer, _}
   end
 
   # This delegates the real inbox/owner callbacks and real admission. The live

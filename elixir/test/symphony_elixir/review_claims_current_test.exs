@@ -207,6 +207,9 @@ defmodule SymphonyElixir.ReviewClaimsCurrentTest do
 
     effect = fn
       :post ->
+        intent = c.ticket.ledger_path |> File.read!() |> publication_rows!() |> List.last()
+        assert intent["event_type"] == "review.publication.intent"
+        send(self(), {:publication_intent, intent})
         control!(c, "after-post")
         send(self(), {:control_evidence, evidence(c)})
 
@@ -223,7 +226,14 @@ defmodule SymphonyElixir.ReviewClaimsCurrentTest do
     refute_received {:github_call, :post, _}
     refute_received {:github_call, :resolve, _}
     assert_received {:control_evidence, before}
-    assert evidence(c) == before
+    assert_received {:publication_intent, intent}
+    after_effect = evidence(c)
+    assert Map.delete(after_effect, :ledger) == Map.delete(before, :ledger)
+    [observed] = publication_append!(before.ledger, after_effect.ledger)
+    location = publication_rows!(before.ledger) |> Enum.find(&(&1["event_id"] == intent["metadata"]["location_event_id"]))
+    assert_publication_location!(location, c)
+    assert_publication_intent!(intent, location, c)
+    assert_publication_observation!(observed, intent, c, "returned_success", nil, "reply-1", c.pr_url <> "#reply")
     assert raw!(c)["review_threads"] == c.raw["review_threads"]
     assert GenServer.call(c.owner, :state).advances == []
   end
@@ -303,9 +313,224 @@ defmodule SymphonyElixir.ReviewClaimsCurrentTest do
     assert_received {:github_call, :post, {"1", "Addressed on the branch."}}
     assert result["comment:1"]["draft_state"] == "approved_to_post"
     refute Map.has_key?(result["comment:1"], "posted_reply_id")
-    assert evidence(c) == before
+    after_effect = evidence(c)
+    assert Map.delete(after_effect, :ledger) == Map.delete(before, :ledger)
+    [location, intent, observed] = publication_append!(before.ledger, after_effect.ledger)
+    assert_publication_location!(location, c)
+    assert_publication_intent!(intent, location, c)
+    assert_publication_observation!(observed, intent, c, "returned_error", "backend_error", nil, nil)
     assert GenServer.call(c.owner, :state).terminal == nil
     assert GenServer.call(c.owner, :state).advances == []
+  end
+
+  test "an uncertain observed post blocks replay without replacing the ordinary first-call fallback", c do
+    first = within(c, fn -> ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, c.pr_url, c.state, opts(c, post_error: true)) end)
+    assert first["comment:1"]["draft_state"] == "approved_to_post"
+    assert_received {:github_call, :post, {"1", "Addressed on the branch."}}
+    retained = evidence(c)
+    intent = publication_rows!(retained.ledger) |> Enum.find(&(&1["event_type"] == "review.publication.intent"))
+    intent_id = intent["event_id"]
+
+    assert {:error, {:review_publication_blocked, :attempt_uncertain, ^intent_id}} =
+             within(c, fn -> ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, c.pr_url, c.state, opts(c)) end)
+
+    refute_received {:github_call, :post, _}
+    assert evidence(c) == retained
+    assert GenServer.call(c.owner, :state).terminal == nil
+    assert GenServer.call(c.owner, :state).advances == []
+  end
+
+  test "a confirmed real reply is rediscovered under current permission without posting it twice", c do
+    first = within(c, fn -> ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, c.pr_url, c.state, opts(c)) end)
+    assert first["comment:1"]["draft_state"] == "posted"
+    assert first["comment:1"]["posted_reply_id"] == "reply-1"
+    assert first["comment:1"]["posted_reply_url"] == c.pr_url <> "#reply"
+    assert_received {:github_call, :post, {"1", "Addressed on the branch."}}
+    retained = evidence(c)
+
+    second = within(c, fn -> ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, c.pr_url, c.state, opts(c)) end)
+
+    assert second == first
+    refute_received {:github_call, :post, _}
+    assert evidence(c) == retained
+    assert raw!(c)["review_threads"] == c.raw["review_threads"]
+    assert GenServer.call(c.owner, :state).advances == []
+  end
+
+  @tag legacy: true
+  test "a pending legacy publication still blocks after genuine identified admission", c do
+    first = ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, c.pr_url, c.state, opts(c, post_error: true))
+    assert first["comment:1"]["draft_state"] == "approved_to_post"
+    assert_received {:github_call, :post, {"1", "Addressed on the branch."}}
+    path = SymphonyElixir.RunLedger.ledger_file_path()
+    intent = path |> File.read!() |> publication_rows!() |> Enum.find(&(&1["event_type"] == "review.publication.intent"))
+    assert intent["metadata"]["binding"] == %{}
+    assert intent["metadata"]["dispatch_id"] == nil
+    intent_id = intent["event_id"]
+
+    assert {:ok, acquired} = LeaseManager.acquire(c.issue.id, c.issue.identifier, "review-publication-successor")
+    assert {:ok, _} = RunStateStore.sync_lease(c.workspace, c.issue, LeaseManager.snapshot_for_state(acquired.lease))
+    assert {:ok, source, view} = RunStateStore.read_admission_source(c.workspace, c.issue)
+
+    assert {:ok, ticket, raw} =
+             DispatchAudit.begin(
+               c.workspace,
+               %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, stage: view.stage, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}},
+               source
+             )
+
+    authority = %{ticket: ticket, lease_token: acquired.token}
+    assert {:ok, state} = RunStateStore.ensure_current(authority, RunStateStore.material_projection(raw))
+    owner = start_supervised!({Owner, %{ticket: ticket, token: acquired.token, raw: raw, worker: self(), issue: c.issue}})
+    identified = Map.merge(c, %{state: state, ticket: ticket, raw: raw, token: acquired.token, authority: authority, owner: owner})
+    retained = evidence(identified)
+    assert is_binary(raw["run_id"])
+    assert raw["run_id"] == ticket.run_id
+
+    assert {:error, {:review_publication_blocked, :attempt_uncertain, ^intent_id}} =
+             within(identified, fn -> ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, c.pr_url, state, opts(c)) end)
+
+    refute_received {:github_call, :post, _}
+    assert evidence(identified) == retained
+    assert GenServer.call(owner, :state).terminal == nil
+    assert GenServer.call(owner, :state).advances == []
+  end
+
+  @tag legacy: true
+  test "a genuine new identified binding cannot adopt a successful legacy reply", c do
+    first = ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, c.pr_url, c.state, opts(c))
+    assert first["comment:1"]["posted_reply_id"] == "reply-1"
+    assert_received {:github_call, :post, {"1", "Addressed on the branch."}}
+    assert {:ok, acquired} = LeaseManager.acquire(c.issue.id, c.issue.identifier, "review-publication-new-binding")
+    assert {:ok, _} = RunStateStore.sync_lease(c.workspace, c.issue, LeaseManager.snapshot_for_state(acquired.lease))
+    assert {:ok, source, view} = RunStateStore.read_admission_source(c.workspace, c.issue)
+
+    assert {:ok, ticket, raw} =
+             DispatchAudit.begin(
+               c.workspace,
+               %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, stage: view.stage, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}},
+               source
+             )
+
+    authority = %{ticket: ticket, lease_token: acquired.token}
+    assert {:ok, state} = RunStateStore.ensure_current(authority, RunStateStore.material_projection(raw))
+    owner = start_supervised!({Owner, %{ticket: ticket, token: acquired.token, raw: raw, worker: self(), issue: c.issue}})
+    identified = Map.merge(c, %{state: state, ticket: ticket, raw: raw, token: acquired.token, authority: authority, owner: owner})
+    before = evidence(identified)
+
+    assert {:error, {:review_publication_blocked, :binding_changed, id}} =
+             within(identified, fn ->
+               ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, c.pr_url, state, opts(c))
+             end)
+
+    assert is_binary(id)
+    assert evidence(identified) == before
+    assert GenServer.call(owner, :state).advances == []
+    refute_receive {:github_call, :post, _}, 30
+  end
+
+  # These are independent expected protocol rows. No production formatter or
+  # normalizer computes the oracle; historical bytes must remain an exact prefix.
+  defp publication_append!(before, after_effect) do
+    assert byte_size(after_effect) > byte_size(before)
+    assert binary_part(after_effect, 0, byte_size(before)) == before
+    suffix = binary_part(after_effect, byte_size(before), byte_size(after_effect) - byte_size(before))
+    publication_rows!(suffix)
+  end
+
+  test "identified execution can publish its caller PR result before the next RAW checkpoint", c do
+    original = evidence(c)
+    new_pr = "https://github.com/example/repo/pull/2"
+
+    assert %{"comment:1" => posted} =
+             within(c, fn ->
+               ReviewClaims.maybe_post_autonomous_review_replies(c.threads, c.workspace, new_pr, c.state, opts(c))
+             end)
+
+    assert posted["posted_reply_url"] == new_pr <> "#reply"
+    assert_received {:github_call, :post, {"1", "Addressed on the branch."}}
+    assert Map.delete(evidence(c), :ledger) == Map.delete(original, :ledger)
+    rows = publication_rows!(File.read!(c.ticket.ledger_path))
+    [intent] = Enum.filter(rows, &(&1["event_type"] == "review.publication.intent"))
+    assert intent["metadata"]["pr_source"] == "caller_result"
+    assert intent["metadata"]["raw_pr"] == %{"pr_url" => c.pr_url}
+    assert intent["metadata"]["pr_identity"] == %{"host" => "github.com", "owner" => "example", "repo" => "repo", "number" => 2}
+    assert intent["metadata"]["binding"] == Map.take(c.raw, ~w(run_id run_identity_event_id run_identity_ledger_path))
+    assert GenServer.call(c.owner, :state).advances == []
+  end
+
+  defp publication_rows!(bytes) do
+    assert String.ends_with?(bytes, "\n")
+    bytes |> String.split("\n") |> Enum.drop(-1) |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp assert_publication_envelope!(entry, type, c) do
+    assert is_map(entry)
+    assert entry["schema_version"] == 1
+    assert entry["event"] == type
+    assert entry["event_type"] == type
+    assert entry["issue_id"] == c.issue.id
+    assert entry["issue_identifier"] == c.issue.identifier
+    assert is_binary(entry["event_id"]) and entry["event_id"] != ""
+    assert {:ok, _, 0} = DateTime.from_iso8601(entry["at"])
+  end
+
+  defp assert_publication_location!(location, c) do
+    assert_publication_envelope!(location, "review.publication.location", c)
+    anchor_name = ".review-publication-" <> Base.encode16(:crypto.hash(:sha256, c.issue.id), case: :lower) <> ".json"
+
+    assert location["metadata"] == %{
+             "publication_version" => 1,
+             "workspace_root" => c.root,
+             "workspace" => c.workspace,
+             "ledger_path" => c.ticket.ledger_path,
+             "anchor_name" => anchor_name
+           }
+  end
+
+  defp publication_identity(c, location_id) do
+    %{
+      "publication_version" => 1,
+      "location_event_id" => location_id,
+      "workspace" => c.workspace,
+      "pr_url" => c.pr_url,
+      "pr_identity" => %{"host" => "github.com", "owner" => "example", "repo" => "repo", "number" => 1},
+      "pr_source" => "caller_result",
+      "raw_pr" => Map.take(c.raw, ["pr_url"]),
+      "thread_key" => "comment:1",
+      "operation" => "post",
+      "reply_target" => "1",
+      "draft_sha256" => Base.encode16(:crypto.hash(:sha256, "Addressed on the branch."), case: :lower),
+      "binding" => Map.take(c.raw, ~w(run_id run_identity_event_id run_identity_ledger_path)),
+      "dispatch_id" => c.ticket.dispatch_id
+    }
+  end
+
+  defp assert_publication_intent!(intent, location, c) do
+    assert_publication_envelope!(intent, "review.publication.intent", c)
+    observation_id = intent["metadata"]["observation_event_id"]
+    assert is_binary(observation_id) and observation_id != ""
+    assert observation_id != intent["event_id"]
+    assert intent["event_id"] != location["event_id"]
+    assert intent["metadata"] == Map.put(publication_identity(c, location["event_id"]), "observation_event_id", observation_id)
+  end
+
+  defp assert_publication_observation!(observed, intent, c, outcome, cause, reply_id, reply_url) do
+    assert_publication_envelope!(observed, "review.publication.observed", c)
+    assert observed["event_id"] == intent["metadata"]["observation_event_id"]
+
+    assert observed["metadata"] ==
+             Map.merge(
+               publication_identity(c, intent["metadata"]["location_event_id"]),
+               %{
+                 "intent_event_id" => intent["event_id"],
+                 "outcome" => outcome,
+                 "cause" => cause,
+                 "posted_reply_id" => reply_id,
+                 "posted_reply_url" => reply_url,
+                 "posted_at" => if(outcome == "returned_success", do: observed["at"], else: nil)
+               }
+             )
   end
 
   defp within(c, fun), do: DispatchAudit.with_authorization(c.ticket, fn -> AgentExecution.with_context(c.ticket, c.token, c.owner, c.raw, fun) end)

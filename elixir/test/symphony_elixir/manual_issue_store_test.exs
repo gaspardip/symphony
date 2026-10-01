@@ -214,6 +214,117 @@ defmodule SymphonyElixir.ManualIssueStoreTest do
     end
   end
 
+  describe "checked identifier lookup" do
+    test "reads the exact submitted issue without rewriting any record", %{store_root: root} do
+      assert {:ok, issue} = ManualIssueStore.submit(%{"id" => "identifier", "identifier" => "ID-1", "title" => "Identifier", "acceptance_criteria" => ["Read exact issue"]})
+      assert {:ok, record} = ManualIssueStore.load_record_by_identifier(issue.identifier)
+      expected = record.issue
+      path = checked_path(root, issue.id)
+      before = File.read!(path)
+
+      assert {:ok, ^expected} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+      assert File.read!(path) == before
+    end
+
+    test "uses the captured collection after the workflow root changes", %{store_root: root} do
+      captured = Path.join(root, "captured-identifier")
+      replacement = Path.join(root, "replacement-identifier")
+      checked_record!(captured, "manual:old", %{"identifier" => "SAME-1"})
+      checked_record!(replacement, "manual:new", %{"identifier" => "SAME-1"})
+      write_workflow_file!(Workflow.workflow_file_path(), manual_store_root: replacement)
+
+      assert {:ok, %{id: "manual:old"}} = ManualIssueStore.fetch_issue_by_identifier_checked("SAME-1", captured)
+      assert {:ok, %{id: "manual:new"}} = ManualIssueStore.fetch_issue_by_identifier("SAME-1")
+    end
+
+    test "missing collection and unmatched identifier are nil without creating files", %{store_root: root} do
+      assert {:ok, nil} = ManualIssueStore.fetch_issue_by_identifier_checked("ABSENT-1", root)
+      assert {:error, :enoent} = File.lstat(root)
+      checked_record!(root, "manual:other", %{"identifier" => "OTHER-1"})
+      File.write!(Path.join(root, "notes.txt"), "not a record")
+      names = Enum.sort(File.ls!(root))
+      assert {:ok, nil} = ManualIssueStore.fetch_issue_by_identifier_checked("ABSENT-1", root)
+      assert Enum.sort(File.ls!(root)) == names
+    end
+
+    test "a non-directory collection is an IO error rather than absence", %{store_root: root} do
+      File.write!(root, "unchanged root file")
+      assert {:error, {:manual_issue_list_failed, :enotdir}} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+      assert File.read!(root) == "unchanged root file"
+    end
+
+    test "a matching record cannot hide corrupt sibling JSON", %{store_root: root} do
+      checked_record!(root, "manual:match", %{"identifier" => "MATCH-1"})
+      corrupt = checked_path(root, "manual:sibling")
+      File.write!(corrupt, "{broken sibling")
+      before = File.read!(corrupt)
+      assert {:error, {:manual_issue_decode_failed, %Jason.DecodeError{}}} = ManualIssueStore.fetch_issue_by_identifier_checked("MATCH-1", root)
+      assert File.read!(corrupt) == before
+    end
+
+    test "rejects duplicate requested identifiers without picking an arbitrary record", %{store_root: root} do
+      checked_record!(root, "manual:first", %{"identifier" => "DUP-1"})
+      checked_record!(root, "manual:second", %{"identifier" => "DUP-1"})
+      before = for name <- File.ls!(root), into: %{}, do: {name, File.read!(Path.join(root, name))}
+      assert {:error, :duplicate_manual_issue_identifier} = ManualIssueStore.fetch_issue_by_identifier_checked("DUP-1", root)
+      assert before == for(name <- File.ls!(root), into: %{}, do: {name, File.read!(Path.join(root, name))})
+    end
+
+    test "duplicate unrelated identifiers do not redefine uniqueness of the requested identifier", %{store_root: root} do
+      checked_record!(root, "manual:first", %{"identifier" => "OTHER-1"})
+      checked_record!(root, "manual:second", %{"identifier" => "OTHER-1"})
+      checked_record!(root, "manual:target", %{"identifier" => "TARGET-1"})
+      assert {:ok, %{id: "manual:target"}} = ManualIssueStore.fetch_issue_by_identifier_checked("TARGET-1", root)
+    end
+
+    test "validates canonical filename identity before accepting its payload", %{store_root: root} do
+      File.mkdir_p!(root)
+
+      for name <- [".json", "not+base64.json", "YQ==.json", "_w.json", "YQ.json.json"] do
+        path = Path.join(root, name)
+        File.write!(path, Jason.encode!(%{"issue" => %{"id" => "manual:payload", "identifier" => "ID-1", "source" => "manual"}}))
+        assert {:error, :invalid_manual_issue_filename} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+        File.rm!(path)
+      end
+
+      checked_record!(root, "manual:filename", %{"id" => "manual:different", "identifier" => "ID-1"})
+      assert {:error, {:manual_issue_identity_mismatch, :id}} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+    end
+
+    test "validates every record shape and real manual source without legacy decoding fallback", %{store_root: root} do
+      id = "manual:invalid-record"
+      File.mkdir_p!(root)
+      path = checked_path(root, id)
+
+      for payload <- [nil, [], %{}, %{"issue" => nil}, %{"issue" => []}] do
+        File.write!(path, Jason.encode!(payload))
+        assert {:error, :invalid_manual_issue_record} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+      end
+
+      for source <- [nil, false, "tracker", "unexpected"] do
+        checked_record!(root, id, %{"identifier" => "ID-1", "source" => source})
+        assert {:error, {:manual_issue_identity_mismatch, :source}} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+      end
+
+      checked_record!(root, id, %{"identifier" => ""})
+      assert {:error, {:manual_issue_identity_mismatch, :identifier}} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+    end
+
+    test "an unreadable listed record stays a read error", %{store_root: root} do
+      File.mkdir_p!(checked_path(root, "manual:directory"))
+      assert {:error, {:manual_issue_read_failed, :eisdir}} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+    end
+
+    test "enoent for a captured collection entry is not collection absence", %{store_root: root} do
+      File.mkdir_p!(root)
+      path = checked_path(root, "manual:dangling")
+      assert :ok = File.ln_s(Path.join(root, "missing-target"), path)
+      assert Path.basename(path) in File.ls!(root)
+      assert {:error, {:manual_issue_read_failed, :enoent}} = ManualIssueStore.fetch_issue_by_identifier_checked("ID-1", root)
+      assert {:ok, %{type: :symlink}} = File.lstat(path)
+    end
+  end
+
   defp checked_path(root, id), do: Path.join(root, Base.url_encode64(id, padding: false) <> ".json")
 
   defp checked_record!(root, id, attrs \\ %{}) do
