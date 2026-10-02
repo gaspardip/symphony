@@ -27,6 +27,11 @@ and is not evidence of confinement. This scope excludes host hooks, Git, `gh` an
 publication. See [the selection contract and limits](elixir/README.md#selected-process-boundaries)
 before configuring the offline backend.
 
+Publication requires fresh validation and accepted evidence from the current worker.
+Changed or replaced proof files block positive effects; a matching digest establishes
+file integrity and does not establish that an arbitrary claim is true. See
+[the evidence acceptance contract](elixir/README.md#current-evidence-before-publication).
+
 Delivery branch preparation and resets fetch the configured base explicitly, including
 workspaces cloned for a different single branch. Reset selects the local base at its
 remote revision and preserves the runtime snapshot; local code changes are discarded.

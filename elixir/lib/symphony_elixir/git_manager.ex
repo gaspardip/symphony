@@ -4,7 +4,7 @@ defmodule SymphonyElixir.GitManager do
   """
 
   alias SymphonyElixir.{AuthorProfile, DebugArtifacts, Linear.Issue, Observability}
-  alias SymphonyElixir.RunStateStore
+  alias SymphonyElixir.{AgentExecution, EvidenceAcceptance, RunStateStore}
 
   @spec prepare_issue_branch(Path.t(), Issue.t() | map(), map() | nil, keyword()) ::
           {:ok, %{branch: String.t(), base_branch: String.t()}} | {:error, term()}
@@ -22,29 +22,31 @@ defmodule SymphonyElixir.GitManager do
   end
 
   @spec commit_all(Path.t(), Issue.t() | map(), String.t(), keyword()) ::
-          {:ok, :noop | %{sha: String.t(), message: String.t()}} | {:error, term()}
+          {:ok, :noop | %{sha: String.t(), message: String.t()}} | {:error, term()} | AgentExecution.terminal()
   def commit_all(workspace, issue, summary, opts \\ [])
       when is_binary(workspace) and is_binary(summary) do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
 
     with :ok <- ensure_git_checkout(workspace),
-         dirty? <- dirty?(command_runner, workspace),
+         {:ok, dirty?} <- commit_dirty(command_runner, workspace, opts),
+         :ok <- evidence_guard(workspace, opts, :commit),
          {:dirty?, true} <- {:dirty?, dirty?},
-         :ok <- git_ok(command_runner, workspace, ["add", "-A"]),
+         :ok <- git_ok(command_runner, workspace, ["add", "-A"], {opts, :commit}),
          message <- commit_message(issue, summary),
-         :ok <- git_ok(command_runner, workspace, ["commit", "-m", message]),
+         :ok <- git_ok(command_runner, workspace, ["commit", "-m", message], {opts, :commit}),
          {:ok, sha} <- git_output(command_runner, workspace, ["rev-parse", "HEAD"]) do
       {:ok, %{sha: sha, message: message}}
     else
       {:dirty?, false} -> {:ok, :noop}
       {:error, reason} -> {:error, reason}
+      {:stop, _} = terminal -> terminal
     end
   end
 
-  @spec push_branch(Path.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  @spec push_branch(Path.t(), String.t(), keyword()) :: :ok | {:error, term()} | AgentExecution.terminal()
   def push_branch(workspace, branch, opts \\ []) when is_binary(workspace) and is_binary(branch) do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
-    git_ok(command_runner, workspace, ["push", "-u", "origin", branch])
+    git_ok(command_runner, workspace, ["push", "-u", "origin", branch], {opts, :push})
   end
 
   @spec reset_to_base(Path.t(), map() | nil, keyword()) :: :ok | {:error, term()}
@@ -117,14 +119,55 @@ defmodule SymphonyElixir.GitManager do
     end
   end
 
-  defp git_ok(command_runner, workspace, args) do
-    case run_git_command(command_runner, workspace, args) do
+  defp git_ok(command_runner, workspace, args, guard \\ nil) do
+    case run_git_command(command_runner, workspace, args, guard) do
       {_output, 0} -> :ok
+      {:error, _} = error -> error
+      {:stop, _} = terminal -> terminal
       {output, status} -> {:error, {:git_failed, Enum.join(args, " "), status, output}}
     end
   end
 
-  defp run_git_command(command_runner, workspace, args) do
+  defp commit_dirty(command_runner, workspace, opts) do
+    if Keyword.has_key?(opts, :evidence_handle) do
+      case command_runner.("git", ["status", "--porcelain"], cd: workspace, stderr_to_stdout: true) do
+        {output, 0} -> {:ok, String.trim(output) != ""}
+        {_output, status} -> {:error, {:publication_status_failed, status}}
+      end
+    else
+      {:ok, dirty?(command_runner, workspace)}
+    end
+  end
+
+  defp evidence_guard(workspace, opts, effect) do
+    case Keyword.fetch(opts, :evidence_handle) do
+      {:ok, handle} ->
+        case EvidenceAcceptance.before_effect(workspace, handle, effect) do
+          {:error, reason} -> {:error, {:evidence_rejected, reason}}
+          outcome -> outcome
+        end
+
+      :error ->
+        case AgentExecution.current_context() do
+          {:error, :execution_context_missing} ->
+            :ok
+
+          {:ok, _context} ->
+            with {:ok, _current} <- AgentExecution.ensure_current(),
+                 do: {:error, {:evidence_rejected, :evidence_handle_required}}
+        end
+    end
+  end
+
+  defp guarded_command(command_runner, workspace, args, nil),
+    do: command_runner.("git", args, cd: workspace, stderr_to_stdout: true)
+
+  defp guarded_command(command_runner, workspace, args, {opts, effect}) do
+    with :ok <- evidence_guard(workspace, opts, effect),
+         do: command_runner.("git", args, cd: workspace, stderr_to_stdout: true)
+  end
+
+  defp run_git_command(command_runner, workspace, args, guard \\ nil) do
     metadata = %{
       workspace: workspace,
       command: Enum.join(args, " "),
@@ -136,13 +179,19 @@ defmodule SymphonyElixir.GitManager do
       Observability.emit([:symphony, :git, :command, :start], %{count: 1}, metadata)
 
       result =
-        case command_runner.("git", args, cd: workspace, stderr_to_stdout: true) do
+        case guarded_command(command_runner, workspace, args, guard) do
+          {:error, _} = error ->
+            error
+
+          {:stop, _} = terminal ->
+            terminal
+
           {_output, status} = result when status == 0 ->
             result
 
           {output, _status} = result ->
             case maybe_recover_stale_index_lock(workspace, output) do
-              :recovered -> command_runner.("git", args, cd: workspace, stderr_to_stdout: true)
+              :recovered -> guarded_command(command_runner, workspace, args, guard)
               :no_recovery -> result
             end
         end
@@ -151,6 +200,9 @@ defmodule SymphonyElixir.GitManager do
       result
     end)
   end
+
+  defp emit_git_command_stop({:error, _}, metadata, start_time), do: emit_guard_denial(metadata, start_time)
+  defp emit_git_command_stop({:stop, _}, metadata, start_time), do: emit_guard_denial(metadata, start_time)
 
   defp emit_git_command_stop({output, status}, metadata, start_time)
        when is_integer(status) do
@@ -175,6 +227,10 @@ defmodule SymphonyElixir.GitManager do
       |> Map.put(:outcome, if(status == 0, do: "ok", else: "error"))
       |> Map.put(:artifact_id, artifact && artifact.artifact_id)
     )
+  end
+
+  defp emit_guard_denial(metadata, start_time) do
+    Observability.emit([:symphony, :git, :command, :stop], %{count: 1, duration: System.monotonic_time() - start_time}, Map.put(metadata, :outcome, "evidence_denied"))
   end
 
   defp current_stage(workspace) when is_binary(workspace) do

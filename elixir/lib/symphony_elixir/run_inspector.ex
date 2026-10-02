@@ -36,7 +36,7 @@ defmodule SymphonyElixir.RunInspector do
   defmodule CommandResult do
     @moduledoc false
 
-    defstruct [:status, :command, :output, :error]
+    defstruct [:status, :command, :output, :error, :exit_code]
   end
 
   @type snapshot :: %Snapshot{}
@@ -217,6 +217,11 @@ defmodule SymphonyElixir.RunInspector do
     run_harness_command(workspace, harness && harness.validation_command, opts)
   end
 
+  @spec run_artifacts(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
+  def run_artifacts(workspace, harness, opts \\ []) do
+    run_harness_command(workspace, harness && harness.artifacts_command, opts)
+  end
+
   @spec run_smoke(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
   def run_smoke(workspace, harness, opts \\ []) do
     run_harness_command(workspace, harness && harness.smoke_command, opts)
@@ -251,6 +256,108 @@ defmodule SymphonyElixir.RunInspector do
   def run_shell_command(workspace, command, opts \\ []) do
     run_harness_command(workspace, command, opts)
   end
+
+  @doc "Checked file selection for accepting evidence. Git failure is never an empty diff."
+  @spec changed_paths_checked(Path.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def changed_paths_checked(workspace, opts \\ []) do
+    command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
+
+    case command_runner.("git", ["status", "--porcelain", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true) do
+      {output, 0} ->
+        paths = output |> to_string() |> String.split(~r/\r?\n/, trim: true) |> Enum.map(&status_path/1) |> Enum.reject(&runtime_artifact_path?/1) |> Enum.reject(&is_nil/1) |> Enum.uniq()
+        {:ok, paths}
+
+      {_output, status} ->
+        {:error, {:evidence_file_selection_failed, status}}
+    end
+  end
+
+  @doc "Captures the real branch delta against one resolved harness base, including local files."
+  def evidence_scope_checked(workspace, harness, opts \\ [])
+
+  @spec evidence_scope_checked(Path.t(), RepoHarness.t() | nil, keyword()) :: {:ok, map()} | {:error, term()}
+  def evidence_scope_checked(workspace, %{base_branch: base}, opts) when is_binary(base) and base != "" do
+    runner = Keyword.get(opts, :command_runner, &System.cmd/3)
+
+    with {:ok, branch} <- evidence_branch(workspace, runner),
+         {:ok, output} <- evidence_git(workspace, runner, ["rev-parse", "--verify", "--end-of-options", "#{base}^{commit}"], :base),
+         commit = String.trim(output),
+         true <- valid_git_oid?(commit) or {:error, :evidence_base_invalid},
+         {:ok, material} <- evidence_material(workspace, commit, runner) do
+      {:ok, %{base_commit: commit, branch: branch, paths: Enum.map(material, & &1.path), material: material}}
+    end
+  end
+
+  def evidence_scope_checked(_workspace, _harness, _opts), do: {:error, :evidence_base_missing}
+
+  @doc "Confirms the captured material, allowing a commit of the same bytes without adopting a new base."
+  @spec confirm_evidence_scope(Path.t(), map() | nil) :: :ok | {:error, term()}
+  def confirm_evidence_scope(_workspace, nil), do: :ok
+
+  def confirm_evidence_scope(workspace, scope) do
+    with {:ok, branch} <- evidence_branch(workspace, &System.cmd/3),
+         true <- branch == scope.branch or {:error, :evidence_branch_changed},
+         {:ok, material} <- evidence_material(workspace, scope.base_commit, &System.cmd/3),
+         true <- material == scope.material or {:error, :evidence_scope_changed} do
+      :ok
+    end
+  end
+
+  defp evidence_branch(workspace, runner) do
+    with {:ok, output} <- evidence_git(workspace, runner, ["symbolic-ref", "--quiet", "--short", "HEAD"], :branch),
+         branch = String.trim(output),
+         true <- branch != "" or {:error, :evidence_branch_unknown},
+         do: {:ok, branch}
+  end
+
+  defp evidence_material(workspace, base_commit, runner) do
+    with {:ok, changed} <- evidence_git(workspace, runner, ["diff", "--name-only", "-z", "--no-ext-diff", base_commit, "--"], :diff),
+         {:ok, untracked} <- evidence_git(workspace, runner, ["ls-files", "--others", "--exclude-standard", "-z"], :untracked),
+         {:ok, deleted} <- evidence_git(workspace, runner, ["diff", "--diff-filter=D", "--name-only", "-z", "--no-ext-diff", base_commit, "--"], :deleted) do
+      paths = (nul_paths(changed) ++ nul_paths(untracked)) |> Enum.uniq() |> Enum.reject(&runtime_artifact_path?/1) |> Enum.sort()
+      deleted_paths = nul_paths(deleted)
+
+      Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, material} ->
+        case evidence_path_material(workspace, path, deleted_paths, runner) do
+          {:ok, entry} -> {:cont, {:ok, material ++ [entry]}}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp evidence_path_material(workspace, path, deleted, runner) do
+    case File.lstat(Path.join(workspace, path)) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        with {:ok, output} <- evidence_git(workspace, runner, ["hash-object", "--no-filters", "--", path], :hash),
+             oid = String.trim(output),
+             true <- valid_git_oid?(oid) or {:error, :evidence_material_invalid},
+             do: {:ok, %{path: path, kind: "regular", executable: Bitwise.band(mode, 0o111) != 0, git_blob: oid}}
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        with {:ok, target} <- File.read_link(Path.join(workspace, path)),
+             do: {:ok, %{path: path, kind: "symlink", sha256: :crypto.hash(:sha256, target) |> Base.encode16(case: :lower)}}
+
+      {:error, :enoent} ->
+        if path in deleted, do: {:ok, %{path: path, kind: "deleted"}}, else: {:error, :evidence_scope_file_missing}
+
+      {:ok, _unsupported} ->
+        {:error, :evidence_scope_file_unsupported}
+
+      {:error, reason} ->
+        {:error, {:evidence_scope_read_failed, reason}}
+    end
+  end
+
+  defp evidence_git(workspace, runner, args, phase) do
+    case runner.("git", args, cd: workspace, stderr_to_stdout: true) do
+      {output, 0} -> {:ok, to_string(output)}
+      {_output, status} -> {:error, {:evidence_scope_command_failed, phase, status}}
+    end
+  end
+
+  defp valid_git_oid?(value), do: Regex.match?(~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/, value)
+  defp nul_paths(output), do: String.split(output, <<0>>, trim: true)
 
   @spec changed_paths(Path.t(), keyword()) :: [String.t()]
   def changed_paths(workspace, opts \\ []) when is_binary(workspace) do
@@ -297,7 +404,7 @@ defmodule SymphonyElixir.RunInspector do
         run_legacy_harness_command(workspace, command, opts)
 
       {:ok, {output, status}} ->
-        %CommandResult{status: if(status == 0, do: :passed, else: :failed), command: command, output: output}
+        %CommandResult{status: if(status == 0, do: :passed, else: :failed), command: command, output: output, exit_code: status}
 
       {:error, reason} ->
         %CommandResult{status: :unavailable, command: command, output: "Execution boundary failed: #{Kernel.inspect(reason)}", error: reason}
@@ -311,6 +418,7 @@ defmodule SymphonyElixir.RunInspector do
 
     %CommandResult{
       status: if(status == 0, do: :passed, else: :failed),
+      exit_code: status,
       command: command,
       output: output
     }

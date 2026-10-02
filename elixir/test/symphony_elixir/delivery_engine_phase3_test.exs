@@ -331,19 +331,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
     )
 
     assert {:stop, :publish_missing_pr} =
-             DeliveryEngine.run(workspace, issue, nil,
-               verifier_runner: fn _workspace, _issue, _state, _inspection, _opts ->
-                 %{
-                   verdict: "pass",
-                   summary: "Verifier passed",
-                   acceptance_gaps: [],
-                   risky_areas: [],
-                   evidence: [],
-                   raw_output: "pass",
-                   acceptance: %{summary: "Verifier summary"}
-                 }
-               end
-             )
+             run_with_evidence(workspace, issue, nil, verifier_session_runner: &verifier_pass/4)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert state.last_verifier_verdict == "pass"
@@ -366,7 +354,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
       policy_publish_required: false
     )
 
-    assert {:stop, :publish_missing_pr} = DeliveryEngine.run(workspace, issue, nil)
+    assert {:stop, :publish_missing_pr} = run_with_evidence(workspace, issue, nil)
 
     assert {:ok, state} = RunStateStore.load(workspace)
     assert Enum.any?(state.stage_history, &(&1.stage == "publish"))
@@ -389,7 +377,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
       policy_publish_required: true
     )
 
-    assert {:stop, :publish_failed} = DeliveryEngine.run(workspace, issue, nil)
+    assert {:stop, :publish_failed} = run_with_evidence(workspace, issue, nil)
 
     {message, 0} = System.cmd("git", ["log", "-1", "--pretty=%s"], cd: workspace)
     assert String.trim(message) == "MT-VERIFY: Verify"
@@ -419,7 +407,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
       command, args, opts -> System.cmd(command, args, opts)
     end
 
-    assert {:stop, :noop_turn} = DeliveryEngine.run(workspace, issue, nil, command_runner: command_runner)
+    assert {:stop, :noop_turn} = run_with_evidence(workspace, issue, nil, command_runner: command_runner)
   end
 
   test "publish stage republishes a clean branch when a PR already exists" do
@@ -459,7 +447,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
     end
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
+             run_with_evidence(workspace, issue, nil,
                command_runner: command_runner,
                github_client: SymphonyElixir.DeliveryEnginePhase3Test.FakeGitHubClient,
                github_client_opts: [
@@ -506,7 +494,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
     end
 
     assert :ok =
-             DeliveryEngine.run(workspace, issue, nil,
+             run_with_evidence(workspace, issue, nil,
                command_runner: command_runner,
                github_client: SymphonyElixir.DeliveryEnginePhase3Test.FakeGitHubClient,
                github_client_opts: [pr_url: "https://github.com/example/repo/pull/88"]
@@ -538,7 +526,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
       command, args, opts -> System.cmd(command, args, opts)
     end
 
-    assert {:stop, :publish_failed} = DeliveryEngine.run(workspace, issue, nil, command_runner: command_runner)
+    assert {:stop, :publish_failed} = run_with_evidence(workspace, issue, nil, command_runner: command_runner)
   end
 
   test "publish stage blocks when commit creation fails" do
@@ -563,7 +551,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
       command, args, opts -> System.cmd(command, args, opts)
     end
 
-    assert {:stop, :publish_failed} = DeliveryEngine.run(workspace, issue, nil, command_runner: command_runner)
+    assert {:stop, :publish_failed} = run_with_evidence(workspace, issue, nil, command_runner: command_runner)
   end
 
   test "publish stage blocks when PR creation fails after a successful push" do
@@ -589,7 +577,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
     end
 
     assert {:stop, :publish_failed} =
-             DeliveryEngine.run(workspace, issue, nil,
+             run_with_evidence(workspace, issue, nil,
                command_runner: command_runner,
                github_client: SymphonyElixir.DeliveryEnginePhase3Test.FakeGitHubClient,
                github_client_opts: [create_error: :pr_create_failed]
@@ -607,11 +595,26 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
     File.mkdir_p!(workspace)
     File.mkdir_p!(Path.join(workspace, ".symphony"))
     File.write!(Path.join(workspace, "README.md"), "initial\n")
+    File.write!(Path.join(workspace, ".gitignore"), ".symphony/\n")
+
+    File.write!(
+      Path.join(workspace, ".symphony/harness.yml"),
+      Jason.encode!(%{
+        version: 1,
+        base_branch: "main",
+        preflight: %{command: "test -s README.md"},
+        validation: %{command: "test -s README.md"},
+        smoke: %{command: "test -s README.md"},
+        post_merge: %{command: "test -s README.md"},
+        artifacts: %{command: "test -s README.md"},
+        pull_request: %{required_checks: ["make-all"]}
+      })
+    )
 
     System.cmd("git", ["init", "-b", "main"], cd: workspace)
     System.cmd("git", ["config", "user.name", "Test User"], cd: workspace)
     System.cmd("git", ["config", "user.email", "test@example.com"], cd: workspace)
-    System.cmd("git", ["add", "README.md"], cd: workspace)
+    System.cmd("git", ["add", ".gitignore", "README.md"], cd: workspace)
     System.cmd("git", ["commit", "-m", "initial"], cd: workspace)
 
     issue = %Issue{
@@ -662,5 +665,189 @@ defmodule SymphonyElixir.DeliveryEnginePhase3Test do
 
     File.chmod!(binary, 0o755)
     "#{binary} app-server"
+  end
+
+  # Genuine lease/admission/AE and checked storage; the fixture owner models
+  # the worker RPC protocol. It does not claim Orchestrator scheduling or DOWN.
+  defmodule Owner do
+    use GenServer
+    alias SymphonyElixir.{AgentExecution, RunStateStore}
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts) do
+      context = %{ticket: opts.ticket, lease_token: opts.token, owner: self(), worker: opts.worker, issue_id: opts.issue.id}
+
+      {:ok,
+       %{
+         context: context,
+         authority: %{ticket: opts.ticket, lease_token: opts.token},
+         issue: opts.issue,
+         expected: RunStateStore.material_projection(opts.raw),
+         registry: AgentExecution.new_registry(),
+         known: nil,
+         terminal: nil,
+         calls: [],
+         before_advance: nil
+       }}
+    end
+
+    @impl true
+    def handle_call(:state, _from, state), do: {:reply, state, state}
+    def handle_call({:before_advance, fun}, _from, state), do: {:reply, :ok, %{state | before_advance: fun}}
+
+    def handle_call({:agent_execution, invocation, expected, action}, {pid, _}, state) do
+      true = pid == state.context.worker
+      :ok = authenticate(state, invocation)
+      state = %{state | calls: state.calls ++ [{expected, action}]}
+      {reply, state} = perform(state, expected, action)
+      {:reply, reply, state}
+    end
+
+    defp perform(%{terminal: terminal} = state, _, _) when not is_nil(terminal), do: {{:stop, terminal}, state}
+    defp perform(state, expected, _) when expected != state.expected, do: terminal(state, {:stale_execution, :owner_expected_changed})
+
+    defp perform(state, _, {kind, previous, next}) when kind in [:advance_current, :confirm_own_terminal] do
+      true = previous == state.expected
+      if state.before_advance, do: state.before_advance.()
+      state = %{state | before_advance: nil}
+
+      result =
+        if kind == :confirm_own_terminal,
+          do: RunStateStore.confirm_terminal_current(state.authority, next),
+          else: RunStateStore.ensure_current(state.authority, next)
+
+      case result do
+        :ok -> {{:ok, :terminal_confirmed}, %{state | expected: next, known: next}}
+        {:ok, _current} -> {:ok, %{state | expected: next}}
+        {:error, reason} -> terminal(state, reason)
+      end
+    end
+
+    defp perform(%{known: %{"stage" => "blocked"} = next} = state, _, :confirm_stop_notification) do
+      case RunStateStore.confirm_terminal_current(state.authority, next) do
+        :ok -> {:ok, state}
+        {:error, reason} -> terminal(state, reason)
+      end
+    end
+
+    defp perform(%{known: %{"stage" => stage}} = state, _, _),
+      do: {{:stop, {:execution_stopped, %{stage: stage}}}, state}
+
+    defp perform(state, _, action) do
+      with {:ok, _current} <- RunStateStore.ensure_current(state.authority, state.expected),
+           {:ok, registry} <- registry_action(state.registry, action) do
+        {:ok, %{state | registry: registry}}
+      else
+        {:error, reason} -> terminal(state, reason)
+      end
+    end
+
+    defp registry_action(registry, {:register, binding, purpose}), do: AgentExecution.register_binding(registry, binding, purpose)
+    defp registry_action(registry, {:begin, binding, ordinal}), do: AgentExecution.begin_binding(registry, binding, ordinal)
+
+    defp registry_action(registry, {:retire, binding, ordinal}) when ordinal == registry.ordinal,
+      do: AgentExecution.retire_binding(registry, binding)
+
+    defp registry_action(registry, {:confirm, binding, ordinal}) when binding == registry.current and ordinal == registry.ordinal,
+      do: {:ok, registry}
+
+    @impl true
+    def handle_info({:agent_execution_usage, invocation, expected, observation}, state) do
+      :ok = authenticate(state, invocation)
+      true = expected == state.expected
+      {:ok, registry, _delta} = AgentExecution.apply_usage(state.registry, invocation.binding, invocation.ordinal, observation)
+
+      case RunStateStore.record_token_usage_current(state.context.ticket.workspace, state.issue, AgentExecution.total_usage(registry), state.authority, expected) do
+        {:ok, _current} ->
+          {:noreply, %{state | registry: registry}}
+
+        {:error, reason} ->
+          {_reply, next} = terminal(state, reason)
+          {:noreply, next}
+      end
+    end
+
+    def handle_info({:agent_worker_update, invocation, expected, _update}, state) do
+      :ok = authenticate(state, invocation)
+      true = expected == state.expected
+
+      case RunStateStore.ensure_current(state.authority, expected) do
+        {:ok, _current} ->
+          {:noreply, state}
+
+        {:error, reason} ->
+          {_reply, next} = terminal(state, reason)
+          {:noreply, next}
+      end
+    end
+
+    def handle_info({:agent_execution_stale, context, ids, cause}, state) do
+      true = context == state.context
+      true = ids == ids(state)
+      {_reply, next} = terminal(state, {:stale_execution, cause})
+      {:noreply, next}
+    end
+
+    def handle_info({:agent_execution_uncertain, context, cause}, state) do
+      true = context == state.context
+      {_reply, next} = terminal(state, cause)
+      {:noreply, next}
+    end
+
+    defp authenticate(state, %{context: context, binding: binding, ordinal: ordinal}) do
+      true = context == state.context
+      true = binding == state.registry.current and ordinal == state.registry.ordinal
+      :ok
+    end
+
+    defp terminal(%{terminal: cause} = state, _) when not is_nil(cause), do: {{:stop, cause}, state}
+
+    defp terminal(state, {:stale_execution, cause}) do
+      terminal = {:stale_execution, ids(state), cause}
+      {{:stop, terminal}, %{state | terminal: terminal}}
+    end
+
+    defp terminal(state, cause) do
+      terminal = {:accounting_uncertain, cause}
+      {{:stop, terminal}, %{state | terminal: terminal}}
+    end
+
+    defp ids(state), do: %{run_id: state.context.ticket.run_id, dispatch_id: state.context.ticket.dispatch_id}
+  end
+
+  defp admitted(workspace, issue, fun) do
+    alias SymphonyElixir.{AgentExecution, DispatchAudit, LeaseManager, RunStateStore}
+    assert {:ok, acquired} = LeaseManager.acquire(issue.id, issue.identifier, "evidence-owner-#{System.unique_integer([:positive])}")
+    assert {:ok, _} = RunStateStore.sync_lease(workspace, issue, LeaseManager.snapshot_for_state(acquired.lease))
+    assert {:ok, source, view} = RunStateStore.read_admission_source(workspace, issue)
+
+    assert {:ok, ticket, raw} =
+             DispatchAudit.begin(workspace, %{issue_id: issue.id, issue_identifier: issue.identifier, stage: view.stage, metadata: %{owner: acquired.token.owner, epoch: acquired.token.epoch}}, source)
+
+    assert {:ok, owner} = Owner.start_link(%{ticket: ticket, token: acquired.token, raw: raw, issue: issue, worker: self()})
+
+    try do
+      DispatchAudit.with_authorization(ticket, fn ->
+        AgentExecution.with_context(ticket, acquired.token, owner, raw, fn -> fun.(%{ticket: ticket, token: acquired.token, owner: owner, raw: raw}) end)
+      end)
+    after
+      if Process.alive?(owner), do: GenServer.stop(owner)
+      assert :ok = DispatchAudit.finish(ticket, :normal)
+      assert {:ok, release} = LeaseManager.release_token(acquired.token)
+      assert release in [:released, :missing]
+    end
+  end
+
+  defp verifier_pass(_workspace, _issue, _state, _opts) do
+    {:ok, %SymphonyElixir.VerifierResult{verdict: :pass, summary: "Fixture criterion passed", acceptance_gaps: [], risky_areas: [], evidence: ["Runtime fixture"], raw_output: "pass"}}
+  end
+
+  defp run_with_evidence(workspace, issue, recipient, opts \\ []) do
+    admitted(workspace, issue, fn _execution ->
+      opts = Keyword.put_new(opts, :issue_state_fetcher, fn [id] when id == issue.id -> {:ok, [issue]} end)
+      SymphonyElixir.DeliveryEngine.run(workspace, issue, recipient, Keyword.put_new(opts, :verifier_session_runner, &verifier_pass/4))
+    end)
   end
 end

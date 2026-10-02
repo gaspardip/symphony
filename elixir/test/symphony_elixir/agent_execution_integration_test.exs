@@ -849,6 +849,17 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
       consumer_fixture!(c, "claude", @consumer_stage)
       consumer_cli!(c, "claude", %{"input_tokens" => 7})
       {owner, worker, entry} = start_controlled(c)
+
+      if @consumer_stage == "verify" do
+        assert :ok =
+                 in_worker(worker, fn ->
+                   inspection = SymphonyElixir.RunInspector.inspect(c.workspace, include_pr_details: false)
+                   validation = SymphonyElixir.RunInspector.run_validation(c.workspace, inspection.harness)
+                   assert validation.status == :passed
+                   AgentExecution.observe_validation(c.workspace, validation)
+                 end)
+      end
+
       before = consumer_evidence(c)
 
       assert {:stop, {:accounting_uncertain, :missing_usage_dimension}} =
@@ -1425,6 +1436,9 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
       in_worker(worker, fn ->
         assert {:ok, snapshot} = RunStateStore.load(c.workspace)
         inspection = SymphonyElixir.RunInspector.inspect(c.workspace, include_pr_details: false)
+        validation = SymphonyElixir.RunInspector.run_validation(c.workspace, inspection.harness)
+        assert validation.status == :passed
+        assert :ok = AgentExecution.observe_validation(c.workspace, validation)
 
         SymphonyElixir.VerifierRunner.verify(c.workspace, c.issue, snapshot, inspection,
           include_pr_details: false,

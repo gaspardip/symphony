@@ -175,6 +175,16 @@ defmodule SymphonyElixir.RuleCatalog do
       failure_class: "validation",
       human_action: "Restore the validation command or environment, then retry."
     },
+    artifacts_failed: %{
+      rule_id: "artifacts.failed",
+      failure_class: "validation",
+      human_action: "Inspect the artifact command failure, repair the required evidence, and retry the issue."
+    },
+    artifacts_unavailable: %{
+      rule_id: "artifacts.unavailable",
+      failure_class: "validation",
+      human_action: "Restore the artifact command or environment before retrying."
+    },
     publish_missing_pr: %{
       rule_id: "publish.missing_pr",
       failure_class: "publish",

@@ -11,7 +11,7 @@ defmodule SymphonyElixir.AgentExecution do
 
   require Logger
 
-  alias SymphonyElixir.{DeployAudit, DispatchAudit, RunStateStore}
+  alias SymphonyElixir.{DeployAudit, DispatchAudit, EvidenceAcceptance, RunLedger, RunStateStore}
 
   @context_key {__MODULE__, :context}
   @max_live 2
@@ -67,7 +67,9 @@ defmodule SymphonyElixir.AgentExecution do
         terminal: nil,
         known_terminal: nil,
         execution_stop: nil,
-        deploys: %{}
+        deploys: %{},
+        evidence: nil,
+        validation_observation: nil
       })
 
       try do
@@ -85,6 +87,133 @@ defmodule SymphonyElixir.AgentExecution do
       {:ok, _other_ticket} -> fail(:dispatch_context_mismatch)
       %{context: _context} -> fail(:execution_context_already_present)
     end
+  end
+
+  @doc "Retains the actual validation outcome in this worker, without adopting last_validation."
+  @spec observe_validation(Path.t(), SymphonyElixir.RunInspector.command_result()) :: :ok | {:error, term()} | terminal()
+  def observe_validation(workspace, %SymphonyElixir.RunInspector.CommandResult{} = result) do
+    with {:ok, state} <- raw_worker_state(),
+         true <- Path.expand(workspace) == state.context.ticket.workspace or {:error, :evidence_workspace_mismatch} do
+      # This is custody of a returned physical result, not execution permission.
+      # Retain it even if the subsequent current check or snapshot CAS denies continuation.
+      observed = %{status: result.status, command: result.command, output: result.output}
+      Process.put(@context_key, %{state | validation_observation: observed})
+      with {:ok, _current} <- ensure_current(), do: :ok
+    end
+  end
+
+  @spec validation_observation() :: {:ok, map() | nil} | {:error, term()} | terminal()
+  def validation_observation do
+    with {:ok, _current} <- ensure_current(), {:ok, state} <- worker_state(), do: {:ok, state.validation_observation}
+  end
+
+  @doc "Captures evidence after the actual gate in this admitted worker. The attempt precedes file IO."
+  @spec begin_evidence(Path.t(), SymphonyElixir.BehavioralProof.Result.t(), SymphonyElixir.RunInspector.command_result(), boolean(), map() | nil) ::
+          {:ok, reference(), [map()]} | {:error, term()} | terminal()
+  def begin_evidence(workspace, selection, gate, validation_required, scope) when is_boolean(validation_required) do
+    with {:ok, _current} <- ensure_current(),
+         {:ok, state} <- worker_state(),
+         true <- Path.expand(workspace) == state.context.ticket.workspace or {:error, :evidence_workspace_mismatch},
+         true <- is_nil(state.evidence) or state.evidence.phase == :rejected or {:error, :evidence_observation_already_attempted},
+         true <- not validation_required or match?(%{status: :passed}, state.validation_observation) or {:error, :evidence_validation_required} do
+      ref = make_ref()
+      Process.put(@context_key, %{state | evidence: %{ref: ref, phase: :reading}})
+
+      with {:ok, observation, contents} <- EvidenceAcceptance.capture(workspace, selection, gate, %{required: validation_required, observation: state.validation_observation}, scope),
+           {:ok, _current} <- ensure_current() do
+        current = Process.get(@context_key)
+        Process.put(@context_key, %{current | evidence: %{ref: ref, phase: :observed, observation: observation}})
+        {:ok, ref, contents}
+      else
+        outcome -> retain_evidence_failure(ref, outcome)
+      end
+    end
+  end
+
+  @doc "Accepts only the current observation and a consistent verifier decision; never imports history."
+  @spec accept_evidence(reference(), map()) :: :ok | {:error, term()} | terminal()
+  def accept_evidence(ref, %{verdict: "pass", acceptance_gaps: [], verification_mode: mode}) when is_reference(ref) and mode in [:agent, :gate_only] do
+    with {:ok, _current} <- ensure_current(),
+         {:ok, state} <- worker_state(),
+         %{ref: ^ref, phase: :observed, observation: observation} <- state.evidence,
+         :ok <- EvidenceAcceptance.verify(state.context.ticket.workspace, observation),
+         observation = Map.put(observation, :verification, %{mode: if(mode == :agent, do: "agent", else: "policy_disabled"), verdict: "pass", acceptance_gaps: []}),
+         {:ok, entry} <- EvidenceAcceptance.prepare(state.context, observation) do
+      # Save the exact event before the first append. A failed/uncertain append is
+      # never retried and a later call cannot replace the prepared identity.
+      evidence = %{ref: ref, phase: :recording, observation: observation, entry: entry}
+      current = Process.get(@context_key)
+      Process.put(@context_key, %{current | evidence: evidence})
+
+      with {:ok, ^entry} <- RunLedger.CheckedStorage.persist(entry, state.context.ticket.ledger_path),
+           :ok <- EvidenceAcceptance.confirm_entry(state.context.ticket.ledger_path, entry),
+           {:ok, _current} <- ensure_current(),
+           :ok <- EvidenceAcceptance.verify(state.context.ticket.workspace, observation) do
+        current = Process.get(@context_key)
+        Process.put(@context_key, %{current | evidence: %{evidence | phase: :accepted}})
+        :ok
+      else
+        outcome -> retain_evidence_failure(ref, outcome)
+      end
+    else
+      {:stop, _} = terminal -> terminal
+      {:error, _} = error -> fail_current_evidence(ref, error)
+      _not_observed -> {:error, :evidence_observation_not_current}
+    end
+  end
+
+  def accept_evidence(ref, %{verdict: verdict}) when is_reference(ref) and verdict != "pass" do
+    with {:ok, state} <- worker_state(),
+         %{ref: ^ref, phase: :observed} = evidence <- state.evidence do
+      Process.put(@context_key, %{state | evidence: %{evidence | phase: :rejected}})
+      :ok
+    else
+      {:stop, _} = terminal -> terminal
+      _other -> {:error, :evidence_observation_not_current}
+    end
+  end
+
+  def accept_evidence(_ref, _result), do: {:error, :evidence_verdict_not_accepted}
+
+  @spec current_evidence(Path.t()) :: {:ok, reference()} | {:error, term()} | terminal()
+  def current_evidence(workspace) do
+    with {:ok, _current} <- ensure_current(),
+         {:ok, state} <- worker_state(),
+         true <- Path.expand(workspace) == state.context.ticket.workspace or {:error, :evidence_workspace_mismatch},
+         %{ref: ref, phase: :accepted, observation: observation, entry: entry} <- state.evidence,
+         :ok <- check_current_evidence(state, observation, entry),
+         {:ok, _current} <- ensure_current() do
+      {:ok, ref}
+    else
+      nil -> {:error, :evidence_reverification_required}
+      %{phase: :failed, outcome: outcome} -> outcome
+      %{phase: _phase} -> {:error, :evidence_not_accepted}
+      {:stop, _} = terminal -> terminal
+      {:error, _} = error -> error
+    end
+  end
+
+  defp check_current_evidence(state, observation, entry) do
+    with :ok <- EvidenceAcceptance.verify(state.context.ticket.workspace, observation),
+         :ok <- EvidenceAcceptance.confirm_entry(state.context.ticket.ledger_path, entry) do
+      :ok
+    else
+      {:error, _} = error -> retain_evidence_failure(state.evidence.ref, error)
+    end
+  end
+
+  defp fail_current_evidence(ref, outcome) do
+    case Process.get(@context_key) do
+      %{evidence: %{ref: ^ref}} -> retain_evidence_failure(ref, outcome)
+      _no_matching_observation -> outcome
+    end
+  end
+
+  defp retain_evidence_failure(ref, outcome) do
+    state = Process.get(@context_key)
+    %{ref: ^ref} = evidence = state.evidence
+    Process.put(@context_key, %{state | evidence: Map.merge(evidence, %{phase: :failed, outcome: outcome})})
+    outcome
   end
 
   @spec current_context() :: {:ok, context()} | {:error, :execution_context_missing}

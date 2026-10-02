@@ -17,6 +17,17 @@ defmodule SymphonyElixir.BehavioralProof do
       behavior_paths: [],
       proof_paths: []
     ]
+
+    @type t :: %__MODULE__{
+            mode: String.t() | nil,
+            reason: String.t() | nil,
+            artifact_path: Path.t() | nil,
+            required?: boolean(),
+            satisfied?: boolean(),
+            artifact_present?: boolean(),
+            behavior_paths: [String.t()],
+            proof_paths: [String.t()]
+          }
   end
 
   @doc_extensions ~w(.md .markdown .rst .adoc .txt)

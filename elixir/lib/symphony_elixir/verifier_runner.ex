@@ -10,6 +10,7 @@ defmodule SymphonyElixir.VerifierRunner do
   alias SymphonyElixir.BehavioralProof
   alias SymphonyElixir.Config
   alias SymphonyElixir.DebugArtifacts
+  alias SymphonyElixir.EvidenceAcceptance
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Observability
@@ -26,11 +27,23 @@ defmodule SymphonyElixir.VerifierRunner do
   def verify(workspace, issue, state, inspection, opts \\ [])
       when is_binary(workspace) and is_map(state) do
     with {:ok, _context} <- AgentExecution.entry_context(workspace, issue) do
-      verify_with_context(workspace, issue, state, inspection, opts)
+      verify_with_context(workspace, issue, state, inspection, opts, :agent)
     end
   end
 
-  defp verify_with_context(workspace, issue, state, inspection, opts) do
+  @doc "Runs the real smoke/proof gates without a model when policy disables the agent verifier."
+  @spec verify_without_agent(Path.t(), Issue.t() | map(), map(), RunInspector.snapshot(), keyword()) :: map() | AgentExecution.terminal()
+  def verify_without_agent(workspace, issue, state, inspection, opts \\ []) do
+    with {:ok, _context} <- AgentExecution.entry_context(workspace, issue) do
+      if Config.policy_require_verifier?() do
+        integrity_blocked(:evidence_verifier_required)
+      else
+        verify_with_context(workspace, issue, state, inspection, opts, :gate_only)
+      end
+    end
+  end
+
+  defp verify_with_context(workspace, issue, state, inspection, opts, mode) do
     metadata = %{
       issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
       stage: "verify",
@@ -42,11 +55,13 @@ defmodule SymphonyElixir.VerifierRunner do
       start_time = System.monotonic_time()
 
       with {:ok, smoke_result} <- current_step(workspace, issue, fn -> RunInspector.run_smoke(workspace, inspection.harness, opts) end),
+           {:ok, {:ok, changed_files, scope}} <- current_step(workspace, issue, fn -> evidence_selection(workspace, inspection, opts) end),
            acceptance = IssueAcceptance.from_issue(issue),
-           {:ok, context} <- verification_context(workspace, issue, inspection, state, acceptance, smoke_result, opts),
+           {:ok, context} <- verification_context(workspace, issue, inspection, state, acceptance, smoke_result, changed_files, scope, opts),
            {:ok, _} <- current_step(workspace, issue, fn -> emit_proof_event(:behavioral, context.behavioral_proof, metadata) end),
            {:ok, _} <- current_step(workspace, issue, fn -> emit_proof_event(:ui, context.ui_proof, metadata) end) do
-        result = verifier_verdict(workspace, issue, state, smoke_result, context, metadata, opts)
+        result = verifier_verdict(workspace, issue, state, smoke_result, context, metadata, opts, mode)
+        result = accept_current_observation(result, context, mode)
 
         with result when is_map(result) <- result,
              {:ok, _execution_context} <- AgentExecution.entry_context(workspace, issue) do
@@ -60,11 +75,15 @@ defmodule SymphonyElixir.VerifierRunner do
 
           result
         end
+      else
+        {:ok, {:error, reason}} -> integrity_blocked(reason)
+        {:error, reason} -> integrity_blocked(reason)
+        {:stop, _} = terminal -> terminal
       end
     end)
   end
 
-  defp verifier_verdict(workspace, issue, state, smoke_result, context, metadata, opts) do
+  defp verifier_verdict(workspace, issue, state, smoke_result, context, metadata, opts, mode) do
     case smoke_result.status do
       :unavailable ->
         blocked_result(
@@ -82,6 +101,7 @@ defmodule SymphonyElixir.VerifierRunner do
         cond do
           context.behavioral_proof.required? and not context.behavioral_proof.satisfied? -> missing_behavioral_proof_result(context)
           context.ui_proof.verify_required? and not context.ui_proof.verify_satisfied? -> missing_ui_proof_result(context)
+          mode == :gate_only -> gate_only_result(context)
           true -> verify_with_session(workspace, issue, state, context, opts)
         end
     end
@@ -285,24 +305,101 @@ defmodule SymphonyElixir.VerifierRunner do
     |> String.trim()
   end
 
-  defp verification_context(workspace, issue, inspection, state, acceptance, smoke_result, opts) do
-    with {:ok, changed_files} <- current_step(workspace, issue, fn -> RunInspector.changed_paths(workspace, opts) end),
-         {:ok, behavioral_proof} <- current_step(workspace, issue, fn -> BehavioralProof.evaluate(workspace, inspection.harness, changed_files) end),
+  defp evidence_selection(workspace, inspection, opts) do
+    if Keyword.get(opts, :evidence_reentry, false) do
+      with {:ok, scope} <- RunInspector.evidence_scope_checked(workspace, inspection.harness, opts),
+           do: {:ok, scope.paths, scope}
+    else
+      with {:ok, paths} <- RunInspector.changed_paths_checked(workspace, opts), do: {:ok, paths, nil}
+    end
+  end
+
+  defp verification_context(workspace, issue, inspection, state, acceptance, smoke_result, changed_files, scope, opts) do
+    with {:ok, behavioral_proof} <- current_step(workspace, issue, fn -> BehavioralProof.evaluate(workspace, inspection.harness, changed_files) end),
          {:ok, diff_summary} <- current_step(workspace, issue, fn -> RunInspector.diff_summary(workspace, opts) end),
          {:ok, content_evidence} <- current_step(workspace, issue, fn -> changed_file_content_evidence(workspace, changed_files, behavioral_proof) end),
-         {:ok, ui_proof} <- current_step(workspace, issue, fn -> UiProof.evaluate(workspace, inspection.harness, changed_files, inspection, opts) end) do
+         {:ok, ui_proof} <- current_step(workspace, issue, fn -> UiProof.evaluate(workspace, inspection.harness, changed_files, inspection, opts) end),
+         {:ok, evidence_handle, proof_contents} <- begin_current_observation(workspace, behavioral_proof, smoke_result, ui_proof, scope) do
       {:ok,
        %{
          acceptance: IssueAcceptance.to_prompt_map(acceptance),
          changed_files: changed_files,
          diff_summary: diff_summary,
-         content_evidence: content_evidence,
+         content_evidence: proof_contents ++ Enum.reject(content_evidence, fn entry -> Enum.any?(proof_contents, &(&1.path == entry.path)) end),
+         evidence_handle: evidence_handle,
          smoke_result: smoke_result,
          validation_output: get_in(state, [:last_validation, :output]),
          behavioral_proof: behavioral_proof,
          ui_proof: ui_proof
        }}
     end
+  end
+
+  defp begin_current_observation(_workspace, _selection, %{status: status}, _ui, _scope) when status != :passed, do: {:ok, nil, []}
+  defp begin_current_observation(_workspace, %{satisfied?: false}, _gate, _ui, _scope), do: {:ok, nil, []}
+
+  defp begin_current_observation(_workspace, _selection, _gate, %{verify_required?: true, verify_satisfied?: false}, _scope), do: {:ok, nil, []}
+
+  defp begin_current_observation(workspace, selection, gate, _ui, scope) do
+    case AgentExecution.current_context() do
+      {:ok, _context} ->
+        with {:ok, handle, contents} <- EvidenceAcceptance.begin_observation(workspace, selection, gate, Config.policy_require_validation?(), scope) do
+          # These excerpts come from the exact buffers hashed by the observer.
+          {:ok, handle, contents |> SecretRedactor.redact() |> Enum.map(&Map.update!(&1, :excerpt, fn bytes -> doc_content_excerpt(bytes) end))}
+        end
+
+      {:error, :execution_context_missing} ->
+        {:ok, nil, []}
+    end
+  end
+
+  defp accept_current_observation(%{verdict: "pass", acceptance_gaps: [_ | _]}, _context, _mode),
+    do: integrity_blocked(:verifier_pass_with_acceptance_gaps)
+
+  defp accept_current_observation(%{verdict: "pass", acceptance_gaps: []} = result, %{evidence_handle: handle}, mode) when is_reference(handle) do
+    case EvidenceAcceptance.accept(handle, Map.put(result, :verification_mode, mode)) do
+      :ok -> result
+      {:error, reason} -> integrity_blocked(reason)
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp accept_current_observation(%{verdict: verdict} = result, %{evidence_handle: handle}, _mode) when is_reference(handle) and verdict != "pass" do
+    case EvidenceAcceptance.accept(handle, result) do
+      :ok -> result
+      {:error, reason} -> integrity_blocked(reason)
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp accept_current_observation(result, _context, _mode), do: result
+
+  defp gate_only_result(context) do
+    %{
+      verdict: "pass",
+      summary: "The configured deterministic smoke and proof gates passed; the agent verifier is disabled by policy.",
+      acceptance_gaps: [],
+      risky_areas: [],
+      evidence: ["Runtime smoke gate passed"],
+      raw_output: nil,
+      smoke: command_result_to_map(context.smoke_result),
+      acceptance: context.acceptance,
+      behavioral_proof: BehavioralProof.to_map(context.behavioral_proof),
+      ui_proof: UiProof.to_map(context.ui_proof)
+    }
+  end
+
+  defp integrity_blocked(reason) do
+    %{
+      verdict: "blocked",
+      reason_code: "evidence_integrity_failed",
+      summary: "Current verification evidence could not be accepted: #{EvidenceAcceptance.failure_code(reason)}.",
+      acceptance_gaps: [],
+      risky_areas: [],
+      evidence: [],
+      raw_output: nil,
+      integrity_error: reason
+    }
   end
 
   defp verifier_result_payload(%VerifierResult{} = result, context) do

@@ -13,6 +13,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.AgentHarness
   alias SymphonyElixir.Config
   alias SymphonyElixir.DeployAudit
+  alias SymphonyElixir.EvidenceAcceptance
   alias SymphonyElixir.GitManager
   alias SymphonyElixir.IssueAcceptance
   alias SymphonyElixir.IssueSource
@@ -1304,6 +1305,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          state when is_map(state) <- ReviewClaims.maybe_persist_reconciled_review_feedback(state, workspace, opts),
          :ok <- execution_guard(workspace, issue),
          validation_result <- RunInspector.run_validation(workspace, inspection.harness, opts),
+         :ok <- retain_validation_observation(workspace, validation_result),
          :ok <- execution_guard(workspace, issue),
          result when is_map(result) <- validation_result do
       validation_attempts = Map.get(state, :validation_attempts, 0) + 1
@@ -1319,13 +1321,17 @@ defmodule SymphonyElixir.DeliveryEngine do
         details: String.slice(to_string(result.output || ""), 0, 500),
         metadata: %{
           command: result.command,
+          status: result.status,
+          exit_code: result.exit_code,
           attempt: validation_attempts
         }
       })
 
       case result.status do
         :passed ->
-          with resume_attrs when is_map(resume_attrs) <-
+          with {:ok, artifacts} <-
+                 run_validation_artifacts(workspace, issue, state, inspection.harness, validation_attempts, opts),
+               resume_attrs when is_map(resume_attrs) <-
                  resume_context_attrs(
                    workspace,
                    issue,
@@ -1344,7 +1350,11 @@ defmodule SymphonyElixir.DeliveryEngine do
                    Map.merge(
                      %{
                        validation_attempts: validation_attempts,
-                       last_validation: command_result_to_map(result)
+                       last_validation:
+                         result
+                         |> command_result_to_map()
+                         |> Map.put(:exit_code, result.exit_code)
+                         |> Map.put(:artifacts, artifacts)
                      },
                      resume_attrs
                    )
@@ -1390,6 +1400,47 @@ defmodule SymphonyElixir.DeliveryEngine do
 
         :unavailable ->
           block_issue(workspace, issue, :validation_unavailable, result.output, @blocked_state)
+      end
+    end
+  end
+
+  defp run_validation_artifacts(workspace, issue, state, harness, attempt, opts) do
+    with :ok <- execution_guard(workspace, issue),
+         result <- RunInspector.run_artifacts(workspace, harness, opts),
+         :ok <- execution_guard(workspace, issue) do
+      event =
+        RunLedger.record("artifacts.completed", %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          stage: "validate",
+          actor_type: "runtime",
+          actor_id: "delivery_engine",
+          policy_class: Map.get(state, :effective_policy_class),
+          summary: "Artifacts #{result.status}",
+          details: String.slice(to_string(result.output || ""), 0, 500),
+          metadata: %{
+            run_id: Map.get(state, :run_id),
+            workspace: workspace,
+            command: result.command,
+            status: result.status,
+            exit_code: result.exit_code,
+            attempt: attempt
+          }
+        })
+
+      case result.status do
+        :passed ->
+          {:ok,
+           result
+           |> command_result_to_map()
+           |> Map.put(:exit_code, result.exit_code)
+           |> Map.put(:ledger_event_id, event.event_id)}
+
+        :failed ->
+          block_issue(workspace, issue, :artifacts_failed, result.output, @blocked_state)
+
+        :unavailable ->
+          block_issue(workspace, issue, :artifacts_unavailable, result.output, @blocked_state)
       end
     end
   end
@@ -1516,37 +1567,80 @@ defmodule SymphonyElixir.DeliveryEngine do
          inspection,
          opts
        ) do
-    if Config.policy_require_verifier?() do
-      verifier_runner = Keyword.get(opts, :verifier_runner, &VerifierRunner.verify/5)
+    verifier_runner =
+      if Config.policy_require_verifier?(),
+        do: Keyword.get(opts, :verifier_runner, &VerifierRunner.verify/5),
+        else: &VerifierRunner.verify_without_agent/5
 
-      with :ok <- execution_guard(workspace, issue),
-           verifier_result <- verifier_runner.(workspace, issue, state, inspection, opts),
-           :ok <- execution_guard(workspace, issue),
-           result when is_map(result) <- verifier_result do
-        verification_attempts = Map.get(state, :verification_attempts, 0) + 1
+    with :ok <- execution_guard(workspace, issue),
+         :ok <- verification_attempt_available(workspace, issue, state),
+         {:ok, state} <- validation_for_verification(workspace, issue, state, inspection, opts),
+         verifier_result <- verifier_runner.(workspace, issue, state, inspection, opts),
+         :ok <- execution_guard(workspace, issue),
+         result when is_map(result) <- verifier_result do
+      result = consistent_verifier_result(result)
+      verification_attempts = Map.get(state, :verification_attempts, 0) + 1
 
-        verifier_summary =
-          Map.get(result, :summary) || Map.get(result, "summary") || inspect(result)
+      verifier_summary =
+        Map.get(result, :summary) || Map.get(result, "summary") || inspect(result)
 
-        RunLedger.record("verification.completed", %{
-          issue_id: issue.id,
-          issue_identifier: issue.identifier,
-          stage: "verify",
-          actor_type: "runtime",
-          actor_id: "delivery_engine",
-          policy_class: Map.get(state, :effective_policy_class),
-          summary: verifier_summary,
-          details: verifier_summary,
-          metadata: %{
-            verdict: Map.get(result, :verdict) || Map.get(result, "verdict"),
-            attempt: verification_attempts
-          }
-        })
+      RunLedger.record("verification.completed", %{
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        stage: "verify",
+        actor_type: "runtime",
+        actor_id: "delivery_engine",
+        policy_class: Map.get(state, :effective_policy_class),
+        summary: verifier_summary,
+        details: verifier_summary,
+        metadata: %{
+          verdict: Map.get(result, :verdict) || Map.get(result, "verdict"),
+          attempt: verification_attempts
+        }
+      })
 
-        case Map.get(result, :verdict) || Map.get(result, "verdict") do
-          "pass" ->
-            verifier_map = verifier_result_to_map(result)
+      case Map.get(result, :verdict) || Map.get(result, "verdict") do
+        "pass" ->
+          verifier_map = verifier_result_to_map(result)
 
+          with :ok <- require_current_evidence(workspace, issue, :publish),
+               resume_attrs when is_map(resume_attrs) <-
+                 resume_context_attrs(
+                   workspace,
+                   issue,
+                   state,
+                   inspection,
+                   %{
+                     last_verifier_summary: summarized_text(verifier_summary, 800),
+                     next_objective: "Publish the verified branch and attach the PR."
+                   },
+                   opts
+                 ),
+               {:ok, _persisted_state} <-
+                 transition_state(
+                   workspace,
+                   "publish",
+                   Map.merge(
+                     %{
+                       verification_attempts: verification_attempts,
+                       last_verifier: verifier_map,
+                       last_verifier_verdict: "pass",
+                       acceptance_summary:
+                         get_in(result, [:acceptance, :summary]) ||
+                           get_in(result, ["acceptance", "summary"]),
+                       ui_proof_required_checks: ui_proof_required_checks(verifier_map)
+                     },
+                     resume_attrs
+                   )
+                 ),
+               :ok <- execution_guard(workspace, issue) do
+            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+          end
+
+        "needs_more_work" ->
+          reason_code = Map.get(result, :reason_code) || Map.get(result, "reason_code")
+
+          if should_retry_verification?(reason_code, verification_attempts, state, max_turns) do
             with resume_attrs when is_map(resume_attrs) <-
                    resume_context_attrs(
                      workspace,
@@ -1555,23 +1649,22 @@ defmodule SymphonyElixir.DeliveryEngine do
                      inspection,
                      %{
                        last_verifier_summary: summarized_text(verifier_summary, 800),
-                       next_objective: "Publish the verified branch and attach the PR."
+                       next_objective: verifier_retry_objective(result)
                      },
                      opts
                    ),
                  {:ok, _persisted_state} <-
                    transition_state(
                      workspace,
-                     "publish",
+                     "implement",
                      Map.merge(
                        %{
                          verification_attempts: verification_attempts,
-                         last_verifier: verifier_map,
-                         last_verifier_verdict: "pass",
+                         last_verifier: verifier_result_to_map(result),
+                         last_verifier_verdict: "needs_more_work",
                          acceptance_summary:
                            get_in(result, [:acceptance, :summary]) ||
-                             get_in(result, ["acceptance", "summary"]),
-                         ui_proof_required_checks: ui_proof_required_checks(verifier_map)
+                             get_in(result, ["acceptance", "summary"])
                        },
                        resume_attrs
                      )
@@ -1579,93 +1672,218 @@ defmodule SymphonyElixir.DeliveryEngine do
                  :ok <- execution_guard(workspace, issue) do
               do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
             end
-
-          "needs_more_work" ->
-            reason_code = Map.get(result, :reason_code) || Map.get(result, "reason_code")
-
-            if should_retry_verification?(reason_code, verification_attempts, state, max_turns) do
-              with resume_attrs when is_map(resume_attrs) <-
-                     resume_context_attrs(
-                       workspace,
-                       issue,
-                       state,
-                       inspection,
-                       %{
-                         last_verifier_summary: summarized_text(verifier_summary, 800),
-                         next_objective: verifier_retry_objective(result)
-                       },
-                       opts
-                     ),
-                   {:ok, _persisted_state} <-
-                     transition_state(
-                       workspace,
-                       "implement",
-                       Map.merge(
-                         %{
-                           verification_attempts: verification_attempts,
-                           last_verifier: verifier_result_to_map(result),
-                           last_verifier_verdict: "needs_more_work",
-                           acceptance_summary:
-                             get_in(result, [:acceptance, :summary]) ||
-                               get_in(result, ["acceptance", "summary"])
-                         },
-                         resume_attrs
-                       )
-                     ),
-                   :ok <- execution_guard(workspace, issue) do
-                do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+          else
+            stop_reason =
+              cond do
+                reason_code == "behavior_proof_missing" -> :behavior_proof_missing
+                reason_code == "ui_proof_missing" -> :ui_proof_missing
+                true -> :verifier_failed
               end
-            else
-              stop_reason =
-                cond do
-                  reason_code == "behavior_proof_missing" -> :behavior_proof_missing
-                  reason_code == "ui_proof_missing" -> :ui_proof_missing
-                  true -> :verifier_failed
-                end
 
-              block_issue(
-                workspace,
-                issue,
-                stop_reason,
-                get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
-                @blocked_state
-              )
-            end
-
-          "blocked" ->
             block_issue(
               workspace,
               issue,
-              :verifier_blocked,
+              stop_reason,
               get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
               @blocked_state
             )
+          end
 
-          "unsafe_to_merge" ->
-            block_issue(
-              workspace,
-              issue,
-              :unsafe_to_merge,
-              get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
-              @blocked_state
-            )
+        "blocked" ->
+          block_issue(
+            workspace,
+            issue,
+            :verifier_blocked,
+            get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
+            @blocked_state
+          )
 
-          other ->
-            block_issue(
-              workspace,
-              issue,
-              :verifier_failed,
-              "Verifier returned an unknown verdict: #{inspect(other)}",
-              @blocked_state
-            )
-        end
-      end
-    else
-      with {:ok, _persisted_state} <- transition_state(workspace, "publish", %{}),
-           :ok <- execution_guard(workspace, issue) do
-        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+        "unsafe_to_merge" ->
+          block_issue(
+            workspace,
+            issue,
+            :unsafe_to_merge,
+            get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
+            @blocked_state
+          )
+
+        other ->
+          block_issue(
+            workspace,
+            issue,
+            :verifier_failed,
+            "Verifier returned an unknown verdict: #{inspect(other)}",
+            @blocked_state
+          )
       end
     end
+  end
+
+  defp retain_validation_observation(workspace, result) do
+    case AgentExecution.current_context() do
+      {:ok, _context} -> AgentExecution.observe_validation(workspace, result)
+      {:error, :execution_context_missing} -> :ok
+    end
+  end
+
+  defp verification_attempt_available(workspace, issue, state) do
+    case AgentExecution.current_context() do
+      {:error, :execution_context_missing} ->
+        :ok
+
+      {:ok, _context} ->
+        if Map.get(state, :verification_attempts, 0) < Config.policy_max_validation_attempts_per_run(),
+          do: :ok,
+          else: block_issue(workspace, issue, :verifier_blocked, "The existing verification attempt budget is exhausted.", @blocked_state)
+    end
+  end
+
+  defp validation_for_verification(workspace, issue, state, inspection, opts) do
+    case AgentExecution.current_context() do
+      {:error, :execution_context_missing} -> {:ok, state}
+      {:ok, _context} -> current_worker_validation(workspace, issue, state, inspection, opts)
+    end
+  end
+
+  defp current_worker_validation(workspace, issue, state, inspection, opts) do
+    with {:ok, observed} <- AgentExecution.validation_observation() do
+      cond do
+        not Config.policy_require_validation?() ->
+          {:ok, state}
+
+        match?(%{status: :passed}, observed) ->
+          {:ok, state}
+
+        Map.get(state, :validation_attempts, 0) >= Config.policy_max_validation_attempts_per_run() ->
+          block_issue(workspace, issue, :validation_failed, "Current-worker validation is required, but its existing attempt budget is exhausted.", @blocked_state)
+
+        true ->
+          result = RunInspector.run_validation(workspace, inspection.harness, opts)
+
+          with :ok <- AgentExecution.observe_validation(workspace, result),
+               {:ok, persisted} <- update_state(workspace, %{validation_attempts: Map.get(state, :validation_attempts, 0) + 1, last_validation: command_result_to_map(result)}) do
+            case result.status do
+              :passed ->
+                with {:ok, artifacts} <-
+                       run_validation_artifacts(workspace, issue, persisted, inspection.harness, persisted.validation_attempts, opts),
+                     {:ok, persisted} <-
+                       update_state(workspace, %{
+                         last_validation:
+                           result
+                           |> command_result_to_map()
+                           |> Map.put(:exit_code, result.exit_code)
+                           |> Map.put(:artifacts, artifacts)
+                       }) do
+                  {:ok, persisted}
+                end
+
+              :failed ->
+                block_issue(workspace, issue, :validation_failed, "Current-worker validation failed during explicit reverification.", @blocked_state)
+
+              :unavailable ->
+                block_issue(workspace, issue, :validation_unavailable, "Current-worker validation is unavailable during explicit reverification.", @blocked_state)
+            end
+          end
+      end
+    end
+  end
+
+  defp consistent_verifier_result(result) do
+    if (Map.get(result, :verdict) || Map.get(result, "verdict")) == "pass" and
+         (Map.get(result, :acceptance_gaps) || Map.get(result, "acceptance_gaps") || []) != [] do
+      %{
+        verdict: "blocked",
+        reason_code: "verifier_pass_with_acceptance_gaps",
+        summary: "Verifier reported pass with unresolved acceptance gaps.",
+        acceptance_gaps: [],
+        risky_areas: [],
+        evidence: [],
+        raw_output: nil
+      }
+    else
+      result
+    end
+  end
+
+  defp require_current_evidence(workspace, issue, effect) do
+    case EvidenceAcceptance.current(workspace) do
+      {:ok, handle} -> guard_evidence_effect(workspace, issue, handle, effect)
+      {:error, reason} -> block_evidence(workspace, issue, reason)
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp evidence_for_effect(workspace, issue, state, inspection, opts, effect) do
+    case EvidenceAcceptance.current(workspace) do
+      {:ok, handle} -> {:ok, state, handle}
+      {:error, :evidence_reverification_required} -> reverify_for_effect(workspace, issue, state, inspection, opts, effect)
+      {:error, reason} -> block_evidence(workspace, issue, reason)
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp guard_evidence_effect(workspace, issue, handle, effect) do
+    case EvidenceAcceptance.before_effect(workspace, handle, effect) do
+      :ok -> :ok
+      {:error, reason} -> block_evidence(workspace, issue, reason)
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp block_evidence(workspace, issue, reason) do
+    block_issue(workspace, issue, :verifier_blocked, "Current verification evidence denied a positive effect: #{EvidenceAcceptance.failure_code(reason)}.", @blocked_state)
+  end
+
+  defp block_publication_error(workspace, issue, {:evidence_rejected, reason}), do: block_evidence(workspace, issue, reason)
+  defp block_publication_error(workspace, issue, reason), do: block_issue(workspace, issue, :publish_failed, inspect(reason), @blocked_state)
+
+  defp reverify_for_effect(workspace, issue, state, inspection, opts, effect) do
+    if Map.get(state, :verification_attempts, 0) >= Config.policy_max_validation_attempts_per_run() do
+      block_issue(workspace, issue, :verifier_blocked, "Current-worker reverification is required, but its existing attempt budget is exhausted.", @blocked_state)
+    else
+      with {:ok, state} <- current_worker_validation(workspace, issue, state, inspection, opts),
+           result when is_map(result) <- run_current_verification(workspace, issue, state, inspection, opts),
+           result = consistent_verifier_result(result),
+           {:ok, persisted} <-
+             update_state(workspace, %{
+               verification_attempts: Map.get(state, :verification_attempts, 0) + 1,
+               last_verifier: verifier_result_to_map(result),
+               last_verifier_verdict: result.verdict
+             }) do
+        RunLedger.record("verification.completed", %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          stage: state.stage,
+          actor_type: "runtime",
+          actor_id: "delivery_engine",
+          summary: result.summary,
+          metadata: %{verdict: result.verdict, attempt: persisted.verification_attempts, consumer: effect}
+        })
+
+        case result.verdict do
+          "pass" ->
+            with :ok <- require_current_evidence(workspace, issue, effect), {:ok, handle} <- EvidenceAcceptance.current(workspace), do: {:ok, persisted, handle}
+
+          _negative ->
+            cause =
+              case result[:reason_code] do
+                "behavior_proof_missing" -> :behavior_proof_missing
+                "ui_proof_missing" -> :ui_proof_missing
+                _other -> if(result.verdict == "unsafe_to_merge", do: :unsafe_to_merge, else: :verifier_blocked)
+              end
+
+            block_issue(workspace, issue, cause, result.summary, @blocked_state)
+        end
+      end
+    end
+  end
+
+  defp run_current_verification(workspace, issue, state, inspection, opts) do
+    opts = Keyword.put(opts, :evidence_reentry, true)
+
+    if Config.policy_require_verifier?(),
+      do: VerifierRunner.verify(workspace, issue, state, inspection, opts),
+      else: VerifierRunner.verify_without_agent(workspace, issue, state, inspection, opts)
   end
 
   defp should_retry_verification?(reason_code, verification_attempts, state, max_turns) do
@@ -1697,6 +1915,8 @@ defmodule SymphonyElixir.DeliveryEngine do
              publication_result <- PullRequestManager.validate_publication(workspace, issue, state, opts),
              :ok <- execution_guard(workspace, issue),
              {:publication_preflight, {:ok, _validation}} <- {:publication_preflight, publication_result},
+             {:ok, state, evidence_handle} <- evidence_for_effect(workspace, issue, state, inspection, opts, :publish),
+             opts = Keyword.put(opts, :evidence_handle, evidence_handle),
              commit_result <-
                GitManager.commit_all(
                  workspace,
@@ -1706,6 +1926,9 @@ defmodule SymphonyElixir.DeliveryEngine do
                ),
              :ok <- execution_guard(workspace, issue) do
           case commit_result do
+            {:stop, _} = terminal ->
+              terminal
+
             {:ok, :noop} ->
               with :ok <- execution_guard(workspace, issue),
                    missing_changes <- is_nil(inspection.pr_url) and not branch_has_publishable_changes?(workspace, state, opts),
@@ -1755,7 +1978,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                   terminal
 
                 {:error, reason} ->
-                  block_issue(workspace, issue, :publish_failed, inspect(reason), @blocked_state)
+                  block_publication_error(workspace, issue, reason)
 
                 _ ->
                   block_issue(
@@ -1768,7 +1991,7 @@ defmodule SymphonyElixir.DeliveryEngine do
               end
 
             {:error, reason} ->
-              block_issue(workspace, issue, :publish_failed, inspect(reason), @blocked_state)
+              block_publication_error(workspace, issue, reason)
           end
         else
           {:stop, _} = terminal ->
@@ -1782,7 +2005,7 @@ defmodule SymphonyElixir.DeliveryEngine do
             {:stop, reason}
 
           {:publication_preflight, {:error, reason}} ->
-            block_issue(workspace, issue, :publish_failed, inspect(reason), @blocked_state)
+            block_publication_error(workspace, issue, reason)
 
           {:error, reason} ->
             block_issue(
@@ -1794,7 +2017,8 @@ defmodule SymphonyElixir.DeliveryEngine do
             )
         end
       else
-        with {:ok, _persisted_state} <- transition_state(workspace, @publish_followup_stage, %{}),
+        with {:ok, _state, _evidence_handle} <- evidence_for_effect(workspace, issue, state, inspection, opts, :publish),
+             {:ok, _persisted_state} <- transition_state(workspace, @publish_followup_stage, %{}),
              :ok <- execution_guard(workspace, issue) do
           do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
         end
@@ -1820,6 +2044,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          pr_result <- PullRequestManager.ensure_pull_request(workspace, issue, state, opts),
          :ok <- execution_guard(workspace, issue),
          {:ok, pr} <- pr_result,
+         :ok <- require_current_evidence(workspace, issue, :publish),
          posted_review_threads when is_map(posted_review_threads) <-
            prepared_review_threads
            |> ReviewClaims.maybe_post_autonomous_review_replies(
@@ -1828,6 +2053,7 @@ defmodule SymphonyElixir.DeliveryEngine do
              state,
              opts
            ),
+         :ok <- require_current_evidence(workspace, issue, :publish),
          finalized_review_threads when is_map(finalized_review_threads) <-
            ReviewClaims.maybe_resolve_autonomous_review_threads(
              posted_review_threads,
@@ -1837,6 +2063,7 @@ defmodule SymphonyElixir.DeliveryEngine do
              opts
            ),
          :ok <- execution_guard(workspace, issue),
+         :ok <- require_current_evidence(workspace, issue, :publish),
          move_result <- maybe_move_issue(issue, @merging_state),
          :ok <- execution_guard(workspace, issue),
          :ok <- move_result,
@@ -1870,7 +2097,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         terminal
 
       {:error, reason} ->
-        block_issue(workspace, issue, :publish_failed, inspect(reason), @blocked_state)
+        block_publication_error(workspace, issue, reason)
     end
   end
 
@@ -2075,7 +2302,9 @@ defmodule SymphonyElixir.DeliveryEngine do
               issue,
               state,
               await_checks_attrs,
-              :risk_review_required
+              :risk_review_required,
+              inspection,
+              opts
             )
 
           RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :automerge and
@@ -2105,7 +2334,9 @@ defmodule SymphonyElixir.DeliveryEngine do
               issue,
               state,
               await_checks_attrs,
-              :policy_review_required
+              :policy_review_required,
+              inspection,
+              opts
             )
 
           RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :manual_only ->
@@ -2114,7 +2345,9 @@ defmodule SymphonyElixir.DeliveryEngine do
               issue,
               state,
               await_checks_attrs,
-              :policy_never_automerge
+              :policy_never_automerge,
+              inspection,
+              opts
             )
 
           RunInspector.ready_for_merge?(inspection) ->
@@ -2123,7 +2356,9 @@ defmodule SymphonyElixir.DeliveryEngine do
               issue,
               state,
               await_checks_attrs,
-              :policy_review_required
+              :policy_review_required,
+              inspection,
+              opts
             )
 
           true ->
@@ -4748,7 +4983,7 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp hold_for_policy_review(workspace, issue, state, await_checks_attrs, code) do
+  defp hold_for_policy_review(workspace, issue, state, await_checks_attrs, code, inspection, opts) do
     rule = RuleCatalog.rule(code)
 
     workflow_profile =
@@ -4760,9 +4995,12 @@ defmodule SymphonyElixir.DeliveryEngine do
     approval_gate_state = workflow_profile.approval_gate_state
 
     with :ok <- execution_guard(workspace, issue),
+         {:ok, state, evidence_handle} <- evidence_for_effect(workspace, issue, state, inspection, opts, :handoff),
+         :ok <- guard_evidence_effect(workspace, issue, evidence_handle, :handoff),
          move_result <- maybe_move_issue(issue, approval_gate_state),
          :ok <- execution_guard(workspace, issue),
          :ok <- move_result,
+         :ok <- guard_evidence_effect(workspace, issue, evidence_handle, :handoff),
          comment_result <-
            IssueSource.create_comment(
              issue,

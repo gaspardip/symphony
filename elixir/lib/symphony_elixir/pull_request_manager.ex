@@ -4,10 +4,10 @@ defmodule SymphonyElixir.PullRequestManager do
   """
 
   alias SymphonyElixir.{AuthorProfile, CredentialRegistry, DebugArtifacts, GitHubCLIClient, Observability, PolicyPack}
-  alias SymphonyElixir.{IssueSource, Linear.Issue, RunInspector}
+  alias SymphonyElixir.{AgentExecution, EvidenceAcceptance, IssueSource, Linear.Issue, RunInspector}
 
   @spec ensure_pull_request(Path.t(), Issue.t() | map(), map(), keyword()) ::
-          {:ok, %{url: String.t(), state: String.t() | nil, body_validation: map()}} | {:error, term()}
+          {:ok, %{url: String.t(), state: String.t() | nil, body_validation: map()}} | {:error, term()} | AgentExecution.terminal()
   def ensure_pull_request(workspace, issue, run_state, opts \\ []) when is_binary(workspace) do
     metadata = pr_metadata(issue, run_state)
 
@@ -32,9 +32,8 @@ defmodule SymphonyElixir.PullRequestManager do
                  github_client,
                  github_opts,
                  opts
-               ) do
-          attach_issue_link(issue, pr.url, opts)
-          persist_pr_url(workspace, run_state, pr.url, github_client, github_opts)
+               ),
+             :ok <- publication_references(workspace, issue, run_state, pr.url, github_client, github_opts, opts) do
           {:ok, Map.put(pr, :body_validation, validation)}
         end
 
@@ -112,17 +111,13 @@ defmodule SymphonyElixir.PullRequestManager do
         try do
           case github_client.existing_pull_request(workspace, github_opts) do
             {:ok, _existing_pr} ->
-              github_client.edit_pull_request(workspace, title, body_file, github_opts)
+              with :ok <- evidence_guard(workspace, opts, :pr_edit),
+                   do: github_client.edit_pull_request(workspace, title, body_file, github_opts)
 
             {:error, :missing_pr} ->
-              github_client.create_pull_request(
-                workspace,
-                branch_name,
-                base_branch,
-                title,
-                body_file,
-                github_opts
-              )
+              with :ok <- evidence_guard(workspace, opts, :pr_create) do
+                github_client.create_pull_request(workspace, branch_name, base_branch, title, body_file, github_opts)
+              end
 
             {:error, reason} ->
               {:error, reason}
@@ -139,21 +134,56 @@ defmodule SymphonyElixir.PullRequestManager do
     end
   end
 
+  defp publication_references(workspace, issue, run_state, url, github_client, github_opts, opts) do
+    if Keyword.has_key?(opts, :evidence_handle) do
+      with :ok <- evidence_guard(workspace, opts, :pr_attachment),
+           :ok <- attach_issue_link(issue, url, opts),
+           :ok <- persist_pr_url(workspace, run_state, url, github_client, github_opts, opts),
+           do: :ok
+    else
+      # Historical adapters remain diagnostic and preserve their return contract.
+      attach_issue_link(issue, url, opts)
+      persist_pr_url(workspace, run_state, url, github_client, github_opts, opts)
+      :ok
+    end
+  end
+
   defp attach_issue_link(%Issue{id: issue_id} = issue, url, opts) when is_binary(issue_id) and is_binary(url) do
     title = Keyword.get(opts, :attachment_title, "GitHub PR: #{issue_identifier(issue)}")
 
     case IssueSource.attach_link(issue, title, url) do
       :ok -> :ok
-      {:error, _reason} -> :ok
+      {:error, _reason} = error -> if(Keyword.has_key?(opts, :evidence_handle), do: error, else: :ok)
     end
   end
 
   defp attach_issue_link(_issue, _url, _opts), do: :ok
 
-  defp persist_pr_url(workspace, run_state, url, github_client, github_opts) do
+  defp persist_pr_url(workspace, run_state, url, github_client, github_opts, opts) do
     branch = RunInspector.inspect(workspace).branch || Map.get(run_state, :branch)
 
-    github_client.persist_pr_url(workspace, branch, url, github_opts)
+    with :ok <- evidence_guard(workspace, opts, :pr_reference),
+         do: github_client.persist_pr_url(workspace, branch, url, github_opts)
+  end
+
+  defp evidence_guard(workspace, opts, effect) do
+    case Keyword.fetch(opts, :evidence_handle) do
+      {:ok, handle} ->
+        case EvidenceAcceptance.before_effect(workspace, handle, effect) do
+          {:error, reason} -> {:error, {:evidence_rejected, reason}}
+          outcome -> outcome
+        end
+
+      :error ->
+        case AgentExecution.current_context() do
+          {:error, :execution_context_missing} ->
+            :ok
+
+          {:ok, _context} ->
+            with {:ok, _current} <- AgentExecution.ensure_current(),
+                 do: {:error, {:evidence_rejected, :evidence_handle_required}}
+        end
+    end
   end
 
   defp validate_pr_body(workspace, body, metadata, opts) do

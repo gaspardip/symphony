@@ -77,7 +77,7 @@ the checked-in workflow is configured for Symphony self-host operation.
 
 The read-only verifier receives changed source and test content selected by the harness's
 `verification.behavioral_proof.source_paths` and `test_paths` (or the existing behavioral-proof defaults),
-before documentation content. Evidence is limited to four files and 2,400 characters per file, redacts
+before documentation content. Additional changed-file context is limited to four files and 2,400 characters per file, redacts
 identified secrets, and explicitly marks binary, unreadable or unsafe paths as omitted. Symlinks are not
 followed. The verifier still cannot use tools other than its result-reporting tool, and must block when
 the supplied evidence is insufficient.
@@ -774,3 +774,22 @@ The coordinator uses its own 19-field material comparison while preserving worke
 checks and fresh usage. Controls invalidate pending continuations even without a
 persisted stop marker. Source integration, loaded release, external providers and
 thesis acceptance need separate evidence. See [the full phase and error contract](../docs/RUNTIME_CONTRACT.md#github-event-continuation-c5).
+
+
+## Current evidence before publication
+
+After successful validation, Symphony runs the harness artifacts command before
+verification. A failed or unavailable command blocks publication. Resuming a worker
+requires fresh observation; persisted validation and verifier results do not grant
+a later worker permission to publish.
+
+The runtime observes the selected proof files before the verifier runs. Only regular
+text files below the workspace are accepted, with a maximum of 1 MiB per file; symlinks
+and unsafe paths are rejected. The verifier receives redacted, bounded excerpts from
+the same buffers that were hashed. A `pass` with unresolved acceptance gaps is blocked.
+
+Acceptance belongs to the current worker and its checked ledger entry. Before
+commit, push, PR changes and handoff, the runtime checks that the selected files,
+material scope and accepted entry remain current. Changed or replaced evidence
+blocks the effect. File hashes establish integrity of the observed bytes; they do
+not establish the truth of arbitrary claims in those files.

@@ -260,6 +260,9 @@ defmodule SymphonyElixir.RunnerExecutionLifecycleIntegrationTest do
           in_worker(worker, fn ->
             assert {:ok, state} = AgentExecution.ensure_current()
             inspection = RunInspector.inspect(c.workspace, include_pr_details: false)
+            validation = RunInspector.run_validation(c.workspace, inspection.harness)
+            assert validation.status == :passed
+            assert :ok = AgentExecution.observe_validation(c.workspace, validation)
 
             result =
               VerifierRunner.verify(c.workspace, c.issue, state, inspection,

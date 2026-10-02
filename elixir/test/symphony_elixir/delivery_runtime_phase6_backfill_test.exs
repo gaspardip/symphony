@@ -300,6 +300,13 @@ defmodule SymphonyElixir.DeliveryRuntimePhase6BackfillTest do
 
     File.chmod!(Path.join(workspace, "scripts/validate.sh"), 0o755)
 
+    File.write!(
+      Path.join(workspace, "scripts/artifacts.sh"),
+      "#!/usr/bin/env bash\ntest -x scripts/validate.sh\n"
+    )
+
+    File.chmod!(Path.join(workspace, "scripts/artifacts.sh"), 0o755)
+
     assert {:stop, :verifier_blocked} =
              DeliveryEngine.run(workspace, issue, nil,
                verifier_runner: fn _workspace, _issue, _state, _inspection, _opts ->

@@ -317,7 +317,13 @@ defmodule SymphonyElixir.RunnerExecutionCurrentTest do
           terminal
         end)
 
-      assert scoped(c, fn -> VerifierRunner.verify(c.workspace, c.issue, %{}, inspection(c), opts) end) == terminal
+      assert scoped(c, fn ->
+               validation = RunInspector.run_validation(c.workspace, %RepoHarness{validation_command: "/usr/bin/true"})
+               assert validation.status == :passed
+               assert :ok = AgentExecution.observe_validation(c.workspace, validation)
+               VerifierRunner.verify(c.workspace, c.issue, %{}, inspection(c), opts)
+             end) == terminal
+
       assert_received :verifier_session
       assert_received {:git_command, ["rev-parse", "HEAD"]}
       refute_received {:git_command, ["rev-parse", "HEAD"]}
@@ -337,6 +343,9 @@ defmodule SymphonyElixir.RunnerExecutionCurrentTest do
 
     assert {:stop, {:stale_execution, _, :material_state_changed}} =
              scoped(c, fn ->
+               validation = RunInspector.run_validation(c.workspace, %RepoHarness{validation_command: "/usr/bin/true"})
+               assert validation.status == :passed
+               assert :ok = AgentExecution.observe_validation(c.workspace, validation)
                VerifierRunner.verify(c.workspace, c.issue, %{}, inspection(c), opts)
              end)
 
