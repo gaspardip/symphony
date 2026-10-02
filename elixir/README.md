@@ -787,6 +787,9 @@ The runtime observes the selected proof files before the verifier runs. Only reg
 text files below the workspace are accepted, with a maximum of 1 MiB per file; symlinks
 and unsafe paths are rejected. The verifier receives redacted, bounded excerpts from
 the same buffers that were hashed. A `pass` with unresolved acceptance gaps is blocked.
+In `harness_artifact_only` mode the selected file is the configured artifact,
+including an artifact under `.symphony/`; changed tests cannot substitute for it.
+Its accepted bytes must remain current until the effect is authorized.
 
 Acceptance belongs to the current worker and its checked ledger entry. Before
 commit, push, PR changes and handoff, the runtime checks that the selected files,

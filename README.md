@@ -31,6 +31,8 @@ Publication requires fresh validation and accepted evidence from the current wor
 Changed or replaced proof files block positive effects; a matching digest establishes
 file integrity and does not establish that an arbitrary claim is true. See
 [the evidence acceptance contract](elixir/README.md#current-evidence-before-publication).
+The `harness_artifact_only` mode always binds the required artifact, even when
+tests change; modifying or removing it blocks publication.
 
 The read-only traceability API reconstructs one persisted run from checked local
 evidence using an exact task, run, workspace or PR selector. Missing, ambiguous or

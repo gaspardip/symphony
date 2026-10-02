@@ -238,6 +238,60 @@ defmodule SymphonyElixir.EvidenceIntegrityTest do
     end)
   end
 
+  for fault <- [:missing, :changed] do
+    @artifact_fault fault
+    test "required runtime artifact remains current with changed tests: #{@artifact_fault}", c do
+      relative = ".symphony/evidence/required-proof.json"
+      proof = Path.join(c.workspace, relative)
+      File.mkdir_p!(Path.dirname(proof))
+      File.write!(proof, "{\"criterion\":true}\n")
+      File.mkdir_p!(Path.join(c.workspace, "test"))
+      File.write!(Path.join(c.workspace, "test/feature_test.exs"), "assert true\n")
+
+      harness = %{
+        c.inspection.harness
+        | base_branch: "main",
+          validation_command: "test -s #{relative}",
+          smoke_command: "test -s #{relative}",
+          behavioral_proof: %{c.inspection.harness.behavioral_proof | artifact_path: relative}
+      }
+
+      c = %{c | inspection: %{c.inspection | harness: harness}, proof: proof}
+
+      admitted(c.workspace, c.issue, fn execution ->
+        assert :ok = AgentExecution.observe_validation(c.workspace, RunInspector.run_validation(c.workspace, harness))
+        assert %{verdict: "pass"} = verify(c, evidence_reentry: true)
+        assert {:ok, handle} = EvidenceAcceptance.current(c.workspace)
+        original = File.read!(proof)
+
+        expected =
+          case @artifact_fault do
+            :missing ->
+              File.rm!(proof)
+              {:error, {:evidence_read_failed, :enoent}}
+
+            :changed ->
+              File.write!(proof, "{\"criterion\":false}\n")
+              {:error, :evidence_changed}
+          end
+
+        assert ^expected = EvidenceAcceptance.before_effect(c.workspace, handle, :publish)
+        File.write!(proof, original)
+        assert ^expected = EvidenceAcceptance.before_effect(c.workspace, handle, :publish)
+        assert {:ok, rows, _} = RunLedger.CheckedStorage.entries_checked(execution.ticket.ledger_path)
+        [receipt] = Enum.filter(rows, &(&1["event"] == "proof.integrity_verified"))
+
+        assert receipt["metadata"]["files"] == [
+                 %{
+                   "path" => relative,
+                   "size" => byte_size(original),
+                   "sha256" => :crypto.hash(:sha256, original) |> Base.encode16(case: :lower)
+                 }
+               ]
+      end)
+    end
+  end
+
   defp verify(c, extra \\ []) do
     VerifierRunner.verify(c.workspace, c.issue, %{}, c.inspection, Keyword.merge([include_pr_details: false, verifier_session_runner: &verifier_pass/4], extra))
   end

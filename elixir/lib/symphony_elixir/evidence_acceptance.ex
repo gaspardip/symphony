@@ -165,7 +165,7 @@ defmodule SymphonyElixir.EvidenceAcceptance do
   defp validation_digest(%{required: required, observation: observation}), do: %{required: required, observed: true, result: gate_digest(observation)}
 
   defp selected_paths(%{required?: false}), do: []
-  defp selected_paths(%{mode: "artifact_only", artifact_path: path}), do: [path]
+  defp selected_paths(%{mode: "harness_artifact_only", artifact_path: path}), do: [path]
   defp selected_paths(%{proof_paths: [_ | _] = paths}), do: paths
   defp selected_paths(%{artifact_path: path}) when is_binary(path), do: [path]
   defp selected_paths(_selection), do: []

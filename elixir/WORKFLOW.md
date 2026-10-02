@@ -91,6 +91,8 @@ Do not perform those steps yourself.
 Use the repo harness as the source of truth for validation and proof.
 The artifacts command must succeed before verification. Keep selected proof files unchanged
 until publication; a verifier pass with unresolved acceptance gaps is blocked.
+When the harness uses `harness_artifact_only`, retain the configured artifact;
+changed tests do not replace the required evidence file.
 Use persisted traceability links for the exact run being inspected. Missing or
 ambiguous evidence is a diagnostic result; do not substitute another run.
 Use producer gate IDs to correlate observed results. A gate ID does not grant
