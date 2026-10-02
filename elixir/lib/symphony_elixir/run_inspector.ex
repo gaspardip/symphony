@@ -631,7 +631,7 @@ defmodule SymphonyElixir.RunInspector do
   def changed_paths_checked(workspace, opts \\ []) do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
 
-    case command_runner.("git", ["status", "--porcelain", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true) do
+    case command_runner.("git", ["status", "--porcelain", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true, env: [{"GIT_OPTIONAL_LOCKS", "0"}]) do
       {output, 0} ->
         paths = output |> to_string() |> String.split(~r/\r?\n/, trim: true) |> Enum.map(&status_path/1) |> Enum.reject(&runtime_artifact_path?/1) |> Enum.reject(&is_nil/1) |> Enum.uniq()
         {:ok, paths}
@@ -732,7 +732,7 @@ defmodule SymphonyElixir.RunInspector do
   def changed_paths(workspace, opts \\ []) when is_binary(workspace) do
     command_runner = Keyword.get(opts, :command_runner, &System.cmd/3)
 
-    case command_runner.("git", ["status", "--porcelain", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true) do
+    case command_runner.("git", ["status", "--porcelain", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true, env: [{"GIT_OPTIONAL_LOCKS", "0"}]) do
       {output, 0} ->
         output
         |> to_string()
@@ -833,7 +833,7 @@ defmodule SymphonyElixir.RunInspector do
   end
 
   defp git_output(command_runner, workspace, args) do
-    case command_runner.("git", args, cd: workspace, stderr_to_stdout: true) do
+    case command_runner.("git", args, cd: workspace, stderr_to_stdout: true, env: [{"GIT_OPTIONAL_LOCKS", "0"}]) do
       {output, 0} ->
         output
         |> to_string()

@@ -849,3 +849,7 @@ Posted reply receipts remain intact; retaining a receipt does not itself establi
 that the current claim is addressed.
 
 Legacy snapshots without a run identity keep their existing posted-reply reconciliation semantics only when `AgentExecution.entry_context/2` explicitly returns `:legacy`. Identified executions and direct PRWatcher reads use strict complete live-claim identity by default; sparse historical reply metadata cannot close an identified claim.
+
+### Background Git inspection
+
+RunInspector disables Git optional index refreshes for read-only status and metadata queries. These reads still report worktree changes, but do not rewrite the index or compete with delivery checkout and commit commands for an optional index lock. Required write locks remain enabled for Git mutations.

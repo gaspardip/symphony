@@ -4,6 +4,43 @@ defmodule SymphonyElixir.RunInspectorTest do
   alias SymphonyElixir.RepoHarness
   alias SymphonyElixir.RunInspector
 
+  test "background Git readers preserve the index while still reporting worktree changes" do
+    readers = [
+      fn workspace -> RunInspector.inspect(workspace, include_pr_details: false).status_text end,
+      &RunInspector.changed_paths/1,
+      &RunInspector.changed_paths_checked/1
+    ]
+
+    for {reader, number} <- Enum.with_index(readers) do
+      workspace = Path.join(System.tmp_dir!(), "inspector-index-#{number}-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(workspace)
+      on_exit(fn -> File.rm_rf(workspace) end)
+      {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: workspace, stderr_to_stdout: true)
+      path = Path.join(workspace, "tracked.txt")
+      File.write!(path, "original\n")
+      {_, 0} = System.cmd("git", ["add", "tracked.txt"], cd: workspace)
+
+      {_, 0} =
+        System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "fixture"], cd: workspace, stderr_to_stdout: true)
+
+      index = Path.join(workspace, ".git/index")
+      before = File.read!(index)
+      :ok = File.touch(path, System.os_time(:second) + 10)
+
+      assert reader.(workspace) in [nil, [], {:ok, []}]
+      assert File.read!(index) == before
+
+      # Prove the stat change exercises Git's optional refresh on this filesystem.
+      {_, 0} = System.cmd("git", ["status", "--porcelain"], cd: workspace, env: [{"GIT_OPTIONAL_LOCKS", "1"}])
+      refute File.read!(index) == before
+
+      before = File.read!(index)
+      File.write!(path, "changed\n")
+      assert reader.(workspace) not in [nil, [], {:ok, []}]
+      assert File.read!(index) == before
+    end
+  end
+
   test "changed paths expands new nested directories and respects ignored files" do
     workspace = Path.join(System.tmp_dir!(), "changed-paths-nested-#{System.unique_integer([:positive])}")
     File.mkdir_p!(workspace)
