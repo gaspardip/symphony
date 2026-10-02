@@ -91,5 +91,7 @@ Do not perform those steps yourself.
 Use the repo harness as the source of truth for validation and proof.
 The artifacts command must succeed before verification. Keep selected proof files unchanged
 until publication; a verifier pass with unresolved acceptance gaps is blocked.
+Use persisted traceability links for the exact run being inspected. Missing or
+ambiguous evidence is a diagnostic result; do not substitute another run.
 Keep shell usage narrow and avoid large output.
 End each implementation turn by calling `report_agent_turn_result` exactly once.

@@ -1139,6 +1139,20 @@ defmodule SymphonyElixir.RunStateStore do
     state = ensure_runner_metadata(state)
     operation_id = SymphonyElixir.Util.generate_id("op_")
 
+    transition_metadata =
+      if Map.has_key?(state, :run_id) do
+        canonical_workspace = Path.expand(workspace)
+
+        binding =
+          state
+          |> Map.take([:run_id, :run_identity_event_id, :run_identity_ledger_path])
+          |> Map.merge(%{workspace: canonical_workspace, workspace_digest: :crypto.hash(:sha256, canonical_workspace) |> Base.encode16(case: :lower)})
+
+        Map.put(transition_metadata, :run_binding, binding)
+      else
+        transition_metadata
+      end
+
     event_attrs = %{
       issue_id: Map.get(state, :issue_id),
       issue_identifier: Map.get(state, :issue_identifier),

@@ -3,7 +3,7 @@ defmodule SymphonyElixir.RunInspector do
   Inspects workspace state, PR status, and harness-based validation commands.
   """
 
-  alias SymphonyElixir.{ExecutionBoundary, RepoHarness}
+  alias SymphonyElixir.{Config, ExecutionBoundary, RepoHarness, RunIdentity, RunLedger, RunStateStore, Workspace}
 
   defmodule Snapshot do
     @moduledoc false
@@ -100,6 +100,375 @@ defmodule SymphonyElixir.RunInspector do
       changed_files: changed_file_count(status_text)
     }
   end
+
+  @doc "Reads a single persisted run by one exact selector, without probing Git, a tracker or a provider."
+  @spec traceability(map()) :: {:ok, map()} | {:error, map()}
+  def traceability(selector) do
+    with {:ok, key, value} <- traceability_selector(selector),
+         {:ok, ledger_path} <- traceability_read(RunLedger.ledger_file_path_checked(), :ledger_unavailable),
+         root = Path.expand(Config.workspace_root()),
+         {:ok, rows, ledger_digest} <- traceability_entries(ledger_path),
+         {:ok, identities} <- traceability_identities(rows),
+         {:ok, candidates} <- traceability_candidates(identities, rows, key, value),
+         {:ok, readings} <- traceability_readings(candidates, root, ledger_path, rows),
+         :ok <- traceability_unchanged(readings, root, ledger_path, ledger_digest),
+         {:ok, reading} <- traceability_unique(readings, key, value) do
+      {:ok, Map.put(reading, :ledger_sha256, ledger_digest)}
+    end
+  end
+
+  defp traceability_selector(selector) when is_map(selector) and map_size(selector) == 1 do
+    case Map.to_list(selector) do
+      [{key, value}] when key in ["issue", "run", "workspace", "pr"] and is_binary(value) and value != "" ->
+        cond do
+          key == "workspace" and (Path.type(value) != :absolute or Path.expand(value) != value) -> traceability_error(:invalid_selector, :workspace_must_be_absolute)
+          key == "pr" and not traceability_pr?(value) -> traceability_error(:invalid_selector, :invalid_pr_url)
+          true -> {:ok, key, value}
+        end
+
+      _ ->
+        traceability_error(:invalid_selector, :one_nonempty_selector_required)
+    end
+  end
+
+  defp traceability_selector(_), do: traceability_error(:invalid_selector, :one_nonempty_selector_required)
+
+  defp traceability_entries(path) do
+    case RunLedger.CheckedStorage.entries_checked(path) do
+      {:ok, rows, digest} -> {:ok, rows, digest}
+      {:error, reason} -> traceability_error(:ledger_unavailable, reason)
+    end
+  end
+
+  defp traceability_identities(rows) do
+    rows
+    |> Enum.filter(&(&1["event_type"] in ["run.identity.created", "run.identity.adopted"]))
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, identities} ->
+      metadata = row["metadata"]
+
+      if is_map(metadata) and Enum.all?([row["event_id"], row["issue_id"], row["issue_identifier"], metadata["run_id"], metadata["workspace"], metadata["intent_event_id"]], &traceability_present?/1) do
+        identity = %{
+          run_id: metadata["run_id"],
+          issue_id: row["issue_id"],
+          issue_identifier: row["issue_identifier"],
+          workspace: metadata["workspace"],
+          event_id: row["event_id"],
+          intent_event_id: metadata["intent_event_id"]
+        }
+
+        {:cont, {:ok, [identity | identities]}}
+      else
+        {:halt, traceability_error(:identity_incomplete, :invalid_identity_confirmation)}
+      end
+    end)
+  end
+
+  defp traceability_candidates(identities, rows, key, value) do
+    candidates = Enum.filter(identities, &traceability_matches?(&1, key, value))
+
+    cond do
+      candidates != [] -> {:ok, candidates}
+      Enum.any?(rows, &traceability_unbound_match?(&1, key, value)) -> traceability_error(:identity_incomplete, :confirmed_identity_missing)
+      true -> traceability_error(:not_found, :no_matching_identity)
+    end
+  end
+
+  defp traceability_matches?(identity, "issue", value), do: value in [identity.issue_id, identity.issue_identifier]
+  defp traceability_matches?(identity, "run", value), do: identity.run_id == value
+  defp traceability_matches?(identity, "workspace", value), do: identity.workspace == value
+  defp traceability_matches?(_identity, "pr", _value), do: true
+
+  defp traceability_unbound_match?(row, "issue", value), do: value in [row["issue_id"], row["issue_identifier"]]
+
+  defp traceability_unbound_match?(row, key, value) do
+    metadata_key = %{"run" => "run_id", "workspace" => "workspace", "pr" => "pr_url"}[key]
+    is_map(row["metadata"]) and row["metadata"][metadata_key] == value
+  end
+
+  defp traceability_readings(identities, root, ledger_path, rows) do
+    Enum.reduce_while(identities, {:ok, []}, fn identity, {:ok, readings} ->
+      result = RunStateStore.with_workspace_lock(identity.workspace, fn -> traceability_reading(identity, root, ledger_path, rows) end)
+
+      case result do
+        {:ok, reading} -> {:cont, {:ok, [reading | readings]}}
+        {:error, reason} -> {:halt, {:error, Map.put(reason, :run_id, identity.run_id)}}
+        :aborted -> {:halt, traceability_error(:snapshot_unavailable, :local_lock_aborted)}
+      end
+    end)
+  end
+
+  defp traceability_reading(identity, root, ledger_path, rows) do
+    with :ok <- traceability_workspace(identity, root),
+         {:ok, bytes} <- traceability_read(File.read(RunStateStore.state_path(identity.workspace)), :snapshot_unavailable),
+         {:ok, raw} <- traceability_raw(bytes),
+         true <-
+           (raw["run_id"] == identity.run_id and raw["run_identity_event_id"] == identity.event_id and raw["run_identity_ledger_path"] == ledger_path) or
+             traceability_error(:identity_conflict, :snapshot_binding_changed),
+         :ok <- traceability_check(RunIdentity.verify(identity.workspace, identity.run_id, identity.issue_id, identity.issue_identifier), :identity_incomplete),
+         {:ok, dispatches} <- traceability_dispatches(identity, rows),
+         {:ok, last_event} <- traceability_last_event(raw, identity, rows) do
+      {:ok, %{identity: identity, state: raw, dispatches: dispatches, last_event: last_event, snapshot_sha256: traceability_digest(bytes)}}
+    end
+  end
+
+  defp traceability_raw(bytes) do
+    case Jason.decode(bytes) do
+      {:ok, %{} = raw} ->
+        with :ok <- traceability_check(RunIdentity.validate_snapshot(raw), :identity_incomplete),
+             true <- not Map.has_key?(raw, "audit_pending") or traceability_error(:snapshot_incomplete, :audit_pending),
+             true <- traceability_present?(raw["stage"]) or traceability_error(:snapshot_incomplete, :stage_missing),
+             :ok <- traceability_result_shape(raw),
+             do: {:ok, raw}
+
+      {:ok, _} ->
+        traceability_error(:snapshot_incomplete, :invalid_state)
+
+      {:error, reason} ->
+        traceability_error(:snapshot_unavailable, reason)
+    end
+  end
+
+  defp traceability_result_shape(raw) do
+    text_fields = ~w(pr_url last_rule_id last_failure_class next_human_action)
+    stop = raw["stop_reason"]
+    valid_stop = is_nil(stop) or (is_map(stop) and Enum.all?(Map.take(stop, ~w(code rule_id failure_class summary human_action)), fn {_key, value} -> is_nil(value) or is_binary(value) end))
+
+    stopped_cause = raw["stage"] != "blocked" or (is_map(stop) and traceability_present?(stop["code"]))
+
+    if valid_stop and stopped_cause and Enum.all?(text_fields, &(is_nil(raw[&1]) or is_binary(raw[&1]))) and
+         (is_nil(raw["pr_url"]) or traceability_pr?(raw["pr_url"])),
+       do: :ok,
+       else: traceability_error(:snapshot_incomplete, :invalid_result_shape)
+  end
+
+  defp traceability_pr?(value) when is_binary(value) do
+    case URI.new(value) do
+      {:ok, %URI{scheme: scheme, host: host, userinfo: nil}} when scheme in ["http", "https"] and is_binary(host) and host != "" -> true
+      _ -> false
+    end
+  end
+
+  defp traceability_pr?(_), do: false
+
+  defp traceability_workspace(identity, root) do
+    expected = Path.expand(Workspace.path_for_issue(identity.issue_identifier))
+
+    if identity.workspace == expected and String.starts_with?(expected, root <> "/") do
+      path = RunStateStore.state_path(expected)
+      parts = path |> Path.relative_to(root) |> Path.split()
+      paths = [root | Enum.scan(parts, root, &Path.join(&2, &1))]
+
+      Enum.reduce_while(paths, :ok, fn current, :ok ->
+        expected_type = if current == path, do: :regular, else: :directory
+
+        case File.lstat(current) do
+          {:ok, %{type: ^expected_type}} -> {:cont, :ok}
+          {:ok, _} -> {:halt, traceability_error(:workspace_unavailable, :unexpected_path_type)}
+          {:error, reason} -> {:halt, traceability_error(:workspace_unavailable, reason)}
+        end
+      end)
+    else
+      traceability_error(:source_changed, :workspace_root_or_identity_path_changed)
+    end
+  end
+
+  defp traceability_dispatches(identity, rows) do
+    events =
+      Enum.filter(rows, fn row ->
+        is_map(row["metadata"]) and row["metadata"]["run_id"] == identity.run_id and row["event_type"] in ["dispatch.requested", "dispatch.started", "dispatch.finished"]
+      end)
+
+    events
+    |> Enum.group_by(& &1["metadata"]["dispatch_id"])
+    |> Enum.reduce_while({:ok, []}, fn {id, group}, {:ok, dispatches} ->
+      requested = Enum.filter(group, &(&1["event_type"] == "dispatch.requested"))
+      started = Enum.filter(group, &(&1["event_type"] == "dispatch.started"))
+      finished = Enum.filter(group, &(&1["event_type"] == "dispatch.finished"))
+
+      case {requested, started, finished} do
+        {[request], [authorization], finish} when length(finish) <= 1 ->
+          custody = Map.take(authorization["metadata"], ~w(owner epoch))
+
+          valid =
+            traceability_present?(id) and request["metadata"] == authorization["metadata"] and
+              group == [request, authorization | finish] and
+              traceability_present?(custody["owner"]) and is_integer(custody["epoch"]) and custody["epoch"] > 0 and
+              Enum.all?(group, &(traceability_event_identity?(&1, identity) and traceability_event_shape?(&1))) and
+              Enum.all?(finish, &(&1["metadata"]["authorization_event_id"] == authorization["event_id"] and Map.take(&1["metadata"], ~w(owner epoch)) == custody))
+
+          if valid do
+            {:cont, {:ok, [%{dispatch_id: id, requested: request, authorized: authorization, finished: List.first(finish)} | dispatches]}}
+          else
+            {:halt, traceability_error(:dispatch_incomplete, :dispatch_reference_mismatch)}
+          end
+
+        _ ->
+          {:halt, traceability_error(:dispatch_incomplete, :dispatch_chain_incomplete_or_ambiguous)}
+      end
+    end)
+    |> case do
+      {:ok, []} -> traceability_error(:dispatch_incomplete, :dispatch_authorization_missing)
+      result -> result
+    end
+  end
+
+  defp traceability_event_shape?(event) do
+    traceability_present?(event["event_id"]) and traceability_present?(event["event_type"]) and
+      Enum.all?(Map.take(event, ~w(at stage actor_type actor_id)), fn {_key, value} -> is_nil(value) or is_binary(value) end)
+  end
+
+  defp traceability_event_identity?(row, identity) do
+    row["issue_id"] == identity.issue_id and row["issue_identifier"] == identity.issue_identifier and
+      case Map.fetch(row["metadata"], "workspace_digest") do
+        {:ok, digest} -> digest == traceability_digest(identity.workspace)
+        :error -> row["metadata"]["workspace"] == identity.workspace
+      end
+  end
+
+  defp traceability_last_event(raw, identity, rows) do
+    confirmation = Enum.find(rows, &(&1["event_id"] == identity.event_id))
+    latest_id = traceability_latest_stage_event_id(identity, rows)
+
+    case raw["last_ledger_event_id"] do
+      nil ->
+        cond do
+          confirmation["stage"] != raw["stage"] or not is_nil(latest_id) ->
+            traceability_error(:snapshot_incomplete, :last_ledger_reference_missing)
+
+          not Map.has_key?(confirmation["metadata"], "inherited_stage_event_id") ->
+            traceability_error(:snapshot_incomplete, :last_ledger_witness_missing)
+
+          is_nil(confirmation["metadata"]["inherited_stage_event_id"]) ->
+            {:ok, nil}
+
+          true ->
+            traceability_error(:snapshot_incomplete, :last_ledger_reference_missing)
+        end
+
+      id when is_binary(id) and id != "" ->
+        case Enum.find(rows, &(&1["event_id"] == id)) do
+          %{"issue_id" => issue_id, "issue_identifier" => identifier} = event when issue_id == identity.issue_id and identifier == identity.issue_identifier ->
+            if traceability_event_shape?(event) and event["event_type"] == "stage.transition" and event["stage"] == raw["stage"] and
+                 traceability_stage_witness?(event, raw, identity, confirmation, latest_id),
+               do: {:ok, event},
+               else: traceability_error(:snapshot_incomplete, :last_ledger_material_mismatch)
+
+          _ ->
+            traceability_error(:snapshot_incomplete, :last_ledger_reference_missing_or_mismatched)
+        end
+
+      _ ->
+        traceability_error(:snapshot_incomplete, :invalid_last_ledger_reference)
+    end
+  end
+
+  defp traceability_stage_witness?(%{"metadata" => %{} = metadata} = event, raw, identity, confirmation, latest_id) do
+    execution = metadata["execution"]
+
+    expected = %{
+      "run_id" => identity.run_id,
+      "run_identity_event_id" => identity.event_id,
+      "run_identity_ledger_path" => raw["run_identity_ledger_path"],
+      "workspace" => identity.workspace
+    }
+
+    if is_nil(execution) or (is_map(execution) and execution["run_id"] == identity.run_id) do
+      case Map.fetch(metadata, "run_binding") do
+        {:ok, binding} ->
+          traceability_stage_binding?(binding, expected) and latest_id == event["event_id"]
+
+        :error when is_map(execution) ->
+          latest_id == event["event_id"]
+
+        :error ->
+          is_nil(latest_id) and confirmation["event_type"] == "run.identity.adopted" and
+            confirmation["stage"] == event["stage"] and
+            Map.fetch(confirmation["metadata"], "inherited_stage_event_id") == {:ok, event["event_id"]}
+      end
+    else
+      false
+    end
+  end
+
+  defp traceability_stage_witness?(_event, _raw, _identity, _confirmation, _latest_id), do: false
+
+  defp traceability_stage_binding?(%{} = binding, expected) do
+    case Map.fetch(binding, "workspace_digest") do
+      {:ok, _digest} ->
+        expected =
+          expected
+          |> Map.put("workspace_digest", traceability_digest(expected["workspace"]))
+          |> Map.put("workspace", SymphonyElixir.SecretRedactor.redact(expected["workspace"]))
+
+        binding == expected
+
+      :error ->
+        binding == expected
+    end
+  end
+
+  defp traceability_stage_binding?(_binding, _expected), do: false
+
+  defp traceability_latest_stage_event_id(identity, rows) do
+    Enum.reduce(rows, nil, fn row, latest_id ->
+      case row do
+        %{"event_type" => "stage.transition", "issue_id" => issue_id, "issue_identifier" => identifier, "metadata" => %{} = metadata}
+        when issue_id == identity.issue_id and identifier == identity.issue_identifier ->
+          binding = metadata["run_binding"]
+          execution = metadata["execution"]
+          if (is_map(binding) and binding["run_id"] == identity.run_id) or (is_map(execution) and execution["run_id"] == identity.run_id), do: row["event_id"], else: latest_id
+
+        _ ->
+          latest_id
+      end
+    end)
+  end
+
+  defp traceability_unique(readings, key, value) do
+    matches = if key == "pr", do: Enum.filter(readings, &(&1.state["pr_url"] == value)), else: readings
+
+    case matches do
+      [reading] -> {:ok, reading}
+      [] -> traceability_error(:not_found, :no_matching_pr)
+      _ -> traceability_error(:ambiguous, :multiple_matching_runs)
+    end
+  end
+
+  defp traceability_unchanged(readings, root, ledger_path, ledger_digest) do
+    with true <- Path.expand(Config.workspace_root()) == root or traceability_error(:source_changed, :workspace_root_changed),
+         {:ok, current_path} <- traceability_read(RunLedger.ledger_file_path_checked(), :ledger_unavailable),
+         true <- current_path == ledger_path or traceability_error(:source_changed, :ledger_path_changed),
+         :ok <- traceability_snapshots_unchanged(readings, root),
+         {:ok, _rows, current_digest} <- traceability_entries(ledger_path),
+         true <- current_digest == ledger_digest or traceability_error(:source_changed, :ledger_changed),
+         do: :ok
+  end
+
+  defp traceability_snapshots_unchanged(readings, root) do
+    Enum.reduce_while(readings, :ok, fn reading, :ok ->
+      result =
+        RunStateStore.with_workspace_lock(reading.identity.workspace, fn ->
+          with :ok <- traceability_workspace(reading.identity, root),
+               {:ok, bytes} <- traceability_read(File.read(RunStateStore.state_path(reading.identity.workspace)), :snapshot_unavailable),
+               true <- traceability_digest(bytes) == reading.snapshot_sha256 or traceability_error(:source_changed, :snapshot_changed),
+               do: :ok
+        end)
+
+      case result do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+        :aborted -> {:halt, traceability_error(:snapshot_unavailable, :local_lock_aborted)}
+      end
+    end)
+  end
+
+  defp traceability_read({:ok, value}, _code), do: {:ok, value}
+  defp traceability_read({:error, reason}, code), do: traceability_error(code, reason)
+  defp traceability_check(:ok, _code), do: :ok
+  defp traceability_check({:error, reason}, code), do: traceability_error(code, reason)
+  defp traceability_present?(value), do: is_binary(value) and value != ""
+  defp traceability_digest(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
+  defp traceability_error(code, cause), do: {:error, %{code: code, cause: cause}}
 
   @spec code_changed?(snapshot(), snapshot()) :: boolean()
   def code_changed?(%Snapshot{fingerprint: before_fp}, %Snapshot{fingerprint: after_fp}) do

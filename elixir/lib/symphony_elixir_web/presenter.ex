@@ -25,6 +25,83 @@ defmodule SymphonyElixirWeb.Presenter do
   alias SymphonyElixir.Linear.Issue
   @dialyzer {:nowarn_function, pr_watcher_payload: 4}
 
+  @doc "Projects checked local run evidence; it does not infer worker execution or a domain result from dispatch admission."
+  @spec traceability_payload(map()) :: {:ok, map()} | {:error, non_neg_integer(), map()}
+  def traceability_payload(selector) do
+    case RunInspector.traceability(selector) do
+      {:ok, reading} ->
+        state = SymphonyElixir.SecretRedactor.redact(reading.state)
+        identity = Map.take(reading.identity, [:run_id, :issue_id, :issue_identifier, :workspace])
+        stop = if is_map(state["stop_reason"]), do: Map.take(state["stop_reason"], ~w(code rule_id failure_class summary human_action)), else: state["stop_reason"]
+
+        {:ok,
+         SymphonyElixir.SecretRedactor.redact(%{
+           schema_version: 1,
+           scope: "persisted_current_run",
+           identity: identity,
+           result: Map.take(state, ~w(stage last_rule_id last_failure_class next_human_action)) |> Map.put("stop_reason", stop),
+           links: %{
+             pr: state["pr_url"],
+             issue: "/api/v1/traceability?" <> URI.encode_query(%{"issue" => identity.issue_id}),
+             run: "/api/v1/traceability?" <> URI.encode_query(%{"run" => identity.run_id}),
+             workspace:
+               if(SymphonyElixir.SecretRedactor.redact(identity.workspace) == identity.workspace,
+                 do: "/api/v1/traceability?" <> URI.encode_query(%{"workspace" => identity.workspace}),
+                 else: nil
+               )
+           },
+           evidence: %{
+             identity_event_id: reading.identity.event_id,
+             identity_intent_event_id: reading.identity.intent_event_id,
+             snapshot_sha256: reading.snapshot_sha256,
+             ledger_sha256: reading.ledger_sha256,
+             last_event: traceability_event(reading.last_event),
+             dispatches:
+               Enum.map(reading.dispatches, fn dispatch ->
+                 %{
+                   dispatch_id: dispatch.dispatch_id,
+                   requested: traceability_event(dispatch.requested),
+                   authorized: traceability_event(dispatch.authorized),
+                   finished: traceability_event(dispatch.finished)
+                 }
+               end)
+           }
+         })}
+
+      {:error, reason} ->
+        status =
+          case reason.code do
+            :invalid_selector -> 400
+            :not_found -> 404
+            code when code in [:ledger_unavailable, :snapshot_unavailable, :workspace_unavailable] -> 503
+            _ -> 409
+          end
+
+        error = Map.merge(Map.take(reason, [:run_id]), %{code: Atom.to_string(reason.code), cause: traceability_cause(reason.cause)})
+        {:error, status, %{error: error}}
+    end
+  end
+
+  defp traceability_event(nil), do: nil
+
+  defp traceability_event(event) do
+    event = SymphonyElixir.SecretRedactor.redact(event)
+    Map.take(event, ~w(event_id event_type at stage actor_type actor_id))
+  end
+
+  defp traceability_cause(%RunLedger.PersistenceError{} = error),
+    do: %{phase: error.phase, event_id: error.event_id, confirmation: error.confirmation, reason: traceability_cause(error.reason), cleanup: Enum.map(error.cleanup_errors, &traceability_cause/1)}
+
+  defp traceability_cause(%Jason.DecodeError{position: position}), do: %{code: "invalid_json", position: position}
+  defp traceability_cause(reason) when is_atom(reason), do: Atom.to_string(reason)
+
+  defp traceability_cause(reason) when is_tuple(reason) do
+    reason |> Tuple.to_list() |> Enum.filter(&(is_atom(&1) or is_integer(&1) or is_tuple(&1))) |> Enum.map(&traceability_cause/1)
+  end
+
+  defp traceability_cause(reason) when is_integer(reason), do: reason
+  defp traceability_cause(_reason), do: "unprojected_cause"
+
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()

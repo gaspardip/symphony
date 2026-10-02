@@ -793,3 +793,21 @@ commit, push, PR changes and handoff, the runtime checks that the selected files
 material scope and accepted entry remain current. Changed or replaced evidence
 blocks the effect. File hashes establish integrity of the observed bytes; they do
 not establish the truth of arbitrary claims in those files.
+
+## Persisted run traceability
+
+`GET /api/v1/traceability` accepts exactly one nonempty query parameter: `issue`
+(issue ID or identifier), `run` (run ID), `workspace` (canonical absolute path), or
+`pr` (PR URL). It reads the checked local ledger and the canonical snapshot without
+contacting Git, a tracker or a provider, or rewriting the evidence.
+
+A successful response binds the snapshot to a confirmed run identity and its
+dispatch and stage events, and returns snapshot and ledger digests. Dispatch
+authorization does not establish that a worker executed or that a domain result
+succeeded. Invalid selectors return HTTP 400, absence 404, contradictory, ambiguous
+or changing evidence 409, and unavailable storage 503. No latest-run guess is made.
+
+Returned links use exact selectors. If redaction changes a canonical workspace
+path, the workspace link is null and the genuine run link remains available.
+Snapshots and ledger bytes are rechecked before returning the response; concurrent
+changes require another read and are never repaired by the query.

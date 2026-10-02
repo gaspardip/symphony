@@ -32,6 +32,10 @@ Changed or replaced proof files block positive effects; a matching digest establ
 file integrity and does not establish that an arbitrary claim is true. See
 [the evidence acceptance contract](elixir/README.md#current-evidence-before-publication).
 
+The read-only traceability API reconstructs one persisted run from checked local
+evidence using an exact task, run, workspace or PR selector. Missing, ambiguous or
+changing evidence is returned as an error. See [the query contract](elixir/README.md#persisted-run-traceability).
+
 Delivery branch preparation and resets fetch the configured base explicitly, including
 workspaces cloned for a different single branch. Reset selects the local base at its
 remote revision and preserves the runtime snapshot; local code changes are discarded.

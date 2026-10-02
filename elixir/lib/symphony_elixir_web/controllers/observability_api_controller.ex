@@ -23,6 +23,14 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     json(conn, Presenter.delivery_report_payload(orchestrator(), snapshot_timeout_ms()))
   end
 
+  @spec traceability(Conn.t(), map()) :: Conn.t()
+  def traceability(conn, params) do
+    case Presenter.traceability_payload(params) do
+      {:ok, payload} -> json(conn, payload)
+      {:error, status, payload} -> conn |> put_status(status) |> json(payload)
+    end
+  end
+
   @spec portfolio(Conn.t(), map()) :: Conn.t()
   def portfolio(conn, _params) do
     json(conn, Presenter.portfolio_payload())

@@ -108,6 +108,7 @@ defmodule SymphonyElixir.RunIdentity do
         workspace: workspace,
         origin: origin,
         intent_event_id: intent.event_id,
+        inherited_stage_event_id: state[:last_ledger_event_id],
         previous_snapshot_digest: RunStateStore.snapshot_digest(state),
         snapshot_digest: RunStateStore.snapshot_digest(identified)
       }
