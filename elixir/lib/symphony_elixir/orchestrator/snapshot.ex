@@ -236,7 +236,8 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
           issue_id: entry.issue_id,
           issue_identifier: entry.identifier,
           source: entry.issue.source,
-          state: entry.issue.state,
+          state: if(Map.get(run_state, :stage) == "blocked", do: "Blocked", else: entry.issue.state),
+          tracker_state: entry.issue.state,
           linear_priority: entry.issue.priority,
           operator_override: entry.reasons.operator_override,
           retry_penalty: entry.reasons.retry_penalty,
@@ -365,14 +366,11 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
     end
   end
 
+  defp queue_policy_reason(_issue, _state, %{stage: "blocked"} = run_state),
+    do: persisted_decision_reason(run_state)
+
   defp queue_policy_reason(%Issue{} = issue, %State{} = state, run_state) do
     run_state = run_state || %{}
-
-    last_decision =
-      case Map.get(run_state, :last_decision) do
-        %{} = decision -> decision
-        _ -> %{}
-      end
 
     case Orchestrator.resolve_policy(issue, state) do
       {:error, conflict} ->
@@ -395,13 +393,23 @@ defmodule SymphonyElixir.Orchestrator.Snapshot do
         }
 
       _ ->
-        {
-          Map.get(run_state, :last_rule_id) || Map.get(last_decision, :rule_id),
-          Map.get(run_state, :last_failure_class) || Map.get(last_decision, :failure_class),
-          Map.get(run_state, :last_decision_summary) || Map.get(last_decision, :summary),
-          Map.get(run_state, :next_human_action) || Map.get(last_decision, :human_action)
-        }
+        persisted_decision_reason(run_state)
     end
+  end
+
+  defp persisted_decision_reason(run_state) do
+    last_decision =
+      case Map.get(run_state, :last_decision) do
+        %{} = decision -> decision
+        _ -> %{}
+      end
+
+    {
+      Map.get(run_state, :last_rule_id) || Map.get(last_decision, :rule_id),
+      Map.get(run_state, :last_failure_class) || Map.get(last_decision, :failure_class),
+      Map.get(run_state, :last_decision_summary) || Map.get(last_decision, :summary),
+      Map.get(run_state, :next_human_action) || Map.get(last_decision, :human_action)
+    }
   end
 
   # -- lease helpers (stateful) --

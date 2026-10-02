@@ -859,3 +859,9 @@ the durable inbox without ACK or effects. Custody retirement or transfer wakes t
 existing owner, which rereads the workspace and rechecks routing, worker closure,
 policy and admission before applying the event. The pending event does not reserve
 the retry lane or borrow its lease.
+
+Queue snapshots and `/api/v1/state` show `Blocked` and the saved failure/action
+when a run is blocked. `tracker_state` retains the cached tracker observation
+separately. The issue policy remains visible, but its general merge requirement
+does not replace the current validation or snapshot failure. Reading the queue
+does not update tracker state or persisted run state.

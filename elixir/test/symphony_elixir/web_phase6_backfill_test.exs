@@ -983,6 +983,29 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert error_html =~ "snapshot_timeout"
   end
 
+  test "public queue preserves blocked runtime decision separately from cached tracker state" do
+    snapshot = rich_snapshot()
+
+    entry =
+      hd(snapshot.queue)
+      |> Map.merge(%{
+        state: "Blocked",
+        tracker_state: "In Progress",
+        last_rule_id: "validation.failed",
+        last_failure_class: "validation",
+        next_human_action: "Repair trimming and rerun validation."
+      })
+
+    name = Module.concat(__MODULE__, :BlockedQueueProjectionOrchestrator)
+    start_supervised!({BackfillOrchestrator, name: name, test_pid: self(), snapshot: %{snapshot | queue: [entry]}})
+    assert [queue] = Presenter.state_payload(name, 50).queue
+    assert queue.state == "Blocked"
+    assert queue.tracker_state == "In Progress"
+    assert queue.last_rule_id == "validation.failed"
+    assert queue.last_failure_class == "validation"
+    assert queue.next_human_action == "Repair trimming and rerun validation."
+  end
+
   test "presenter state and issue payloads cover policy, activity, retry, paused, queue, and run-state branches" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",

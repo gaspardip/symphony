@@ -135,6 +135,48 @@ defmodule SymphonyElixir.SnapshotCorruptionTest do
              RunStateStore.update(workspace, &Map.put(&1, :implementation_turns, 3))
   end
 
+  for policy <- ["review_required", "never_automerge"] do
+    test "blocked queue keeps the actual failure under #{policy} instead of suggesting PR review", c do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: c.root, tracker_required_labels: [], policy_default_issue_class: unquote(policy))
+
+      assert {:ok, _} =
+               RunStateStore.update(c.workspace, fn state ->
+                 Map.merge(state, %{
+                   issue_id: c.issue.id,
+                   issue_identifier: c.issue.identifier,
+                   stage: "blocked",
+                   last_rule_id: "validation.failed",
+                   last_failure_class: "validation",
+                   last_decision_summary: "Normalization retained outer whitespace.",
+                   next_human_action: "Repair trimming and rerun validation before publication.",
+                   last_decision: %{target_state: "Blocked", rule_id: "validation.failed"}
+                 })
+               end)
+
+      bytes = File.read!(c.path)
+      state = %State{last_candidate_issues: [c.issue], max_concurrent_agents: 0}
+      assert [entry] = SymphonyElixir.Orchestrator.Snapshot.queue_snapshot(state)
+      assert entry.state == "Blocked"
+      assert entry.tracker_state == "In Progress"
+      assert entry.last_rule_id == "validation.failed"
+      assert entry.last_failure_class == "validation"
+      assert entry.last_decision_summary == "Normalization retained outer whitespace."
+      assert entry.next_human_action == "Repair trimming and rerun validation before publication."
+      assert File.read!(c.path) == bytes
+    end
+  end
+
+  test "corrupt snapshot stays blocked in queue with its repair action", c do
+    File.write!(c.path, "{invalid-json")
+    state = %State{last_candidate_issues: [c.issue], max_concurrent_agents: 0}
+    assert [entry] = SymphonyElixir.Orchestrator.Snapshot.queue_snapshot(state)
+    assert entry.state == "Blocked"
+    assert entry.tracker_state == "In Progress"
+    assert entry.last_rule_id == "runtime.snapshot_unreadable"
+    assert entry.next_human_action =~ "preserved"
+    assert File.read!(c.path) == "{invalid-json"
+  end
+
   test "corrupt staged bootstrap state cannot become a new checkout snapshot", %{
     root: root,
     issue: issue,

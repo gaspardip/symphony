@@ -939,6 +939,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_identifier: Map.get(entry, :issue_identifier),
       source: Map.get(entry, :source),
       state: Map.get(entry, :state),
+      tracker_state: Map.get(entry, :tracker_state),
       rank: Map.get(entry, :rank),
       linear_priority: Map.get(entry, :linear_priority),
       operator_override: Map.get(entry, :operator_override),
