@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config}
+  alias SymphonyElixir.{Codex.DynamicTool, Config, ProviderTransport}
 
   @initialize_id 1
   @thread_start_id 2
@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   @usage_callback_key {__MODULE__, :on_usage}
 
   @type session :: %{
-          port: port(),
+          port: port() | ProviderTransport.handle(),
           metadata: map(),
           approval_policy: String.t() | map(),
           auto_approve_requests: boolean(),
@@ -30,11 +30,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   def run(workspace, prompt, issue, opts \\ []) do
     with_port_exit_trapping(fn ->
       with {:ok, session} <- start_session(workspace, opts) do
-        try do
-          run_turn(session, prompt, issue, opts)
-        after
-          stop_session(session)
-        end
+        ProviderTransport.with_cleanup(fn -> run_turn(session, prompt, issue, opts) end, fn -> stop_session(session) end)
       end
     end)
   end
@@ -57,26 +53,44 @@ defmodule SymphonyElixir.Codex.AppServer do
         metadata = port_metadata(port)
         expanded_workspace = Path.expand(workspace)
 
-        with {:ok, session_policies} <- session_policies(expanded_workspace),
-             {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
-          {:ok,
-           %{
-             port: port,
-             metadata: metadata,
-             approval_policy: session_policies.approval_policy,
-             auto_approve_requests: session_policies.approval_policy == "never",
-             thread_sandbox: session_policies.thread_sandbox,
-             turn_sandbox_policy: session_policies.turn_sandbox_policy,
-             thread_id: thread_id,
-             workspace: expanded_workspace
-           }}
-        else
-          {:error, reason} ->
-            stop_port(port)
-            {:error, reason}
+        outcome =
+          try do
+            {:returned, start_captured_session(port, metadata, expanded_workspace)}
+          catch
+            kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+          end
+
+        case outcome do
+          {:returned, {:ok, _session} = result} ->
+            result
+
+          {:returned, error} ->
+            ProviderTransport.with_cleanup(fn -> error end, fn -> stop_port(port) end)
+
+          {:raised, kind, reason, stack} ->
+            ProviderTransport.with_cleanup(fn -> :erlang.raise(kind, reason, stack) end, fn -> stop_port(port) end)
         end
       end
     end)
+  end
+
+  defp start_captured_session(port, metadata, expanded_workspace) do
+    with {:ok, session_policies} <- session_policies(expanded_workspace),
+         {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+      {:ok,
+       %{
+         port: port,
+         metadata: metadata,
+         approval_policy: session_policies.approval_policy,
+         auto_approve_requests: session_policies.approval_policy == "never",
+         thread_sandbox: session_policies.thread_sandbox,
+         turn_sandbox_policy: session_policies.turn_sandbox_policy,
+         thread_id: thread_id,
+         workspace: expanded_workspace
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -171,8 +185,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     end)
   end
 
-  @spec stop_session(session()) :: :ok
-  def stop_session(%{port: port}) when is_port(port) do
+  @spec stop_session(session()) :: :ok | {:error, term()}
+  def stop_session(%{port: port}) do
     stop_port(port)
   end
 
@@ -195,6 +209,28 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_port(workspace, opts) do
+    started_at = System.monotonic_time(:millisecond)
+
+    case Config.provider_execution_boundary() do
+      {:ok, :legacy} ->
+        start_legacy_port(workspace, opts)
+
+      {:ok, selected} ->
+        if Keyword.has_key?(opts, :codex_command) do
+          {:error, :provider_command_override_forbidden}
+        else
+          case ProviderTransport.open(workspace, %{provider: "codex", command: {:shell, Config.codex_command()}, started_at: started_at}, selected) do
+            {:ok, handle, _identity} -> {:ok, handle}
+            error -> error
+          end
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp start_legacy_port(workspace, opts) do
     executable = System.find_executable("bash")
     env_executable = System.find_executable("env") || "env"
 
@@ -234,6 +270,11 @@ defmodule SymphonyElixir.Codex.AppServer do
       _ ->
         %{}
     end
+  end
+
+  defp port_metadata({:owned_provider, _, _, _, _} = handle) do
+    %{child: child} = ProviderTransport.metadata(handle)
+    %{codex_app_server_pid: to_string(child)}
   end
 
   defp send_initialize(port) do
@@ -425,7 +466,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     receive_loop(port, on_message, Config.agent_turn_timeout_ms(), "", tool_executor, auto_approve_requests)
   end
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) when is_port(port) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
@@ -452,6 +493,29 @@ defmodule SymphonyElixir.Codex.AppServer do
         exit(:shutdown)
     after
       timeout_ms ->
+        {:error, :turn_timeout}
+    end
+  end
+
+  defp receive_loop(handle, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
+    case ProviderTransport.recv(handle, timeout_ms) do
+      {:data, {:eol, chunk}} ->
+        handle_incoming(handle, on_message, pending_line <> chunk, timeout_ms, tool_executor, auto_approve_requests)
+
+      {:data, {:noeol, _chunk}} ->
+        {:error, :provider_line_limit}
+
+      {:stderr, bytes} ->
+        Logger.debug("Selected provider stderr bytes=#{byte_size(bytes)}")
+        receive_loop(handle, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests)
+
+      {:exit_status, status} ->
+        {:error, {:port_exit, status}}
+
+      {:transport_error, reason} ->
+        {:error, {:provider_transport_error, reason}}
+
+      :timeout ->
         {:error, :turn_timeout}
     end
   end
@@ -1018,7 +1082,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     with_timeout_response(port, request_id, Config.agent_read_timeout_ms(), "")
   end
 
-  defp with_timeout_response(port, request_id, timeout_ms, pending_line) do
+  defp with_timeout_response(port, request_id, timeout_ms, pending_line) when is_port(port) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
@@ -1038,6 +1102,29 @@ defmodule SymphonyElixir.Codex.AppServer do
         exit(:shutdown)
     after
       timeout_ms ->
+        {:error, :response_timeout}
+    end
+  end
+
+  defp with_timeout_response(handle, request_id, timeout_ms, pending_line) do
+    case ProviderTransport.recv(handle, timeout_ms) do
+      {:data, {:eol, chunk}} ->
+        handle_response(handle, request_id, pending_line <> chunk, timeout_ms)
+
+      {:data, {:noeol, _chunk}} ->
+        {:error, :provider_line_limit}
+
+      {:stderr, bytes} ->
+        Logger.debug("Selected provider stderr bytes=#{byte_size(bytes)}")
+        with_timeout_response(handle, request_id, timeout_ms, pending_line)
+
+      {:exit_status, status} ->
+        {:error, {:port_exit, status}}
+
+      {:transport_error, reason} ->
+        {:error, {:provider_transport_error, reason}}
+
+      :timeout ->
         {:error, :response_timeout}
     end
   end
@@ -1092,6 +1179,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp likely_json_payload?(_payload_string), do: false
+
+  defp stop_port({:owned_provider, _, _, _, _} = handle), do: ProviderTransport.close(handle)
 
   defp stop_port(port) when is_port(port) do
     case :erlang.port_info(port) do
@@ -1288,7 +1377,11 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp tool_call_arguments(_params), do: %{}
 
-  defp send_message(port, message) do
+  defp send_message({:owned_provider, _, _, _, _} = handle, message) do
+    ProviderTransport.command!(handle, Jason.encode!(message) <> "\n")
+  end
+
+  defp send_message(port, message) when is_port(port) do
     line = Jason.encode!(message) <> "\n"
 
     try do

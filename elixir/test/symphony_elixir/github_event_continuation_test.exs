@@ -171,6 +171,10 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     @impl true
     def handle_call(:runtime, _from, state), do: {:reply, state.runtime, state}
 
+    def handle_call({:enqueue, event}, _from, state) do
+      {:reply, GitHubEventInbox.enqueue([event]), state}
+    end
+
     def handle_call({:hold, kind, value}, _from, state) do
       hold = if value, do: MapSet.put(state.hold, kind), else: MapSet.delete(state.hold, kind)
       {:reply, :ok, %{state | hold: hold}}
@@ -2559,7 +2563,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp enqueue!(pid, kind \\ :ci) do
-    assert {:ok, %{accepted: 1}} = GitHubEventInbox.enqueue([event(kind)])
+    assert {:ok, %{accepted: 1}} = GenServer.call(pid, {:enqueue, event(kind)}, 5_000)
     send(pid, :run_github_webhook_cycle)
   end
 

@@ -100,7 +100,17 @@ defmodule SymphonyElixir.AgentRunner do
   defp restore_outcome({:returned, value}), do: value
   defp restore_outcome({:raised, kind, reason, stacktrace}), do: :erlang.raise(kind, reason, stacktrace)
 
-  defp outcome_diagnostic({:raised, kind, reason, stacktrace}), do: Exception.format(kind, reason, stacktrace)
+  defp outcome_diagnostic({:raised, kind, reason, stacktrace}) do
+    cause =
+      case reason do
+        %{__struct__: module} when is_atom(module) -> module
+        atom when is_atom(atom) -> atom
+        _ -> :details_retained_in_primary_outcome
+      end
+
+    "#{kind}: #{inspect(cause)}\n" <>
+      Exception.format_stacktrace(Enum.map(stacktrace, &diagnostic_stack_frame/1))
+  end
 
   defp outcome_diagnostic({:returned, {:stop, {:stale_execution, _ids, cause}}}),
     do: "stale_execution: " <> inspect(cause, limit: 8, printable_limit: 512)
@@ -118,6 +128,25 @@ defmodule SymphonyElixir.AgentRunner do
   defp outcome_diagnostic({:returned, {:error, reason}}), do: "error: " <> inspect(reason, limit: 8, printable_limit: 512)
   defp outcome_diagnostic({:returned, {:done, _issue}}), do: "done"
   defp outcome_diagnostic({:returned, _value}), do: "returned"
+
+  defp diagnostic_stack_frame({module, function, arity_or_args, location}) do
+    arity = if is_list(arity_or_args), do: length(arity_or_args), else: arity_or_args
+    {module, function, arity, diagnostic_stack_location(location)}
+  end
+
+  defp diagnostic_stack_frame({fun, arity_or_args, location}) when is_function(fun) do
+    {:module, module} = Function.info(fun, :module)
+    {:name, function} = Function.info(fun, :name)
+    diagnostic_stack_frame({module, function, arity_or_args, location})
+  end
+
+  defp diagnostic_stack_location(location) do
+    Enum.flat_map(location, fn
+      {:file, file} when is_binary(file) or is_list(file) -> [file: Path.basename(file)]
+      {:line, line} when is_integer(line) -> [line: line]
+      _metadata -> []
+    end)
+  end
 
   defp run_agent_turns(workspace, issue, agent_update_recipient, opts) do
     DeliveryEngine.run(workspace, issue, agent_update_recipient, opts)

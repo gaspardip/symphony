@@ -181,6 +181,58 @@ codex:
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
+## Selected process boundaries
+
+Two optional top-level workflow selections have separate scopes:
+`execution_boundary` covers configured harness commands run by `RunInspector`;
+`provider_execution_boundary` covers the Codex app-server, Claude CLI and Codex CLI
+child transports. Selecting one does not select the other. Both maps require
+exactly these three fields:
+
+| Field | Required value |
+| --- | --- |
+| `policy_file` | Absolute path to the external policy file; no `~` or environment expansion. |
+| `sha256` | 64 lowercase hexadecimal characters matching the exact policy file bytes. |
+| `timeout_ms` | Integer from 1 through 3,600,000; preparation and execution share this deadline. |
+
+An absent selection preserves the historical execution path and does not establish
+confinement. A present null, malformed selection, unreadable or changed policy,
+unsupported platform or failed launch is an explicit error; it cannot fall back to
+legacy execution. The checked-in workflow leaves both selections absent.
+
+The policy is a JSON object with exactly six fields:
+
+| Field | Required value |
+| --- | --- |
+| `version` | `1` |
+| `backend` | `"macos_deny_default_v1"` |
+| `workspace_root` | Existing canonical physical directory containing the issue workspace as a strict descendant. Broad system roots are rejected. |
+| `shell` | Exact path of one executable listed below. |
+| `executables` | 1–32 objects, each with exactly `path` and `sha256`; paths are physical executable files outside the candidate root, with matching content hashes. |
+| `read_roots` | Up to 16 physical directories outside, and not containing, the candidate root. Broad system roots and the user's home directory are rejected. |
+
+Keep the workflow and policy outside the entire candidate root. The policy,
+executables and read roots must pass the ownership/write-mode checks; candidate
+code must not supply these resources. The workspace must already have valid Git
+metadata and a physical `.symphony` directory. The policy protects `.git`, its
+resolved Git directories and `.symphony` from child writes.
+
+The native launcher replaces the environment before candidate shell execution:
+only the selected tools' `PATH`, private `HOME`/`TMPDIR`, and `LANG=C`/`LC_ALL=C`
+are provided. Only standard input, output and error are inherited. The generated
+macOS profile denies operations by default, permits the declared executables and
+bounded read locations, and limits writes to the workspace outside protected
+metadata and the private home/temp directories. It grants no network access.
+The packaged native helper must match the running macOS platform and architecture.
+
+This backend is offline. It does not establish working remote inference or
+publication, and cannot inherit host credentials to make those paths work. Host
+Git/`gh`, publication, lifecycle hooks and host tool callbacks remain outside this
+selected child boundary. It is not a boundary against a malicious trustee process
+with the same operating-system user, nor a guarantee of escaped-daemon cleanup.
+Provider-native sandbox options are separate from this selection. Source, runtime
+and packaged-executable verification remain separate evidence.
+
 ## Configuration captured for issue reads
 
 Each logical issue read captures the validated workflow once. Linear pagination,

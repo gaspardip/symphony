@@ -3,7 +3,7 @@ defmodule SymphonyElixir.RunInspector do
   Inspects workspace state, PR status, and harness-based validation commands.
   """
 
-  alias SymphonyElixir.RepoHarness
+  alias SymphonyElixir.{ExecutionBoundary, RepoHarness}
 
   defmodule Snapshot do
     @moduledoc false
@@ -36,7 +36,7 @@ defmodule SymphonyElixir.RunInspector do
   defmodule CommandResult do
     @moduledoc false
 
-    defstruct [:status, :command, :output]
+    defstruct [:status, :command, :output, :error]
   end
 
   @type snapshot :: %Snapshot{}
@@ -292,6 +292,19 @@ defmodule SymphonyElixir.RunInspector do
   end
 
   defp run_harness_command(workspace, command, opts) when is_binary(command) do
+    case ExecutionBoundary.run(workspace, command, opts) do
+      :legacy ->
+        run_legacy_harness_command(workspace, command, opts)
+
+      {:ok, {output, status}} ->
+        %CommandResult{status: if(status == 0, do: :passed, else: :failed), command: command, output: output}
+
+      {:error, reason} ->
+        %CommandResult{status: :unavailable, command: command, output: "Execution boundary failed: #{Kernel.inspect(reason)}", error: reason}
+    end
+  end
+
+  defp run_legacy_harness_command(workspace, command, opts) do
     shell_runner = Keyword.get(opts, :shell_runner, &default_shell_runner/3)
     env = workspace_runtime_env(workspace)
     {output, status} = shell_runner.(workspace, command, stderr_to_stdout: true, env: env)

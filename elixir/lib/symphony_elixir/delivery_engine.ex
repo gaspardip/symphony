@@ -173,19 +173,20 @@ defmodule SymphonyElixir.DeliveryEngine do
           session_id = Map.get(app_session, :thread_id) || Map.get(app_session, :session_id, "unknown")
           Logger.info("Agent session bootstrap succeeded for #{issue.identifier} session_id=#{session_id}")
 
-          try do
-            do_run(
-              app_session,
-              workspace,
-              issue,
-              agent_update_recipient,
-              issue_state_fetcher,
-              max_turns,
-              opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
-            )
-          after
-            AgentProvider.close_session(provider, app_session, binding)
-          end
+          SymphonyElixir.ProviderTransport.with_cleanup(
+            fn ->
+              do_run(
+                app_session,
+                workspace,
+                issue,
+                agent_update_recipient,
+                issue_state_fetcher,
+                max_turns,
+                opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
+              )
+            end,
+            fn -> AgentProvider.close_session(provider, app_session, binding) end
+          )
         else
           {:stop, _} = terminal ->
             terminal
@@ -448,19 +449,20 @@ defmodule SymphonyElixir.DeliveryEngine do
     Logger.info("Late session bootstrap for active stage #{stage} issue=#{issue.identifier} provider=#{inspect(provider)}")
 
     with {:ok, app_session, binding} <- AgentProvider.open_session(provider, workspace, issue, :main) do
-      try do
-        do_run(
-          app_session,
-          workspace,
-          issue,
-          agent_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
-        )
-      after
-        AgentProvider.close_session(provider, app_session, binding)
-      end
+      SymphonyElixir.ProviderTransport.with_cleanup(
+        fn ->
+          do_run(
+            app_session,
+            workspace,
+            issue,
+            agent_update_recipient,
+            issue_state_fetcher,
+            max_turns,
+            opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
+          )
+        end,
+        fn -> AgentProvider.close_session(provider, app_session, binding) end
+      )
     else
       {:stop, _} = terminal ->
         terminal

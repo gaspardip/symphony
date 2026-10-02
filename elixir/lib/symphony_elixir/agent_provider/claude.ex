@@ -14,7 +14,7 @@ defmodule SymphonyElixir.AgentProvider.Claude do
 
   require Logger
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, ProviderTransport}
   alias SymphonyElixir.DeliveryEngine.TurnEffects
 
   @default_model "claude-sonnet-4-6"
@@ -34,20 +34,30 @@ defmodule SymphonyElixir.AgentProvider.Claude do
 
   @impl true
   def start_session(workspace, opts \\ []) do
-    model = Keyword.get(opts, :model) || Config.agent_model() || @default_model
-    max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
+    with {:ok, boundary} <- Config.provider_execution_boundary() do
+      model = Keyword.get(opts, :model) || Config.agent_model() || @default_model
+      max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
 
-    {:ok,
-     %{
-       workspace: Path.expand(workspace),
-       model: model,
-       max_turns: max_turns,
-       session_id: generate_session_id()
-     }}
+      {:ok,
+       %{
+         workspace: Path.expand(workspace),
+         provider_boundary: boundary,
+         model: model,
+         max_turns: max_turns,
+         session_id: generate_session_id()
+       }}
+    end
   end
 
   @impl true
   def run_turn(session, prompt, issue, opts \\ []) do
+    case session.provider_boundary do
+      :legacy -> legacy_run_turn(session, prompt, issue, opts)
+      selection -> selected_run_turn(session, prompt, issue, opts, selection)
+    end
+  end
+
+  defp legacy_run_turn(session, prompt, issue, opts) do
     model = Keyword.get(opts, :model, session.model)
     effective_session = %{session | model: model}
     full_prompt = build_full_prompt(prompt, session.workspace, opts)
@@ -104,6 +114,77 @@ defmodule SymphonyElixir.AgentProvider.Claude do
         })
 
         {:error, {kind, reason}}
+    end
+  end
+
+  defp selected_run_turn(session, prompt, _issue, opts, selection) do
+    started_at = System.monotonic_time(:millisecond)
+    model = Keyword.get(opts, :model, session.model)
+    prompt = build_full_prompt(prompt, session.workspace, opts)
+    args = build_cli_args(%{session | model: model}, prompt, opts)
+    executable = claude_executable()
+    launch = %{provider: "claude", command: {:exec, executable, args}, started_at: started_at}
+
+    with {:ok, handle, _identity} <- ProviderTransport.open(session.workspace, launch, selection) do
+      on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+      on_usage = Keyword.get(opts, :on_usage)
+
+      ProviderTransport.with_cleanup(
+        fn ->
+          try do
+            case receive_selected(handle, on_message, on_usage, %StreamState{}) do
+              {:error, _} = error ->
+                error
+
+              {result, state} ->
+                {:ok,
+                 %{
+                   result: result,
+                   session_id: session.session_id,
+                   usage: state.usage,
+                   cli_observation: %{profile: :claude_cli, files_touched: state.files_touched, result_text: state.result_text, error: state.error}
+                 }}
+            end
+          catch
+            :throw, {:agent_execution_halt, {:stop, _} = terminal} ->
+              terminal
+
+            kind, reason ->
+              on_message.(%{event: :turn_ended_with_error, timestamp: DateTime.utc_now(), payload: %{error: "selected_provider_turn_failed"}})
+              {:error, {kind, reason}}
+          end
+        end,
+        fn -> ProviderTransport.close(handle) end
+      )
+    end
+  end
+
+  defp receive_selected(handle, on_message, on_usage, state) do
+    case ProviderTransport.recv(handle, Config.agent_turn_timeout_ms()) do
+      {:data, {:eol, line}} ->
+        observe_raw_line(line, on_usage)
+        {state, event} = parse_stream_line(line, state)
+        if event, do: on_message.(event)
+        receive_selected(handle, on_message, on_usage, state)
+
+      {:data, {:noeol, _partial}} ->
+        {:error, :provider_line_limit}
+
+      {:stderr, bytes} ->
+        Logger.debug("Selected provider stderr bytes=#{byte_size(bytes)}")
+        receive_selected(handle, on_message, on_usage, state)
+
+      {:exit_status, 0} ->
+        {:turn_completed, state}
+
+      {:exit_status, status} ->
+        {:turn_failed, %{state | error: "exit_status_#{status}"}}
+
+      {:transport_error, reason} ->
+        {:error, {:provider_transport_error, reason}}
+
+      :timeout ->
+        {:error, :provider_turn_timeout}
     end
   end
 

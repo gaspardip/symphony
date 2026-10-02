@@ -38,7 +38,7 @@ defmodule SymphonyElixir.AgentProvider do
   @callback run_turn(session(), prompt :: String.t(), issue :: map(), opts :: keyword()) ::
               {:ok, turn_result()} | {:error, term()} | AgentExecution.terminal()
 
-  @callback stop_session(session()) :: :ok
+  @callback stop_session(session()) :: :ok | {:error, term()}
 
   @doc false
   @spec open_session(module(), Path.t(), map(), :main | :verifier, keyword()) ::
@@ -52,17 +52,17 @@ defmodule SymphonyElixir.AgentProvider do
           {:ok, session, binding}
 
         {:stop, _} = terminal ->
-          provider.stop_session(session)
-          terminal
+          SymphonyElixir.ProviderTransport.with_cleanup(fn -> terminal end, fn -> provider.stop_session(session) end)
       end
     end
   end
 
   @doc false
-  @spec close_session(module(), session(), AgentExecution.binding() | :legacy) :: :ok | AgentExecution.terminal()
+  @spec close_session(module(), session(), AgentExecution.binding() | :legacy) :: :ok | {:error, term()} | AgentExecution.terminal()
   def close_session(provider, session, binding) do
-    :ok = provider.stop_session(session)
-    if binding == :legacy, do: :ok, else: AgentExecution.retire_session(binding)
+    with :ok <- provider.stop_session(session) do
+      if binding == :legacy, do: :ok, else: AgentExecution.retire_session(binding)
+    end
   end
 
   @doc false

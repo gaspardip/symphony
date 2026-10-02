@@ -1398,9 +1398,40 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:server, :host])
   end
 
+  @doc "Checked, explicit harness confinement selection; absence is the historical contract."
+  @spec execution_boundary() :: {:ok, :legacy | map()} | {:error, term()}
+  def execution_boundary, do: execution_boundary_selection("execution_boundary")
+
+  @doc "Checked provider selection, independent of the harness selection."
+  @spec provider_execution_boundary() :: {:ok, :legacy | map()} | {:error, term()}
+  def provider_execution_boundary, do: execution_boundary_selection("provider_execution_boundary")
+
+  defp execution_boundary_selection(key) do
+    with {:ok, %{config: config}} when is_map(config) <- current_workflow() do
+      case Map.fetch(normalize_keys(config), key) do
+        :error ->
+          {:ok, :legacy}
+
+        {:ok, %{"policy_file" => path, "sha256" => digest, "timeout_ms" => timeout} = selected}
+        when map_size(selected) == 3 and is_binary(path) and is_binary(digest) and
+               is_integer(timeout) and timeout > 0 and timeout <= 3_600_000 ->
+          if Path.type(path) == :absolute and Regex.match?(~r/\A[0-9a-f]{64}\z/, digest),
+            do: {:ok, %{policy_file: path, sha256: digest, timeout_ms: timeout, workflow_file: Workflow.workflow_file_path()}},
+            else: {:error, :invalid_execution_boundary_selection}
+
+        {:ok, _invalid} ->
+          {:error, :invalid_execution_boundary_selection}
+      end
+    else
+      {:error, reason} -> {:error, {:execution_boundary_workflow, reason}}
+    end
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, _workflow} <- current_workflow(),
+         {:ok, _boundary} <- execution_boundary(),
+         {:ok, _provider_boundary} <- provider_execution_boundary(),
          :ok <- require_tracker_kind(),
          :ok <- require_linear_token(),
          :ok <- require_linear_project(),

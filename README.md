@@ -21,6 +21,12 @@ specification below describe its starting point, not acceptance evidence for thi
 The [selected runner release contract](docs/selected-runner-release.md) distinguishes
 the configured release from execution identity and defines its pre-run path protection.
 
+Selected harness and provider processes can use independently configured macOS
+execution boundaries. Selection is explicit; omission preserves legacy execution
+and is not evidence of confinement. This scope excludes host hooks, Git, `gh` and
+publication. See [the selection contract and limits](elixir/README.md#selected-process-boundaries)
+before configuring the offline backend.
+
 Delivery branch preparation and resets fetch the configured base explicitly, including
 workspaces cloned for a different single branch. Reset selects the local base at its
 remote revision and preserves the runtime snapshot; local code changes are discarded.

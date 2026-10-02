@@ -16,6 +16,12 @@ tracker:
     - Done
 runner:
   channel: canary
+# Optional independent process policies are not enabled in this workflow.
+# execution_boundary and provider_execution_boundary each require exactly:
+# policy_file (absolute path), sha256 (64 lowercase hex), timeout_ms (1..3600000).
+# See README.md#selected-process-boundaries for the closed six-field macOS policy.
+# Omission keeps legacy execution and is not proof of confinement.
+# The selected backend is offline; host hooks, Git/gh and publication are outside it.
 polling:
   interval_ms: 600000
   healing_interval_ms: 1800000

@@ -29,13 +29,17 @@ struct owner {
     pid_t child;
     int grouped, reaped, reap_confirmed, seen_exit, status, input, output, gate;
     int started, channel, control_open, output_eof, killed, confirmed, final_queued;
+    int stream, error_output, error_eof, write_ack, output_credit, error_first;
+    uint32_t write_id;
+    unsigned char input_pending[CHUNK];
+    size_t input_size, input_offset;
     enum trigger trigger;
     enum phase phase;
     int reason, closure_error;
     int64_t deadline, stopping, finish_deadline;
     unsigned char pending[CHUNK + 256];
     size_t pending_size, pending_offset;
-    unsigned char control[64];
+    unsigned char control[CHUNK + 32];
     size_t control_size;
 };
 
@@ -148,6 +152,20 @@ static void complete_cleanup(struct owner *o, int64_t now) {
 }
 
 static void control_packet(struct owner *o, const unsigned char *data, size_t size, int64_t now) {
+    if (o->stream && size == 1 && data[0] == 'A') {
+        if (o->trigger != NONE) return; /* Cleanup drains independently of credits. */
+        if (o->output_credit == 0) { o->output_credit = 1; return; }
+    }
+    if (o->stream && size > 5 && size <= CHUNK + 5 && data[0] == 'I' && o->started &&
+        o->trigger == NONE && o->input >= 0 && o->input_size == 0 && !o->write_ack) {
+        memcpy(&o->write_id, data + 1, 4);
+        memcpy(o->input_pending, data + 5, size - 5);
+        o->input_size = size - 5; o->input_offset = 0; return;
+    }
+    if (o->stream && size == 1 && data[0] == 'E' && o->input_size == 0 && !o->write_ack) {
+        if (o->input >= 0) { close(o->input); o->input = -1; }
+        return;
+    }
     if (size == 1 && data[0] == 'C') { begin_stop(o, OWNER_GONE, now); return; }
     if (size == 1 && data[0] == 'T') { begin_stop(o, DEADLINE, now); return; }
     if (size > 1 && size < 24 && data[0] == 'G' && !o->started && o->trigger == NONE) {
@@ -161,7 +179,9 @@ static void control_packet(struct owner *o, const unsigned char *data, size_t si
         if (write(o->gate, "G", 1) != 1) {
             remember(o, CONTROL, errno); begin_stop(o, FAILED, now); return;
         }
-        close(o->gate); o->gate = -1; o->started = 1; return;
+        close(o->gate); o->gate = -1; o->started = 1; o->output_credit = 1;
+        if (o->stream) packet(o, 'B', "", 0);
+        return;
     }
     remember(o, CONTROL, EPROTO); begin_stop(o, FAILED, now);
 }
@@ -182,7 +202,7 @@ static void read_control(struct owner *o, int64_t now) {
     while (o->control_size >= 4) {
         uint32_t length;
         memcpy(&length, o->control, 4); length = ntohl(length);
-        if (length == 0 || length > 24) {
+        if (length == 0 || length > (o->stream ? CHUNK + 5 : 24)) {
             remember(o, CONTROL, EPROTO); begin_stop(o, FAILED, now); return;
         }
         if (o->control_size < (size_t)length + 4) return;
@@ -192,21 +212,48 @@ static void read_control(struct owner *o, int64_t now) {
     }
 }
 
+static void flush_input(struct owner *o, int64_t now) {
+    if (o->trigger != NONE || o->input < 0 || o->input_size == 0) return;
+    ssize_t count = write(o->input, o->input_pending + o->input_offset, o->input_size - o->input_offset);
+    if (count > 0) {
+        o->input_offset += (size_t)count;
+        if (o->input_offset == o->input_size) { o->input_size = 0; o->write_ack = 1; }
+    } else if (count < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+        remember(o, CONTROL, errno); begin_stop(o, FAILED, now);
+    }
+}
+
+static void read_error(struct owner *o) {
+    if (!o->stream || o->error_eof || (o->trigger == NONE && !o->output_credit) || (o->channel && o->pending_size != 0)) return;
+    unsigned char data[CHUNK];
+    ssize_t n = read(o->error_output, data, sizeof(data));
+    if (n > 0 && o->channel && (o->trigger == NONE || o->trigger == COMPLETED)) {
+        packet(o, 'S', data, (size_t)n); o->output_credit = 0;
+    }
+    else if (n == 0) o->error_eof = 1;
+    else if (n < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+        remember(o, OUTPUT, errno); o->error_eof = 1;
+    }
+}
+
 static void read_output(struct owner *o) {
-    if (o->output_eof || (o->channel && o->pending_size != 0)) return;
+    if (o->output_eof || (o->stream && o->trigger == NONE && !o->output_credit) || (o->channel && o->pending_size != 0)) return;
     unsigned char data[CHUNK];
     ssize_t n = read(o->output, data, sizeof(data));
-    if (n > 0 && o->channel) packet(o, 'D', data, (size_t)n);
+    if (n > 0 && o->channel && (!o->stream || o->trigger == NONE || o->trigger == COMPLETED)) {
+        packet(o, 'D', data, (size_t)n); o->output_credit = 0;
+    }
     else if (n == 0) o->output_eof = 1;
     else if (n < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
         remember(o, OUTPUT, errno); o->output_eof = 1;
     }
 }
 
-static void child_exec(int input[2], int output[2], int gate[2], const char *shell, const char *command) {
+static void child_exec(int input[2], int output[2], int gate[2], int errors[2], const char *shell, const char *command, char **direct) {
     if (setpgid(0, 0) < 0 || dup2(input[0], STDIN_FILENO) < 0 ||
-        dup2(output[1], STDOUT_FILENO) < 0 || dup2(output[1], STDERR_FILENO) < 0) _exit(126);
+        dup2(output[1], STDOUT_FILENO) < 0 || dup2(errors == NULL ? output[1] : errors[1], STDERR_FILENO) < 0) _exit(126);
     close(input[0]); close(input[1]); close(output[0]); close(output[1]); close(gate[1]);
+    if (errors != NULL) { close(errors[0]); close(errors[1]); }
     char start = 0;
     ssize_t count;
     do { count = read(gate[0], &start, 1); } while (count < 0 && errno == EINTR);
@@ -216,20 +263,24 @@ static void child_exec(int input[2], int output[2], int gate[2], const char *she
     memset(&action, 0, sizeof(action)); action.sa_handler = SIG_DFL; sigemptyset(&action.sa_mask);
     const int signals[] = {SIGTERM, SIGHUP, SIGINT, SIGPIPE};
     for (size_t i = 0; i < sizeof(signals) / sizeof(signals[0]); i++) sigaction(signals[i], &action, NULL);
-    execl(shell, shell, "-lc", command, (char *)NULL);
+    if (direct != NULL) execv(direct[0], direct);
+    else execl(shell, shell, "-lc", command, (char *)NULL);
     _exit(127);
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4) return 64;
+    int stream = argc >= 4 && strcmp(argv[2], "--stream") == 0;
+    int direct = stream || (argc >= 4 && strcmp(argv[2], "--argv") == 0);
+    if ((!direct && argc != 4) || argc > 260) return 64;
     char *end;
     errno = 0; long budget = strtol(argv[1], &end, 10);
-    if (errno || *end || budget <= 0 || argv[2][0] != '/') return 64;
+    if (errno || *end || budget <= 0 || (direct ? argv[3][0] : argv[2][0]) != '/') return 64;
     int64_t now = clock_ms(); if (now < 0 || budget > INT64_MAX - now - GRACE_MS - VERIFY_MS - 250) return 70;
     struct owner o;
     memset(&o, 0, sizeof(o));
     o.child = -1; o.input = -1; o.output = -1; o.gate = -1;
     o.status = -1; o.trigger = NONE; o.channel = 1; o.control_open = 1; o.deadline = now + budget;
+    o.stream = stream; o.error_output = -1; o.error_eof = !stream;
     struct sigaction action;
     memset(&action, 0, sizeof(action)); action.sa_handler = stop_signal; sigemptyset(&action.sa_mask);
     const int signals[] = {SIGTERM, SIGHUP, SIGINT, SIGPIPE};
@@ -238,21 +289,24 @@ int main(int argc, char **argv) {
     if (sigprocmask(SIG_SETMASK, &action.sa_mask, NULL) < 0) return 70;
     action.sa_handler = SIG_DFL;
     if (sigaction(SIGCHLD, &action, NULL) < 0) return 70;
-    int input[2], output[2], gate[2];
+    int input[2], output[2], gate[2], errors[2];
     if (owned_pipe(input) < 0) return 70;
     if (owned_pipe(output) < 0) { close(input[0]); close(input[1]); return 70; }
     if (owned_pipe(gate) < 0) { close(input[0]); close(input[1]); close(output[0]); close(output[1]); return 70; }
+    if (stream && owned_pipe(errors) < 0) return 70;
+    if (stream && (nonblocking(errors[0]) < 0 || nonblocking(input[1]) < 0)) return 70;
     /* Configure polled fds before fork, so setup failure cannot block cleanup. */
     if (nonblocking(STDIN_FILENO) < 0 || nonblocking(STDOUT_FILENO) < 0 || nonblocking(output[0]) < 0) return 70;
     o.child = fork();
-    if (o.child == 0) child_exec(input, output, gate, argv[2], argv[3]);
+    if (o.child == 0) child_exec(input, output, gate, stream ? errors : NULL, argv[2], argv[3], direct ? &argv[3] : NULL);
     if (o.child < 0) return 70; /* No hook child exists; the OS closes our descriptors. */
     close(input[0]); close(output[1]); close(gate[0]);
     o.input = input[1]; o.output = output[0]; o.gate = gate[1];
+    if (stream) { close(errors[1]); o.error_output = errors[0]; }
     if (setpgid(o.child, o.child) == 0 || getpgid(o.child) == o.child) o.grouped = 1;
     else { remember(&o, GROUP, errno); begin_stop(&o, FAILED, now); }
     char ready[96];
-    int length = snprintf(ready, sizeof(ready), "1 %ld %ld", (long)o.child, (long)getpid());
+    int length = snprintf(ready, sizeof(ready), "%d %ld %ld", stream ? 2 : 1, (long)o.child, (long)getpid());
     packet(&o, 'R', ready, (size_t)length);
 
     for (;;) {
@@ -268,29 +322,38 @@ int main(int argc, char **argv) {
         if (now >= o.deadline) begin_stop(&o, DEADLINE, now);
         if (o.phase != NO_ERROR) begin_stop(&o, FAILED, now);
         complete_cleanup(&o, now);
-        read_output(&o);
+        flush_input(&o, now);
+        if (o.write_ack && o.pending_size == 0) {
+            packet(&o, 'W', &o.write_id, 4); o.write_ack = 0;
+        }
+        if (o.stream && o.error_first) { read_error(&o); read_output(&o); }
+        else { read_output(&o); read_error(&o); }
+        o.error_first = !o.error_first;
         flush_packet(&o);
         if (!o.channel) begin_stop(&o, OWNER_GONE, now);
 
-        int ended = o.trigger != NONE && o.confirmed && o.output_eof;
+        int ended = o.trigger != NONE && o.confirmed && o.output_eof && o.error_eof;
         int expired = o.trigger != NONE && now >= o.finish_deadline;
-        if (!o.final_queued && (ended || expired) && o.pending_size == 0) {
+        if (!o.final_queued && (ended || expired) && o.pending_size == 0 && !o.write_ack) {
             char result[160];
             int certain = o.grouped && o.reap_confirmed && o.confirmed &&
-                          o.output_eof && !o.closure_error;
-            length = snprintf(result, sizeof(result), "1 %d %d %d %d %d %ld", (int)o.trigger,
+                          o.output_eof && o.error_eof && !o.closure_error;
+            length = snprintf(result, sizeof(result), "%d %d %d %d %d %d %ld", stream ? 2 : 1, (int)o.trigger,
                               o.status, certain, (int)o.phase, o.reason, (long)o.child);
             if (!o.channel) return certain ? 0 : 70;
             packet(&o, 'F', result, (size_t)length); o.final_queued = 1;
         }
         if (o.final_queued && o.pending_size == 0) return 0;
         if (expired && now >= o.finish_deadline + 250) return 70;
-        struct pollfd fds[3] = {
+        int readable_output = !o.stream || o.trigger != NONE || o.output_credit;
+        struct pollfd fds[5] = {
             {o.control_open ? STDIN_FILENO : -1, POLLIN, 0},
-            {o.output, o.output_eof || (o.channel && o.pending_size != 0) ? 0 : POLLIN, 0},
-            {STDOUT_FILENO, o.channel && o.pending_size != 0 ? POLLOUT : 0, 0}
+            {o.output, o.output_eof || !readable_output || (o.channel && o.pending_size != 0) ? 0 : POLLIN, 0},
+            {STDOUT_FILENO, o.channel && o.pending_size != 0 ? POLLOUT : 0, 0},
+            {o.error_output, o.error_eof || !readable_output || (o.channel && o.pending_size != 0) ? 0 : POLLIN, 0},
+            {o.input, o.input_size != 0 && o.trigger == NONE ? POLLOUT : 0, 0}
         };
-        int result = poll(fds, 3, 10);
+        int result = poll(fds, 5, 10);
         if (result < 0 && errno != EINTR) { remember(&o, CONTROL, errno); begin_stop(&o, FAILED, now); }
     }
 }

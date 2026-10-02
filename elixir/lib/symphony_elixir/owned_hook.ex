@@ -31,6 +31,233 @@ defmodule SymphonyElixir.OwnedHook do
     end
   end
 
+  @doc false
+  @spec run_boundary(String.t(), Path.t(), map(), integer()) :: {:ok, {binary(), non_neg_integer()}} | {:error, term()}
+  def run_boundary(command, workspace, selection, deadline) do
+    caller = self()
+    ref = make_ref()
+
+    case spawn_owner(caller, ref, {:boundary, selection, command}, workspace, deadline) do
+      {pid, monitor} when is_pid(pid) -> await_owner(pid, monitor, ref, deadline)
+      {:error, reason} -> {:error, {:start_failed, reason}}
+    end
+  end
+
+  @doc false
+  @spec prepare_stream(Path.t(), map(), tuple(), integer()) :: {:ok, tuple(), map()} | {:error, term()}
+  def prepare_stream(workspace, selection, launch, deadline) do
+    caller = self()
+    ref = make_ref()
+    {owner, monitor} = spawn_monitor(fn -> supervise_stream(caller, ref, workspace, selection, launch, deadline) end)
+    handle = {:owned_provider, owner, caller, ref, deadline}
+
+    receive do
+      {^handle, {:ready, identity}} ->
+        Process.demonitor(monitor, [:flush])
+        {:ok, handle, identity}
+
+      {^handle, {:closed, result}} ->
+        Process.demonitor(monitor, [:flush])
+
+        case result do
+          {:ok, receipt} -> {:error, {:provider_start_interrupted, receipt}}
+          {:error, _} = error -> error
+        end
+
+      {:DOWN, ^monitor, :process, ^owner, _reason} ->
+        {:error, {:provider_cleanup_uncertain, :custodian_down}}
+    after
+      max(deadline - now(), 0) + @cleanup_budget ->
+        stream_control(handle, "C")
+        Process.demonitor(monitor, [:flush])
+        {:error, {:provider_cleanup_uncertain, :startup_deadline}}
+    end
+  end
+
+  @doc false
+  @spec stream_control({:owned_provider, pid(), pid(), reference(), integer()}, binary()) :: :ok | {:error, :foreign_stream_owner}
+  def stream_control({:owned_provider, owner, caller, ref, _deadline}, packet) when caller == self() and is_binary(packet) do
+    send(owner, {:stream_control, ref, caller, packet})
+    :ok
+  end
+
+  def stream_control(_handle, _packet), do: {:error, :foreign_stream_owner}
+
+  defp supervise_stream(caller, ref, workspace, selection, launch, deadline) do
+    Process.flag(:trap_exit, true)
+    monitor = Process.monitor(caller)
+    handle = {:owned_provider, self(), caller, ref, deadline}
+
+    result =
+      with :ok <- platform_current(),
+           :ok <- startup_current(caller, deadline),
+           {:ok, artifact} <- materialize(workspace) do
+        result =
+          case SymphonyElixir.ExecutionBoundary.prepare_argv(selection, launch, workspace, deadline) do
+            {:ok, resource} ->
+              primary = open_stream_native(artifact.path, resource, handle, monitor)
+
+              case primary do
+                {:error, {:provider_cleanup_uncertain, _}} -> primary
+                _ -> SymphonyElixir.ExecutionBoundary.finish(resource, primary)
+              end
+
+            error ->
+              error
+          end
+
+        case result do
+          {:error, {:provider_cleanup_uncertain, _}} -> result
+          _ -> combine(result, remove_artifact(artifact))
+        end
+      end
+
+    Process.demonitor(monitor, [:flush])
+    send(caller, {handle, {:closed, result}})
+  end
+
+  defp open_stream_native(path, resource, {:owned_provider, _owner, caller, ref, deadline} = handle, monitor) do
+    with :ok <- startup_current(caller, deadline) do
+      port =
+        Port.open({:spawn_executable, path}, [
+          :binary,
+          :exit_status,
+          :use_stdio,
+          {:packet, 4},
+          {:args, [Integer.to_string(deadline - now()), "--stream" | resource.argv]}
+        ])
+
+      state = %{
+        port: port,
+        handle: handle,
+        caller: caller,
+        ref: ref,
+        monitor: monitor,
+        deadline: deadline,
+        limit: deadline + @cleanup_budget - 250,
+        ready: nil,
+        receipt: nil,
+        started: false,
+        cancelled: false,
+        failure: nil
+      }
+
+      try do
+        receive_stream_native(state)
+      after
+        if Port.info(port) != nil, do: Port.close(port)
+      end
+    end
+  rescue
+    error -> {:error, {:provider_cleanup_uncertain, {:native_exception, error.__struct__}}}
+  end
+
+  defp receive_stream_native(state) do
+    %{port: port, caller: caller, monitor: monitor, handle: handle, ref: ref} = state
+    wait_until = if state.cancelled, do: state.limit, else: state.deadline
+
+    receive do
+      {^port, {:data, <<"R", payload::binary>>}} ->
+        case {state.ready, integers(payload)} do
+          {nil, [2, child, helper]} when child > 1 and helper > 1 ->
+            next = %{state | ready: %{child: child, pgid: child, helper: helper}}
+
+            if Port.info(port, :os_pid) == {:os_pid, helper} and Process.alive?(caller) and now() < state.deadline do
+              send(caller, {handle, {:ready, next.ready}})
+              receive_stream_native(next)
+            else
+              receive_stream_native(stream_cancel(next, :invalid_ready))
+            end
+
+          _ ->
+            receive_stream_native(stream_cancel(state, :invalid_ready))
+        end
+
+      {^port, {:data, "B"}} when not state.started and not state.cancelled ->
+        send(caller, {handle, :started})
+        receive_stream_native(%{state | started: true})
+
+      {^port, {:data, <<kind, data::binary>>}} when kind in [?D, ?S] and state.receipt == nil ->
+        send(caller, {handle, {:chunk, if(kind == ?D, do: :stdout, else: :stderr), data}})
+        receive_stream_native(state)
+
+      {^port, {:data, <<"W", id::unsigned-big-32>>}} when state.receipt == nil ->
+        send(caller, {handle, {:written, id}})
+        receive_stream_native(state)
+
+      {^port, {:data, <<"F", payload::binary>>}} ->
+        case {state.ready, state.receipt, integers(payload)} do
+          {%{child: child}, nil, [2, trigger, status, certain, phase, reason, child]}
+          when trigger in 0..4 and status >= -1 and certain in [0, 1] and phase in 0..10 and reason >= 0 ->
+            receipt = %{trigger: trigger, status: status, certain: certain, phase: phase, reason: reason}
+            receive_stream_native(%{state | receipt: receipt, cancelled: true})
+
+          _ ->
+            receive_stream_native(stream_cancel(state, :invalid_receipt))
+        end
+
+      {^port, {:data, _invalid}} ->
+        receive_stream_native(stream_cancel(state, :invalid_packet))
+
+      {:stream_control, ^ref, ^caller, packet} ->
+        next =
+          cond do
+            state.receipt != nil -> state
+            packet in ["C", "T"] -> stream_cancel(state, nil, packet)
+            state.cancelled -> state
+            now() >= state.deadline -> stream_cancel(state, :timeout, "T")
+            true -> stream_native_command(state, packet)
+          end
+
+        receive_stream_native(next)
+
+      {^port, {:exit_status, status}} ->
+        stream_result(state, status)
+
+      {:EXIT, ^port, :normal} ->
+        receive_stream_native(state)
+
+      {:EXIT, ^port, _reason} ->
+        {:error, {:provider_cleanup_uncertain, %{reason: :port_exit, identity: state.ready, receipt: state.receipt}}}
+
+      {:DOWN, ^monitor, :process, ^caller, _reason} ->
+        receive_stream_native(stream_cancel(state, nil))
+    after
+      max(wait_until - now(), 0) ->
+        if now() >= state.limit,
+          do: {:error, {:provider_cleanup_uncertain, %{reason: :native_deadline, identity: state.ready, receipt: state.receipt}}},
+          else: receive_stream_native(stream_cancel(state, :timeout, "T"))
+    end
+  end
+
+  defp stream_cancel(state, reason, packet \\ "C") do
+    next = %{state | cancelled: true, failure: state.failure || reason, limit: min(state.limit, now() + @cleanup_budget - 250)}
+    if state.cancelled, do: next, else: stream_native_command(next, packet)
+  end
+
+  defp stream_native_command(state, packet) do
+    case Port.command(state.port, packet, [:nosuspend]) do
+      true ->
+        state
+
+      false ->
+        Port.close(state.port)
+        %{state | cancelled: true, failure: state.failure || :native_input_backpressure, limit: min(state.limit, now() + @cleanup_budget - 250)}
+    end
+  rescue
+    ArgumentError -> %{state | cancelled: true, failure: state.failure || :native_channel_closed, limit: min(state.limit, now() + @cleanup_budget - 250)}
+  catch
+    :exit, _reason -> %{state | cancelled: true, failure: state.failure || :native_channel_closed, limit: min(state.limit, now() + @cleanup_budget - 250)}
+  end
+
+  defp stream_result(%{receipt: %{certain: 1, phase: phase} = receipt} = state, 0) when phase in [0, 5, 7] do
+    if phase != 0, do: Logger.warning("Provider physical closure diagnostic phase=#{phase} errno=#{receipt.reason}")
+    {:ok, %{identity: state.ready, receipt: receipt, failure: state.failure}}
+  end
+
+  defp stream_result(state, status),
+    do: {:error, {:provider_cleanup_uncertain, %{exit_status: status, failure: state.failure, identity: state.ready, receipt: state.receipt}}}
+
   defp spawn_owner(caller, ref, command, workspace, deadline) do
     spawn_monitor(fn -> supervise(caller, ref, command, workspace, deadline) end)
   rescue
@@ -118,14 +345,22 @@ defmodule SymphonyElixir.OwnedHook do
     end
   end
 
-  defp run_materialized(artifact, caller, monitor, command, workspace, deadline) do
-    case System.find_executable("sh") do
-      nil -> {:error, {:start_failed, :shell_not_found}}
-      shell -> open_native(artifact.path, shell, command, workspace, caller, monitor, deadline)
+  defp run_materialized(artifact, caller, monitor, {:boundary, selection, command}, workspace, deadline) do
+    with :ok <- startup_current(caller, deadline),
+         {:ok, resource} <- SymphonyElixir.ExecutionBoundary.prepare(selection, command, workspace, deadline) do
+      primary = open_native(artifact.path, ["--argv" | resource.argv], workspace, caller, monitor, deadline)
+      SymphonyElixir.ExecutionBoundary.finish(resource, primary)
     end
   end
 
-  defp open_native(path, shell, command, workspace, caller, monitor, deadline) do
+  defp run_materialized(artifact, caller, monitor, command, workspace, deadline) do
+    case System.find_executable("sh") do
+      nil -> {:error, {:start_failed, :shell_not_found}}
+      shell -> open_native(artifact.path, [shell, command], workspace, caller, monitor, deadline)
+    end
+  end
+
+  defp open_native(path, arguments, workspace, caller, monitor, deadline) do
     remaining = deadline - now()
 
     cond do
@@ -143,7 +378,7 @@ defmodule SymphonyElixir.OwnedHook do
             :use_stdio,
             {:packet, 4},
             {:cd, workspace},
-            {:args, [Integer.to_string(remaining), shell, command]}
+            {:args, [Integer.to_string(remaining) | arguments]}
           ])
 
         state = %{
