@@ -1709,6 +1709,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{blocked: true} -> state
         %{operation: %{phase: :refreshing_after_effects}} -> start_github_read(state, :refreshing_after_effects)
         %{operation: %{phase: :waiting_worker} = operation} -> resume_github_after_worker(state, operation)
+        %{operation: %{phase: :waiting_retry_custody} = operation} -> resume_github_after_retry_custody(state, operation)
         %{operation: %{phase: :resolving} = operation} -> restart_github_resolution(state, operation)
         %{operation: nil, workspaces: []} -> complete_github_head(state)
         %{operation: nil, workspaces: [workspace | _]} -> prepare_github_workspace(state, workspace)
@@ -1895,10 +1896,36 @@ defmodule SymphonyElixir.Orchestrator do
 
     with {:ok, workspace} <- current_custody_workspace(state, operation.issue_ref),
          true <- Path.expand(workspace) == Path.expand(operation.workspace) or {:error, :lease_workspace_changed} do
-      finish_github_candidate(state, :custody_in_progress)
+      case Map.fetch!(state.lease_claims, operation.issue_ref.id) do
+        %{holder: :retry} -> put_in(state.github_inbox_batch.head.operation.phase, :waiting_retry_custody)
+        _ -> finish_github_candidate(state, :custody_in_progress)
+      end
     else
       {:error, reason} -> finish_github_candidate(state, {:lease_lookup_error, reason})
     end
+  end
+
+  defp resume_github_after_retry_custody(state, operation) do
+    if github_custody_identity(state, operation.issue_ref.id) == operation.custody do
+      state
+    else
+      # The queued event owns no lease. Recapture current material and any successor
+      # worker after the previous retry has retired or transferred its custody.
+      state = put_in(state.github_inbox_batch.head.operation, nil)
+      prepare_github_workspace(state, operation.workspace)
+    end
+  end
+
+  defp wake_github_custody_waiter(state, issue_id) do
+    case state.github_inbox_batch do
+      %{ref: ref, head: %{operation: %{issue_ref: %{id: ^issue_id}, phase: :waiting_retry_custody}}} ->
+        send(self(), {:github_inbox_continue, ref})
+
+      _ ->
+        :ok
+    end
+
+    state
   end
 
   defp prepare_github_unowned_candidate(state) do
@@ -2681,7 +2708,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp github_reserved?(state, id) do
     case state.github_inbox_batch do
       %{head: %{operation: %{issue_ref: %{id: ^id}, phase: phase, invalidated: false}}} ->
-        phase != :blocked or github_admission_close_held?(state, id)
+        phase not in [:blocked, :waiting_retry_custody] or github_admission_close_held?(state, id)
 
       _ ->
         false
@@ -6458,7 +6485,7 @@ defmodule SymphonyElixir.Orchestrator do
       _ -> :ok
     end
 
-    %{state | lease_claims: Map.delete(state.lease_claims, issue_id), claimed: MapSet.delete(state.claimed, issue_id)}
+    wake_github_custody_waiter(%{state | lease_claims: Map.delete(state.lease_claims, issue_id), claimed: MapSet.delete(state.claimed, issue_id)}, issue_id)
   end
 
   defp current_issue_custody(state, issue_id, expected_ref \\ :current) do
@@ -6483,7 +6510,7 @@ defmodule SymphonyElixir.Orchestrator do
           end
 
         state = %{state | lease_claims: Map.put(state.lease_claims, issue_id, next)}
-        bind_tracker_inbox_custody(state, issue_id, claim.custody_ref, next)
+        state |> bind_tracker_inbox_custody(issue_id, claim.custody_ref, next) |> wake_github_custody_waiter(issue_id)
 
       :error ->
         state

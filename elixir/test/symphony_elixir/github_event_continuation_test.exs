@@ -1021,6 +1021,66 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert effect_count("A", "dispatch.started") == 2
   end
 
+  for kind <- [:ci, :review] do
+    test "#{kind} arriving after normal worker DOWN stays pending until retry custody retires", c do
+      write_config!(c.workflow, put_in(c.config, [:agent, :max_concurrent_agents], 1))
+      workspace = workspace!("A")
+      worker = install_audited_worker!(c.pid, issue("A"))
+      send(worker, :finish)
+      retired = await!(c.pid, &(not Map.has_key?(&1.running, "A") and Map.has_key?(&1.retry_attempts, "A")))
+      retry = retired.retry_attempts["A"]
+      assert retired.lease_claims["A"].holder == :retry
+      assert :ok = DispatchAudit.ensure_available(workspace)
+      original_run = raw(workspace)["run_id"]
+      before = bytes(workspace)
+      enqueue!(c.pid, unquote(kind))
+      waiting = await!(c.pid, &phase?(&1, :waiting_retry_custody))
+      assert waiting.github_inbox_ack_pending == nil
+      assert length(GitHubEventInbox.pending_events(100)) == 1
+      assert bytes(workspace) == before
+      assert effect_count("A") == 0
+      refute_received {:github_read, _, "A"}
+      refute_received {:github_writer, "A"}
+      # Deliver the real retry generation; its physical lookup sees Human Review.
+      send(c.pid, {:retry_issue, "A", retry.retry_ref})
+      send(read!("A"), {:answer, {:ok, %{issue("A") | state: "Human Review"}}})
+      send(read!("A"), {:answer, {:ok, %{issue("A") | state: "Human Review"}}})
+      assert_receive {:github_writer, "A"}, 2_000
+      send(read!("A"), {:answer, {:ok, issue("A")}})
+      deliver!(c.pid, callback!(:gate))
+      wait_file!(c.ready)
+      ack!(c.pid)
+      settled = runtime(c.pid)
+      assert settled.github_last_assignment.assignment_state == "processed"
+      assert settled.running["A"].execution_started?
+      assert raw(workspace)["run_id"] == original_run
+      expected_stage = if unquote(kind) == :ci, do: "implement", else: "review_verification"
+      assert transition_count(workspace, expected_stage) == 1
+      assert effect_count("A", "dispatch.started") == 2
+      assert effect_count("A") == 1
+    end
+  end
+
+  test "retry custody retirement rechecks changed routing before applying retained feedback", c do
+    workspace = workspace!("A")
+    worker = install_audited_worker!(c.pid, issue("A"))
+    send(worker, :finish)
+    retired = await!(c.pid, &(not Map.has_key?(&1.running, "A") and Map.has_key?(&1.retry_attempts, "A")))
+    enqueue!(c.pid)
+    await!(c.pid, &phase?(&1, :waiting_retry_custody))
+    write_raw!(workspace, Map.put(raw(workspace), "runner_channel", "other-runner"))
+    changed = bytes(workspace)
+    send(c.pid, {:retry_issue, "A", retired.retry_attempts["A"].retry_ref})
+    send(read!("A"), {:answer, {:ok, %{issue("A") | state: "Human Review"}}})
+    ack!(c.pid)
+    assert runtime(c.pid).github_last_assignment.assignment_state == "routed_to_other_runner"
+    assert bytes(workspace) == changed
+    assert effect_count("A") == 0
+    assert runtime(c.pid).running == %{}
+    refute_received {:github_read, _, "A"}
+    refute_received {:github_writer, "A"}
+  end
+
   test "W1 uncertain journal close never grants C5 observation or worker authority", c do
     workspace = workspace!("A")
     worker = install_audited_worker!(c.pid, issue("A"))

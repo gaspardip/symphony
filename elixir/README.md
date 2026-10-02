@@ -853,3 +853,9 @@ Legacy snapshots without a run identity keep their existing posted-reply reconci
 ### Background Git inspection
 
 RunInspector disables Git optional index refreshes for read-only status and metadata queries. These reads still report worktree changes, but do not rewrite the index or compete with delivery checkout and commit commands for an optional index lock. Required write locks remain enabled for Git mutations.
+
+GitHub feedback received while a completed worker retains retry custody stays in
+the durable inbox without ACK or effects. Custody retirement or transfer wakes the
+existing owner, which rereads the workspace and rechecks routing, worker closure,
+policy and admission before applying the event. The pending event does not reserve
+the retry lane or borrow its lease.
