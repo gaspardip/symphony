@@ -652,7 +652,8 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
           |> maybe_put_opt(:github_client, Keyword.get(opts, :github_client))
           |> maybe_put_opt(:github_client_opts, Keyword.get(opts, :github_client_opts))
 
-        with :ok <- execution_guard(workspace),
+        with {:ok, context} <- AgentExecution.entry_context(workspace, nil),
+             watcher_opts = Keyword.put(watcher_opts, :preserve_legacy_reply_state, context == :legacy),
              feedback_result = PRWatcher.review_feedback(workspace, watcher_opts),
              :ok <- execution_guard(workspace) do
           case feedback_result do
@@ -741,8 +742,8 @@ defmodule SymphonyElixir.DeliveryEngine.ReviewClaims do
             "verification_attempts" => Map.get(persisted, "verification_attempts", 0),
             "evidence_refs" => Map.get(persisted, "evidence_refs", []),
             "evidence_summary" => Map.get(persisted, "evidence_summary"),
-            "implementation_status" => Map.get(persisted, "implementation_status"),
-            "addressed_summary" => Map.get(persisted, "addressed_summary"),
+            "implementation_status" => Map.get(item, :implementation_status, Map.get(persisted, "implementation_status")),
+            "addressed_summary" => Map.get(item, :addressed_summary, Map.get(persisted, "addressed_summary")),
             "pr_url" => pr_url
           }
 

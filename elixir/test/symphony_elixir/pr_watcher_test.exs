@@ -121,6 +121,16 @@ defmodule SymphonyElixir.PRWatcherTest do
         github_client: __MODULE__.FakeGitHubClient,
         thread_states: %{
           "comment:2" => %{
+            "thread_key" => "comment:2",
+            "id" => "2",
+            "kind" => "comment",
+            "author" => "reviewer",
+            "body" => "nit: tighten this copy",
+            "path" => "lib/example.ex",
+            "line" => 12,
+            "state" => nil,
+            "review_decision" => "CHANGES_REQUESTED",
+            "pr_url" => "https://github.com/example/repo/pull/42",
             "draft_state" => "posted",
             "draft_reply" => "I addressed this concern locally and will include it in the next branch update. Updated the router.",
             "posted_reply_id" => "3",
@@ -316,6 +326,160 @@ defmodule SymphonyElixir.PRWatcherTest do
     assert stats.resolved_count == 1
     assert get_in(updated_threads, ["comment:2", "resolution_state"]) == "resolved"
     assert is_binary(get_in(updated_threads, ["comment:2", "resolved_at"]))
+  end
+
+  describe "live addressed claim continuity" do
+    setup do
+      workspace = Path.join(System.tmp_dir!(), "addressed-feedback-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(workspace, "lib"))
+      File.write!(Path.join(workspace, "lib/config.ex"), "first line\nsecond line\n")
+      File.write!(Path.join(workspace, "lib/other.ex"), "first line\nsecond line\n")
+      on_exit(fn -> File.rm_rf!(workspace) end)
+
+      comment = %{id: 71, author: "reviewer", body: "config is ignored in this file", path: "lib/config.ex", line: 1, replies: []}
+      feedback = %{pr_url: "https://github.com/example/repo/pull/71", review_decision: "CHANGES_REQUESTED", reviews: [], comments: [comment]}
+      %{workspace: workspace, feedback: feedback, comment: comment}
+    end
+
+    test "the same addressed comment stays non-actionable across two live reads without a posted reply", c do
+      fresh = live_feedback(c.workspace, c.feedback, %{})
+      assert [original] = fresh.items
+      assert original.actionable == true
+      assert original.disposition == "needs_verification"
+      persisted = addressed_item(original, c.feedback.pr_url)
+      # The API id and persisted JSON id have both existed as integers/strings.
+      persisted = Map.put(persisted, "id", 71)
+
+      first = live_feedback(c.workspace, c.feedback, %{"comment:71" => persisted})
+      assert first.status == "ok"
+      assert first.actionable_items_count == 0
+      assert [closed] = first.items
+      assert closed.implementation_status == "addressed"
+      assert closed.addressed_summary == "Read config.trim before normalizing."
+      assert closed.actionable == false
+      assert closed.body == c.comment.body
+      assert closed.disposition == original.disposition
+      assert closed.proof_sources == original.proof_sources
+      refute Map.has_key?(closed, :posted_reply_id)
+
+      timestamp_only = %{c.feedback | comments: [Map.put(c.comment, :created_at, "2026-10-01T10:00:00Z")]}
+      second = live_feedback(c.workspace, timestamp_only, %{"comment:71" => addressed_item(closed, c.feedback.pr_url)})
+      assert second.actionable_items_count == 0
+      assert hd(second.items).implementation_status == "addressed"
+      assert hd(second.items).actionable == false
+    end
+
+    for {field, value} <- [{:body, "config is ignored for a different input"}, {:path, "lib/other.ex"}, {:line, 2}, {:author, "another-reviewer"}, {:id, 72}] do
+      @tag changed_field: field, changed_value: value
+      test "a changed #{field} uses fresh adjudication instead of the previous implementation", c do
+        [original] = live_feedback(c.workspace, c.feedback, %{}).items
+        persisted = addressed_item(original, c.feedback.pr_url)
+        changed = %{c.feedback | comments: [Map.put(c.comment, c.changed_field, c.changed_value)]}
+        baseline = live_feedback(c.workspace, changed, %{})
+        result = live_feedback(c.workspace, changed, %{"comment:71" => persisted})
+        assert [item] = result.items
+        assert item.implementation_status == nil
+        assert item.addressed_summary == nil
+        assert item.actionable == hd(baseline.items).actionable
+        assert item.disposition == hd(baseline.items).disposition
+        assert item.actionable == true
+        assert result.actionable_items_count == 1
+      end
+    end
+
+    for {field, value} <- [{:pr_url, "https://github.com/example/repo/pull/72"}, {:review_decision, "REVIEW_REQUIRED"}] do
+      @tag feedback_field: field, feedback_value: value
+      test "changed feedback #{field} cannot borrow a previous addressed claim", c do
+        [original] = live_feedback(c.workspace, c.feedback, %{}).items
+        persisted = addressed_item(original, c.feedback.pr_url)
+        changed = Map.put(c.feedback, c.feedback_field, c.feedback_value)
+        baseline = live_feedback(c.workspace, changed, %{})
+        result = live_feedback(c.workspace, changed, %{"comment:71" => persisted})
+        assert [item] = result.items
+        assert item.implementation_status == nil
+        assert item.addressed_summary == nil
+        assert item.actionable == hd(baseline.items).actionable
+        assert item.disposition == hd(baseline.items).disposition
+      end
+    end
+
+    test "a changed review state clears addressed even when the review id and body are unchanged", c do
+      review = %{id: 73, author: "reviewer", body: "Please fix this edge case before merge.", state: "CHANGES_REQUESTED"}
+      before = %{c.feedback | comments: [], reviews: [review]}
+      [original] = live_feedback(c.workspace, before, %{}).items
+      persisted = addressed_item(original, before.pr_url)
+      unchanged = live_feedback(c.workspace, before, %{"review:73" => persisted})
+      assert hd(unchanged.items).implementation_status == "addressed"
+      assert unchanged.actionable_items_count == 0
+      after_review = %{before | reviews: [%{review | state: "COMMENTED"}]}
+      baseline = live_feedback(c.workspace, after_review, %{})
+      changed = live_feedback(c.workspace, after_review, %{"review:73" => persisted})
+      assert hd(changed.items).implementation_status == nil
+      assert hd(changed.items).addressed_summary == nil
+      assert hd(changed.items).actionable == hd(baseline.items).actionable
+      assert hd(changed.items).disposition == hd(baseline.items).disposition
+    end
+
+    for invalidation <- [:missing_body, :changed_body] do
+      @tag invalidation: invalidation
+      test "#{invalidation} retains the physical reply receipt without granting an addressed exemption", c do
+        [original] = live_feedback(c.workspace, c.feedback, %{}).items
+        reply = %{id: "receipt-71", url: c.feedback.pr_url <> "#discussion_r71", body: "Published response", updated_at: "2026-10-01T10:00:00Z"}
+        persisted = Map.merge(addressed_item(original, c.feedback.pr_url), %{"draft_state" => "posted", "posted_reply_id" => reply.id, "posted_reply_url" => reply.url})
+        persisted = if c.invalidation == :missing_body, do: Map.delete(persisted, "body"), else: persisted
+        comment = Map.put(c.comment, :replies, [reply])
+        comment = if c.invalidation == :changed_body, do: %{comment | body: "config is ignored on a new path"}, else: comment
+        result = live_feedback(c.workspace, %{c.feedback | comments: [comment]}, %{"comment:71" => persisted})
+        assert [item] = result.items
+        assert item.actionable == true
+        assert item.implementation_status == nil
+        assert item.addressed_summary == nil
+        assert item.draft_state == "posted"
+        assert item.posted_reply_id == reply.id
+        assert item.posted_reply_url == reply.url
+        assert item.posted_at == reply.updated_at
+      end
+    end
+
+    test "unavailable feedback remains cached without acquiring a live identity witness", c do
+      [original] = live_feedback(c.workspace, c.feedback, %{}).items
+      threads = %{"comment:71" => addressed_item(original, c.feedback.pr_url)}
+      result = PRWatcher.review_feedback(c.workspace, policy_pack: :private_autopilot, thread_states: threads, github_client: __MODULE__.UnavailableGitHubClient)
+      assert result.status == "cached"
+      assert hd(result.items).body == nil
+      refute Map.has_key?(hd(result.items), :implementation_status)
+      assert threads["comment:71"]["implementation_status"] == "addressed"
+    end
+  end
+
+  defmodule LiveClaimGitHubClient do
+    def review_feedback(_workspace, opts), do: {:ok, Keyword.fetch!(opts, :feedback)}
+  end
+
+  defp live_feedback(workspace, feedback, threads) do
+    PRWatcher.review_feedback(workspace,
+      policy_pack: :private_autopilot,
+      github_client: LiveClaimGitHubClient,
+      github_client_opts: [feedback: feedback],
+      thread_states: threads
+    )
+  end
+
+  defp addressed_item(item, pr_url) do
+    %{
+      "thread_key" => item.thread_key,
+      "id" => item.id,
+      "kind" => Atom.to_string(item.kind),
+      "author" => item.author,
+      "body" => item.body,
+      "path" => item.path,
+      "line" => item.line,
+      "state" => item.state,
+      "review_decision" => item.review_decision,
+      "pr_url" => pr_url,
+      "implementation_status" => "addressed",
+      "addressed_summary" => "Read config.trim before normalizing."
+    }
   end
 
   defmodule FakeGitHubClient do

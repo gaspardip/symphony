@@ -315,6 +315,60 @@ defmodule SymphonyElixir.Orchestrator.GitHubFollowUpTest do
            }
   end
 
+  test "addressed live feedback remains closed across a subsequent eligible webhook plan" do
+    closed = Map.merge(item(), %{implementation_status: "addressed", addressed_summary: "Implemented the guard.", actionable: false})
+    observed = %{feedback() | items: [closed], actionable_items_count: 0}
+    first = GitHubFollowUp.plan(review_event(), %{stage: "await_checks"}, observed, true)
+    assert first.stage == nil
+    assert first.event == "review.feedback_triaged"
+
+    for state <- [first.attrs.review_claims["comment:7"], first.attrs.review_threads["comment:7"]] do
+      assert state["implementation_status"] == "addressed"
+      assert state["addressed_summary"] == "Implemented the guard."
+      assert state["actionable"] == false
+    end
+
+    second = GitHubFollowUp.plan(review_event(), Map.merge(first.attrs, %{stage: "await_checks"}), observed, true)
+    assert second.stage == nil
+    assert second.attrs.review_claims["comment:7"]["implementation_status"] == "addressed"
+    assert second.attrs.review_threads["comment:7"]["addressed_summary"] == "Implemented the guard."
+    assert second.attrs.review_claims["comment:7"]["actionable"] == false
+  end
+
+  test "explicit live clear never restores addressed from the previous snapshot" do
+    old = %{"implementation_status" => "addressed", "addressed_summary" => "Old fix", "actionable" => false, "verification_attempts" => 2, "evidence_refs" => ["proof:old"]}
+    fresh = %{issue_source: "manual", stage: "await_checks", review_claims: %{"comment:7" => old}, review_threads: %{"comment:7" => old}}
+
+    changed =
+      Map.merge(item(), %{
+        body: "Check a different guard.",
+        implementation_status: nil,
+        addressed_summary: nil,
+        draft_state: "posted",
+        posted_reply_id: "reply-7",
+        posted_reply_url: @pr <> "#discussion_r7",
+        posted_at: "2026-10-01T10:00:00Z",
+        reply_refresh_needed: true
+      })
+
+    plan = GitHubFollowUp.plan(review_event(), fresh, %{feedback() | items: [changed]}, true)
+    assert plan.stage == "implement"
+
+    for state <- [plan.attrs.review_claims["comment:7"], plan.attrs.review_threads["comment:7"]] do
+      assert Map.fetch(state, "implementation_status") == {:ok, nil}
+      assert Map.fetch(state, "addressed_summary") == {:ok, nil}
+      assert state["actionable"] == true
+    end
+
+    assert plan.attrs.review_threads["comment:7"]["draft_state"] == "posted"
+    assert plan.attrs.review_threads["comment:7"]["posted_reply_id"] == "reply-7"
+    assert plan.attrs.review_threads["comment:7"]["posted_reply_url"] == @pr <> "#discussion_r7"
+    assert plan.attrs.review_threads["comment:7"]["posted_at"] == "2026-10-01T10:00:00Z"
+    assert plan.attrs.review_threads["comment:7"]["reply_refresh_needed"] == true
+    assert plan.attrs.review_claims["comment:7"]["verification_attempts"] == 2
+    assert plan.attrs.review_claims["comment:7"]["evidence_refs"] == ["proof:old"]
+  end
+
   defp ci_event do
     %GitHubEvent{provider: "github", event_name: "check_run", action: "completed", raw: %{}, pr_url: @pr, check_name: "unit", conclusion: "failure", details_url: @details, head_sha: "abc123"}
   end

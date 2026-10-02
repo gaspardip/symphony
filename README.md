@@ -46,6 +46,9 @@ Harness gates receive an invocation identity before evaluation. Their completion
 records retain the observed timing, exit code and executor, including unavailable
 commands. See [the gate identity contract](elixir/README.md#gate-invocation-identity).
 
+A review claim stays addressed only while its live identity and contents match.
+Changed claims are evaluated again. See [the review continuity contract](elixir/README.md#live-review-claim-continuity).
+
 ## Running Symphony
 
 ### Requirements
@@ -106,3 +109,5 @@ retries, immediate controls and pre-dispatch revalidation still need the next ph
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
+
+Legacy snapshots without a run identity keep their existing posted-reply reconciliation semantics only when `AgentExecution.entry_context/2` explicitly returns `:legacy`. Identified executions and direct PRWatcher reads use strict complete live-claim identity by default; sparse historical reply metadata cannot close an identified claim.

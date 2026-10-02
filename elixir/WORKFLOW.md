@@ -97,5 +97,9 @@ Use persisted traceability links for the exact run being inspected. Missing or
 ambiguous evidence is a diagnostic result; do not substitute another run.
 Use producer gate IDs to correlate observed results. A gate ID does not grant
 publication authority and does not justify rerunning an uncertain command.
+Treat changed review comments as fresh observations; do not carry an addressed
+status across a changed claim.
 Keep shell usage narrow and avoid large output.
 End each implementation turn by calling `report_agent_turn_result` exactly once.
+
+Legacy snapshots without a run identity keep their existing posted-reply reconciliation semantics only when `AgentExecution.entry_context/2` explicitly returns `:legacy`. Identified executions and direct PRWatcher reads use strict complete live-claim identity by default; sparse historical reply metadata cannot close an identified claim.

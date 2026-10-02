@@ -164,7 +164,7 @@ defmodule SymphonyElixir.Orchestrator.GitHubFollowUp do
               "pr_url" => pr_url
             }
 
-            Map.put(acc, thread_key, claim_state)
+            Map.put(acc, thread_key, copy_implementation_fields(claim_state, item))
 
           _ ->
             acc
@@ -268,6 +268,26 @@ defmodule SymphonyElixir.Orchestrator.GitHubFollowUp do
       "adjudication_summary" => Map.get(item, :adjudication_summary),
       "pr_url" => pr_url
     }
+    |> copy_implementation_fields(item)
+    |> copy_posted_reply_fields(item)
+  end
+
+  defp copy_posted_reply_fields(state, item) do
+    Enum.reduce([:posted_reply_id, :posted_reply_url, :posted_at, :reply_refresh_needed], state, fn key, acc ->
+      case Map.fetch(item, key) do
+        {:ok, value} -> Map.put(acc, Atom.to_string(key), value)
+        :error -> acc
+      end
+    end)
+  end
+
+  defp copy_implementation_fields(state, item) do
+    Enum.reduce([:implementation_status, :addressed_summary], state, fn key, acc ->
+      case Map.fetch(item, key) do
+        {:ok, value} -> Map.put(acc, Atom.to_string(key), value)
+        :error -> acc
+      end
+    end)
   end
 
   defp review_claim_verification_status(persisted, item)

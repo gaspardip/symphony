@@ -69,7 +69,16 @@ defmodule SymphonyElixir.ReviewClaimsCurrentTest do
 
       comments =
         if opts[:feedback_mode] == :comment do
-          [%{id: 1, body: "Please verify error handling in this file.", author: "reviewer", path: "lib/example.ex", line: 1, replies: []}]
+          [
+            %{
+              id: 1,
+              body: Keyword.get(opts, :comment_body, "Please verify error handling in this file."),
+              author: "reviewer",
+              path: "lib/example.ex",
+              line: 1,
+              replies: Keyword.get(opts, :comment_replies, [])
+            }
+          ]
         else
           []
         end
@@ -273,6 +282,118 @@ defmodule SymphonyElixir.ReviewClaimsCurrentTest do
                assert length(GenServer.call(c.owner, :state).advances) == 2
                :ok
              end)
+  end
+
+  test "a real checked turn closes the same live claim and a later edited claim becomes eligible", c do
+    read_opts = opts(c, feedback_mode: :comment, comment_body: "config is ignored in this file")
+
+    assert :ok =
+             within(c, fn ->
+               initial = ReviewClaims.maybe_persist_reconciled_review_feedback(c.state, c.workspace, read_opts)
+               assert initial.review_claims["comment:1"]["disposition"] == "needs_verification"
+               refute ReviewClaims.claim_pending_review_fix?(initial.review_claims["comment:1"])
+               verified_claims = ReviewClaims.maybe_refresh_preflight_review_claims(initial.review_claims, c.workspace)
+               verified_threads = ReviewClaims.sync_review_claims_into_threads(initial.review_threads, verified_claims)
+               assert {:ok, initial} = AgentExecution.update_current(%{review_claims: verified_claims, review_threads: verified_threads})
+               assert initial.review_claims["comment:1"]["disposition"] == "accepted"
+               assert initial.review_claims["comment:1"]["verification_status"] == "verified_scope"
+               assert ReviewClaims.claim_pending_review_fix?(initial.review_claims["comment:1"])
+               File.write!(Path.join(c.workspace, "lib/example.ex"), "defmodule Example do\n  def value(value, config), do: if(config.trim, do: String.trim(value), else: value)\nend\n")
+               turn = %SymphonyElixir.TurnResult{summary: "Read config.trim before normalizing.", files_touched: ["lib/example.ex"]}
+               claims = ReviewClaims.advance_review_claims_after_turn(initial.review_claims, Map.to_list(initial.review_claims), turn)
+               threads = ReviewClaims.sync_review_claims_into_threads(initial.review_threads, claims)
+               assert {:ok, addressed} = AgentExecution.update_current(%{review_claims: claims, review_threads: threads})
+               assert addressed.review_claims["comment:1"]["implementation_status"] == "addressed"
+               assert addressed.review_claims["comment:1"]["actionable"] == false
+
+               effect = fn
+                 :feedback ->
+                   assert {:ok, precondition} = AgentExecution.workspace_precondition(c.workspace, c.issue)
+                   assert {:ok, _} = RunStateStore.record_token_usage_current(c.workspace, c.issue, usage(77), precondition.authority, precondition.expected)
+                   assert {:ok, refreshed} = LeaseManager.refresh_token(c.token)
+                   assert {:ok, lease_state} = RunStateStore.sync_lease(c.workspace, c.issue, LeaseManager.snapshot_for_state(refreshed))
+                   send(self(), {:continuity_lease, Map.take(lease_state, lease_fields())})
+
+                 _ ->
+                   :ok
+               end
+
+               first = ReviewClaims.maybe_persist_reconciled_review_feedback(addressed, c.workspace, opts(c, feedback_mode: :comment, comment_body: "config is ignored in this file", effect: effect))
+               assert_received {:continuity_lease, lease}
+               second = ReviewClaims.maybe_persist_reconciled_review_feedback(first, c.workspace, read_opts)
+
+               for persisted <- [first, second] do
+                 assert persisted.review_claims["comment:1"]["implementation_status"] == "addressed"
+                 assert persisted.review_claims["comment:1"]["addressed_summary"] == turn.summary
+                 assert persisted.review_claims["comment:1"]["actionable"] == false
+                 assert persisted.review_threads["comment:1"]["implementation_status"] == "addressed"
+                 assert persisted.review_threads["comment:1"]["actionable"] == false
+                 refute ReviewClaims.claim_pending_review_fix?(persisted.review_claims["comment:1"])
+                 assert persisted.token_usage == usage(77)
+                 assert Map.take(persisted, lease_fields()) == lease
+               end
+
+               changed = ReviewClaims.maybe_persist_reconciled_review_feedback(second, c.workspace, opts(c, feedback_mode: :comment, comment_body: "config is ignored for a different input"))
+               assert changed.review_claims["comment:1"]["implementation_status"] == nil
+               assert changed.review_claims["comment:1"]["addressed_summary"] == nil
+               assert changed.review_threads["comment:1"]["implementation_status"] == nil
+               assert changed.review_threads["comment:1"]["addressed_summary"] == nil
+               assert changed.review_claims["comment:1"]["disposition"] == "needs_verification"
+               refute ReviewClaims.claim_pending_review_fix?(changed.review_claims["comment:1"])
+               changed_claims = ReviewClaims.maybe_refresh_preflight_review_claims(changed.review_claims, c.workspace)
+               changed_threads = ReviewClaims.sync_review_claims_into_threads(changed.review_threads, changed_claims)
+               assert {:ok, changed} = AgentExecution.update_current(%{review_claims: changed_claims, review_threads: changed_threads})
+               assert changed.review_claims["comment:1"]["disposition"] == "accepted"
+               assert ReviewClaims.claim_pending_review_fix?(changed.review_claims["comment:1"])
+               assert changed.token_usage == usage(77)
+               assert Map.take(changed, lease_fields()) == lease
+               assert {:ok, current} = AgentExecution.ensure_current()
+               assert current == changed
+               assert GenServer.call(c.owner, :state).expected == RunStateStore.material_projection(changed)
+               assert raw!(c)["run_id"] == c.ticket.run_id
+               assert :ok = LeaseManager.ensure_current(c.token)
+               refute_received {:github_call, :post, _}
+               refute_received {:github_call, :resolve, _}
+               :ok
+             end)
+  end
+
+  for legacy <- [false, true] do
+    @tag legacy: legacy
+    @tag legacy_reply: legacy
+    test "sparse posted reply state is retained only by the explicit legacy scope (legacy=#{legacy})", c do
+      thread = c.threads["comment:1"] |> Map.put("posted_reply_id", "reply-1") |> Map.put("draft_state", "posted")
+      replies = [%{id: "reply-1", body: "Addressed on the branch.", url: c.pr_url <> "#reply-1"}]
+
+      check = fn state ->
+        reconciled = ReviewClaims.maybe_reconcile_live_review_feedback(state, c.workspace, opts(c, feedback_mode: :comment, comment_replies: replies))
+        claim = reconciled.review_claims["comment:1"]
+        assert claim["posted_reply_id"] == nil
+        assert reconciled.review_threads["comment:1"]["posted_reply_id"] == "reply-1"
+        assert reconciled.review_threads["comment:1"]["draft_state"] == "posted"
+
+        if c.legacy_reply do
+          assert claim["implementation_status"] == "addressed"
+          assert reconciled.review_threads["comment:1"]["implementation_status"] == "addressed"
+        else
+          assert claim["implementation_status"] == nil
+          assert reconciled.review_threads["comment:1"]["implementation_status"] == nil
+          assert claim["actionable"] == true
+        end
+
+        refute_received {:github_call, :post, _}
+        refute_received {:github_call, :resolve, _}
+      end
+
+      if c.legacy_reply do
+        check.(%{c.state | review_threads: %{"comment:1" => thread}})
+      else
+        within(c, fn ->
+          assert {:ok, state} = AgentExecution.update_current(%{review_threads: %{"comment:1" => thread}})
+          check.(state)
+        end)
+      end
+    end
   end
 
   test "identified snapshot without an execution scope rejects before any GitHub effect", c do

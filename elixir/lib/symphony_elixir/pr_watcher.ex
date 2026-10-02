@@ -121,6 +121,16 @@ defmodule SymphonyElixir.PRWatcher do
         case review_feedback_for_source(github_client, workspace, pr_url, github_opts) do
           {:ok, feedback} ->
             items = build_feedback_items(feedback, thread_states, workspace)
+
+            items =
+              if Keyword.get(opts, :preserve_legacy_reply_state, false) do
+                Enum.map(items, fn item ->
+                  reconcile_posted_reply(item, item, Map.get(thread_states, item.thread_key, %{}))
+                end)
+              else
+                items
+              end
+
             review_count = Enum.count(items, &(&1.kind == :review))
             comment_count = Enum.count(items, &(&1.kind == :comment))
             actionable_items_count = Enum.count(items, &ReviewAdjudicator.actionable_feedback?/1)
@@ -201,8 +211,47 @@ defmodule SymphonyElixir.PRWatcher do
       |> Enum.filter(&(present?(Map.get(&1, :body)) or present?(Map.get(&1, "body"))))
       |> Enum.map(&comment_item(&1, thread_states, review_decision, workspace))
 
-    review_items ++ comment_items
+    pr_url = Map.get(feedback, :pr_url) || Map.get(feedback, "pr_url")
+
+    Enum.map(review_items ++ comment_items, fn item ->
+      retain_addressed_claim(item, Map.get(thread_states, item.thread_key, %{}), pr_url)
+    end)
   end
+
+  defp retain_addressed_claim(item, persisted, pr_url) do
+    if Map.get(persisted, "implementation_status") == "addressed" and
+         same_live_claim?(item, persisted, pr_url) do
+      item
+      |> Map.put(:implementation_status, "addressed")
+      |> Map.put(:addressed_summary, Map.get(persisted, "addressed_summary"))
+      |> Map.put(:actionable, false)
+    else
+      item
+      |> Map.put(:implementation_status, nil)
+      |> Map.put(:addressed_summary, nil)
+    end
+  end
+
+  defp same_live_claim?(item, persisted, pr_url) do
+    required = [:thread_key, :author, :body]
+    nullable = [:path, :line, :state, :review_decision]
+
+    is_binary(pr_url) and pr_url != "" and Map.get(persisted, "pr_url") == pr_url and
+      is_binary(item.id) and item.id != "" and
+      same_claim_id?(Map.get(persisted, "id"), item.id) and
+      Map.get(persisted, "kind") in [item.kind, Atom.to_string(item.kind)] and
+      Enum.all?(required, fn key ->
+        value = Map.fetch!(item, key)
+        is_binary(value) and value != "" and Map.fetch(persisted, Atom.to_string(key)) == {:ok, value}
+      end) and
+      Enum.all?(nullable, fn key ->
+        Map.fetch(persisted, Atom.to_string(key)) == Map.fetch(item, key)
+      end)
+  end
+
+  defp same_claim_id?(persisted, current) when is_binary(persisted), do: persisted == current
+  defp same_claim_id?(persisted, current) when is_integer(persisted), do: Integer.to_string(persisted) == current
+  defp same_claim_id?(_persisted, _current), do: false
 
   defp cached_feedback(thread_states, pr_url, reason) when map_size(thread_states) > 0 do
     items =

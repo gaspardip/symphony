@@ -834,3 +834,18 @@ Evidence receipts retain the gate references alongside command/output hashes.
 IDs support reconstruction and do not grant publication authority. Reading a
 historical result does not mint an ID or fill an unknown exit code. Post-merge,
 preview and other non-gate command wrappers keep their existing result contract.
+
+## Live review claim continuity
+
+A live review item retains its addressed status only when the PR URL, item ID,
+kind, thread key, author, body, path, line, review state and decision match the
+persisted claim. Integer and string representations of the same item ID are
+compared explicitly. Unrelated timestamp changes do not reopen an identical claim.
+
+Missing or changed identity fields clear the old implementation status and summary
+and use the fresh adjudication result. The current status flows through subsequent
+webhook plans and persistence without restoring a cleared historical status.
+Posted reply receipts remain intact; retaining a receipt does not itself establish
+that the current claim is addressed.
+
+Legacy snapshots without a run identity keep their existing posted-reply reconciliation semantics only when `AgentExecution.entry_context/2` explicitly returns `:legacy`. Identified executions and direct PRWatcher reads use strict complete live-claim identity by default; sparse historical reply metadata cannot close an identified claim.
