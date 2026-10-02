@@ -40,6 +40,10 @@ Delivery branch preparation and resets fetch the configured base explicitly, inc
 workspaces cloned for a different single branch. Reset selects the local base at its
 remote revision and preserves the runtime snapshot; local code changes are discarded.
 
+Harness gates receive an invocation identity before evaluation. Their completion
+records retain the observed timing, exit code and executor, including unavailable
+commands. See [the gate identity contract](elixir/README.md#gate-invocation-identity).
+
 ## Running Symphony
 
 ### Requirements

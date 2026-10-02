@@ -811,3 +811,23 @@ Returned links use exact selectors. If redaction changes a canonical workspace
 path, the workspace link is null and the genuine run link remains available.
 Snapshots and ledger bytes are rechecked before returning the response; concurrent
 changes require another read and are never repaired by the query.
+
+## Gate invocation identity
+
+Each call to `run_preflight`, `run_validation`, `run_smoke` or `run_artifacts` creates
+one `gate_id` before evaluation, including a missing command that returns
+`unavailable`. The result carries its kind, UTC start and finish timestamps,
+monotonic duration in microseconds, and OS family/name plus the actual executor
+branch. An unobserved exit code stays null; the environment does not include
+process environment variables or configuration values.
+
+Executing callers capture the checked ledger path before the command. Completion
+and gate-related blocking records retain the producer ID and are written to that
+path without rerunning the command or retrying an uncertain write. Current-worker
+checks still apply before invocation and after its return; lost authority can
+prevent a late result from being recorded or promoted.
+
+Evidence receipts retain the gate references alongside command/output hashes.
+IDs support reconstruction and do not grant publication authority. Reading a
+historical result does not mint an ID or fill an unknown exit code. Post-merge,
+preview and other non-gate command wrappers keep their existing result contract.

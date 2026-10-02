@@ -3,7 +3,7 @@ defmodule SymphonyElixir.RunInspector do
   Inspects workspace state, PR status, and harness-based validation commands.
   """
 
-  alias SymphonyElixir.{Config, ExecutionBoundary, RepoHarness, RunIdentity, RunLedger, RunStateStore, Workspace}
+  alias SymphonyElixir.{Config, ExecutionBoundary, RepoHarness, RunIdentity, RunLedger, RunStateStore, Util, Workspace}
 
   defmodule Snapshot do
     @moduledoc false
@@ -36,7 +36,7 @@ defmodule SymphonyElixir.RunInspector do
   defmodule CommandResult do
     @moduledoc false
 
-    defstruct [:status, :command, :output, :error, :exit_code]
+    defstruct [:status, :command, :output, :error, :exit_code, :gate_id, :gate_kind, :started_at, :finished_at, :duration_us, :environment]
   end
 
   @type snapshot :: %Snapshot{}
@@ -578,22 +578,22 @@ defmodule SymphonyElixir.RunInspector do
 
   @spec run_preflight(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
   def run_preflight(workspace, harness, opts \\ []) do
-    run_harness_command(workspace, harness && harness.preflight_command, opts)
+    run_gate_command(workspace, harness && harness.preflight_command, :preflight, opts)
   end
 
   @spec run_validation(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
   def run_validation(workspace, harness, opts \\ []) do
-    run_harness_command(workspace, harness && harness.validation_command, opts)
+    run_gate_command(workspace, harness && harness.validation_command, :validation, opts)
   end
 
   @spec run_artifacts(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
   def run_artifacts(workspace, harness, opts \\ []) do
-    run_harness_command(workspace, harness && harness.artifacts_command, opts)
+    run_gate_command(workspace, harness && harness.artifacts_command, :artifacts, opts)
   end
 
   @spec run_smoke(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
   def run_smoke(workspace, harness, opts \\ []) do
-    run_harness_command(workspace, harness && harness.smoke_command, opts)
+    run_gate_command(workspace, harness && harness.smoke_command, :smoke, opts)
   end
 
   @spec run_post_merge(Path.t(), RepoHarness.t() | nil, keyword()) :: command_result()
@@ -763,20 +763,45 @@ defmodule SymphonyElixir.RunInspector do
     end
   end
 
-  defp run_harness_command(_workspace, nil, _opts) do
-    %CommandResult{status: :unavailable, command: nil, output: "No harness command configured."}
+  # Identity is created at invocation, never reconstructed from persisted results.
+  defp run_gate_command(workspace, command, kind, opts) do
+    gate_id = Util.generate_id("gate_")
+    started_at = DateTime.to_iso8601(DateTime.utc_now())
+    start_time = System.monotonic_time(:microsecond)
+    {result, executor} = execute_harness_command(workspace, command, opts)
+    duration_us = System.monotonic_time(:microsecond) - start_time
+    {os_family, os_name} = :os.type()
+
+    %{
+      result
+      | gate_id: gate_id,
+        gate_kind: kind,
+        started_at: started_at,
+        finished_at: DateTime.to_iso8601(DateTime.utc_now()),
+        duration_us: duration_us,
+        environment: %{os_family: os_family, os_name: os_name, executor: executor}
+    }
   end
 
-  defp run_harness_command(workspace, command, opts) when is_binary(command) do
+  defp run_harness_command(workspace, command, opts) do
+    {result, _executor} = execute_harness_command(workspace, command, opts)
+    result
+  end
+
+  defp execute_harness_command(_workspace, nil, _opts) do
+    {%CommandResult{status: :unavailable, command: nil, output: "No harness command configured."}, :not_started}
+  end
+
+  defp execute_harness_command(workspace, command, opts) when is_binary(command) do
     case ExecutionBoundary.run(workspace, command, opts) do
       :legacy ->
-        run_legacy_harness_command(workspace, command, opts)
+        {run_legacy_harness_command(workspace, command, opts), :legacy_shell}
 
       {:ok, {output, status}} ->
-        %CommandResult{status: if(status == 0, do: :passed, else: :failed), command: command, output: output, exit_code: status}
+        {%CommandResult{status: if(status == 0, do: :passed, else: :failed), command: command, output: output, exit_code: status}, :execution_boundary}
 
       {:error, reason} ->
-        %CommandResult{status: :unavailable, command: command, output: "Execution boundary failed: #{Kernel.inspect(reason)}", error: reason}
+        {%CommandResult{status: :unavailable, command: command, output: "Execution boundary failed: #{Kernel.inspect(reason)}", error: reason}, :execution_boundary}
     end
   end
 

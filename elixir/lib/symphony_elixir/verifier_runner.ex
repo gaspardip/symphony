@@ -16,6 +16,7 @@ defmodule SymphonyElixir.VerifierRunner do
   alias SymphonyElixir.Observability
   alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.RunInspector
+  alias SymphonyElixir.RunLedger
   alias SymphonyElixir.SecretRedactor
   alias SymphonyElixir.UiProof
   alias SymphonyElixir.VerifierResult
@@ -54,7 +55,7 @@ defmodule SymphonyElixir.VerifierRunner do
     Observability.with_span("symphony.verifier", metadata, fn ->
       start_time = System.monotonic_time()
 
-      with {:ok, smoke_result} <- current_step(workspace, issue, fn -> RunInspector.run_smoke(workspace, inspection.harness, opts) end),
+      with {:ok, smoke_result} <- current_smoke_step(workspace, issue, inspection.harness, opts),
            {:ok, {:ok, changed_files, scope}} <- current_step(workspace, issue, fn -> evidence_selection(workspace, inspection, opts) end),
            acceptance = IssueAcceptance.from_issue(issue),
            {:ok, context} <- verification_context(workspace, issue, inspection, state, acceptance, smoke_result, changed_files, scope, opts),
@@ -73,7 +74,7 @@ defmodule SymphonyElixir.VerifierRunner do
             |> Map.put(:smoke_status, smoke_result.status)
           )
 
-          result
+          Map.put(result, :smoke, command_result_to_map(smoke_result))
         end
       else
         {:ok, {:error, reason}} -> integrity_blocked(reason)
@@ -183,6 +184,49 @@ defmodule SymphonyElixir.VerifierRunner do
 
         finish_with_cleanup(primary, cleanup)
       end
+    end
+  end
+
+  defp current_smoke_step(workspace, issue, harness, opts) do
+    with {:ok, context} <- AgentExecution.entry_context(workspace, issue) do
+      ledger = capture_gate_ledger(context)
+      result = RunInspector.run_smoke(workspace, harness, opts)
+
+      with {:ok, result} <- current_result(workspace, issue, result) do
+        record_gate_event!(ledger, "smoke.completed", %{
+          issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+          issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
+          actor_type: "runtime",
+          actor_id: "verifier_runner",
+          stage: "verify",
+          summary: "Smoke #{result.status}",
+          metadata: %{workspace: workspace, gate_id: result.gate_id, gate: command_result_to_map(result)}
+        })
+
+        {:ok, result}
+      end
+    end
+  end
+
+  defp capture_gate_ledger(:legacy) do
+    case RunLedger.ledger_file_path_checked() do
+      {:ok, path} -> %{ledger_path: path}
+      {:error, error} -> raise error
+    end
+  end
+
+  defp capture_gate_ledger(%{ticket: ticket}),
+    do: %{ledger_path: ticket.ledger_path, run_id: ticket.run_id, dispatch_id: ticket.dispatch_id}
+
+  defp record_gate_event!(ledger, type, attrs) do
+    attrs = if Map.has_key?(ledger, :run_id), do: Map.put(attrs, :run_id, ledger.run_id), else: attrs
+    attrs = if Map.has_key?(ledger, :dispatch_id), do: Map.update(attrs, :metadata, %{dispatch_id: ledger.dispatch_id}, &Map.put(&1, :dispatch_id, ledger.dispatch_id)), else: attrs
+
+    with {:ok, prepared} <- RunLedger.prepare_entry(type, attrs),
+         {:ok, event} <- RunLedger.CheckedStorage.persist(prepared, ledger.ledger_path) do
+      event
+    else
+      {:error, error} -> raise error
     end
   end
 
@@ -628,6 +672,7 @@ defmodule SymphonyElixir.VerifierRunner do
       command: result.command,
       output: String.slice(to_string(result.output || ""), 0, 2_000)
     }
+    |> Map.merge(result |> Map.take([:gate_id, :gate_kind, :exit_code, :started_at, :finished_at, :duration_us, :environment]) |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Map.new())
   end
 
   defp format_content_evidence([]), do: "Changed file content evidence:\n- none"

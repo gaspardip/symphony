@@ -150,7 +150,17 @@ defmodule SymphonyElixir.EvidenceAcceptance do
     end
   end
 
-  defp gate_digest(gate), do: %{status: to_string(gate.status), command_sha256: digest(gate.command || ""), output_sha256: digest(gate.output || "")}
+  defp gate_digest(gate) do
+    # Observability only: acceptance still requires the private current-worker handle.
+    references =
+      gate
+      |> Map.take([:gate_id, :gate_kind, :exit_code, :started_at, :finished_at, :duration_us, :environment])
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
+    Map.merge(references, %{status: to_string(gate.status), command_sha256: digest(gate.command || ""), output_sha256: digest(gate.output || "")})
+  end
+
   defp validation_digest(%{required: required, observation: nil}), do: %{required: required, observed: false}
   defp validation_digest(%{required: required, observation: observation}), do: %{required: required, observed: true, result: gate_digest(observation)}
 

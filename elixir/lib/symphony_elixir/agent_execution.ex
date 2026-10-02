@@ -96,7 +96,7 @@ defmodule SymphonyElixir.AgentExecution do
          true <- Path.expand(workspace) == state.context.ticket.workspace or {:error, :evidence_workspace_mismatch} do
       # This is custody of a returned physical result, not execution permission.
       # Retain it even if the subsequent current check or snapshot CAS denies continuation.
-      observed = %{status: result.status, command: result.command, output: result.output}
+      observed = Map.take(result, [:status, :command, :output, :gate_id, :gate_kind, :exit_code, :started_at, :finished_at, :duration_us, :environment])
       Process.put(@context_key, %{state | validation_observation: observed})
       with {:ok, _current} <- ensure_current(), do: :ok
     end

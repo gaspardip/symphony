@@ -1304,13 +1304,15 @@ defmodule SymphonyElixir.DeliveryEngine do
     with :ok <- execution_guard(workspace, issue),
          state when is_map(state) <- ReviewClaims.maybe_persist_reconciled_review_feedback(state, workspace, opts),
          :ok <- execution_guard(workspace, issue),
+         {:ok, gate_context} <- AgentExecution.entry_context(workspace, issue),
+         gate_ledger = capture_gate_ledger(gate_context),
          validation_result <- RunInspector.run_validation(workspace, inspection.harness, opts),
          :ok <- retain_validation_observation(workspace, validation_result),
          :ok <- execution_guard(workspace, issue),
          result when is_map(result) <- validation_result do
       validation_attempts = Map.get(state, :validation_attempts, 0) + 1
 
-      RunLedger.record("validation.completed", %{
+      record_gate_event!(gate_ledger, "validation.completed", %{
         issue_id: issue.id,
         issue_identifier: issue.identifier,
         stage: "validate",
@@ -1323,7 +1325,10 @@ defmodule SymphonyElixir.DeliveryEngine do
           command: result.command,
           status: result.status,
           exit_code: result.exit_code,
-          attempt: validation_attempts
+          attempt: validation_attempts,
+          workspace: workspace,
+          gate_id: result.gate_id,
+          gate: gate_result_to_map(result)
         }
       })
 
@@ -1352,7 +1357,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                        validation_attempts: validation_attempts,
                        last_validation:
                          result
-                         |> command_result_to_map()
+                         |> gate_result_to_map()
                          |> Map.put(:exit_code, result.exit_code)
                          |> Map.put(:artifacts, artifacts)
                      },
@@ -1386,7 +1391,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      Map.merge(
                        %{
                          validation_attempts: validation_attempts,
-                         last_validation: command_result_to_map(result)
+                         last_validation: gate_result_to_map(result)
                        },
                        resume_attrs
                      )
@@ -1395,21 +1400,23 @@ defmodule SymphonyElixir.DeliveryEngine do
               do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
             end
           else
-            block_issue(workspace, issue, :validation_failed, result.output, @blocked_state)
+            block_issue(workspace, issue, :validation_failed, result.output, @blocked_state, %{ledger: gate_ledger, result: result})
           end
 
         :unavailable ->
-          block_issue(workspace, issue, :validation_unavailable, result.output, @blocked_state)
+          block_issue(workspace, issue, :validation_unavailable, result.output, @blocked_state, %{ledger: gate_ledger, result: result})
       end
     end
   end
 
   defp run_validation_artifacts(workspace, issue, state, harness, attempt, opts) do
     with :ok <- execution_guard(workspace, issue),
+         {:ok, gate_context} <- AgentExecution.entry_context(workspace, issue),
+         gate_ledger = capture_gate_ledger(gate_context),
          result <- RunInspector.run_artifacts(workspace, harness, opts),
          :ok <- execution_guard(workspace, issue) do
       event =
-        RunLedger.record("artifacts.completed", %{
+        record_gate_event!(gate_ledger, "artifacts.completed", %{
           issue_id: issue.id,
           issue_identifier: issue.identifier,
           stage: "validate",
@@ -1424,7 +1431,9 @@ defmodule SymphonyElixir.DeliveryEngine do
             command: result.command,
             status: result.status,
             exit_code: result.exit_code,
-            attempt: attempt
+            attempt: attempt,
+            gate_id: result.gate_id,
+            gate: gate_result_to_map(result)
           }
         })
 
@@ -1432,15 +1441,15 @@ defmodule SymphonyElixir.DeliveryEngine do
         :passed ->
           {:ok,
            result
-           |> command_result_to_map()
+           |> gate_result_to_map()
            |> Map.put(:exit_code, result.exit_code)
            |> Map.put(:ledger_event_id, event.event_id)}
 
         :failed ->
-          block_issue(workspace, issue, :artifacts_failed, result.output, @blocked_state)
+          block_issue(workspace, issue, :artifacts_failed, result.output, @blocked_state, %{ledger: gate_ledger, result: result})
 
         :unavailable ->
-          block_issue(workspace, issue, :artifacts_unavailable, result.output, @blocked_state)
+          block_issue(workspace, issue, :artifacts_unavailable, result.output, @blocked_state, %{ledger: gate_ledger, result: result})
       end
     end
   end
@@ -1575,6 +1584,8 @@ defmodule SymphonyElixir.DeliveryEngine do
     with :ok <- execution_guard(workspace, issue),
          :ok <- verification_attempt_available(workspace, issue, state),
          {:ok, state} <- validation_for_verification(workspace, issue, state, inspection, opts),
+         {:ok, gate_context} <- AgentExecution.entry_context(workspace, issue),
+         gate_ledger = capture_gate_ledger(gate_context),
          verifier_result <- verifier_runner.(workspace, issue, state, inspection, opts),
          :ok <- execution_guard(workspace, issue),
          result when is_map(result) <- verifier_result do
@@ -1584,7 +1595,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       verifier_summary =
         Map.get(result, :summary) || Map.get(result, "summary") || inspect(result)
 
-      RunLedger.record("verification.completed", %{
+      record_gate_event!(gate_ledger, "verification.completed", %{
         issue_id: issue.id,
         issue_identifier: issue.identifier,
         stage: "verify",
@@ -1595,7 +1606,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         details: verifier_summary,
         metadata: %{
           verdict: Map.get(result, :verdict) || Map.get(result, "verdict"),
-          attempt: verification_attempts
+          attempt: verification_attempts,
+          gate: Map.get(result, :smoke) || Map.get(result, "smoke")
         }
       })
 
@@ -1685,7 +1697,8 @@ defmodule SymphonyElixir.DeliveryEngine do
               issue,
               stop_reason,
               get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
-              @blocked_state
+              @blocked_state,
+              verification_gate_observation(result, gate_ledger)
             )
           end
 
@@ -1695,7 +1708,8 @@ defmodule SymphonyElixir.DeliveryEngine do
             issue,
             :verifier_blocked,
             get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
-            @blocked_state
+            @blocked_state,
+            verification_gate_observation(result, gate_ledger)
           )
 
         "unsafe_to_merge" ->
@@ -1704,7 +1718,8 @@ defmodule SymphonyElixir.DeliveryEngine do
             issue,
             :unsafe_to_merge,
             get_in(result, [:summary]) || get_in(result, ["summary"]) || inspect(result),
-            @blocked_state
+            @blocked_state,
+            verification_gate_observation(result, gate_ledger)
           )
 
         other ->
@@ -1713,7 +1728,8 @@ defmodule SymphonyElixir.DeliveryEngine do
             issue,
             :verifier_failed,
             "Verifier returned an unknown verdict: #{inspect(other)}",
-            @blocked_state
+            @blocked_state,
+            verification_gate_observation(result, gate_ledger)
           )
       end
     end
@@ -1758,10 +1774,21 @@ defmodule SymphonyElixir.DeliveryEngine do
           block_issue(workspace, issue, :validation_failed, "Current-worker validation is required, but its existing attempt budget is exhausted.", @blocked_state)
 
         true ->
-          result = RunInspector.run_validation(workspace, inspection.harness, opts)
+          with {:ok, gate_context} <- AgentExecution.entry_context(workspace, issue),
+               gate_ledger = capture_gate_ledger(gate_context),
+               result = RunInspector.run_validation(workspace, inspection.harness, opts),
+               :ok <- AgentExecution.observe_validation(workspace, result),
+               {:ok, persisted} <- update_state(workspace, %{validation_attempts: Map.get(state, :validation_attempts, 0) + 1, last_validation: gate_result_to_map(result)}) do
+            record_gate_event!(gate_ledger, "validation.completed", %{
+              issue_id: issue.id,
+              issue_identifier: issue.identifier,
+              stage: "validate",
+              actor_type: "runtime",
+              actor_id: "delivery_engine",
+              summary: "Validation #{result.status}",
+              metadata: %{workspace: workspace, attempt: persisted.validation_attempts, consumer: "reverification", gate_id: result.gate_id, gate: gate_result_to_map(result)}
+            })
 
-          with :ok <- AgentExecution.observe_validation(workspace, result),
-               {:ok, persisted} <- update_state(workspace, %{validation_attempts: Map.get(state, :validation_attempts, 0) + 1, last_validation: command_result_to_map(result)}) do
             case result.status do
               :passed ->
                 with {:ok, artifacts} <-
@@ -1770,7 +1797,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                        update_state(workspace, %{
                          last_validation:
                            result
-                           |> command_result_to_map()
+                           |> gate_result_to_map()
                            |> Map.put(:exit_code, result.exit_code)
                            |> Map.put(:artifacts, artifacts)
                        }) do
@@ -1778,10 +1805,13 @@ defmodule SymphonyElixir.DeliveryEngine do
                 end
 
               :failed ->
-                block_issue(workspace, issue, :validation_failed, "Current-worker validation failed during explicit reverification.", @blocked_state)
+                block_issue(workspace, issue, :validation_failed, "Current-worker validation failed during explicit reverification.", @blocked_state, %{ledger: gate_ledger, result: result})
 
               :unavailable ->
-                block_issue(workspace, issue, :validation_unavailable, "Current-worker validation is unavailable during explicit reverification.", @blocked_state)
+                block_issue(workspace, issue, :validation_unavailable, "Current-worker validation is unavailable during explicit reverification.", @blocked_state, %{
+                  ledger: gate_ledger,
+                  result: result
+                })
             end
           end
       end
@@ -1798,7 +1828,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         acceptance_gaps: [],
         risky_areas: [],
         evidence: [],
-        raw_output: nil
+        raw_output: nil,
+        smoke: Map.get(result, :smoke) || Map.get(result, "smoke")
       }
     else
       result
@@ -1842,6 +1873,8 @@ defmodule SymphonyElixir.DeliveryEngine do
       block_issue(workspace, issue, :verifier_blocked, "Current-worker reverification is required, but its existing attempt budget is exhausted.", @blocked_state)
     else
       with {:ok, state} <- current_worker_validation(workspace, issue, state, inspection, opts),
+           {:ok, gate_context} <- AgentExecution.entry_context(workspace, issue),
+           gate_ledger = capture_gate_ledger(gate_context),
            result when is_map(result) <- run_current_verification(workspace, issue, state, inspection, opts),
            result = consistent_verifier_result(result),
            {:ok, persisted} <-
@@ -1850,14 +1883,14 @@ defmodule SymphonyElixir.DeliveryEngine do
                last_verifier: verifier_result_to_map(result),
                last_verifier_verdict: result.verdict
              }) do
-        RunLedger.record("verification.completed", %{
+        record_gate_event!(gate_ledger, "verification.completed", %{
           issue_id: issue.id,
           issue_identifier: issue.identifier,
           stage: state.stage,
           actor_type: "runtime",
           actor_id: "delivery_engine",
           summary: result.summary,
-          metadata: %{verdict: result.verdict, attempt: persisted.verification_attempts, consumer: effect}
+          metadata: %{verdict: result.verdict, attempt: persisted.verification_attempts, consumer: effect, gate: Map.get(result, :smoke)}
         })
 
         case result.verdict do
@@ -1872,7 +1905,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                 _other -> if(result.verdict == "unsafe_to_merge", do: :unsafe_to_merge, else: :verifier_blocked)
               end
 
-            block_issue(workspace, issue, cause, result.summary, @blocked_state)
+            block_issue(workspace, issue, cause, result.summary, @blocked_state, verification_gate_observation(result, gate_ledger))
         end
       end
     end
@@ -4483,6 +4516,35 @@ defmodule SymphonyElixir.DeliveryEngine do
     )
   end
 
+  defp handle_checkout_error(workspace, issue, {:error, {:missing_harness_command, stage}})
+       when stage in ["preflight", "validation", "smoke", "artifacts"] do
+    with {:ok, context} <- AgentExecution.entry_context(workspace, issue) do
+      ledger = capture_gate_ledger(context)
+
+      result =
+        case stage do
+          "preflight" -> RunInspector.run_preflight(workspace, nil)
+          "validation" -> RunInspector.run_validation(workspace, nil)
+          "smoke" -> RunInspector.run_smoke(workspace, nil)
+          "artifacts" -> RunInspector.run_artifacts(workspace, nil)
+        end
+
+      with :ok <- execution_guard(workspace, issue) do
+        record_gate_event!(ledger, "#{stage}.completed", %{
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          stage: "checkout",
+          actor_type: "runtime",
+          actor_id: "delivery_engine",
+          summary: "#{stage} unavailable",
+          metadata: %{workspace: workspace, gate_id: result.gate_id, gate: gate_result_to_map(result)}
+        })
+
+        block_issue(workspace, issue, :missing_harness_command, "The repo harness is missing the required `#{stage}.command` entry.", @blocked_state, %{ledger: ledger, result: result})
+      end
+    end
+  end
+
   defp handle_checkout_error(workspace, issue, {:error, {:missing_harness_command, stage}}) do
     block_issue(
       workspace,
@@ -4569,16 +4631,17 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp block_issue(workspace, issue, code, details, target_state) do
+  defp block_issue(workspace, issue, code, details, target_state, gate_observation \\ nil) do
     issue_id = issue.id
     issue_identifier = issue.identifier || issue.id || "unknown"
     detail_text = safe_detail_text(details)
     rule = RuleCatalog.rule(code)
+    gate_metadata = gate_block_metadata(gate_observation)
 
     with {:ok, run_state} <- delivery_state(workspace, issue),
          :ok <- execution_guard(workspace, issue) do
       ledger_event =
-        RunLedger.record("runtime.stopped", %{
+        record_gate_stop!(gate_observation, %{
           issue_id: issue_id,
           issue_identifier: issue_identifier,
           stage: Map.get(run_state, :stage),
@@ -4590,29 +4653,35 @@ defmodule SymphonyElixir.DeliveryEngine do
           summary: detail_summary(code, detail_text),
           details: detail_text,
           target_state: target_state,
-          metadata: %{
-            code: Atom.to_string(code),
-            human_action: rule.human_action
-          }
+          metadata:
+            %{
+              code: Atom.to_string(code),
+              human_action: rule.human_action
+            }
+            |> Map.merge(gate_metadata)
         })
 
       transition_result =
         transition_state(workspace, "blocked", %{
-          stop_reason: %{
-            code: to_string(code),
-            rule_id: rule.rule_id,
-            failure_class: rule.failure_class,
-            details: detail_text
-          },
-          last_decision: %{
-            rule_id: rule.rule_id,
-            failure_class: rule.failure_class,
-            summary: detail_summary(code, detail_text),
-            details: detail_text,
-            human_action: rule.human_action,
-            target_state: target_state,
-            ledger_event_id: Map.get(ledger_event, :event_id)
-          },
+          stop_reason:
+            %{
+              code: to_string(code),
+              rule_id: rule.rule_id,
+              failure_class: rule.failure_class,
+              details: detail_text
+            }
+            |> Map.merge(gate_metadata),
+          last_decision:
+            %{
+              rule_id: rule.rule_id,
+              failure_class: rule.failure_class,
+              summary: detail_summary(code, detail_text),
+              details: detail_text,
+              human_action: rule.human_action,
+              target_state: target_state,
+              ledger_event_id: Map.get(ledger_event, :event_id)
+            }
+            |> Map.merge(gate_metadata),
           last_rule_id: rule.rule_id,
           last_failure_class: rule.failure_class,
           last_decision_summary: detail_summary(code, detail_text),
@@ -4679,6 +4748,45 @@ defmodule SymphonyElixir.DeliveryEngine do
     |> String.trim()
     |> String.slice(0, 2_000)
   end
+
+  defp capture_gate_ledger(:legacy) do
+    case RunLedger.ledger_file_path_checked() do
+      {:ok, path} -> %{ledger_path: path}
+      {:error, error} -> raise error
+    end
+  end
+
+  defp capture_gate_ledger(%{ticket: ticket}),
+    do: %{ledger_path: ticket.ledger_path, run_id: ticket.run_id, dispatch_id: ticket.dispatch_id}
+
+  defp record_gate_event!(ledger, type, attrs) do
+    attrs = if Map.has_key?(ledger, :run_id), do: Map.put(attrs, :run_id, ledger.run_id), else: attrs
+    attrs = if Map.has_key?(ledger, :dispatch_id), do: Map.update(attrs, :metadata, %{dispatch_id: ledger.dispatch_id}, &Map.put(&1, :dispatch_id, ledger.dispatch_id)), else: attrs
+
+    with {:ok, prepared} <- RunLedger.prepare_entry(type, attrs),
+         {:ok, event} <- RunLedger.CheckedStorage.persist(prepared, ledger.ledger_path) do
+      event
+    else
+      {:error, error} -> raise error
+    end
+  end
+
+  defp gate_result_to_map(result) do
+    command_result_to_map(result)
+    |> Map.merge(result |> Map.take([:gate_id, :gate_kind, :exit_code, :started_at, :finished_at, :duration_us, :environment]) |> Enum.reject(fn {_key, value} -> is_nil(value) end) |> Map.new())
+  end
+
+  defp verification_gate_observation(result, ledger) do
+    case Map.get(result, :smoke) || Map.get(result, "smoke") do
+      %{gate_id: id} = smoke when is_binary(id) -> %{result: smoke, ledger: ledger}
+      _historical -> nil
+    end
+  end
+
+  defp gate_block_metadata(nil), do: %{}
+  defp gate_block_metadata(%{result: result}), do: %{gate_id: result.gate_id, gate: gate_result_to_map(result)}
+  defp record_gate_stop!(nil, attrs), do: RunLedger.record("runtime.stopped", attrs)
+  defp record_gate_stop!(%{ledger: ledger}, attrs), do: record_gate_event!(ledger, "runtime.stopped", attrs)
 
   defp command_result_to_map(result) do
     %{

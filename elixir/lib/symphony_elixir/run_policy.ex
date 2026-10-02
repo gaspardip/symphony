@@ -64,11 +64,7 @@ defmodule SymphonyElixir.RunPolicy do
         stop_issue(issue, missing_checkout_violation(workspace), workspace)
 
       Config.policy_require_validation?() and inspection.harness_error not in [nil, :missing] ->
-        stop_issue(
-          issue,
-          harness_validation_violation(workspace, inspection.harness_error),
-          workspace
-        )
+        stop_harness_error(issue, workspace, inspection.harness_error, opts)
 
       Config.policy_require_validation?() and is_nil(inspection.harness) ->
         stop_issue(issue, missing_harness_violation(workspace), workspace)
@@ -96,17 +92,107 @@ defmodule SymphonyElixir.RunPolicy do
   end
 
   defp run_preflight_or_promote(issue, workspace, inspection, opts) do
-    with {:ok, _entry} <- AgentExecution.entry_context(workspace, issue) do
-      case RunInspector.run_preflight(workspace, inspection.harness, opts) do
-        %{status: :failed, output: output} ->
-          stop_issue(issue, preflight_failed_violation(output), workspace)
+    with {:ok, result, ledger} <- run_policy_gate(issue, workspace, inspection.harness, :preflight, opts) do
+      case result.status do
+        status when status in [:failed, :unavailable] ->
+          stop_gate_issue(issue, with_gate(preflight_failed_violation(result.output), result), workspace, ledger)
 
-        %{status: :unavailable, output: output} ->
-          stop_issue(issue, preflight_failed_violation(output), workspace)
-
-        _ ->
+        :passed ->
           promote_todo_issue(issue, workspace)
       end
+    end
+  end
+
+  defp stop_harness_error(issue, workspace, {:missing_harness_command, kind} = reason, opts)
+       when kind in ["preflight", "validation", "smoke", "artifacts"] do
+    gate =
+      case kind do
+        "preflight" -> :preflight
+        "validation" -> :validation
+        "smoke" -> :smoke
+        "artifacts" -> :artifacts
+      end
+
+    with {:ok, result, ledger} <- run_policy_gate(issue, workspace, nil, gate, opts) do
+      stop_gate_issue(issue, with_gate(harness_validation_violation(workspace, reason), result), workspace, ledger)
+    end
+  end
+
+  defp stop_harness_error(issue, workspace, reason, _opts),
+    do: stop_issue(issue, harness_validation_violation(workspace, reason), workspace)
+
+  defp run_policy_gate(issue, workspace, harness, kind, opts) do
+    with {:ok, context} <- AgentExecution.entry_context(workspace, issue) do
+      ledger = capture_gate_ledger(context)
+
+      result =
+        case kind do
+          :preflight -> RunInspector.run_preflight(workspace, harness, opts)
+          :validation -> RunInspector.run_validation(workspace, harness, opts)
+          :smoke -> RunInspector.run_smoke(workspace, harness, opts)
+          :artifacts -> RunInspector.run_artifacts(workspace, harness, opts)
+        end
+
+      with {:ok, _current} <- AgentExecution.entry_context(workspace, issue) do
+        record_gate_event!(ledger, "#{kind}.completed", %{
+          issue_id: Map.get(issue, :id) || Map.get(issue, "id"),
+          issue_identifier: Map.get(issue, :identifier) || Map.get(issue, "identifier"),
+          actor_type: "runtime",
+          actor_id: "run_policy",
+          stage: to_string(kind),
+          summary: "#{kind} #{result.status}",
+          metadata: %{workspace: workspace, gate_id: result.gate_id, gate: gate_result(result)}
+        })
+
+        {:ok, result, ledger}
+      end
+    end
+  end
+
+  defp with_gate(violation, result),
+    do: %{violation | metadata: Map.merge(violation.metadata, %{gate_id: result.gate_id, gate: gate_result(result)})}
+
+  defp gate_result(result) do
+    result
+    |> Map.take([:status, :command, :exit_code, :gate_id, :gate_kind, :started_at, :finished_at, :duration_us, :environment])
+    |> Map.put(:output, String.slice(to_string(result.output || ""), 0, 2_000))
+  end
+
+  defp stop_gate_issue(issue, violation, workspace, ledger) do
+    case AgentExecution.entry_context(workspace, issue) do
+      {:ok, :legacy} -> stop_issue_legacy(issue, violation, workspace, ledger)
+      {:ok, _context} -> stop_issue_worker(issue, violation, ledger)
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp stop_after_turn_gate(issue, violation, workspace, ledger) do
+    case AgentExecution.entry_context(workspace, issue) do
+      {:ok, :legacy} -> stop_issue_legacy(issue, violation, nil, ledger)
+      {:ok, _context} -> stop_issue_worker(issue, violation, ledger)
+      {:stop, _} = terminal -> terminal
+    end
+  end
+
+  defp capture_gate_ledger(:legacy) do
+    case RunLedger.ledger_file_path_checked() do
+      {:ok, path} -> %{ledger_path: path}
+      {:error, error} -> raise error
+    end
+  end
+
+  defp capture_gate_ledger(%{ticket: ticket}),
+    do: %{ledger_path: ticket.ledger_path, run_id: ticket.run_id, dispatch_id: ticket.dispatch_id}
+
+  defp record_gate_event!(ledger, type, attrs) do
+    attrs = if Map.has_key?(ledger, :run_id), do: Map.put(attrs, :run_id, ledger.run_id), else: attrs
+    attrs = if Map.has_key?(ledger, :dispatch_id), do: Map.update(attrs, :metadata, %{dispatch_id: ledger.dispatch_id}, &Map.put(&1, :dispatch_id, ledger.dispatch_id)), else: attrs
+
+    with {:ok, prepared} <- RunLedger.prepare_entry(type, attrs),
+         {:ok, event} <- RunLedger.CheckedStorage.persist(prepared, ledger.ledger_path) do
+      event
+    else
+      {:error, error} -> raise error
     end
   end
 
@@ -118,7 +204,7 @@ defmodule SymphonyElixir.RunPolicy do
           non_neg_integer(),
           keyword()
         ) ::
-          {:ok, non_neg_integer()} | {:stop, violation()}
+          {:ok, non_neg_integer()} | {:stop, violation()} | AgentExecution.terminal()
   def evaluate_after_turn(
         issue,
         refreshed_issue,
@@ -132,15 +218,12 @@ defmodule SymphonyElixir.RunPolicy do
         stop_issue(issue, missing_pr_for_review_violation())
 
       validation_required?(refreshed_issue, before_snapshot, after_snapshot) ->
-        case RunInspector.run_validation(after_snapshot.workspace, after_snapshot.harness, opts) do
-          %{status: :passed} ->
-            evaluate_noop(issue, before_snapshot, after_snapshot, noop_turns)
-
-          %{status: :failed, output: output} ->
-            stop_issue(issue, validation_failed_violation(output))
-
-          %{status: :unavailable, output: output} ->
-            stop_issue(issue, validation_unavailable_violation(output))
+        with {:ok, result, ledger} <- run_policy_gate(issue, after_snapshot.workspace, after_snapshot.harness, :validation, opts) do
+          case result.status do
+            :passed -> evaluate_noop(issue, before_snapshot, after_snapshot, noop_turns)
+            :failed -> stop_after_turn_gate(issue, with_gate(validation_failed_violation(result.output), result), after_snapshot.workspace, ledger)
+            :unavailable -> stop_after_turn_gate(issue, with_gate(validation_unavailable_violation(result.output), result), after_snapshot.workspace, ledger)
+          end
         end
 
       true ->
@@ -631,9 +714,9 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp stop_issue_worker(issue, violation) do
+  defp stop_issue_worker(issue, violation, ledger \\ nil) do
     with {:ok, current} <- AgentExecution.ensure_current() do
-      {identifier, comment, event} = policy_stop_details(issue, violation)
+      {identifier, comment, event} = policy_stop_details(issue, violation, ledger)
       attrs = policy_stop_attrs(violation, event, current_resume_context(violation, current))
 
       with {:ok, _blocked} <- AgentExecution.transition_current("blocked", attrs),
@@ -646,8 +729,8 @@ defmodule SymphonyElixir.RunPolicy do
     end
   end
 
-  defp stop_issue_legacy(issue, violation, workspace) do
-    {identifier, comment, event} = policy_stop_details(issue, violation)
+  defp stop_issue_legacy(issue, violation, workspace, ledger \\ nil) do
+    {identifier, comment, event} = policy_stop_details(issue, violation, ledger)
 
     if is_binary(workspace) do
       resume = persisted_resume_context_from_violation(violation, workspace)
@@ -662,12 +745,12 @@ defmodule SymphonyElixir.RunPolicy do
     {:stop, violation}
   end
 
-  defp policy_stop_details(issue, violation) do
+  defp policy_stop_details(issue, violation, ledger \\ nil) do
     issue_id = Map.get(issue, :id) || Map.get(issue, "id")
     identifier = Map.get(issue, :identifier) || Map.get(issue, "identifier") || issue_id || "unknown"
 
     event =
-      RunLedger.record("runtime.stopped", %{
+      record_policy_stop(ledger, %{
         issue_id: issue_id,
         issue_identifier: identifier,
         actor_type: "runtime",
@@ -677,11 +760,13 @@ defmodule SymphonyElixir.RunPolicy do
         summary: violation.summary,
         details: violation.details,
         target_state: violation.target_state,
-        metadata: %{
-          code: Atom.to_string(violation.code),
-          human_action: violation.human_action,
-          violation_metadata: violation.metadata
-        }
+        metadata:
+          %{
+            code: Atom.to_string(violation.code),
+            human_action: violation.human_action,
+            violation_metadata: violation.metadata
+          }
+          |> Map.merge(Map.take(violation.metadata, [:gate_id, :gate]))
       })
 
     {identifier, violation_comment(identifier, violation), event}
@@ -690,14 +775,16 @@ defmodule SymphonyElixir.RunPolicy do
   defp policy_stop_attrs(violation, event, resume) do
     %{
       resume_context: resume,
-      stop_reason: %{
-        code: Atom.to_string(violation.code),
-        rule_id: violation.rule_id,
-        failure_class: violation.failure_class,
-        summary: violation.summary,
-        details: violation.details,
-        human_action: violation.human_action
-      },
+      stop_reason:
+        %{
+          code: Atom.to_string(violation.code),
+          rule_id: violation.rule_id,
+          failure_class: violation.failure_class,
+          summary: violation.summary,
+          details: violation.details,
+          human_action: violation.human_action
+        }
+        |> Map.merge(Map.take(violation.metadata, [:gate_id, :gate])),
       last_decision: %{
         rule_id: violation.rule_id,
         failure_class: violation.failure_class,
@@ -714,6 +801,9 @@ defmodule SymphonyElixir.RunPolicy do
       next_human_action: violation.human_action
     }
   end
+
+  defp record_policy_stop(nil, attrs), do: RunLedger.record("runtime.stopped", attrs)
+  defp record_policy_stop(ledger, attrs), do: record_gate_event!(ledger, "runtime.stopped", attrs)
 
   defp current_resume_context(%Violation{metadata: metadata}, state) do
     case Map.get(metadata, :resume_context) || Map.get(metadata, "resume_context") do
