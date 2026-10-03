@@ -261,6 +261,36 @@ defmodule SymphonyElixir.GateIdentityDeliveryTest do
     end
   end
 
+  for mode <- [:admitted, :legacy] do
+    @budget_entry_mode mode
+    test "#{mode} exhausted validation budget stops before commands or gate IDs", c do
+      assert {:ok, _} = RunStateStore.update(c.workspace, &Map.put(&1, :validation_attempts, 1))
+
+      run = fn ledger_path ->
+        assert {:stop, :validation_failed} = DeliveryEngine.run(c.workspace, c.issue, nil, opts())
+        assert order(c) == []
+        assert raw(c)["validation_attempts"] == 1
+        assert raw(c)["verification_attempts"] == 0
+        assert raw(c)["stage"] == "blocked"
+        assert raw(c)["stop_reason"]["code"] == "validation_failed"
+        assert raw(c)["stop_reason"]["details"] == "The existing validation attempt budget is exhausted."
+        events = rows(ledger_path)
+        stopped = event(events, "runtime.stopped")
+        refute Map.has_key?(stopped["metadata"], "gate_id")
+        refute Enum.any?(events, &(&1["event"] in ["validation.completed", "artifacts.completed", "smoke.completed", "verification.completed", "proof.integrity_verified", "publish.completed"]))
+      end
+
+      case @budget_entry_mode do
+        :admitted ->
+          admitted(c.workspace, c.issue, fn execution -> run.(execution.ticket.ledger_path) end)
+
+        :legacy ->
+          assert {:ok, ledger_path} = RunLedger.ledger_file_path_checked()
+          run.(ledger_path)
+      end
+    end
+  end
+
   defp harness!(c, overrides) do
     harness = %{
       "version" => 1,

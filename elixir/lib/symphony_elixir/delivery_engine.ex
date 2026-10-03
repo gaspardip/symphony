@@ -1302,15 +1302,17 @@ defmodule SymphonyElixir.DeliveryEngine do
          opts
        ) do
     with :ok <- execution_guard(workspace, issue),
+         :ok <- validation_attempt_available(workspace, issue, state),
          state when is_map(state) <- ReviewClaims.maybe_persist_reconciled_review_feedback(state, workspace, opts),
          :ok <- execution_guard(workspace, issue),
          {:ok, gate_context} <- AgentExecution.entry_context(workspace, issue),
          gate_ledger = capture_gate_ledger(gate_context),
+         {:ok, state} <- update_state(workspace, %{validation_attempts: Map.get(state, :validation_attempts, 0) + 1}),
          validation_result <- RunInspector.run_validation(workspace, inspection.harness, opts),
          :ok <- retain_validation_observation(workspace, validation_result),
          :ok <- execution_guard(workspace, issue),
          result when is_map(result) <- validation_result do
-      validation_attempts = Map.get(state, :validation_attempts, 0) + 1
+      validation_attempts = Map.get(state, :validation_attempts, 0)
 
       record_gate_event!(gate_ledger, "validation.completed", %{
         issue_id: issue.id,
@@ -1733,6 +1735,12 @@ defmodule SymphonyElixir.DeliveryEngine do
           )
       end
     end
+  end
+
+  defp validation_attempt_available(workspace, issue, state) do
+    if Map.get(state, :validation_attempts, 0) < Config.policy_max_validation_attempts_per_run(),
+      do: :ok,
+      else: block_issue(workspace, issue, :validation_failed, "The existing validation attempt budget is exhausted.", @blocked_state)
   end
 
   defp retain_validation_observation(workspace, result) do

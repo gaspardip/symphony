@@ -335,6 +335,144 @@ defmodule SymphonyElixir.EvidenceIntegrityPublicationTest do
     end)
   end
 
+  for entry <- [:admitted, :legacy] do
+    @validation_budget_entry entry
+    test "#{entry} exhausted validation budget denies the command before execution", c do
+      budget_workflow!(c, 1)
+      assert {:ok, _} = RunStateStore.transition(c.workspace, "validate", %{validation_attempts: 1})
+      sentinel = Path.join(c.workspace, ".symphony/forbidden-validation")
+      harness = c.workspace |> Path.join(".symphony/harness.yml") |> File.read!() |> Jason.decode!()
+      File.write!(Path.join(c.workspace, ".symphony/harness.yml"), Jason.encode!(put_in(harness, ["validation", "command"], "printf executed > .symphony/forbidden-validation; exit 0")))
+
+      run = fn ledger_path ->
+        assert {:stop, :validation_failed} = DeliveryEngine.run(c.workspace, c.issue, nil, delivery_opts())
+        refute File.exists?(sentinel)
+        assert {:ok, state} = RunStateStore.load(c.workspace)
+        assert state.validation_attempts == 1
+        assert state.verification_attempts == 0
+        assert state.stage == "blocked"
+        assert state.stop_reason.details == "The existing validation attempt budget is exhausted."
+        assert {:ok, events, _} = SymphonyElixir.RunLedger.CheckedStorage.entries_checked(ledger_path)
+        refute Enum.any?(events, &(&1["event"] in ["validation.completed", "artifacts.completed", "smoke.completed", "verification.completed", "proof.integrity_verified", "publish.completed"]))
+      end
+
+      case @validation_budget_entry do
+        :admitted ->
+          admitted(c.workspace, c.issue, fn execution -> run.(execution.ticket.ledger_path) end)
+
+        :legacy ->
+          assert {:ok, ledger_path} = SymphonyElixir.RunLedger.ledger_file_path_checked()
+          run.(ledger_path)
+      end
+
+      refute_received :pr_create
+      refute_received :pr_edit
+    end
+  end
+
+  test "failed terminal validation remains consumed when a later worker resumes", c do
+    budget_workflow!(c, 1)
+    assert {:ok, _} = RunStateStore.transition(c.workspace, "validate")
+    path = Path.join(c.workspace, ".symphony/harness.yml")
+    harness = Jason.decode!(File.read!(path))
+    File.write!(path, Jason.encode!(put_in(harness, ["validation", "command"], "printf 'attempt\n' >> .symphony/physical-validation-attempts; exit 17")))
+
+    shell = fn workspace, command, opts ->
+      assert {:ok, reserved} = RunStateStore.load(workspace)
+      assert reserved.validation_attempts == 1
+      System.cmd("sh", ["-lc", command], Keyword.put(opts, :cd, workspace))
+    end
+
+    admitted(c.workspace, c.issue, fn _execution ->
+      opts = delivery_opts() |> Keyword.put(:include_pr_details, false) |> Keyword.put(:shell_runner, shell)
+      assert {:stop, :validation_failed} = DeliveryEngine.run(c.workspace, c.issue, nil, opts)
+      assert {:ok, state} = RunStateStore.load(c.workspace)
+      assert state.validation_attempts == 1
+      assert state.stage == "blocked"
+    end)
+
+    assert {:ok, first} = RunStateStore.load(c.workspace)
+    assert {:ok, _} = RunStateStore.transition(c.workspace, "validate")
+
+    admitted(c.workspace, c.issue, fn execution ->
+      assert {:stop, :validation_failed} = DeliveryEngine.run(c.workspace, c.issue, nil, delivery_opts())
+      assert {:ok, state} = RunStateStore.load(c.workspace)
+      assert state.run_id == first.run_id
+      assert state.validation_attempts == 1
+      assert state.verification_attempts == 0
+      assert state.stop_reason.details == "The existing validation attempt budget is exhausted."
+      assert File.read!(Path.join(c.workspace, ".symphony/physical-validation-attempts")) == "attempt\n"
+      assert {:ok, events, _} = SymphonyElixir.RunLedger.CheckedStorage.entries_checked(execution.ticket.ledger_path)
+      [validation] = Enum.filter(events, &(&1["event"] == "validation.completed"))
+      assert validation["metadata"]["attempt"] == 1
+      assert validation["metadata"]["gate"]["exit_code"] == 17
+      refute Enum.any?(events, &(&1["event"] in ["artifacts.completed", "smoke.completed", "verification.completed", "publish.completed"]))
+    end)
+
+    refute_received :pr_create
+    refute_received :pr_edit
+  end
+
+  test "two successful workers consume the original budget and a third cannot renew it", c do
+    assert SymphonyElixir.Config.policy_max_validation_attempts_per_run() == 2
+
+    admitted(c.workspace, c.issue, fn _execution ->
+      assert :ok = DeliveryEngine.run(c.workspace, c.issue, nil, delivery_opts())
+      assert {:ok, state} = RunStateStore.load(c.workspace)
+      assert state.validation_attempts == 1
+      assert state.verification_attempts == 1
+    end)
+
+    assert_received :pr_create
+    assert {:ok, initial} = RunStateStore.load(c.workspace)
+    issue = %{c.issue | labels: ["policy:review-required"]}
+
+    admitted(c.workspace, issue, fn _execution ->
+      assert :ok = DeliveryEngine.run(c.workspace, issue, nil, handoff_opts())
+      assert {:ok, state} = RunStateStore.load(c.workspace)
+      assert state.run_id == initial.run_id
+      assert state.validation_attempts == 2
+      assert state.verification_attempts == 2
+    end)
+
+    assert {published, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: c.workspace)
+
+    admitted(c.workspace, issue, fn execution ->
+      assert {:stop, :verifier_blocked} = DeliveryEngine.run(c.workspace, issue, nil, handoff_opts())
+      assert {:ok, state} = RunStateStore.load(c.workspace)
+      assert state.run_id == initial.run_id
+      assert state.validation_attempts == 2
+      assert state.verification_attempts == 2
+      assert state.stage == "blocked"
+      assert state.pr_url == initial.pr_url
+      assert {^published, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: c.workspace)
+      assert {:ok, events, _} = SymphonyElixir.RunLedger.CheckedStorage.entries_checked(execution.ticket.ledger_path)
+      assert Enum.count(events, &(&1["event"] == "verification.completed")) == 2
+
+      refute Enum.any?(
+               events,
+               &(&1["event"] in ["validation.completed", "artifacts.completed", "smoke.completed", "verification.completed", "publish.completed"] and
+                   &1["metadata"]["dispatch_id"] == execution.ticket.dispatch_id)
+             )
+    end)
+
+    refute_received :pr_create
+    refute_received :pr_edit
+  end
+
+  defp budget_workflow!(c, limit) do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: c.root,
+      runner_install_root: Path.join(c.root, "runner"),
+      company_policy_pack: "private_autopilot",
+      policy_publish_required: true,
+      policy_retry_validation_failures_within_run: false,
+      policy_max_validation_attempts_per_run: limit,
+      codex_command: local_codex!(c.root)
+    )
+  end
+
   defp handoff_opts do
     Keyword.put(delivery_opts(), :command_runner, fn
       "gh", ["pr", "view" | _], _ ->
