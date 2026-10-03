@@ -27,6 +27,10 @@ and is not evidence of confinement. This scope excludes host hooks, Git, `gh` an
 publication. See [the selection contract and limits](elixir/README.md#selected-process-boundaries)
 before configuring the offline backend.
 
+A selected provider's lifetime applies while waiting for output. Expiration is
+reported as `provider_deadline`; a shorter read timeout keeps its separate cause.
+Physical cleanup is verified through the native receipt.
+
 Publication requires fresh validation and accepted evidence from the current worker.
 Changed or replaced proof files block positive effects; a matching digest establishes
 file integrity and does not establish that an arbitrary claim is true. See

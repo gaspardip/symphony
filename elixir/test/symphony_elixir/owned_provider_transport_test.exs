@@ -231,7 +231,7 @@ defmodule SymphonyElixir.OwnedProviderTransportTest do
     tree = register_tree!(c, handle, identity)
     assert :ok = ProviderTransport.command(handle, "first\n")
     assert {:data, {:eol, "first"}} = ProviderTransport.recv(handle, 1000)
-    assert :timeout = ProviderTransport.recv(handle, 3000)
+    assert {:transport_error, :provider_deadline} = ProviderTransport.recv(handle, 3000)
     assert :ok = ProviderTransport.close(handle)
     assert_tree_absent!(tree)
     assert List.last(boundary_events())["metadata"]["trigger"] == 1

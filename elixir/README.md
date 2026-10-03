@@ -200,6 +200,12 @@ confinement. A present null, malformed selection, unreadable or changed policy,
 unsupported platform or failed launch is an explicit error; it cannot fall back to
 legacy execution. The checked-in workflow leaves both selections absent.
 
+The provider lifetime also bounds an in-progress read. When that lifetime expires,
+the transport reports `provider_deadline` and requests native cleanup; an earlier
+read timeout remains a read timeout. Neither result extends the lifetime or proves
+physical cleanup. Closing the transport still requires its native receipt and
+preserves any cleanup uncertainty.
+
 The policy is a JSON object with exactly six fields:
 
 | Field | Required value |

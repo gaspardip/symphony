@@ -243,7 +243,12 @@ defmodule SymphonyElixir.ProviderTransport do
             next_chunk(handle, read_deadline)
 
           {:error, :receive_timeout} ->
-            :timeout
+            if deadline(handle) <= read_deadline do
+              OwnedHook.stream_control(handle, "T")
+              {:transport_error, :provider_deadline}
+            else
+              :timeout
+            end
 
           {:error, reason} ->
             {:transport_error, reason}
