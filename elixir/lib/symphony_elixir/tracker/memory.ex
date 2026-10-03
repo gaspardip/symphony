@@ -65,8 +65,30 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
-    send_event({:memory_tracker_state_update, issue_id, state_name})
-    :ok
+    result =
+      :global.trans(
+        {{__MODULE__, :issue_states}, self()},
+        fn ->
+          issues =
+            Enum.map(configured_issues(), fn
+              %Issue{id: ^issue_id} = issue -> %{issue | state: state_name}
+              entry -> entry
+            end)
+
+          Application.put_env(:symphony_elixir, :memory_tracker_issues, issues)
+          :ok
+        end,
+        [node()]
+      )
+
+    case result do
+      :ok ->
+        send_event({:memory_tracker_state_update, issue_id, state_name})
+        :ok
+
+      :aborted ->
+        {:error, :memory_tracker_write_aborted}
+    end
   end
 
   @spec attach_link(String.t(), String.t(), String.t()) :: :ok | {:error, term()}

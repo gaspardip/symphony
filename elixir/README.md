@@ -865,3 +865,11 @@ when a run is blocked. `tracker_state` retains the cached tracker observation
 separately. The issue policy remains visible, but its general merge requirement
 does not replace the current validation or snapshot failure. Reading the queue
 does not update tracker state or persisted run state.
+
+### Local tracker write visibility
+
+The memory tracker updates configured issue state before returning success. Writes
+are serialized on the current node so concurrent updates to different issues do
+not overwrite each other. State-update messages are notifications of the completed
+write; recipients must not replay them into the store. Missing issue IDs retain
+the existing notification-only contract and do not create an issue.

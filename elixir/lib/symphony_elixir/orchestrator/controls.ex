@@ -543,7 +543,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     result =
       case File.stat(operation.workspace) do
         {:ok, _stat} ->
-          with :ok <- control_deadline(operation), {:ok, _} <- RunStateStore.update(operation.workspace, &Map.put(&1, :policy_override, policy)), do: :ok
+          with :ok <- control_deadline(operation), {:ok, _} <- RunStateStore.update(operation.workspace, operation.issue, &Map.put(&1, :policy_override, policy)), do: :ok
 
         {:error, :enoent} ->
           :ok
@@ -603,7 +603,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   defp advance_control(state, %{phase: :approve_merge_snapshot} = operation, :start) do
     attrs = %{review_approved: true, automerge_disabled: false, stop_reason: nil, last_decision: nil, last_rule_id: nil, last_failure_class: nil, last_decision_summary: nil, next_human_action: nil}
 
-    case RunStateStore.update(operation.workspace, &Map.merge(&1, attrs)) do
+    case RunStateStore.update(operation.workspace, operation.issue, &Map.merge(&1, attrs)) do
       {:ok, _} = result -> advance(state, record_control_effect(%{operation | phase: :approval_dispatch}, :approve_merge_snapshot, result), :start)
       {:error, reason} = result -> domain_control_error(state, record_control_effect(operation, :approve_merge_snapshot, result), reason)
     end
@@ -741,7 +741,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
 
   defp advance_control(state, %{phase: :review_snapshot} = operation, :start) do
     p = operation.prepared
-    result = RunStateStore.update(operation.workspace, &Map.merge(&1, %{review_threads: p.threads, last_decision_summary: p.summary, next_human_action: p.human}))
+    result = RunStateStore.update(operation.workspace, operation.issue, &Map.merge(&1, %{review_threads: p.threads, last_decision_summary: p.summary, next_human_action: p.human}))
     operation = record_control_effect(operation, :review_snapshot, result)
 
     case result do

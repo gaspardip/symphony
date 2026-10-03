@@ -1345,6 +1345,26 @@ defmodule SymphonyElixir.RunStateStore do
 
   defp apply_publication_patches(_threads, _patches), do: {:error, :invalid_review_publication_patch}
 
+  @doc "Updates the canonical snapshot under its issue identity, creating it only when absent."
+  @spec update(Path.t(), map(), (map() -> map())) :: {:ok, map()} | {:error, term()}
+  def update(workspace, %{id: id, identifier: identifier} = issue, fun)
+      when is_binary(workspace) and is_binary(id) and id != "" and is_binary(identifier) and identifier != "" and is_function(fun, 1) do
+    with_workspace_lock(workspace, fn ->
+      with {:ok, _source, previous_state} <- read_admission_source(workspace, issue) do
+        state = fun.(previous_state)
+
+        if Map.take(state, [:issue_id, :issue_identifier]) == %{issue_id: id, issue_identifier: identifier} do
+          case save_unlocked(workspace, state) do
+            :ok -> {:ok, state}
+            {:error, reason} -> {:error, reason}
+          end
+        else
+          {:error, :run_identity_issue_mismatch}
+        end
+      end
+    end)
+  end
+
   @spec update(Path.t(), (map() -> map())) :: {:ok, map()} | {:error, term()}
   def update(workspace, fun) when is_binary(workspace) and is_function(fun, 1) do
     with_workspace_lock(workspace, fn ->
