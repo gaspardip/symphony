@@ -108,6 +108,34 @@ defmodule SymphonyElixir.LeaseManager do
     end
   end
 
+  @doc "Holds the physical lease lock while diagnosing missing or expired custody; never acquires, renews or releases it."
+  @spec with_inactive(storage_context(), (:missing | {:expired, map(), binary()} -> result)) :: result | {:error, term()} when result: var
+  def with_inactive(storage, operation) when is_function(operation, 1) do
+    with :ok <- validate_storage(storage) do
+      with_lease_lock(storage, fn ->
+        case File.lstat(storage.lease_path) do
+          {:error, :enoent} ->
+            operation.(:missing)
+
+          {:ok, %{type: :regular}} ->
+            with {:ok, lease} <- read_at(storage),
+                 :ok <- validate_acquirable_legacy(lease, storage.issue_id),
+                 true <- stale_lease?(lease["updated_at"], DateTime.utc_now(), storage.ttl_ms) or {:error, :lease_still_active},
+                 {:ok, bytes} <- File.read(storage.lease_path),
+                 true <- Jason.decode(bytes) == {:ok, lease} or {:error, :lease_observation_changed} do
+              operation.({:expired, lease, bytes})
+            end
+
+          {:ok, _stat} ->
+            {:error, :invalid_lease_path_type}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+      end)
+    end
+  end
+
   @spec snapshot_for_state(map()) :: map()
   def snapshot_for_state(lease) when is_map(lease) do
     %{

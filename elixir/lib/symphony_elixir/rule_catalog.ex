@@ -5,6 +5,11 @@ defmodule SymphonyElixir.RuleCatalog do
   """
 
   @rules %{
+    dispatch_audit_pending: %{
+      rule_id: "runtime.dispatch_audit_pending",
+      failure_class: "recovery",
+      human_action: "Investigate the retained dispatch journal and the previous worker before explicitly resuming this run. Preserve their evidence."
+    },
     runner_install_missing: %{
       rule_id: "runner.install_missing",
       failure_class: "environment",

@@ -792,6 +792,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp retry_attempt(retry), do: retry.attempt || 0
 
   defp issue_status(_running, _retry, paused, _queue, _tracked_issue, _run_state) when not is_nil(paused), do: "paused"
+  defp issue_status(nil, _retry, _paused, _queue, %{} = _tracked_issue, %{stage: "blocked", stop_reason: %{code: "dispatch_audit_pending"}}), do: "Blocked"
   defp issue_status(_running, nil, _paused, nil, nil, %{} = run_state), do: Map.get(run_state, :stage) || "tracked"
   defp issue_status(nil, nil, _paused, _queue, %{} = tracked_issue, _run_state), do: entry_value(tracked_issue, "state") || "tracked"
   defp issue_status(_running, nil, _paused, nil, %{} = tracked_issue, _run_state), do: entry_value(tracked_issue, "state") || "tracked"
@@ -978,6 +979,7 @@ defmodule SymphonyElixirWeb.Presenter do
         Enum.filter(running, &human_attention_entry?/1) |> Enum.map(&triage_entry_payload(&1, "attention_now")),
         Enum.map(paused, &triage_entry_payload(&1, "attention_now")),
         Enum.map(skipped, &triage_entry_payload(&1, "attention_now")),
+        Enum.filter(queue, &queue_attention_entry?/1) |> Enum.map(&triage_entry_payload(&1, "attention_now")),
         recent_attention_entries_from_ledger(ledger_entries, running, retrying, paused, skipped, queue)
       ])
       |> uniq_triage_entries()
@@ -2411,6 +2413,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
       %{
         source: "ledger",
+        event_id: entry_value(entry, "event_id"),
+        issue_id: entry_value(entry, "issue_id"),
+        issue_identifier: entry_value(entry, "issue_identifier"),
         at: entry_value(entry, "at"),
         event: event,
         message: ledger_message(entry),
@@ -2617,6 +2622,9 @@ defmodule SymphonyElixirWeb.Presenter do
     entries
     |> Enum.filter(fn entry ->
       Map.get(entry, "event_type") in [
+        "dispatch.started",
+        "publish.completed",
+        "runtime.stopped",
         "merge.completed",
         "post_merge.completed",
         "deploy.preview.completed",

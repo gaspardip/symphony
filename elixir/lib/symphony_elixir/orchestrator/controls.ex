@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
   alias SymphonyElixir.BehavioralProof
   alias SymphonyElixir.Config
   alias SymphonyElixir.DeployAudit
+  alias SymphonyElixir.DispatchAudit
   alias SymphonyElixir.GitHubEventInbox
   alias SymphonyElixir.LeaseManager
   alias SymphonyElixir.IssuePolicy
@@ -832,6 +833,7 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     issue = operation.issue
 
     with :ok <- DeployAudit.ensure_available(operation.workspace),
+         :ok <- Orchestrator.ensure_retry_dispatch_access(state, issue, operation.workspace),
          false <- Orchestrator.issue_paused?(state, issue),
          :ok <- control_deadline(operation),
          {:ok, next_state} <- Orchestrator.prepare_retry_custody(state, issue.id) do
@@ -839,6 +841,10 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     else
       true ->
         domain_control_error(state, operation, "issue is paused")
+
+      {:error, {:dispatch_audit_pending, _workspace} = reason} ->
+        payload = control_domain_payload(operation, inspect(reason)) |> Map.put(:dispatch_outcome, "deferred")
+        {:rejected, operation, payload, state}
 
       {:error, reason, retained} ->
         payload = control_domain_payload(operation, inspect(reason)) |> Map.put(:dispatch_outcome, "deferred")
@@ -901,7 +907,11 @@ defmodule SymphonyElixir.Orchestrator.Controls do
       resume_context: p.resume_context
     }
 
-    case RunStateStore.transition(operation.workspace, p.stage, attrs) do
+    result =
+      with :ok <- Orchestrator.ensure_retry_dispatch_access(state, issue, operation.workspace),
+           do: RunStateStore.transition(operation.workspace, p.stage, attrs)
+
+    case result do
       {:ok, persisted} = result ->
         prepared =
           if Map.get(p, :manual_resume?) do
@@ -921,7 +931,11 @@ defmodule SymphonyElixir.Orchestrator.Controls do
     do: request_control_refresh(state, record_control_effect(operation, :retry_writer, :not_applicable), :retry_dispatch)
 
   defp advance_control(state, %{phase: :retry_writer} = operation, :start) do
-    case IssueSource.update_issue_state(operation.issue, operation.prepared.target) do
+    result =
+      with :ok <- Orchestrator.ensure_retry_dispatch_access(state, operation.issue, operation.workspace),
+           do: IssueSource.update_issue_state(operation.issue, operation.prepared.target)
+
+    case result do
       :ok ->
         request_control_refresh(state, record_control_effect(operation, :retry_writer, :ok), :retry_dispatch)
 
@@ -1471,7 +1485,8 @@ defmodule SymphonyElixir.Orchestrator.Controls do
       end
 
     with true <- location_matches or {:error, :lease_workspace_changed},
-         :ok <- DeployAudit.ensure_available(workspace) do
+         :ok <- DeployAudit.ensure_available(workspace),
+         :ok <- DispatchAudit.ensure_available(workspace) do
       resume_available_blocked_issue(state, issue, workspace)
     end
   end

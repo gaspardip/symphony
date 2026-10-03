@@ -983,6 +983,149 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
     assert error_html =~ "snapshot_timeout"
   end
 
+  for {tracker_state, stage, event, summary, rule, action} <- [
+        {"Human Review", "await_checks", "publish.completed", "Required checks passed; awaiting review.", "policy.review_required", "Review the published change."},
+        {"Blocked", "blocked", "runtime.stopped", "Required validation failed.", "validation.failed", "Repair validation and retry."},
+        {"In Progress", "implement", "dispatch.started", "Implementing the requested change.", nil, nil}
+      ] do
+    test "delivery report includes an admitted run at #{stage}" do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      issue = %Issue{id: "report-admitted", identifier: "REPORT-ADMITTED", title: "Admitted delivery", state: unquote(tracker_state), source: :tracker}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      workspace = Path.join(Config.workspace_root(), issue.identifier)
+
+      assert {:ok, _state} =
+               RunStateStore.transition(workspace, unquote(stage), %{
+                 issue_id: issue.id,
+                 issue_identifier: issue.identifier,
+                 issue_source: "tracker",
+                 effective_policy_class: "review_required",
+                 last_decision_summary: unquote(summary),
+                 last_rule_id: unquote(rule),
+                 next_human_action: unquote(action)
+               })
+
+      RunLedger.record(unquote(event), %{issue_id: issue.id, issue_identifier: issue.identifier, stage: unquote(stage), actor_type: "runtime", summary: unquote(summary)})
+      name = Module.concat(__MODULE__, :AdmittedDeliveryReportOrchestrator)
+      start_supervised!({BackfillOrchestrator, name: name, test_pid: self(), snapshot: empty_snapshot()})
+      start_test_endpoint(orchestrator: name, snapshot_timeout_ms: 50)
+
+      payload = json_response(get(build_conn(), "/api/v1/reports/delivery"), 200)
+      assert payload["summary"]["recent_deliveries"] == 1
+      assert [delivery] = payload["deliveries"]
+      assert delivery["issue_id"] == issue.id
+      assert delivery["issue_identifier"] == issue.identifier
+      assert delivery["status"] == unquote(tracker_state)
+      assert delivery["summary"]["current_stage"] == unquote(stage)
+      assert delivery["summary"]["why_here"] == unquote(summary)
+      assert delivery["summary"]["rule_id"] == unquote(rule)
+      assert delivery["summary"]["human_action_required"] == unquote(action)
+    end
+  end
+
+  test "persisted blocked disposition overrides the unchanged tracker while no worker runs" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    issue = %Issue{id: "report-interrupted", identifier: "REPORT-INTERRUPTED", title: "Interrupted delivery", state: "In Progress", source: :tracker}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    workspace = Workspace.path_for_issue(issue.identifier)
+
+    assert {:ok, _state} =
+             RunStateStore.transition(workspace, "blocked", %{
+               issue_id: issue.id,
+               issue_identifier: issue.identifier,
+               issue_source: "tracker",
+               stop_reason: %{code: "dispatch_audit_pending"},
+               last_rule_id: "runtime.dispatch_audit_pending",
+               last_failure_class: "recovery",
+               last_decision_summary: "Continuation blocked by an unresolved dispatch journal.",
+               next_human_action: "Inspect the previous owner and retained journal."
+             })
+
+    name = Module.concat(__MODULE__, :InterruptedDeliveryOrchestrator)
+    start_supervised!({BackfillOrchestrator, name: name, test_pid: self(), snapshot: empty_snapshot()})
+    assert {:ok, payload} = Presenter.issue_payload(issue.identifier, name, 50)
+    assert payload.status == "Blocked"
+    assert payload.tracked.state == "In Progress"
+    assert payload.operator_summary.current_stage == "blocked"
+    assert payload.stop_reason.code == "dispatch_audit_pending"
+    assert payload.operator_summary.human_action_required == "Inspect the previous owner and retained journal."
+  end
+
+  test "global ledger activity preserves event and issue identity" do
+    event =
+      RunLedger.record("validation.completed", %{
+        issue_id: "activity-identity",
+        issue_identifier: "ACTIVITY-IDENTITY",
+        stage: "validate",
+        actor_type: "runtime",
+        summary: "Validation failed for the admitted issue."
+      })
+
+    name = Module.concat(__MODULE__, :LedgerActivityIdentityOrchestrator)
+    start_supervised!({BackfillOrchestrator, name: name, test_pid: self(), snapshot: empty_snapshot()})
+
+    payload = Presenter.state_payload(name, 50)
+    assert [activity] = Enum.filter(payload.activity, &(&1.event == "validation.completed"))
+    assert activity.event_id == event.event_id
+    assert activity.issue_id == "activity-identity"
+    assert activity.issue_identifier == "ACTIVITY-IDENTITY"
+    assert activity.message == "Validation failed for the admitted issue."
+  end
+
+  test "blocked queued issues appear in operator attention and the dashboard" do
+    snapshot = rich_snapshot()
+    action = "Repair trimming and rerun validation."
+    entry = hd(snapshot.queue) |> Map.merge(%{state: "Blocked", last_rule_id: "validation.failed", last_failure_class: "validation", next_human_action: action})
+    snapshot = %{snapshot | running: [], retrying: [], paused: [], skipped: [], queue: [entry]}
+    name = Module.concat(__MODULE__, :QueuedAttentionOrchestrator)
+    start_supervised!({BackfillOrchestrator, name: name, test_pid: self(), snapshot: snapshot})
+
+    payload = Presenter.state_payload(name, 50)
+    assert payload.triage.summary.attention_now == 1
+    assert payload.triage.waiting_safe == []
+    assert [attention] = payload.triage.attention_now
+    assert attention.issue_identifier == entry.issue_identifier
+    assert attention.status == "Blocked"
+    assert attention.rule_id == "validation.failed"
+    assert attention.failure_class == "validation"
+    assert attention.human_action_required == action
+    start_test_endpoint(orchestrator: name, snapshot_timeout_ms: 50)
+    assert {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "1 issue(s) need operator attention now."
+    assert html =~ action
+    refute html =~ "Nothing is blocked on you right now."
+  end
+
+  test "queued issues without attention reasons remain in safe waiting" do
+    snapshot = rich_snapshot()
+    entry = hd(snapshot.queue) |> Map.merge(%{state: "Todo", last_rule_id: nil, last_failure_class: nil, next_human_action: nil, error: nil})
+    snapshot = %{snapshot | running: [], retrying: [], paused: [], skipped: [], queue: [entry]}
+    name = Module.concat(__MODULE__, :QueuedSafeWaitOrchestrator)
+    start_supervised!({BackfillOrchestrator, name: name, test_pid: self(), snapshot: snapshot})
+
+    payload = Presenter.state_payload(name, 50)
+    assert payload.triage.summary.attention_now == 0
+    assert payload.triage.attention_now == []
+    assert [waiting] = payload.triage.waiting_safe
+    assert waiting.issue_identifier == entry.issue_identifier
+    assert waiting.bucket == "waiting_safe"
+  end
+
+  test "a queued issue already shown as skipped is counted once in attention" do
+    snapshot = rich_snapshot()
+    entry = hd(snapshot.queue) |> Map.merge(%{state: "Blocked", last_rule_id: "validation.failed", next_human_action: "Repair validation."})
+    skipped = Map.merge(entry, %{reason: "Validation failed", next_human_action: "Repair validation."})
+    snapshot = %{snapshot | running: [], retrying: [], paused: [], skipped: [skipped], queue: [entry]}
+    name = Module.concat(__MODULE__, :QueuedDuplicateAttentionOrchestrator)
+    start_supervised!({BackfillOrchestrator, name: name, test_pid: self(), snapshot: snapshot})
+
+    payload = Presenter.state_payload(name, 50)
+    assert payload.triage.summary.attention_now == 1
+    assert [attention] = payload.triage.attention_now
+    assert attention.issue_identifier == entry.issue_identifier
+    assert payload.triage.waiting_safe == []
+  end
+
   test "public queue preserves blocked runtime decision separately from cached tracker state" do
     snapshot = rich_snapshot()
 

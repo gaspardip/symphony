@@ -1455,6 +1455,21 @@ defmodule SymphonyElixir.Orchestrator do
     state |> receive_retry_result(operation, result) |> advance_admission()
   end
 
+  defp receive_admission_result(state, %{purpose: :interrupted_dispatch}, {:ok, {:skipped, reason}})
+       when reason in [:lease_missing, :lease_still_active],
+       do: advance_admission(state)
+
+  defp receive_admission_result(state, %{purpose: :interrupted_dispatch} = operation, result) do
+    reason =
+      case {Map.has_key?(state.running, operation.issue.id), result} do
+        {false, {:ok, _diagnosis}} -> operation.original_rejection
+        {false, {:error, cause}} -> {:interrupted_dispatch_diagnostic_failed, operation.original_rejection, cause}
+        {true, _result} -> {:interrupted_dispatch_diagnostic_failed, operation.original_rejection, :active_worker_changed}
+      end
+
+    state |> complete_interrupted_rejection(operation.issue, reason) |> advance_admission()
+  end
+
   defp receive_admission_result(state, operation, result) do
     state = refresh_runtime_config(state)
 
@@ -7948,6 +7963,9 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, {:persisted_stage_requires_explicit_resume, _stage} = reason} ->
         state |> record_control_admission_failure(issue.id, reason) |> stop_terminal_dispatch(issue, reason)
 
+      {:error, {:dispatch_audit_pending, _workspace} = rejection} ->
+        start_interrupted_dispatch_diagnostic(state, issue, rejection)
+
       {:error, reason} ->
         state = record_control_admission_failure(state, issue.id, reason)
 
@@ -7958,6 +7976,127 @@ defmodule SymphonyElixir.Orchestrator do
           state = tracker_inbox_outcome(state, issue.id, tracker_inbox_validation_outcome(reason))
           %{state | candidate_fetch_error: reason}
         end
+    end
+  end
+
+  defp start_interrupted_dispatch_diagnostic(state, issue, {:dispatch_audit_pending, workspace} = rejection) do
+    Logger.error("Dispatch blocked by runtime validation issue_identifier=#{issue.identifier} reason=#{inspect(rejection)}")
+    state = complete_interrupted_rejection(state, issue, rejection)
+
+    state =
+      case state.candidate_fetch_error do
+        {:dispatch_audit_failed, id, ^rejection} when id == issue.id -> %{state | candidate_fetch_error: rejection}
+        _other_error -> state
+      end
+
+    if Map.has_key?(state.running, issue.id) or not is_nil(state.admission_read) or state.candidate_fetch_error != rejection do
+      state
+    else
+      case automatic_interruption_candidate(state, issue, workspace) do
+        :not_applicable ->
+          state
+
+        {:error, cause} ->
+          complete_interrupted_rejection(state, issue, {:interrupted_dispatch_diagnostic_failed, rejection, cause})
+
+        :eligible ->
+          operation = %{purpose: :interrupted_dispatch, issue: issue, workspace: workspace, original_rejection: rejection}
+          identity = %{id: issue.id, identifier: issue.identifier}
+
+          case TrackerReader.start_operation(fn -> DispatchAudit.block_interrupted_if_expired(workspace, identity) end) do
+            {:ok, reader} -> %{state | admission_read: Map.merge(operation, reader)}
+            {:error, cause} -> complete_interrupted_rejection(state, issue, {:interrupted_dispatch_diagnostic_failed, rejection, {:operation_start_failed, cause}})
+          end
+      end
+    end
+  end
+
+  defp automatic_interruption_candidate(state, %Issue{id: id, identifier: identifier}, workspace)
+       when is_binary(id) and id != "" and is_binary(identifier) and identifier != "" do
+    matches =
+      state.last_candidate_issues
+      |> Enum.filter(&(Workspace.path_for_issue(&1) == workspace))
+      |> Enum.map(&{&1.id, &1.identifier})
+
+    case matches do
+      [{^id, ^identifier}] ->
+        with {:ok, storage} <- LeaseManager.capture_storage(id) do
+          case File.lstat(storage.lease_path) do
+            {:error, :enoent} ->
+              :not_applicable
+
+            {:ok, %{type: :regular}} ->
+              case LeaseManager.read_at(storage) do
+                {:error, :missing} ->
+                  :not_applicable
+
+                {:ok, lease} ->
+                  cond do
+                    lease["issue_identifier"] != identifier -> {:error, :dispatch_audit_lease_mismatch}
+                    LeaseManager.reclaimable?(lease, DateTime.utc_now(), ttl_ms: storage.ttl_ms) -> :eligible
+                    true -> :not_applicable
+                  end
+
+                {:error, _cause} = error ->
+                  error
+              end
+
+            {:ok, _stat} ->
+              {:error, :invalid_lease_path_type}
+
+            {:error, _cause} = error ->
+              error
+          end
+        end
+
+      _no_unique_current_candidate ->
+        :not_applicable
+    end
+  end
+
+  defp automatic_interruption_candidate(_state, _issue, _workspace), do: {:error, :invalid_interrupted_issue}
+
+  defp complete_interrupted_rejection(state, issue, reason) do
+    state = halt_dispatch_audit(state, issue.id, reason)
+
+    if github_reserved?(state, issue.id),
+      do: block_github_head(state, {:github_dispatch_validation_failed, reason}),
+      else: state
+  end
+
+  @doc false
+  @spec ensure_retry_dispatch_access(State.t(), Issue.t(), Path.t()) :: :ok | {:error, term()}
+  def ensure_retry_dispatch_access(%State{} = state, %Issue{id: id, identifier: identifier}, workspace)
+      when is_binary(workspace) do
+    workspace = Path.expand(workspace)
+
+    case DispatchAudit.ensure_available(workspace) do
+      {:error, {:dispatch_audit_pending, _}} = pending ->
+        with %{
+               issue: %Issue{id: ^id, identifier: ^identifier},
+               workspace_path: ^workspace,
+               custody_ref: ref,
+               dispatch_ticket: %{workspace: ^workspace, owner: owner, epoch: epoch, ledger_path: ledger_path, run_id: run_id} = ticket,
+               lease_token: token,
+               agent_execution: %{context: context}
+             } = entry <- Map.get(state.running, id),
+             %{owner: ^owner, epoch: ^epoch, storage: %{issue_id: ^id, ledger_path: ^ledger_path}} <- token,
+             true <- is_reference(ref) and owner == state.lease_owner,
+             {:ok, ^id, ^entry} <- matching_execution_entry(state, context),
+             {:ok, %{workspace: ^workspace, token: ^token, holder: holder}} <- current_issue_custody(state, id, ref),
+             true <- holder in [:gated, :running],
+             :ok <- execution_permission(entry),
+             :ok <- LeaseManager.ensure_current(token),
+             :ok <- SymphonyElixir.RunIdentity.verify(workspace, run_id, id, identifier) do
+          DispatchAudit.with_authorization(ticket, fn -> DispatchAudit.ensure_workspace_access(workspace) end)
+        else
+          {:error, _cause} = error -> error
+          {:stop, cause} -> {:error, {:retry_execution_stopped, cause}}
+          _mismatch -> pending
+        end
+
+      result ->
+        result
     end
   end
 

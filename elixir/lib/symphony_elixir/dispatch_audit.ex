@@ -11,7 +11,7 @@ defmodule SymphonyElixir.DispatchAudit do
   canonical workspace by SHA-256; older events retain exact literal matching.
   """
 
-  alias SymphonyElixir.{RunIdentity, RunLedger, RunStateStore}
+  alias SymphonyElixir.{DeployAudit, LeaseManager, RuleCatalog, RunIdentity, RunLedger, RunStateStore}
 
   @context_key {__MODULE__, :authorization}
   @ticket_key {__MODULE__, :ticket}
@@ -118,6 +118,200 @@ defmodule SymphonyElixir.DispatchAudit do
       {:error, reason} -> {:error, {:dispatch_audit_read_failed, reason}}
     end
   end
+
+  @doc """
+  Records a blocked continuation after rejected admission to an interrupted run.
+  The caller must have no active worker for this issue. Missing or expired custody
+  is not proof of worker death. This preserves the dispatch journal and lease;
+  it neither executes work nor grants authority to resolve the old dispatch.
+  """
+  @spec block_interrupted(Path.t(), %{id: String.t(), identifier: String.t()}) :: {:ok, map()} | {:error, term()}
+  def block_interrupted(workspace, issue), do: do_block_interrupted(workspace, issue, :missing_or_expired)
+
+  @doc "Automatically diagnoses only a retained expired lease; missing or live custody preserves the original pending rejection."
+  @spec block_interrupted_if_expired(Path.t(), %{id: String.t(), identifier: String.t()}) ::
+          {:ok, map() | {:skipped, :lease_missing | :lease_still_active}} | {:error, term()}
+  def block_interrupted_if_expired(workspace, issue) do
+    case do_block_interrupted(workspace, issue, :expired_only) do
+      {:error, :lease_still_active} -> {:ok, {:skipped, :lease_still_active}}
+      result -> result
+    end
+  end
+
+  defp do_block_interrupted(workspace, %{id: id, identifier: identifier} = issue, custody_policy)
+       when is_binary(workspace) and is_binary(id) and id != "" and is_binary(identifier) and identifier != "" do
+    workspace = Path.expand(workspace)
+
+    result =
+      RunStateStore.with_workspace_lock(workspace, fn ->
+        with :ok <- DeployAudit.ensure_available(workspace),
+             {:ok, marker} <- read_marker(workspace),
+             true <- (marker["version"] == 2 and marker["status"] == "authorized") or {:error, :dispatch_audit_not_interrupted},
+             true <- (marker["authorized"]["issue_id"] == id and marker["authorized"]["issue_identifier"] == identifier) or {:error, :dispatch_audit_issue_mismatch},
+             :ok <- validate_recorded_admission(marker),
+             {:ok, rows, _digest} <- RunLedger.CheckedStorage.entries_checked(marker["ledger_path"]),
+             true <- not Enum.any?(rows, &interrupted_dispatch_finished?(&1, marker)) or {:error, :dispatch_audit_already_finished},
+             {:ok, storage} <- LeaseManager.capture_storage(id),
+             true <- storage.ledger_path == marker["ledger_path"] or {:error, :dispatch_audit_ledger_changed} do
+          LeaseManager.with_inactive(storage, fn observation ->
+            with :ok <- interrupted_observation_allowed(observation, custody_policy),
+                 :ok <- interrupted_lease_matches(observation, marker),
+                 {:ok, raw, state, bytes} <- interrupted_snapshot(workspace, issue, marker),
+                 {:ok, marker_bytes} <- File.read(Path.join(marker_directory(workspace), @marker_name)),
+                 true <- Jason.decode(marker_bytes) == {:ok, marker} or {:error, :dispatch_audit_marker_changed} do
+              persist_interrupted_block(workspace, marker, marker_bytes, storage, observation, raw, state, bytes)
+            end
+          end)
+        end
+      end)
+
+    case result do
+      :aborted -> {:error, :dispatch_audit_workspace_lock_aborted}
+      result -> result
+    end
+  end
+
+  defp do_block_interrupted(_workspace, _issue, _custody_policy), do: {:error, :invalid_interrupted_issue}
+
+  defp interrupted_observation_allowed(:missing, :expired_only), do: {:ok, {:skipped, :lease_missing}}
+  defp interrupted_observation_allowed(:missing, :missing_or_expired), do: :ok
+
+  defp interrupted_observation_allowed({:expired, _lease, _bytes}, custody_policy)
+       when custody_policy in [:missing_or_expired, :expired_only], do: :ok
+
+  defp interrupted_dispatch_finished?(row, marker) do
+    row["event_type"] == "dispatch.finished" and is_map(row["metadata"]) and row["metadata"]["dispatch_id"] == marker["dispatch_id"]
+  end
+
+  defp interrupted_lease_matches(:missing, _marker), do: :ok
+
+  defp interrupted_lease_matches({:expired, lease, _bytes}, marker) do
+    if lease["owner"] == marker["owner"] and lease["epoch"] == marker["epoch"] and lease["issue_identifier"] == marker["authorized"]["issue_identifier"],
+      do: :ok,
+      else: {:error, :dispatch_audit_lease_mismatch}
+  end
+
+  defp interrupted_snapshot(workspace, issue, marker) do
+    with :ok <- interrupted_path_type(workspace, :directory),
+         :ok <- interrupted_path_type(Path.join(workspace, ".symphony"), :directory),
+         :ok <- interrupted_path_type(RunStateStore.state_path(workspace), :regular),
+         {:ok, bytes} <- File.read(RunStateStore.state_path(workspace)),
+         {:ok, raw} <- Jason.decode(bytes),
+         true <- is_map(raw) or {:error, :invalid_state},
+         {:ok, state} <- RunStateStore.load(workspace),
+         true <- RunStateStore.snapshot_digest(state) == RunStateStore.snapshot_digest(raw) or {:error, :dispatch_audit_snapshot_changed},
+         true <- (raw["issue_id"] == issue.id and raw["issue_identifier"] == issue.identifier and raw["run_id"] == marker["run_id"]) or {:error, :dispatch_audit_snapshot_mismatch},
+         :ok <- RunIdentity.verify(workspace, marker["run_id"], issue.id, issue.identifier),
+         true <- is_map(raw["resume_context"]) or {:error, :invalid_interrupted_resume_context} do
+      {:ok, raw, state, bytes}
+    end
+  end
+
+  defp interrupted_path_type(path, expected) do
+    case File.lstat(path) do
+      {:ok, %{type: ^expected}} -> :ok
+      {:ok, _stat} -> {:error, :invalid_interrupted_snapshot_path_type}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp persist_interrupted_block(_workspace, marker, marker_bytes, _storage, _observation, %{"stage" => "blocked"} = raw, state, _bytes) do
+    with :ok <- matching_interrupted_block(raw, marker, marker_bytes), do: {:ok, state}
+  end
+
+  defp persist_interrupted_block(workspace, marker, marker_bytes, storage, observation, raw, state, bytes) do
+    with true <- raw["stage"] in ["implement", "validate"] or {:error, :dispatch_audit_checkpoint_not_interruptible},
+         true <- not Map.has_key?(raw["resume_context"], "dispatch_interruption") or {:error, :dispatch_audit_diagnostic_conflict} do
+      summary = "Continuation is blocked by an unresolved dispatch from the previous owner; worker termination is unconfirmed."
+      rule_id = RuleCatalog.rule_id(:dispatch_audit_pending)
+      failure_class = RuleCatalog.failure_class(:dispatch_audit_pending)
+      action = RuleCatalog.human_action(:dispatch_audit_pending)
+
+      evidence = %{
+        dispatch_id: marker["dispatch_id"],
+        run_id: marker["run_id"],
+        authorization_event_id: marker["authorized"]["event_id"],
+        owner: marker["owner"],
+        epoch: marker["epoch"],
+        marker_path: Path.join(marker_directory(workspace), @marker_name),
+        marker_sha256: workspace_digest(marker_bytes),
+        marker_status: marker["status"],
+        observed_at: DateTime.to_iso8601(DateTime.utc_now()),
+        lease: interrupted_lease_evidence(storage, observation),
+        checkpoint: %{
+          snapshot_sha256: workspace_digest(bytes),
+          previous_fields:
+            Map.take(
+              raw,
+              ~w(stage resume_stage stop_reason last_decision last_rule_id last_failure_class last_decision_summary next_human_action last_ledger_event_id reason stage_history stage_transition_counts)
+            )
+        }
+      }
+
+      RunStateStore.transition(workspace, "blocked", %{
+        resume_stage: raw["stage"],
+        resume_context: Map.put(state.resume_context, :dispatch_interruption, evidence),
+        stop_reason: %{code: "dispatch_audit_pending", rule_id: rule_id, failure_class: failure_class, summary: summary, human_action: action},
+        last_decision: nil,
+        last_rule_id: rule_id,
+        last_failure_class: failure_class,
+        last_decision_summary: summary,
+        next_human_action: action,
+        reason: "Blocked continuation for unresolved dispatch #{marker["dispatch_id"]}, authorization #{marker["authorized"]["event_id"]}."
+      })
+    end
+  end
+
+  defp interrupted_lease_evidence(storage, :missing), do: %{status: "missing", path: storage.lease_path, ttl_ms: storage.ttl_ms}
+
+  defp interrupted_lease_evidence(storage, {:expired, lease, bytes}) do
+    %{
+      status: "expired",
+      path: storage.lease_path,
+      sha256: workspace_digest(bytes),
+      ttl_ms: storage.ttl_ms,
+      age_ms: LeaseManager.age_ms(lease),
+      identity: Map.take(lease, ~w(issue_id issue_identifier owner epoch lease_version lease_generation acquired_at updated_at))
+    }
+  end
+
+  defp matching_interrupted_block(
+         %{"resume_context" => %{"dispatch_interruption" => %{"checkpoint" => %{"previous_fields" => %{} = checkpoint}} = evidence}, "stop_reason" => %{} = stop} = raw,
+         marker,
+         marker_bytes
+       ) do
+    binding = %{
+      "run_id" => raw["run_id"],
+      "run_identity_event_id" => raw["run_identity_event_id"],
+      "run_identity_ledger_path" => raw["run_identity_ledger_path"],
+      "workspace" => SymphonyElixir.SecretRedactor.redact(marker["workspace"]),
+      "workspace_digest" => workspace_digest(marker["workspace"])
+    }
+
+    valid =
+      is_binary(raw["last_ledger_event_id"]) and raw["last_ledger_event_id"] != "" and
+        checkpoint["stage"] in ["implement", "validate"] and raw["resume_stage"] == checkpoint["stage"] and
+        evidence["dispatch_id"] == marker["dispatch_id"] and evidence["run_id"] == marker["run_id"] and
+        evidence["authorization_event_id"] == marker["authorized"]["event_id"] and evidence["owner"] == marker["owner"] and evidence["epoch"] == marker["epoch"] and
+        evidence["marker_sha256"] == workspace_digest(marker_bytes) and evidence["marker_status"] == "authorized" and
+        stop["code"] == "dispatch_audit_pending" and stop["rule_id"] == RuleCatalog.rule_id(:dispatch_audit_pending) and
+        raw["last_rule_id"] == stop["rule_id"] and raw["last_failure_class"] == RuleCatalog.failure_class(:dispatch_audit_pending) and
+        raw["next_human_action"] == RuleCatalog.human_action(:dispatch_audit_pending)
+
+    with true <- valid or {:error, :dispatch_audit_diagnostic_conflict},
+         {:ok, event} <- RunLedger.fetch_entry_checked(raw["last_ledger_event_id"]),
+         true <- match?(%{"metadata" => %{"run_binding" => %{}, "snapshot_digest" => _}}, event) or {:error, :dispatch_audit_diagnostic_unconfirmed},
+         before_finalization =
+           if(Map.has_key?(checkpoint, "last_ledger_event_id"), do: Map.put(raw, "last_ledger_event_id", checkpoint["last_ledger_event_id"]), else: Map.delete(raw, "last_ledger_event_id")),
+         true <-
+           (event["event_type"] == "stage.transition" and event["stage"] == "blocked" and event["issue_id"] == raw["issue_id"] and event["issue_identifier"] == raw["issue_identifier"] and
+              get_in(event, ["metadata", "run_binding"]) == binding and
+              get_in(event, ["metadata", "snapshot_digest"]) == RunStateStore.snapshot_digest(before_finalization)) or {:error, :dispatch_audit_diagnostic_unconfirmed} do
+      :ok
+    end
+  end
+
+  defp matching_interrupted_block(_raw, _marker, _marker_bytes), do: {:error, :dispatch_audit_diagnostic_conflict}
 
   @spec ensure_workspace_access(Path.t()) :: :ok | {:error, term()}
   def ensure_workspace_access(workspace) when is_binary(workspace) do

@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.TrackerReader do
   @moduledoc """
-  Owns the lifecycle of one read without carrying coordinator state.
+  Owns the lifecycle of one callback without carrying coordinator state.
+
+  start/2 is restricted to reads. start_operation/2 explicitly admits an audited
+  mutation under the separate cancellation and uncertainty contract below.
 
   The caller owns the returned handle. A supervised guardian monitors that caller
   and runs the supplied function in a linked, monitored child. It sends one
@@ -13,7 +16,7 @@ defmodule SymphonyElixir.TrackerReader do
   A guardian that observes cancellation or owner death kills its own read child
   and waits for its DOWN before terminating, without delivering a result.
 
-  The function must perform only the intended read and return `{:ok, data}` or
+  The function passed to `start/2` must perform only the intended read and return `{:ok, data}` or
   `{:error, reason}`. It must not enable `trap_exit` or spawn detached work. Those
   contracts make the child link effective if the guardian itself is killed. This
   module does not supervise arbitrary transport descendants or interrupt a blocking
@@ -31,6 +34,26 @@ defmodule SymphonyElixir.TrackerReader do
   @doc "Starts a guardian and installs the caller's monitor before allowing the read to run."
   @spec start((-> result()), keyword()) :: {:ok, handle()} | {:error, term()}
   def start(read_fun, opts \\ []) when is_function(read_fun, 0) do
+    start_owned(read_fun, opts)
+  end
+
+  @doc """
+  Starts one explicitly audited operation using the same owned guardian lifecycle.
+
+  Unlike start/2, this entry permits a durable mutation with its own checked
+  journal. The callback must return {:ok, data} or {:error, reason}; it must not
+  trap exits or spawn detached work. This entry never retries or rolls back.
+  Cancellation or owner death may leave committed effects, a pending journal or
+  a physical lock. The owner must preserve the rejected admission and treat a
+  missing result as uncertain, never as proof that the mutation was undone.
+  Results and lifecycle failures retain the existing tracker_read_result protocol.
+  """
+  @spec start_operation((-> result()), keyword()) :: {:ok, handle()} | {:error, term()}
+  def start_operation(operation_fun, opts \\ []) when is_function(operation_fun, 0) do
+    start_owned(operation_fun, opts)
+  end
+
+  defp start_owned(read_fun, opts) do
     owner = self()
     ref = make_ref()
     supervisor = Keyword.get(opts, :supervisor, SymphonyElixir.TaskSupervisor)
