@@ -8,7 +8,8 @@ on:
 
 jobs:
   make-all:
-    runs-on: ubuntu-latest
+    # Execution boundary integration tests require Darwin.
+    runs-on: macos-15
     defaults:
       run:
         working-directory: elixir
