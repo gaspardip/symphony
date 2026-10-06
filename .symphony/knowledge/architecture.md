@@ -23,3 +23,9 @@ persistent batch representation; it owns heads, contexts, admission, custody,
 callbacks and effects. EventInbox owns storage locking, byte verification and
 durable ACK. Tracker head membership and GitHub whole-prefix currency remain
 distinct, as do their generation-retirement policies.
+
+Config preserves the workflow's normalized string-key stage provider mapping.
+AgentProvider resolves each selection through the existing adapters and fallback.
+This configuration seam owns no session lifecycle, capacity, execution authority
+or usage accounting; resolving a different provider alone does not replace an
+already-open session in DeliveryEngine.

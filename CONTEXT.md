@@ -17,3 +17,8 @@ cursors. InboxPrefix preserves its horizon through application and confirmed ACK
 Tracker consumes applied rows before confirmation; GitHub retains its completed
 row until confirmation. A confirmed boundary identifies the original remainder,
 not a permission to execute effects or consume later appends.
+
+A stage provider mapping is a workflow dictionary from string stage keys to
+provider selections. Config reads normalized string keys after validation; only
+existing stage atoms are queried. A missing mapping retains the existing provider
+fallback. Mapping resolution does not open or replace a live session.

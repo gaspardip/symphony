@@ -719,3 +719,20 @@ applied candidate before rebind and clears obsolete generation cursors before
 cleanup, including a retained head with release debt. GitHub generation errors
 keep the pending ACK/head under its existing error policy. Neither adapter treats
 these calculations as durable exactly-once delivery or new-source acceptance.
+
+## Stage provider configuration
+
+Config normalizes workflow configuration dictionaries to string keys and validates
+agent.providers as a string-key map with the existing unrestricted value contract
+and reads the string form of an existing stage atom. YAML, JSON frontmatter and
+the legacy codex section follow the same route. No stage atoms are created.
+
+The agent mapping retains precedence over the legacy mapping, including an
+explicit empty agent map masking legacy selections. Missing mappings preserve
+the existing global or explicit provider fallback. Unknown provider names retain
+the existing Codex fallback. Model and reasoning selection are unchanged.
+
+These guarantees cover configuration and module resolution only. DeliveryEngine
+currently captures its initial session; live provider handoff requires the
+separate session-lifecycle change and public execution evidence. Configuration
+regressions do not prove handoff, custody, accounting or new-source acceptance.

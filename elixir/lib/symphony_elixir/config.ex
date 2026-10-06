@@ -255,7 +255,7 @@ defmodule SymphonyElixir.Config do
                                  ],
                                  provider: [type: {:or, [:string, nil]}, default: nil],
                                  model: [type: {:or, [:string, nil]}, default: nil],
-                                 providers: [type: {:or, [:map, nil]}, default: nil],
+                                 providers: [type: {:or, [{:map, :string, :any}, nil]}, default: nil],
                                  models: [type: {:or, [:map, nil]}, default: nil],
                                  reasoning: [
                                    type: :map,
@@ -982,7 +982,7 @@ defmodule SymphonyElixir.Config do
         s when is_binary(s) -> String.to_existing_atom(s)
       end
 
-    get_in(validated_workflow_options(), [:agent, :providers, stage_key])
+    get_in(validated_workflow_options(), [:agent, :providers, Atom.to_string(stage_key)])
   rescue
     ArgumentError -> nil
   end
