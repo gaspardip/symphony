@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.GitHubEvent
   alias SymphonyElixir.GitHubEventInbox
   alias SymphonyElixir.GitManager
+  alias SymphonyElixir.InboxPrefix
   alias SymphonyElixir.IssueSource
   alias SymphonyElixir.IssuePolicy
   alias SymphonyElixir.PolicyPack
@@ -1699,7 +1700,11 @@ defmodule SymphonyElixir.Orchestrator do
           %{state | github_inbox_storage_error: nil, github_inbox_last_drained_at: DateTime.utc_now()}
 
         _ ->
-          batch = Map.merge(captured, %{ref: make_ref(), fingerprint: context.fingerprint, root: Config.workspace_root(), head: nil})
+          batch =
+            captured
+            |> Map.merge(Map.from_struct(InboxPrefix.new(captured, :consume_after_ack)))
+            |> Map.merge(%{ref: make_ref(), fingerprint: context.fingerprint, root: Config.workspace_root(), head: nil})
+
           resume_github_head(%{state | github_inbox_batch: batch, github_inbox_storage_error: nil})
       end
     else
@@ -1743,8 +1748,7 @@ defmodule SymphonyElixir.Orchestrator do
          true <- (context.fingerprint == batch.fingerprint and Config.workspace_root() == batch.root) or {:error, :github_context_changed},
          true <- GitHubEventInbox.location() == batch.location or {:error, :github_location_changed},
          {:ok, captured} <- GitHubEventInbox.capture(batch.location, tracker_inbox_limits()),
-         true <- (captured.generation == batch.generation and captured.start_offset == batch.start_offset) or {:error, :github_cursor_changed},
-         true <- Enum.take(captured.rows, length(batch.rows)) == batch.rows or {:error, :github_prefix_changed} do
+         :ok <- check_github_inbox_prefix(batch, captured) do
       :ok
     end
   end
@@ -2535,9 +2539,9 @@ defmodule SymphonyElixir.Orchestrator do
       end)
 
     state = if head.event, do: record_github_assignment(state, head.event, github_assignment(head.event, outcomes)), else: state
-    cursor = head.row.cursor
-    send(self(), {:github_inbox_ack, cursor})
-    %{state | github_inbox_ack_pending: cursor}
+    applied = InboxPrefix.applied(physical_inbox_prefix(state.github_inbox_batch))
+    send(self(), {:github_inbox_ack, applied.cursor})
+    %{state | github_inbox_batch: with_inbox_prefix(state.github_inbox_batch, applied.prefix), github_inbox_ack_pending: applied.cursor}
   end
 
   defp github_assignment(event, outcomes) do
@@ -2599,29 +2603,31 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, _confirmation} ->
         batch = state.github_inbox_batch
         state = acknowledge_disabled_github_custody(state, batch.head.ref)
-        remaining = tl(batch.rows)
+        confirmed = InboxPrefix.acknowledged(physical_inbox_prefix(batch), cursor)
         state = %{state | github_inbox_ack_pending: nil, github_inbox_storage_error: nil, github_inbox_last_drained_at: DateTime.utc_now()}
 
-        if remaining == [] do
-          send(self(), :run_github_webhook_cycle)
-          %{state | github_inbox_batch: nil}
-        else
-          case GitHubEventInbox.capture(batch.location, tracker_inbox_limits()) do
-            {:ok, captured} ->
-              rows = Enum.take(captured.rows, length(remaining))
+        case confirmed.continuation do
+          :drained ->
+            send(self(), :run_github_webhook_cycle)
+            %{state | github_inbox_batch: nil}
 
-              if captured.generation == batch.generation and captured.start_offset == cursor.end_offset and
-                   Enum.map(rows, &{&1.record, &1.cursor.end_offset}) == Enum.map(remaining, &{&1.record, &1.cursor.end_offset}) do
-                state = %{state | github_inbox_batch: %{batch | rows: rows, start_offset: captured.start_offset, head: nil}}
-                send(self(), {:github_inbox_continue, batch.ref})
-                state
-              else
-                block_github_head(state, :github_prefix_changed)
-              end
+          {:recapture, boundary} ->
+            case GitHubEventInbox.capture(batch.location, tracker_inbox_limits()) do
+              {:ok, captured} ->
+                case InboxPrefix.rebind(confirmed.prefix, captured, boundary) do
+                  {:ok, prefix} ->
+                    batch = with_inbox_prefix(batch, prefix) |> Map.put(:head, nil)
+                    state = %{state | github_inbox_batch: batch}
+                    send(self(), {:github_inbox_continue, batch.ref})
+                    state
 
-            {:error, reason} ->
-              block_github_head(state, reason)
-          end
+                  {:error, _mismatch} ->
+                    block_github_head(state, :github_prefix_changed)
+                end
+
+              {:error, reason} ->
+                block_github_head(state, reason)
+            end
         end
 
       {:error, error} ->
@@ -3272,6 +3278,28 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp tracker_inbox_limits, do: %{max_rows: 100, max_bytes: 4 * 1024 * 1024}
 
+  defp physical_inbox_prefix(batch) do
+    %InboxPrefix{
+      location: batch.location,
+      generation: batch.generation,
+      start_offset: batch.start_offset,
+      end_offset: batch.end_offset,
+      rows: batch.rows,
+      applied_cursor: batch.applied_cursor,
+      consumption: batch.consumption
+    }
+  end
+
+  defp with_inbox_prefix(batch, %InboxPrefix{} = prefix), do: Map.merge(batch, Map.from_struct(prefix))
+
+  defp check_github_inbox_prefix(batch, captured) do
+    case InboxPrefix.check(physical_inbox_prefix(batch), captured, :retained) do
+      :ok -> :ok
+      {:error, mismatch} when mismatch in [:generation_changed, :cursor_changed] -> {:error, :github_cursor_changed}
+      {:error, _mismatch} -> {:error, :github_prefix_changed}
+    end
+  end
+
   defp reconcile_tracker_inbox_context(%{tracker_inbox_batch: nil} = state), do: state
   defp reconcile_tracker_inbox_context(%{tracker_inbox_batch: %{head: %{phase: :blocked, retryable: false}}} = state), do: state
 
@@ -3296,8 +3324,8 @@ defmodule SymphonyElixir.Orchestrator do
             do: %{state | inbox_storage_error: nil, inbox_last_drained_at: DateTime.utc_now()},
             else: %{state | inbox_storage_error: nil}
 
-        rows ->
-          batch = Map.merge(captured, %{ref: make_ref(), fingerprint: context.fingerprint, head: nil, applied_cursor: nil, end_offset: List.last(rows).cursor.end_offset})
+        _rows ->
+          batch = captured |> Map.merge(Map.from_struct(InboxPrefix.new(captured, :consume_before_ack))) |> Map.merge(%{ref: make_ref(), fingerprint: context.fingerprint, head: nil})
           resume_tracker_inbox(%{state | tracker_inbox_batch: batch, inbox_storage_error: nil})
       end
     else
@@ -3328,30 +3356,22 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp rebind_tracker_inbox_prefix(state, acknowledged_end \\ nil) do
+  defp rebind_tracker_inbox_prefix(state, boundary \\ :unconfirmed) do
     batch = state.tracker_inbox_batch
 
     case TrackerEventInbox.capture(batch.location, tracker_inbox_limits()) do
-      {:ok, %{generation: generation}} when generation != batch.generation ->
-        {:retired, retire_tracker_inbox_generation(state)}
-
       {:ok, captured} ->
-        applied_end = if batch.applied_cursor, do: batch.applied_cursor.end_offset, else: captured.start_offset
-        rows = Enum.filter(captured.rows, &(&1.cursor.end_offset <= batch.end_offset and &1.cursor.end_offset > applied_end))
-        expected_start = acknowledged_end || batch.start_offset
+        case InboxPrefix.rebind(physical_inbox_prefix(batch), captured, boundary) do
+          {:ok, prefix} ->
+            head = if batch.head, do: %{batch.head | row: hd(prefix.rows)}, else: nil
+            batch = with_inbox_prefix(batch, prefix) |> Map.put(:head, head)
+            {:ok, %{state | tracker_inbox_batch: batch}}
 
-        same_rows =
-          if is_nil(acknowledged_end) do
-            rows == batch.rows
-          else
-            Enum.map(rows, &{&1.cursor.end_offset, &1.record}) == Enum.map(batch.rows, &{&1.cursor.end_offset, &1.record})
-          end
+          {:error, :generation_changed} ->
+            {:retired, retire_tracker_inbox_generation(state)}
 
-        if captured.start_offset == expected_start and same_rows do
-          head = if batch.head, do: %{batch.head | row: hd(rows)}, else: nil
-          {:ok, %{state | tracker_inbox_batch: %{batch | rows: rows, head: head, start_offset: captured.start_offset}}}
-        else
-          {:error, :tracker_inbox_prefix_changed}
+          {:error, _mismatch} ->
+            {:error, :tracker_inbox_prefix_changed}
         end
 
       {:error, reason} ->
@@ -3394,7 +3414,8 @@ defmodule SymphonyElixir.Orchestrator do
     batch = state.tracker_inbox_batch
 
     if discardable_tracker_inbox_event?(batch.head.event) do
-      batch = %{batch | head: nil, rows: tl(batch.rows), applied_cursor: batch.head.row.cursor}
+      applied = InboxPrefix.applied(physical_inbox_prefix(batch))
+      batch = with_inbox_prefix(batch, applied.prefix) |> Map.put(:head, nil)
       discard_tracker_inbox_prefix(%{state | tracker_inbox_batch: batch}, context)
     else
       state
@@ -3497,8 +3518,7 @@ defmodule SymphonyElixir.Orchestrator do
          true <- context.fingerprint == head.fingerprint,
          true <- tracker_inbox_observation(state, head.event.entity_id) == head.observation,
          {:ok, captured} <- TrackerEventInbox.capture(batch.location, tracker_inbox_limits()),
-         true <- captured.generation == batch.generation and captured.start_offset == batch.start_offset,
-         true <- Enum.any?(captured.rows, &(&1 == head.row)) do
+         true <- InboxPrefix.check(physical_inbox_prefix(batch), captured, {:row, head.row}) == :ok do
       :ok
     else
       {:error, reason} -> {:blocked, reason}
@@ -3778,7 +3798,8 @@ defmodule SymphonyElixir.Orchestrator do
     batch = state.tracker_inbox_batch
     head = batch.head
     cache = if head.issue, do: remember_issue_cache_entry(state.issue_routing_cache, head.issue), else: state.issue_routing_cache
-    batch = %{batch | head: nil, rows: tl(batch.rows), applied_cursor: head.row.cursor}
+    applied = InboxPrefix.applied(physical_inbox_prefix(batch))
+    batch = with_inbox_prefix(batch, applied.prefix) |> Map.put(:head, nil)
     send(self(), {:tracker_inbox_continue, batch.ref})
     %{state | tracker_inbox_batch: batch, issue_routing_cache: cache}
   end
@@ -3803,20 +3824,25 @@ defmodule SymphonyElixir.Orchestrator do
         state = %{state | inbox_ack_pending: nil, inbox_storage_error: nil, inbox_last_drained_at: DateTime.utc_now()}
 
         case state.tracker_inbox_batch do
-          %{rows: []} ->
-            send(self(), :run_webhook_cycle)
-            %{state | tracker_inbox_batch: nil}
-
           nil ->
             state
 
           batch ->
-            state = %{state | tracker_inbox_batch: %{batch | applied_cursor: nil}}
+            confirmed = InboxPrefix.acknowledged(physical_inbox_prefix(batch), cursor)
 
-            case rebind_tracker_inbox_prefix(state, cursor.end_offset) do
-              {:ok, next} -> resume_tracker_inbox_after_ack(next)
-              {:retired, next} -> next
-              {:error, reason} -> block_tracker_inbox(state, reason)
+            case confirmed.continuation do
+              :drained ->
+                send(self(), :run_webhook_cycle)
+                %{state | tracker_inbox_batch: nil}
+
+              {:recapture, boundary} ->
+                state = %{state | tracker_inbox_batch: with_inbox_prefix(batch, confirmed.prefix)}
+
+                case rebind_tracker_inbox_prefix(state, boundary) do
+                  {:ok, next} -> resume_tracker_inbox_after_ack(next)
+                  {:retired, next} -> next
+                  {:error, reason} -> block_tracker_inbox(state, reason)
+                end
             end
         end
 
@@ -3891,7 +3917,7 @@ defmodule SymphonyElixir.Orchestrator do
     state =
       case state.tracker_inbox_batch do
         nil -> state
-        batch -> %{state | tracker_inbox_batch: %{batch | applied_cursor: nil}}
+        batch -> %{state | tracker_inbox_batch: with_inbox_prefix(batch, InboxPrefix.retire_generation(physical_inbox_prefix(batch)))}
       end
 
     retire_tracker_inbox(state, :tracker_inbox_generation_changed)

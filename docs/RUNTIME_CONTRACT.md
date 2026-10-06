@@ -690,3 +690,32 @@ PRWatcher, tracker mutations and local writers remain synchronous. Availability 
 held issue reads does not prove prompt stop during these effects, distributed atomicity,
 loaded-release correctness or thesis acceptance. Verification belongs to the frozen
 composed source and its external validation receipts.
+
+
+## Physical inbox prefix continuation
+
+InboxPrefix owns the captured horizon, retained physical rows, applied cursor and
+post-confirmation boundary for both intake adapters. Its six operations calculate
+continuity without IO, execution authority, callback effects or coordinator state.
+The owner projects only physical fields and merges returned geometry into the
+existing batch; no second persistent copy of the prefix is introduced.
+
+Tracker consumes applied or discarded rows before ACK and can accumulate one
+applied cursor across several rows. It checks exact membership of its current
+head. GitHub retains the completed row, workspace outcomes and custody until ACK
+succeeds, and checks the whole retained prefix before effects. Pending ACK remains
+in the coordinator because confirmation can outlive a batch retired by context.
+
+Before confirmation, row equality includes the original physical cursor and
+digest. After confirmation, rebind checks the confirmed end offset, generation,
+original retained records and their end offsets while allowing storage to supply
+new start offsets/digests. Later appends never enter the captured continuation.
+A mismatch does not manufacture a replacement cursor or authorization.
+
+The owner retains confirmation order: GitHub confirms disabled custody before
+recapturing its remainder and publishes a successor head only after successful
+rebind. A failed recapture retains the old head and blocks it. Tracker clears its
+applied candidate before rebind and clears obsolete generation cursors before
+cleanup, including a retained head with release debt. GitHub generation errors
+keep the pending ACK/head under its existing error policy. Neither adapter treats
+these calculations as durable exactly-once delivery or new-source acceptance.

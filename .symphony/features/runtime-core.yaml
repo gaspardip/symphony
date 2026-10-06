@@ -6,6 +6,7 @@ source_paths:
   - elixir/lib/symphony_elixir/agent_execution.ex
   - elixir/lib/symphony_elixir/deploy_audit.ex
   - elixir/lib/symphony_elixir/event_inbox.ex
+  - elixir/lib/symphony_elixir/inbox_prefix.ex
   - elixir/lib/symphony_elixir/delivery_engine/turn_effects.ex
   - elixir/lib/symphony_elixir/run_identity.ex
   - elixir/lib/symphony_elixir/lease_manager.ex
@@ -114,6 +115,7 @@ acceptance_signals:
   - GitHub callbacks, backoff and admission preserve the original custody deadline; failed own no-child closure retains exact audit uncertainty through controls and retry cleanup
   - Delivery turn reports own synchronous result/error callbacks and reset both channels without changing worker authority or per-issue storage keys
   - Retry budget decisions preserve owner write order, fresh checked resume data and accumulated usage while file-focus inference and selective prompt limits share one contract
+  - Physical prefix continuation preserves captured horizons, distinct before/after ACK consumption, full cursor checks before confirmation and original remainder checks afterward without moving custody or IO
 dependencies:
   - harness
 last_updated_by_issue: architecture-C5

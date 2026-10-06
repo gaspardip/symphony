@@ -16,3 +16,10 @@ RetryBudget.Focus owns file inference and compact learning. RunPolicy remains th
 owner of budget persistence and stop effects. DeliveryEngine owns prompt guards and
 general resume merges; Orchestrator remains the single owner of scheduling and custody.
 None of these calculation modules grants execution authority.
+
+InboxPrefix owns finite physical capture, applied cursor, confirmed boundary and
+rebind geometry. Orchestrator projects only those fields and keeps the single
+persistent batch representation; it owns heads, contexts, admission, custody,
+callbacks and effects. EventInbox owns storage locking, byte verification and
+durable ACK. Tracker head membership and GitHub whole-prefix currency remain
+distinct, as do their generation-retirement policies.
