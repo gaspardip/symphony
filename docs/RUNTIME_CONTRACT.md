@@ -733,6 +733,34 @@ the existing global or explicit provider fallback. Unknown provider names retain
 the existing Codex fallback. Model and reasoning selection are unchanged.
 
 These guarantees cover configuration and module resolution only. DeliveryEngine
-currently captures its initial session; live provider handoff requires the
-separate session-lifecycle change and public execution evidence. Configuration
-regressions do not prove handoff, custody, accounting or new-source acceptance.
+uses the StageSession lifecycle below for actual turns. Configuration regressions
+alone do not prove handoff, custody, accounting or new-source acceptance.
+
+
+## Delivery stage sessions
+
+DeliveryEngine.StageSession owns one main provider transport in the admitted
+worker for one delivery execution. The worker-bound scope retains an exact
+session and binding when the next active stage resolves to the same provider.
+A changed provider closes and retires the old session before opening the next.
+The final cleanup observes the current resource rather than the initial one.
+
+A failed close stores its original returned error, terminal or raised outcome
+and stack. Current reads, later ensure calls and final cleanup restore that
+outcome without closing again, opening a successor or reusing the old session.
+An open failure leaves the scope empty; DeliveryEngine returns the failure before
+a stage transition, implementation retry or fabricated turn log. The scope does
+not add automatic open retries or new provider callback injection.
+
+AgentProvider and AgentExecution retain capacity, registration, invocation ordinal,
+retired usage, durable accounting and the original ticket/lease authority. Actual
+plan and implement turns check execution before resource acquisition and again
+after it, use the current provider/binding, then check authority after the turn.
+Turn durations begin after acquisition and the second guard; they describe the
+accounted invocation, including its turn effects, rather than session handoff.
+
+Initial passive stages open no main transport. Later active stages borrow from
+the same exterior scope. VerifierRunner continues to own its distinct verifier
+session and cleanup. The scope does not select stages, persist delivery state,
+admit work or renew authority. Native lifecycle and case-level evidence must
+refer to the actual composed source; no prior 26-case acceptance is transferred.

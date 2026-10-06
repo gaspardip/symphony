@@ -15,12 +15,14 @@ source_paths:
   - elixir/lib/symphony_elixir/dispatch_audit.ex
   - elixir/lib/symphony_elixir/dispatch_gate.ex
   - elixir/lib/symphony_elixir/delivery_engine.ex
+  - elixir/lib/symphony_elixir/delivery_engine/stage_session.ex
   - elixir/lib/symphony_elixir/github_webhook_relay.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
   - elixir/lib/symphony_elixir/retry_budget.ex
   - elixir/lib/symphony_elixir/retry_budget/focus.ex
 acceptance_signals:
+  - Main stage sessions retain same-provider resources and close before replacement; uncertain close preserves the original outcome without a successor, repeat close or authority reset
   - Stage provider dictionaries accept normalized string keys through YAML, JSON and legacy workflow sections without creating atoms or changing fallback precedence; this configuration check does not prove live session handoff
   - Audited deploy tickets bind the exact captured dispatch, physical token and material state; legacy requires checked raw absence and cannot import orphan custody
   - One original deployment observation consumes its attempt before preparation and IO; a denied continuation, restored obstruction or authorized disk marker never permits replay

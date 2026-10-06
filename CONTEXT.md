@@ -22,3 +22,8 @@ A stage provider mapping is a workflow dictionary from string stage keys to
 provider selections. Config reads normalized string keys after validation; only
 existing stage atoms are queried. A missing mapping retains the existing provider
 fallback. Mapping resolution does not open or replace a live session.
+
+A delivery stage session is the current main provider transport for one delivery
+execution in its worker. StageSession retains or replaces that resource and
+remembers an attempted close. The original ticket, lease, invocation sequence and
+accumulated usage remain owned by AgentExecution.

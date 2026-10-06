@@ -32,6 +32,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.DeliveryEngine.ReviewClaims
   alias SymphonyElixir.DeliveryEngine.TurnReport
+  alias SymphonyElixir.DeliveryEngine.StageSession
   alias SymphonyElixir.TurnResult
   alias SymphonyElixir.VerifierRunner
   alias SymphonyElixir.WorkflowProfile
@@ -151,50 +152,33 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   defp run_with_readable_snapshot(workspace, issue, agent_update_recipient, opts) do
     max_turns = Keyword.get(opts, :max_turns, Config.agent_max_turns())
-
-    issue_state_fetcher =
-      Keyword.get(opts, :issue_state_fetcher, &IssueSource.fetch_issue_states_by_ids/1)
+    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &IssueSource.fetch_issue_states_by_ids/1)
 
     with {:ok, initial_state} <- delivery_state(workspace, issue),
          state when is_map(state) <- maybe_sync_policy_override(initial_state, workspace, opts) do
       stage = Map.get(state, :stage, "checkout")
 
-      if passive_stage?(stage) do
-        Logger.info("Skipping agent session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}")
-
-        do_run(nil, workspace, issue, agent_update_recipient, issue_state_fetcher, max_turns, opts)
-      else
-        provider = AgentProvider.resolve_for_stage(stage)
-        Logger.info("Starting agent session bootstrap for #{issue.identifier} provider=#{inspect(provider)} workspace=#{workspace}")
-
-        with {:ok, app_session, binding} <- AgentProvider.open_session(provider, workspace, issue, :main) do
-          session_id = Map.get(app_session, :thread_id) || Map.get(app_session, :session_id, "unknown")
-          Logger.info("Agent session bootstrap succeeded for #{issue.identifier} session_id=#{session_id}")
-
-          SymphonyElixir.ProviderTransport.with_cleanup(
-            fn ->
-              do_run(
-                app_session,
-                workspace,
-                issue,
-                agent_update_recipient,
-                issue_state_fetcher,
-                max_turns,
-                opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
-              )
-            end,
-            fn -> AgentProvider.close_session(provider, app_session, binding) end
-          )
+      StageSession.with_scope(workspace, issue, fn session_scope ->
+        if passive_stage?(stage) do
+          Logger.info("Skipping agent session bootstrap for passive stage #{stage} issue=#{issue.identifier} workspace=#{workspace}")
+          do_run(session_scope, workspace, issue, agent_update_recipient, issue_state_fetcher, max_turns, opts)
         else
-          {:stop, _} = terminal ->
-            terminal
+          Logger.info("Starting agent session bootstrap for #{issue.identifier} stage=#{stage} workspace=#{workspace}")
 
-          {:error, reason} = error ->
-            Logger.error("Agent session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
+          with {:ok, %{provider: provider, session: session}} <- StageSession.ensure(session_scope, stage) do
+            session_id = Map.get(session, :thread_id) || Map.get(session, :session_id, "unknown")
+            Logger.info("Agent session bootstrap succeeded for #{issue.identifier} provider=#{inspect(provider)} session_id=#{session_id}")
+            do_run(session_scope, workspace, issue, agent_update_recipient, issue_state_fetcher, max_turns, opts)
+          else
+            {:stop, _} = terminal ->
+              terminal
 
-            error
+            {:error, reason} = error ->
+              Logger.error("Agent session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
+              error
+          end
         end
-      end
+      end)
     end
   end
 
@@ -364,7 +348,7 @@ defmodule SymphonyElixir.DeliveryEngine do
       do: should_resume_validation_from_retained_changes?(state, focused_claims, before_snapshot)
 
   defp do_run(
-         app_session,
+         session_scope,
          workspace,
          issue,
          agent_update_recipient,
@@ -374,7 +358,7 @@ defmodule SymphonyElixir.DeliveryEngine do
        ) do
     with :ok <- ensure_delivery_entry_readable(workspace, issue) do
       do_run_with_readable_snapshot(
-        app_session,
+        session_scope,
         workspace,
         issue,
         agent_update_recipient,
@@ -393,7 +377,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp do_run_with_readable_snapshot(
-         app_session,
+         session_scope,
          workspace,
          issue,
          agent_update_recipient,
@@ -407,73 +391,41 @@ defmodule SymphonyElixir.DeliveryEngine do
 
       stage = Map.get(state, :stage, "checkout")
 
-      if is_nil(app_session) and not passive_stage?(stage) do
-        bootstrap_session_and_run(
-          workspace,
-          issue,
-          agent_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          stage,
-          opts
-        )
-      else
-        do_run_dispatched(
-          app_session,
-          workspace,
-          issue,
-          agent_update_recipient,
-          issue_state_fetcher,
-          max_turns,
-          state,
-          stage,
-          opts
-        )
+      case StageSession.current(session_scope) do
+        {:error, _} = error ->
+          error
+
+        {:stop, _} = terminal ->
+          terminal
+
+        current ->
+          if current == :empty and not passive_stage?(stage) do
+            bootstrap_session_and_run(session_scope, workspace, issue, agent_update_recipient, issue_state_fetcher, max_turns, stage, opts)
+          else
+            do_run_dispatched(session_scope, workspace, issue, agent_update_recipient, issue_state_fetcher, max_turns, state, stage, opts)
+          end
       end
     end
   end
 
-  defp bootstrap_session_and_run(
-         workspace,
-         issue,
-         agent_update_recipient,
-         issue_state_fetcher,
-         max_turns,
-         stage,
-         opts
-       ) do
-    provider = Keyword.get(opts, :agent_provider) || AgentProvider.resolve_for_stage(stage)
+  defp bootstrap_session_and_run(session_scope, workspace, issue, agent_update_recipient, issue_state_fetcher, max_turns, stage, opts) do
+    Logger.info("Late session bootstrap for active stage #{stage} issue=#{issue.identifier}")
 
-    Logger.info("Late session bootstrap for active stage #{stage} issue=#{issue.identifier} provider=#{inspect(provider)}")
-
-    with {:ok, app_session, binding} <- AgentProvider.open_session(provider, workspace, issue, :main) do
-      SymphonyElixir.ProviderTransport.with_cleanup(
-        fn ->
-          do_run(
-            app_session,
-            workspace,
-            issue,
-            agent_update_recipient,
-            issue_state_fetcher,
-            max_turns,
-            opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
-          )
-        end,
-        fn -> AgentProvider.close_session(provider, app_session, binding) end
-      )
+    with {:ok, %{provider: provider}} <- StageSession.ensure(session_scope, stage) do
+      Logger.info("Late session bootstrap succeeded for #{issue.identifier} provider=#{inspect(provider)}")
+      do_run(session_scope, workspace, issue, agent_update_recipient, issue_state_fetcher, max_turns, opts)
     else
       {:stop, _} = terminal ->
         terminal
 
       {:error, reason} = error ->
         Logger.error("Late session bootstrap failed for #{issue.identifier}: #{inspect(reason)}")
-
         error
     end
   end
 
   defp do_run_dispatched(
-         app_session,
+         session_scope,
          workspace,
          issue,
          agent_update_recipient,
@@ -490,7 +442,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         case stage do
           "checkout" ->
             handle_checkout(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -503,7 +455,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "plan" ->
             handle_plan(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -516,7 +468,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "implement" ->
             handle_implement(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -529,7 +481,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "initialize_harness" ->
             handle_initialize_harness(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -542,7 +494,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "validate" ->
             handle_validate(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -555,7 +507,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "review_verification" ->
             handle_review_verification(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -568,7 +520,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "verify" ->
             handle_verify(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -581,7 +533,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "publish" ->
             handle_publish(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -594,7 +546,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "merge_readiness" ->
             handle_merge_readiness(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -607,7 +559,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "await_checks" ->
             handle_await_checks(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -620,7 +572,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
           "merge" ->
             handle_merge(
-              app_session,
+              session_scope,
               workspace,
               issue,
               agent_update_recipient,
@@ -667,7 +619,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp passive_stage?(_stage), do: false
 
   defp handle_checkout(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -697,7 +649,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          :ok <- execution_guard(workspace, issue),
          :ok <- maybe_move_issue(issue, @in_progress_state),
          :ok <- execution_guard(workspace, issue) do
-      do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+      do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
     else
       {:stop, _} = terminal -> terminal
       error -> handle_checkout_error(workspace, issue, error)
@@ -739,7 +691,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_initialize_harness(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -774,7 +726,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                    )
                  ),
                :ok <- execution_guard(workspace, issue) do
-            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+            do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
           end
 
         {:error, reason} ->
@@ -790,7 +742,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_plan(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -800,7 +752,7 @@ defmodule SymphonyElixir.DeliveryEngine do
          _inspection,
          opts
        ) do
-    provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve_for_stage("plan"))
+    provider = AgentProvider.resolve_for_stage("plan")
     model = Config.agent_model_for_stage("plan") || Config.agent_model()
 
     with :ok <- execution_guard(workspace, issue),
@@ -820,29 +772,28 @@ defmodule SymphonyElixir.DeliveryEngine do
                  resume_context: %{next_objective: "Follow the implementation plan in #{progress_path}. Read it first, then implement each step."}
                }),
              :ok <- execution_guard(workspace, issue) do
-          do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+          do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
         end
       else
         do_plan_turn(
-          app_session,
+          session_scope,
           workspace,
           issue,
           recipient,
           fetcher,
           max_turns,
           state,
-          Keyword.put(opts, :agent_provider, provider)
+          opts
         )
       end
     end
   end
 
-  defp do_plan_turn(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts) do
+  defp do_plan_turn(session_scope, workspace, issue, recipient, fetcher, max_turns, state, opts) do
     prompt = plan_prompt(issue, state, workspace)
 
     TurnReport.reset(issue)
 
-    provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve_for_stage("plan"))
     model = Config.agent_model_for_stage("plan") || Config.agent_model()
 
     turn_opts =
@@ -856,11 +807,14 @@ defmodule SymphonyElixir.DeliveryEngine do
       )
 
     {provider_turn_result, turn_log_context} =
-      run_logged_agent_turn(provider, app_session, workspace, prompt, issue, turn_opts)
+      run_logged_agent_turn(session_scope, workspace, prompt, issue, turn_opts)
 
     case provider_turn_result do
       {:stop, _} = terminal ->
         terminal
+
+      {:error, _} = error when is_nil(turn_log_context) ->
+        error
 
       {:error, {:turn_effect_failed, _details}} = error ->
         log_agent_turn_lifecycle(turn_log_context, plan_turn_log_result(error, error, false))
@@ -884,7 +838,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                    resume_context: %{next_objective: "Follow the implementation plan in #{progress_path}. Read it first, then implement each step."}
                  }),
                :ok <- execution_guard(workspace, issue) do
-            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+            do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
           end
         end
     end
@@ -953,7 +907,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_implement(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -1011,7 +965,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                    )
                  ),
                :ok <- execution_guard(workspace, issue) do
-            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+            do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
           end
 
         effective_implementation_turns >= max_turns ->
@@ -1037,7 +991,6 @@ defmodule SymphonyElixir.DeliveryEngine do
             TurnReport.reset(issue)
 
             try do
-              provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve_for_stage("implement"))
               model = Config.agent_model_for_stage("implement") || Config.agent_model()
 
               turn_opts =
@@ -1053,7 +1006,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                 )
 
               {provider_turn_result, turn_log_context} =
-                run_logged_agent_turn(provider, app_session, workspace, prompt, issue, turn_opts)
+                run_logged_agent_turn(session_scope, workspace, prompt, issue, turn_opts)
 
               with {:ok, _turn_session} <- provider_turn_result,
                    :ok <- execution_guard(workspace, issue),
@@ -1123,7 +1076,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      :ok <- execution_guard(workspace, issue),
                      {:ok, refreshed_issue} <- refresh_result,
                      :ok <- ensure_issue_still_active(refreshed_issue) do
-                  do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
+                  do_run(session_scope, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
                 else
                   {:stop, _} = terminal ->
                     terminal
@@ -1156,7 +1109,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                     cond do
                       retryable_implementation_error?(reason) ->
                         handle_implementation_turn_error(
-                          app_session,
+                          session_scope,
                           workspace,
                           issue,
                           recipient,
@@ -1184,6 +1137,9 @@ defmodule SymphonyElixir.DeliveryEngine do
                 {:stop, _} = terminal ->
                   terminal
 
+                {:error, _} = error when is_nil(turn_log_context) ->
+                  error
+
                 error ->
                   log_agent_turn_lifecycle(
                     turn_log_context,
@@ -1196,7 +1152,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
                     {:error, {:turn_runtime_error, reason}} ->
                       handle_implementation_turn_error(
-                        app_session,
+                        session_scope,
                         workspace,
                         issue,
                         recipient,
@@ -1241,7 +1197,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                       cond do
                         retryable_implementation_error?(reason) ->
                           handle_implementation_turn_error(
-                            app_session,
+                            session_scope,
                             workspace,
                             issue,
                             recipient,
@@ -1285,7 +1241,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_validate(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -1361,7 +1317,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                    )
                  ),
                :ok <- execution_guard(workspace, issue) do
-            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+            do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
           end
 
         :failed ->
@@ -1393,7 +1349,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      )
                    ),
                  :ok <- execution_guard(workspace, issue) do
-              do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+              do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
             end
           else
             block_issue(workspace, issue, :validation_failed, result.output, @blocked_state, %{ledger: gate_ledger, result: result})
@@ -1451,7 +1407,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_review_verification(
-         _app_session,
+         _session_scope,
          workspace,
          issue,
          _recipient,
@@ -1562,7 +1518,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_verify(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -1642,7 +1598,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                    )
                  ),
                :ok <- execution_guard(workspace, issue) do
-            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+            do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
           end
 
         "needs_more_work" ->
@@ -1678,7 +1634,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      )
                    ),
                  :ok <- execution_guard(workspace, issue) do
-              do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+              do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
             end
           else
             stop_reason =
@@ -1930,7 +1886,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_publish(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -1978,7 +1934,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                   )
                 else
                   publish_after_commit(
-                    app_session,
+                    session_scope,
                     workspace,
                     issue,
                     recipient,
@@ -1999,7 +1955,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                    {:ok, state} <-
                      update_state(workspace, %{last_commit_sha: sha}) do
                 publish_after_commit(
-                  app_session,
+                  session_scope,
                   workspace,
                   issue,
                   recipient,
@@ -2055,14 +2011,14 @@ defmodule SymphonyElixir.DeliveryEngine do
         with {:ok, _state, _evidence_handle} <- evidence_for_effect(workspace, issue, state, inspection, opts, :publish),
              {:ok, _persisted_state} <- transition_state(workspace, @publish_followup_stage, %{}),
              :ok <- execution_guard(workspace, issue) do
-          do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+          do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
         end
       end
     end
   end
 
   defp publish_after_commit(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -2126,7 +2082,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         }
       })
 
-      do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+      do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
     else
       {:stop, _} = terminal ->
         terminal
@@ -2137,7 +2093,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_await_checks(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -2157,15 +2113,15 @@ defmodule SymphonyElixir.DeliveryEngine do
                await_checks_polls: Map.get(state, :await_checks_polls, 0)
              }),
            :ok <- execution_guard(workspace, issue) do
-        do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+        do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
       end
     else
-      poll_await_checks(app_session, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts)
+      poll_await_checks(session_scope, workspace, issue, recipient, fetcher, max_turns, state, inspection, opts)
     end
   end
 
   defp poll_await_checks(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -2241,7 +2197,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                      })
                    ),
                  :ok <- execution_guard(workspace, issue) do
-              do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+              do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
             end
 
           closed_pull_request?(inspection) ->
@@ -2288,7 +2244,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                        })
                      ),
                    :ok <- execution_guard(workspace, issue) do
-                do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+                do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
               end
             else
               block_issue(
@@ -2353,14 +2309,14 @@ defmodule SymphonyElixir.DeliveryEngine do
               Map.get(state, :automerge_disabled, false) == false ->
             with {:ok, _persisted_state} <- transition_state(workspace, "merge", await_checks_attrs),
                  :ok <- execution_guard(workspace, issue) do
-              do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+              do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
             end
 
           RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :review_gate and
               Map.get(state, :review_approved, false) == true ->
             with {:ok, _persisted_state} <- transition_state(workspace, "merge", await_checks_attrs),
                  :ok <- execution_guard(workspace, issue) do
-              do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+              do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
             end
 
           RunInspector.ready_for_merge?(inspection) and workflow_profile.merge_mode == :review_gate ->
@@ -2416,7 +2372,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp handle_merge_readiness(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -2453,7 +2409,7 @@ defmodule SymphonyElixir.DeliveryEngine do
              inspection <- RunInspector.inspect(workspace, opts),
              :ok <- execution_guard(workspace, issue) do
           Observability.with_stage("await_checks", issue_observability_metadata(issue, persisted_state), fn ->
-            poll_await_checks(app_session, workspace, issue, recipient, fetcher, max_turns, persisted_state, inspection, opts)
+            poll_await_checks(session_scope, workspace, issue, recipient, fetcher, max_turns, persisted_state, inspection, opts)
           end)
         end
     end
@@ -2461,7 +2417,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   @dialyzer {:nowarn_function, handle_merge: 9}
   defp handle_merge(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -2490,7 +2446,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                    merge_attempts: Map.get(state, :merge_attempts, 0)
                  }),
                :ok <- execution_guard(workspace, issue) do
-            do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+            do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
           end
 
         closed_pull_request?(inspection) ->
@@ -2538,7 +2494,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                     }
                   })
 
-                  do_run(app_session, workspace, issue, recipient, fetcher, max_turns, opts)
+                  do_run(session_scope, workspace, issue, recipient, fetcher, max_turns, opts)
                 end
 
               {:error, reason} ->
@@ -3875,18 +3831,30 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp run_logged_agent_turn(provider, app_session, workspace, prompt, issue, opts) do
-    started_at = System.monotonic_time()
-
+  defp run_logged_agent_turn(session_scope, workspace, prompt, issue, opts) do
     with :ok <- execution_guard(workspace, issue),
-         turn_result <- AgentProvider.run_turn(provider, app_session, workspace, prompt, issue, opts, :delivery),
+         {:ok, %{provider: provider, session: session, binding: binding}} <-
+           StageSession.ensure(session_scope, Keyword.fetch!(opts, :stage)),
          :ok <- execution_guard(workspace, issue) do
-      case turn_result do
+      turn_opts = opts |> Keyword.put(:agent_provider, provider) |> Keyword.put(:execution_binding, binding)
+      started_at = System.monotonic_time()
+      turn_result = AgentProvider.run_turn(provider, session, workspace, prompt, issue, turn_opts, :delivery)
+
+      with :ok <- execution_guard(workspace, issue) do
+        case turn_result do
+          {:stop, _} = terminal -> {terminal, nil}
+          _ -> logged_agent_turn_result(turn_result, provider, issue, turn_opts, started_at)
+        end
+      else
         {:stop, _} = terminal -> {terminal, nil}
-        _ -> logged_agent_turn_result(turn_result, provider, issue, opts, started_at)
       end
     else
-      {:stop, _} = terminal -> {terminal, nil}
+      {:stop, _} = terminal ->
+        {terminal, nil}
+
+      {:error, reason} = error ->
+        Logger.error("Agent session transition failed for #{issue.identifier} stage=#{Keyword.fetch!(opts, :stage)}: #{inspect(reason)}")
+        {error, nil}
     end
   end
 
@@ -3947,7 +3915,6 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_turn_provider(SymphonyElixir.AgentProvider.Claude), do: "claude"
   defp normalize_turn_provider(provider) when is_binary(provider), do: provider
   defp normalize_turn_provider(provider) when is_atom(provider), do: Atom.to_string(provider)
-  defp normalize_turn_provider(provider), do: inspect(provider)
 
   defp normalize_issue_log_value(%Issue{identifier: identifier, id: issue_id}) do
     identifier || issue_id || "unknown"
@@ -4041,7 +4008,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp maybe_move_issue(_issue, _target_state), do: :ok
 
   defp handle_implementation_turn_error(
-         app_session,
+         session_scope,
          workspace,
          issue,
          recipient,
@@ -4079,7 +4046,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                  reason: "Retrying implementation after agent turn error: #{summary}"
                }),
              :ok <- execution_guard(workspace, issue) do
-          do_run(app_session, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
+          do_run(session_scope, workspace, refreshed_issue, recipient, fetcher, max_turns, opts)
         end
       end
     else

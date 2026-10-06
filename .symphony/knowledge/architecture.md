@@ -29,3 +29,11 @@ AgentProvider resolves each selection through the existing adapters and fallback
 This configuration seam owns no session lifecycle, capacity, execution authority
 or usage accounting; resolving a different provider alone does not replace an
 already-open session in DeliveryEngine.
+
+DeliveryEngine.StageSession deepens the main transport lifecycle behind a
+worker-bound scope. It retains exact same-provider resources and closes before
+replacement, with one attempted close per resource and original failure retention.
+DeliveryEngine retains stage policy, authority guards, turn effects and retries;
+AgentExecution retains admission, capacity, registration and accumulated usage.
+VerifierRunner retains its own verifier session. The scope introduces no new OTP
+owner, execution authority or provider callback injection seam.
