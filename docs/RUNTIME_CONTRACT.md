@@ -135,6 +135,27 @@ I2a confirms admitted execution context and persisted usage before local turn
 effects and dynamic tools. B2 does not authorize stale work or fence remote
 provider effects. Material stage/review validity remains a separate I2b boundary.
 
+## Delivery turn reports
+
+`DeliveryEngine.TurnReport` owns the reported result and captured streaming errors
+in the admitted worker's process dictionary. `reset/1` clears both channels before
+a new plan or implement turn; implement's existing final cleanup also resets both.
+A valid `TurnResult` has precedence over captured errors. A malformed report remains
+an explicit invalid-result error; no report becomes missing-result or the collected
+runtime-error list. The existing key atoms and per-issue identity are preserved.
+
+The report executor normalizes `report_agent_turn_result` and returns the same
+success/rejection acknowledgement. Other tools use `Codex.DynamicTool` unchanged.
+The message callback captures terminal and notification failures synchronously in
+the caller process. It checks execution context at message delivery, forwarding
+worker updates itself only for legacy callers; admitted callbacks retain their
+existing `AgentExecution` accounting and forwarding authority.
+
+This extraction adds no process, persistence, retry or execution permission. The
+engine retains guards, transitions, accounting, provider invocation and publication.
+Historical `_for_test` entry points delegate to this module for compatibility; no
+new test-only production entry point is introduced.
+
 ## Checked inbox storage (C4a)
 
 Tracker and GitHub inboxes share a checked storage contract. State version 2 binds

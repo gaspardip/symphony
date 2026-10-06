@@ -110,6 +110,7 @@ acceptance_signals:
   - Coordinator writes compare 19 material fields and closed deltas without broadening worker material checks or resetting usage
   - GitHub seeded manual continuation requires checked absence of the exact enabled explicit-manual record; corrupt, unavailable and vanished refresh records cannot become seeds
   - GitHub callbacks, backoff and admission preserve the original custody deadline; failed own no-child closure retains exact audit uncertainty through controls and retry cleanup
+  - Delivery turn reports own synchronous result/error callbacks and reset both channels without changing worker authority or per-issue storage keys
 dependencies:
   - harness
 last_updated_by_issue: architecture-C5

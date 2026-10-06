@@ -9,7 +9,6 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   alias SymphonyElixir.AgentExecution
   alias SymphonyElixir.AgentProvider
-  alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.AgentHarness
   alias SymphonyElixir.Config
   alias SymphonyElixir.DeployAudit
@@ -31,6 +30,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.DeliveryEngine.ReviewClaims
+  alias SymphonyElixir.DeliveryEngine.TurnReport
   alias SymphonyElixir.TurnResult
   alias SymphonyElixir.VerifierRunner
   alias SymphonyElixir.WorkflowProfile
@@ -41,11 +41,8 @@ defmodule SymphonyElixir.DeliveryEngine do
   @done_state "Done"
   @rework_state "Rework"
   @report_turn_result_tool "report_agent_turn_result"
-  @turn_result_key_prefix :symphony_turn_result
-  @turn_runtime_error_key_prefix :symphony_turn_runtime_error
   @await_checks_missing_limit 6
   @publish_followup_stage "merge_readiness"
-  @agent_turn_error_methods ["codex/event/stream_error", "codex/event/error", "error"]
   @review_fix_max_turns 6
   @passive_stages [
     "merge_readiness",
@@ -203,12 +200,12 @@ defmodule SymphonyElixir.DeliveryEngine do
 
   @doc false
   @spec fetch_turn_result_for_test(term()) :: term()
-  def fetch_turn_result_for_test(issue), do: fetch_turn_result(issue)
+  def fetch_turn_result_for_test(issue), do: TurnReport.fetch(issue)
 
   @doc false
   @spec execute_tool_for_test(term(), term(), term(), keyword()) :: term()
   def execute_tool_for_test(issue, tool, arguments, opts \\ []) do
-    tool_executor(issue, opts).(tool, arguments)
+    TurnReport.tool_executor(issue, opts).(tool, arguments)
   end
 
   @doc false
@@ -236,7 +233,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   @doc false
   @spec agent_message_handler_for_test(pid() | nil, term()) :: term()
   def agent_message_handler_for_test(recipient, issue),
-    do: agent_message_handler(recipient, issue)
+    do: TurnReport.message_handler(recipient, issue)
 
   @doc false
   @spec normalize_state_for_test(term()) :: term()
@@ -843,8 +840,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp do_plan_turn(app_session, workspace, issue, recipient, fetcher, max_turns, state, opts) do
     prompt = plan_prompt(issue, state, workspace)
 
-    clear_turn_result(issue)
-    clear_turn_runtime_errors(issue)
+    TurnReport.reset(issue)
 
     provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve_for_stage("plan"))
     model = Config.agent_model_for_stage("plan") || Config.agent_model()
@@ -855,8 +851,8 @@ defmodule SymphonyElixir.DeliveryEngine do
         stage: "plan",
         effort: Config.agent_turn_effort("plan"),
         model: model,
-        on_message: agent_message_handler(recipient, issue),
-        tool_executor: tool_executor(issue, opts)
+        on_message: TurnReport.message_handler(recipient, issue),
+        tool_executor: TurnReport.tool_executor(issue, opts)
       )
 
     {provider_turn_result, turn_log_context} =
@@ -872,7 +868,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
       _ ->
         with :ok <- execution_guard(workspace, issue) do
-          reported_turn_result = fetch_turn_result(issue)
+          reported_turn_result = TurnReport.fetch(issue)
           plan_completed = match?({:ok, _}, provider_turn_result) and match?({:ok, _}, reported_turn_result)
 
           log_agent_turn_lifecycle(
@@ -1038,8 +1034,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                    effective_implementation_turns + 1,
                    max_turns
                  ) do
-            clear_turn_result(issue)
-            clear_turn_runtime_errors(issue)
+            TurnReport.reset(issue)
 
             try do
               provider = Keyword.get(opts, :agent_provider, AgentProvider.resolve_for_stage("implement"))
@@ -1053,8 +1048,8 @@ defmodule SymphonyElixir.DeliveryEngine do
                   model: model,
                   forbidden_commands: implement_forbidden_commands(before_snapshot.harness),
                   command_output_budget: implement_command_output_budget(state),
-                  on_message: agent_message_handler(recipient, issue),
-                  tool_executor: tool_executor(issue, opts)
+                  on_message: TurnReport.message_handler(recipient, issue),
+                  tool_executor: TurnReport.tool_executor(issue, opts)
                 )
 
               {provider_turn_result, turn_log_context} =
@@ -1062,7 +1057,7 @@ defmodule SymphonyElixir.DeliveryEngine do
 
               with {:ok, _turn_session} <- provider_turn_result,
                    :ok <- execution_guard(workspace, issue),
-                   {:ok, turn_result} <- fetch_turn_result(issue) do
+                   {:ok, turn_result} <- TurnReport.fetch(issue) do
                 log_agent_turn_lifecycle(
                   turn_log_context,
                   implement_turn_log_result(provider_turn_result, {:ok, turn_result})
@@ -1272,8 +1267,7 @@ defmodule SymphonyElixir.DeliveryEngine do
                   end
               end
             after
-              clear_turn_result(issue)
-              clear_turn_runtime_errors(issue)
+              TurnReport.reset(issue)
             end
           end
       end
@@ -4109,25 +4103,6 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp fetch_turn_result(issue) do
-    case Process.get(turn_result_key(issue)) do
-      %TurnResult{} = turn_result ->
-        {:ok, turn_result}
-
-      nil ->
-        case fetch_turn_runtime_errors(issue) do
-          {:ok, reason} -> {:error, {:turn_runtime_error, reason}}
-          :error -> {:error, :missing_turn_result}
-        end
-
-      {:error, reason} ->
-        {:error, {:invalid_turn_result, reason}}
-
-      other ->
-        {:error, {:invalid_turn_result, other}}
-    end
-  end
-
   defp run_logged_agent_turn(provider, app_session, workspace, prompt, issue, opts) do
     started_at = System.monotonic_time()
 
@@ -4281,63 +4256,6 @@ defmodule SymphonyElixir.DeliveryEngine do
   defp normalize_turn_outcome_value(value, _default) when is_atom(value), do: Atom.to_string(value)
   defp normalize_turn_outcome_value(value, _default) when is_binary(value), do: value
   defp normalize_turn_outcome_value(_value, default), do: default
-
-  defp tool_executor(issue, opts) do
-    fn tool, arguments ->
-      case tool do
-        @report_turn_result_tool ->
-          case TurnResult.normalize(arguments) do
-            {:ok, turn_result} ->
-              Process.put(turn_result_key(issue), turn_result)
-
-              %{
-                "success" => true,
-                "contentItems" => [%{"type" => "inputText", "text" => "turn result recorded"}]
-              }
-
-            {:error, reason} ->
-              Process.put(turn_result_key(issue), {:error, reason})
-
-              %{
-                "success" => false,
-                "contentItems" => [%{"type" => "inputText", "text" => inspect(reason)}]
-              }
-          end
-
-        _ ->
-          DynamicTool.execute(tool, arguments, opts)
-      end
-    end
-  end
-
-  defp clear_turn_result(issue) do
-    Process.delete(turn_result_key(issue))
-    :ok
-  end
-
-  defp turn_result_key(%Issue{id: issue_id}), do: {@turn_result_key_prefix, issue_id}
-
-  defp record_turn_runtime_error(issue, reason) do
-    key = turn_runtime_error_key(issue)
-    existing = Process.get(key, [])
-    Process.put(key, existing ++ [reason])
-    :ok
-  end
-
-  defp fetch_turn_runtime_errors(issue) do
-    case Process.get(turn_runtime_error_key(issue)) do
-      errors when is_list(errors) and errors != [] -> {:ok, errors}
-      _ -> :error
-    end
-  end
-
-  defp clear_turn_runtime_errors(issue) do
-    Process.delete(turn_runtime_error_key(issue))
-    :ok
-  end
-
-  defp turn_runtime_error_key(%Issue{id: issue_id}),
-    do: {@turn_runtime_error_key_prefix, issue_id}
 
   defp maybe_move_issue(%Issue{id: issue_id, state: current_state} = issue, target_state)
        when is_binary(issue_id) and is_binary(target_state) do
@@ -4819,35 +4737,6 @@ defmodule SymphonyElixir.DeliveryEngine do
       ui_proof: Map.get(result, :ui_proof) || Map.get(result, "ui_proof")
     }
   end
-
-  defp agent_message_handler(recipient, issue) do
-    fn message ->
-      maybe_capture_turn_runtime_error(issue, message)
-
-      if match?({:error, :execution_context_missing}, AgentExecution.current_context()) and is_pid(recipient) and is_binary(issue.id) do
-        send(recipient, {:agent_worker_update, issue.id, message})
-      end
-
-      :ok
-    end
-  end
-
-  defp maybe_capture_turn_runtime_error(issue, %{event: :turn_ended_with_error, reason: reason}) do
-    record_turn_runtime_error(issue, reason)
-  end
-
-  defp maybe_capture_turn_runtime_error(issue, %{
-         event: :notification,
-         payload: %{"method" => method} = payload
-       })
-       when method in @agent_turn_error_methods do
-    record_turn_runtime_error(
-      issue,
-      {:agent_notification_error, method, Map.get(payload, "params", %{})}
-    )
-  end
-
-  defp maybe_capture_turn_runtime_error(_issue, _message), do: :ok
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = SymphonyElixir.Util.normalize_state(state_name)
