@@ -15,6 +15,8 @@ source_paths:
   - elixir/lib/symphony_elixir/github_webhook_relay.ex
   - elixir/lib/symphony_elixir/orchestrator.ex
   - elixir/lib/symphony_elixir/run_state_store.ex
+  - elixir/lib/symphony_elixir/retry_budget.ex
+  - elixir/lib/symphony_elixir/retry_budget/focus.ex
 acceptance_signals:
   - Audited deploy tickets bind the exact captured dispatch, physical token and material state; legacy requires checked raw absence and cannot import orphan custody
   - One original deployment observation consumes its attempt before preparation and IO; a denied continuation, restored obstruction or authorized disk marker never permits replay
@@ -111,6 +113,7 @@ acceptance_signals:
   - GitHub seeded manual continuation requires checked absence of the exact enabled explicit-manual record; corrupt, unavailable and vanished refresh records cannot become seeds
   - GitHub callbacks, backoff and admission preserve the original custody deadline; failed own no-child closure retains exact audit uncertainty through controls and retry cleanup
   - Delivery turn reports own synchronous result/error callbacks and reset both channels without changing worker authority or per-issue storage keys
+  - Retry budget decisions preserve owner write order, fresh checked resume data and accumulated usage while file-focus inference and selective prompt limits share one contract
 dependencies:
   - harness
 last_updated_by_issue: architecture-C5

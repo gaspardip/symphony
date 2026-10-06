@@ -26,6 +26,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Observability
   alias SymphonyElixir.PriorityEngine
   alias SymphonyElixir.PRWatcher
+  alias SymphonyElixir.RetryBudget
   alias SymphonyElixir.RuleCatalog
   alias SymphonyElixir.RunInspector
   alias SymphonyElixir.RunLedger
@@ -6669,103 +6670,8 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp auto_continue_review_fix_budget_stop?(run_state) when is_map(run_state) do
-    blocked_review_fix_budget_stop?(run_state) and
-      actionable_review_claims_present?(run_state) and
-      (addressed_review_claims_present?(run_state) or
-         review_fix_retry_budget_active?(run_state))
-  end
-
-  defp review_fix_retry_budget_active?(run_state) when is_map(run_state) do
-    review_fix_budget_retry_count(run_state) > 0 and
-      resume_context_token_pressure(run_state) == "high"
-  end
-
-  defp review_fix_budget_retry_count(run_state) when is_map(run_state) do
-    run_state
-    |> resume_context_map()
-    |> map_value("review_fix_budget_retry_count")
-    |> case do
-      value when is_integer(value) and value > 0 -> value
-      _ -> 0
-    end
-  end
-
-  defp resume_context_token_pressure(run_state) when is_map(run_state) do
-    run_state
-    |> resume_context_map()
-    |> map_value("token_pressure")
-  end
-
-  defp resume_context_map(run_state) when is_map(run_state) do
-    case Map.get(run_state, :resume_context) || Map.get(run_state, "resume_context") do
-      context when is_map(context) -> context
-      _ -> %{}
-    end
-  end
-
-  defp blocked_review_fix_budget_stop?(run_state) when is_map(run_state) do
-    last_rule_id = Map.get(run_state, :last_rule_id) || Map.get(run_state, "last_rule_id")
-
-    stop_reason =
-      Map.get(run_state, :stop_reason) ||
-        Map.get(run_state, "stop_reason") ||
-        %{}
-
-    last_rule_id == "budget.per_turn_input_exceeded" or
-      Map.get(stop_reason, :rule_id) == "budget.per_turn_input_exceeded" or
-      Map.get(stop_reason, "rule_id") == "budget.per_turn_input_exceeded" or
-      Map.get(stop_reason, :code) == "per_turn_input_budget_exceeded" or
-      Map.get(stop_reason, "code") == "per_turn_input_budget_exceeded"
-  end
-
-  defp addressed_review_claims_present?(run_state) when is_map(run_state) do
-    run_state
-    |> review_claim_values()
-    |> Enum.any?(fn claim ->
-      map_value(claim, "implementation_status") == "addressed"
-    end)
-  end
-
-  defp actionable_review_claims_present?(run_state) when is_map(run_state) do
-    run_state
-    |> review_claim_values()
-    |> Enum.any?(fn claim ->
-      map_value(claim, "disposition") == "accepted" and
-        truthy_map_value(claim, "actionable") and
-        map_value(claim, "implementation_status") != "addressed"
-    end)
-  end
-
-  defp review_claim_values(run_state) when is_map(run_state) do
-    case Map.get(run_state, :review_claims) || Map.get(run_state, "review_claims") do
-      claims when is_map(claims) -> Map.values(claims)
-      _ -> []
-    end
-  end
-
-  defp map_value(map, key) when is_map(map) and is_binary(key) do
-    Map.get(map, key) || Map.get(map, known_map_atom_key(key))
-  end
-
-  defp map_value(_map, _key), do: nil
-
-  defp known_map_atom_key("implementation_status"), do: :implementation_status
-  defp known_map_atom_key("disposition"), do: :disposition
-  defp known_map_atom_key("actionable"), do: :actionable
-  defp known_map_atom_key("blocked"), do: :blocked
-  defp known_map_atom_key("needs_another_turn"), do: :needs_another_turn
-  defp known_map_atom_key(_key), do: nil
-
-  defp truthy_map_value(map, key) do
-    case map_value(map, key) do
-      true -> true
-      "true" -> true
-      1 -> true
-      "1" -> true
-      _ -> false
-    end
-  end
+  defp auto_continue_review_fix_budget_stop?(run_state) when is_map(run_state),
+    do: RetryBudget.auto_continue?(run_state)
 
   defp issue_run_state(identifier) when is_binary(identifier) do
     workspace = Workspace.path_for_issue(identifier)

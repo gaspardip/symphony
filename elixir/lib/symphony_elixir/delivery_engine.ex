@@ -28,6 +28,7 @@ defmodule SymphonyElixir.DeliveryEngine do
   alias SymphonyElixir.RunInspector
   alias SymphonyElixir.RunLedger
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.RetryBudget
   alias SymphonyElixir.RunStateStore
   alias SymphonyElixir.DeliveryEngine.ReviewClaims
   alias SymphonyElixir.DeliveryEngine.TurnReport
@@ -43,7 +44,6 @@ defmodule SymphonyElixir.DeliveryEngine do
   @report_turn_result_tool "report_agent_turn_result"
   @await_checks_missing_limit 6
   @publish_followup_stage "merge_readiness"
-  @review_fix_max_turns 6
   @passive_stages [
     "merge_readiness",
     "await_checks",
@@ -3179,14 +3179,9 @@ defmodule SymphonyElixir.DeliveryEngine do
   end
 
   defp resume_context_for_prompt(workspace, issue, state, inspection) do
-    stored =
-      case Map.get(state, :resume_context) do
-        context when is_map(context) -> normalize_resume_context(context)
-        _ -> %{}
-      end
-
     target_stage = Map.get(state, :stage) || "implement"
-    stored = Map.merge(stored, review_fix_resume_context(state, stored, target_stage))
+    budget_view = RetryBudget.delivery_context(state, Map.get(state, :resume_context), target_stage: target_stage)
+    stored = budget_view.stored_resume
     state = Map.put(state, :resume_context, stored)
 
     with fresh when is_map(fresh) <- fresh_resume_context(workspace, issue, state, inspection, %{}) do
@@ -3194,7 +3189,7 @@ defmodule SymphonyElixir.DeliveryEngine do
         Map.merge(
           fresh,
           preserved_resume_context(stored)
-          |> Map.merge(carry_forward_review_fix_budget_context(stored))
+          |> Map.merge(budget_view.stale_budget_context)
         )
       else
         Map.merge(fresh, stored)
@@ -3213,7 +3208,6 @@ defmodule SymphonyElixir.DeliveryEngine do
          diff_summary <- RunInspector.diff_summary(workspace),
          :ok <- execution_guard(workspace, issue) do
       target_stage = Map.get(overrides, :target_stage) || Map.get(state, :stage) || "implement"
-      stored_resume_context = normalize_resume_context(Map.get(state, :resume_context, %{}))
 
       focused_review_claims =
         ReviewClaims.focused_review_claims(
@@ -3221,16 +3215,11 @@ defmodule SymphonyElixir.DeliveryEngine do
           focused_review_claim_limit(state)
         )
 
-      review_fix_context = review_fix_resume_context(state, stored_resume_context, target_stage)
-
-      broad_retry_context =
-        if review_fix_budget_mode?(review_fix_context) do
-          %{}
-        else
-          broad_retry_resume_context(stored_resume_context, target_stage)
-        end
-
-      review_fix_progress_delta = Map.get(overrides, :review_fix_progress_delta, 0)
+      budget_view =
+        RetryBudget.delivery_context(state, Map.get(state, :resume_context, %{}),
+          target_stage: target_stage,
+          progress_delta: Map.get(overrides, :review_fix_progress_delta, 0)
+        )
 
       %{
         issue_identifier: issue.identifier,
@@ -3255,9 +3244,7 @@ defmodule SymphonyElixir.DeliveryEngine do
           Map.get(overrides, :next_objective) ||
             ReviewClaims.default_next_objective(state, focused_review_claims)
       }
-      |> Map.merge(review_fix_context)
-      |> Map.merge(broad_retry_context)
-      |> maybe_increment_review_fix_progress(review_fix_progress_delta)
+      |> Map.merge(budget_view.budget_context)
       |> Map.merge(Enum.into(overrides, %{}))
       |> Map.drop([:target_stage, :review_fix_progress_delta])
     end
@@ -3495,169 +3482,11 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp review_fix_resume_context(state, stored_resume_context, "implement") do
-    cond do
-      review_fix_budget_mode?(stored_resume_context) ->
-        carry_forward_review_fix_budget_context(stored_resume_context)
-
-      review_fix_scope_ids(state, "review_claim_batch") != [] ->
-        initial_review_fix_resume_context(
-          state,
-          "review_claim_batch",
-          review_fix_scope_ids(state, "review_claim_batch")
-        )
-
-      review_fix_scope_ids(state, "ci_failure_batch") != [] ->
-        initial_review_fix_resume_context(
-          state,
-          "ci_failure_batch",
-          review_fix_scope_ids(state, "ci_failure_batch")
-        )
-
-      true ->
-        %{}
-    end
-  end
-
-  defp review_fix_resume_context(_state, _stored_resume_context, _target_stage), do: %{}
-
-  defp broad_retry_resume_context(stored_resume_context, "implement") do
-    if broad_implement_budget_mode?(stored_resume_context) do
-      Map.take(stored_resume_context, [
-        :budget_mode,
-        :budget_pressure_level,
-        :budget_retry_count,
-        :budget_window_base_turn,
-        :budget_last_stop_code,
-        :budget_last_observed_input_tokens,
-        :budget_auto_narrowed,
-        :target_paths,
-        :already_learned,
-        :next_required_path,
-        :budget_expansion_used,
-        :budget_admission_reason,
-        :token_pressure
-      ])
-    else
-      %{}
-    end
-  end
-
-  defp broad_retry_resume_context(_stored_resume_context, _target_stage), do: %{}
-
-  defp initial_review_fix_resume_context(state, scope_kind, scope_ids) do
-    %{
-      budget_mode: "review_fix",
-      budget_pressure_level: "normal",
-      budget_retry_count: 0,
-      budget_window_base_turn: Map.get(state, :implementation_turns, 0) + 1,
-      budget_last_stop_code: nil,
-      budget_last_observed_input_tokens: nil,
-      budget_scope_kind: scope_kind,
-      budget_scope_ids: scope_ids,
-      budget_progress_count: 0,
-      budget_total_extension_used: false,
-      budget_auto_narrowed: false
-    }
-  end
-
-  defp carry_forward_review_fix_budget_context(resume_context) do
-    Map.take(resume_context, [
-      :budget_mode,
-      :budget_pressure_level,
-      :budget_retry_count,
-      :budget_window_base_turn,
-      :budget_last_stop_code,
-      :budget_last_observed_input_tokens,
-      :budget_scope_kind,
-      :budget_scope_ids,
-      :budget_progress_count,
-      :budget_total_extension_used,
-      :budget_auto_narrowed,
-      :token_pressure
-    ])
-  end
-
-  defp review_fix_scope_ids(state, "review_claim_batch") do
-    state
-    |> Map.get(:review_claims, %{})
-    |> Enum.filter(fn {_thread_key, claim} -> ReviewClaims.claim_pending_review_fix?(claim) end)
-    |> Enum.map(fn {thread_key, _claim} -> to_string(thread_key) end)
-    |> Enum.sort()
-  end
-
-  defp review_fix_scope_ids(state, "ci_failure_batch") do
-    state
-    |> Map.get(:last_failing_required_checks, [])
-    |> List.wrap()
-    |> Enum.map(&to_string/1)
-    |> Enum.reject(&(&1 == ""))
-    |> Enum.uniq()
-  end
-
-  defp review_fix_scope_ids(_state, _scope_kind), do: []
-
   defp review_fix_budget_mode?(resume_context) when is_map(resume_context),
     do: Map.get(resume_context, :budget_mode) == "review_fix"
 
-  defp review_fix_budget_mode?(_resume_context), do: false
-
   defp broad_implement_budget_mode?(resume_context) when is_map(resume_context),
     do: Map.get(resume_context, :budget_mode) == "broad_implement"
-
-  defp broad_implement_budget_mode?(_resume_context), do: false
-
-  defp maybe_increment_review_fix_progress(resume_context, delta)
-       when is_map(resume_context) and is_integer(delta) and delta > 0 do
-    if review_fix_budget_mode?(resume_context) do
-      Map.update(resume_context, :budget_progress_count, delta, &(&1 + delta))
-    else
-      resume_context
-    end
-  end
-
-  defp maybe_increment_review_fix_progress(resume_context, _delta), do: resume_context
-
-  defp normalize_resume_context(context) when is_map(context) do
-    context
-    |> Enum.into(%{}, fn
-      {key, value} when is_binary(key) ->
-        case normalize_resume_context_key(key) do
-          nil -> {key, value}
-          atom_key -> {atom_key, value}
-        end
-
-      {key, value} ->
-        {key, value}
-    end)
-  end
-
-  defp normalize_resume_context(_context), do: %{}
-
-  defp normalize_resume_context_key("budget_mode"), do: :budget_mode
-  defp normalize_resume_context_key("budget_pressure_level"), do: :budget_pressure_level
-  defp normalize_resume_context_key("budget_retry_count"), do: :budget_retry_count
-  defp normalize_resume_context_key("budget_window_base_turn"), do: :budget_window_base_turn
-  defp normalize_resume_context_key("budget_last_stop_code"), do: :budget_last_stop_code
-
-  defp normalize_resume_context_key("budget_last_observed_input_tokens"),
-    do: :budget_last_observed_input_tokens
-
-  defp normalize_resume_context_key("budget_scope_kind"), do: :budget_scope_kind
-  defp normalize_resume_context_key("budget_scope_ids"), do: :budget_scope_ids
-  defp normalize_resume_context_key("budget_progress_count"), do: :budget_progress_count
-
-  defp normalize_resume_context_key("budget_total_extension_used"),
-    do: :budget_total_extension_used
-
-  defp normalize_resume_context_key("budget_auto_narrowed"), do: :budget_auto_narrowed
-  defp normalize_resume_context_key("target_paths"), do: :target_paths
-  defp normalize_resume_context_key("already_learned"), do: :already_learned
-  defp normalize_resume_context_key("next_required_path"), do: :next_required_path
-  defp normalize_resume_context_key("budget_expansion_used"), do: :budget_expansion_used
-  defp normalize_resume_context_key("budget_admission_reason"), do: :budget_admission_reason
-  defp normalize_resume_context_key("token_pressure"), do: :token_pressure
-  defp normalize_resume_context_key(_key), do: nil
 
   defp maybe_broad_retry_issue_brief(issue, resume_context) when is_map(resume_context) do
     case Map.get(resume_context, :target_paths, []) do
@@ -3883,42 +3712,13 @@ defmodule SymphonyElixir.DeliveryEngine do
     end
   end
 
-  defp implement_command_output_budget(state) do
-    cond do
-      ReviewClaims.focused_review_claims(Map.get(state, :review_claims, %{})) == [] ->
-        %{
-          stage: "implement",
-          per_command_bytes: 8_192,
-          per_turn_bytes: 32_768,
-          max_command_count: 12
-        }
-
-      get_in(state, [:resume_context, :token_pressure]) == "high" ->
-        %{
-          stage: "implement",
-          per_command_bytes: 4_096,
-          per_turn_bytes: 12_288,
-          max_command_count: 4
-        }
-
-      true ->
-        %{
-          stage: "implement",
-          per_command_bytes: 6_144,
-          per_turn_bytes: 24_576,
-          max_command_count: 6
-        }
-    end
-  end
+  defp implement_command_output_budget(state),
+    do: RetryBudget.delivery_limits(state, :command_output_budget)
 
   @doc false
   @spec focused_review_claim_limit(map()) :: non_neg_integer()
-  def focused_review_claim_limit(state) do
-    case get_in(state, [:resume_context, :token_pressure]) do
-      "high" -> 1
-      _ -> 2
-    end
-  end
+  def focused_review_claim_limit(state),
+    do: RetryBudget.delivery_limits(state, :focused_claim_limit)
 
   # -- Delegations to ReviewClaims (called cross-module after extraction) ------
 
@@ -3950,41 +3750,13 @@ defmodule SymphonyElixir.DeliveryEngine do
   @spec claim_pending_review_fix?(map()) :: boolean()
   defdelegate claim_pending_review_fix?(claim), to: SymphonyElixir.DeliveryEngine.ReviewClaims
 
-  defp effective_implementation_turns(state) when is_map(state) do
-    implementation_turns = Map.get(state, :implementation_turns, 0)
-    window_base = get_in(state, [:resume_context, :implementation_turn_window_base]) || 0
+  defp effective_implementation_turns(state) when is_map(state),
+    do: RetryBudget.delivery_limits(state, :implementation_turns)
 
-    cond do
-      not is_integer(implementation_turns) ->
-        0
+  defp effective_max_turns(max_turns, state) when is_integer(max_turns) and is_map(state),
+    do: RetryBudget.delivery_limits(state, {:max_turns, max_turns})
 
-      not is_integer(window_base) ->
-        implementation_turns
-
-      implementation_turns >= window_base ->
-        implementation_turns - window_base
-
-      true ->
-        implementation_turns
-    end
-  end
-
-  defp effective_max_turns(max_turns, state) when is_integer(max_turns) and is_map(state) do
-    if review_fix_turn_budget_candidate?(state) do
-      max(max_turns, @review_fix_max_turns)
-    else
-      max_turns
-    end
-  end
-
-  defp review_fix_turn_budget_candidate?(state) when is_map(state) do
-    get_in(state, [:resume_context, :token_pressure]) == "high" and
-      Enum.any?(Map.get(state, :review_claims, %{}), fn {_thread_key, claim} ->
-        claim_value(claim, :disposition) == "accepted" and claim_value(claim, :actionable, false)
-      end)
-  end
-
-  defp claim_value(claim, key, default \\ nil) when is_map(claim) and is_atom(key) do
+  defp claim_value(claim, key, default) when is_map(claim) and is_atom(key) do
     Map.get(claim, key, Map.get(claim, Atom.to_string(key), default))
   end
 

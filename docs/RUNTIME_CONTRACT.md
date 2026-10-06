@@ -156,6 +156,37 @@ engine retains guards, transitions, accounting, provider invocation and publicat
 Historical `_for_test` entry points delegate to this module for compatibility; no
 new test-only production entry point is introduced.
 
+## Retry budgets and file focus
+
+`RetryBudget` owns the calculations for pressure, turn windows, scoped review
+progress, bounded total extensions and broad retry admission. RunPolicy prepares
+an observation of usage, identity, durable state and text facts; execution
+capabilities and complete provider messages stay with their owner. `pressure/1`
+returns a view and optional soft-pressure data. RunPolicy completes that write and
+its journal before calling `decide/2` with the appropriate fresh state. The decision
+contains an optional resume write and an explicit result. The owner completes the
+write before returning a retry or constructing the existing stop violation.
+
+Checked and legacy persistence retain their distinct contracts. Scoped checked
+calculations observe the pressure write; scoped legacy retains the initial resume.
+Broad retry focus is persisted before accumulated totals can replace retry with a
+stop. Generic hard-input stops add no separate resume write. Adaptive window keys
+remain distinct from historical retry accounting; no retry renews consumed usage.
+
+`RetryBudget.Focus` owns path inference, diff-marker normalization and compact
+learning. Explicit resume focus precedes issue paths, changed files and agent
+updates. Primary and expansion queries retain their selective reads. Retry-field
+preparation retains eager candidate discovery and eager summary validation.
+`Observation.text_facts/1` is the shared text decoder; it retains preferred-key
+ordering and preferred empty text. Unsupported execution-bearing scalar messages
+remain explicit errors when consumed as summaries, without retaining the original
+capability in the observation.
+
+DeliveryEngine owns prompt guards, general resume merges and progress writes. Its
+limit queries evaluate only the requested calculation. Orchestrator delegates the
+budget continuation predicate while retaining admission, accounting, persistence
+and scheduling. This extraction adds no provider, process or execution authority.
+
 ## Checked inbox storage (C4a)
 
 Tracker and GitHub inboxes share a checked storage contract. State version 2 binds
