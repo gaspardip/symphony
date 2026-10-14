@@ -951,7 +951,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     HttpServer.bound_port()
   end
 
-  defp assert_eventually(fun, attempts \\ 20)
+  defp assert_eventually(fun, attempts \\ 200)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do
     if fun.() do

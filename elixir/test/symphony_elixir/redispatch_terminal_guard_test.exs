@@ -909,7 +909,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
 
   defp await_worker_down(state, pid, ref, deadline) do
     remaining = deadline - System.monotonic_time(:millisecond)
-    if remaining <= 0, do: flunk("worker did not finish within 2000ms")
+    if remaining <= 0, do: flunk("worker did not finish before the deadline")
 
     receive do
       {:DOWN, ^ref, :process, ^pid, _reason} = down ->
@@ -924,7 +924,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
         assert {:noreply, next} = Orchestrator.handle_info(message, state)
         await_worker_down(next, pid, ref, deadline)
     after
-      remaining -> flunk("worker did not finish within 2000ms")
+      remaining -> flunk("worker did not finish before the deadline")
     end
   end
 
