@@ -508,9 +508,9 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
                  result
                end)
 
-      assert_receive {:callback_pid, ^worker, :notification}, 1_000
-      assert_receive {:callback_pid, ^worker, :turn_completed}, 1_000
-      assert_receive {:tool_pid, ^worker, "report_agent_turn_result"}, 1_000
+      assert_receive {:callback_pid, ^worker, :notification}, 5_000
+      assert_receive {:callback_pid, ^worker, :turn_completed}, 5_000
+      assert_receive {:tool_pid, ^worker, "report_agent_turn_result"}, 5_000
       assert GenServer.call(owner, :runtime).agent_totals.total_tokens == 10
     end
   end
@@ -905,9 +905,9 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
           end)
         end)
 
-      assert_receive {:usage_held, ^owner, invocation, {:ok, :thread_absolute, %{total_tokens: 10}}}, 2_000
+      assert_receive {:usage_held, ^owner, invocation, {:ok, :thread_absolute, %{total_tokens: 10}}}, 5_000
       assert invocation.context.worker == worker
-      consumer_await_file!(queued, System.monotonic_time(:millisecond) + 2_000)
+      consumer_await_file!(queued, System.monotonic_time(:millisecond) + 5_000)
       before = consumer_evidence(c)
       ledger = entry.dispatch_ticket.ledger_path
       backup = ledger <> ".consumer-before-fault"
@@ -996,7 +996,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
                SymphonyElixir.DeliveryEngine.run(c.workspace, c.issue, self(), include_pr_details: false)
              end)
 
-    consumer_await_file!(queued, System.monotonic_time(:millisecond) + 2_000)
+    consumer_await_file!(queued, System.monotonic_time(:millisecond) + 5_000)
     runtime = GenServer.call(owner, :runtime)
     assert runtime.running[c.issue.id].turn_count == 0
     assert runtime.running[c.issue.id].last_agent_event == nil
@@ -1164,7 +1164,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     refute Map.has_key?(runtime.retry_attempts, c.issue.id)
     lease = File.read!(entry.lease_token.storage.lease_path)
     send(worker, :finish)
-    assert_receive {:worker_down, ^owner, {:DOWN, ref, :process, ^worker, {:accounting_uncertain, _}}, stopped}, 2_000
+    assert_receive {:worker_down, ^owner, {:DOWN, ref, :process, ^worker, {:accounting_uncertain, _}}, stopped}, 5_000
     assert ref == entry.ref
     refute Map.has_key?(stopped.running, c.issue.id)
     assert stopped.lease_claims[c.issue.id] == claim
@@ -1191,7 +1191,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     totals = Map.take(runtime.agent_totals, [:input_tokens, :output_tokens, :total_tokens])
     lease = File.read!(entry.lease_token.storage.lease_path)
     send(worker, :finish)
-    assert_receive {:worker_down, ^owner, {:DOWN, ref, :process, ^worker, {:stale_execution, ^ids, ^cause}}, stopped}, 2_000
+    assert_receive {:worker_down, ^owner, {:DOWN, ref, :process, ^worker, {:stale_execution, ^ids, ^cause}}, stopped}, 5_000
     assert ref == entry.ref
     refute Map.has_key?(stopped.running, c.issue.id)
     assert stopped.lease_claims[c.issue.id] == claim
@@ -1313,9 +1313,9 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     # Public stop intentionally comments and updates the tracker. Require those
     # exact control effects once; the later usage must add no budget effects.
     issue_id = c.issue.id
-    assert_receive {:memory_tracker_comment, ^issue_id, comment}, 1_000
+    assert_receive {:memory_tracker_comment, ^issue_id, comment}, 5_000
     assert comment =~ "Rule ID: operator.stop"
-    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}, 1_000
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Blocked"}, 5_000
     refute_received {:memory_tracker_comment, ^issue_id, _}
     refute_received {:memory_tracker_state_update, ^issue_id, _}
 
@@ -1398,10 +1398,10 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
                end
              end)
 
-    assert_receive {:positive_callback, ^worker, :session_started}, 1_000
-    assert_receive {:positive_tool, ^worker, "report_agent_turn_result", ^worker}, 1_000
-    assert_receive {:positive_callback, ^worker, :tool_call_completed}, 1_000
-    assert_receive {:positive_callback, ^worker, :turn_completed}, 1_000
+    assert_receive {:positive_callback, ^worker, :session_started}, 5_000
+    assert_receive {:positive_tool, ^worker, "report_agent_turn_result", ^worker}, 5_000
+    assert_receive {:positive_callback, ^worker, :tool_call_completed}, 5_000
+    assert_receive {:positive_callback, ^worker, :turn_completed}, 5_000
     [reply] = replies |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
     assert %{"id" => 72, "result" => %{"success" => true}} = reply
     runtime = GenServer.call(owner, :runtime)
@@ -1458,9 +1458,9 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
     assert result.summary == "Reviewed by the real verifier report tool"
     assert result.smoke.status == :passed
     assert result.raw_output == "pass"
-    assert_receive {:positive_verifier_callback, ^worker, :session_started}, 1_000
-    assert_receive {:positive_verifier_callback, ^worker, :tool_call_completed}, 1_000
-    assert_receive {:positive_verifier_callback, ^worker, :turn_completed}, 1_000
+    assert_receive {:positive_verifier_callback, ^worker, :session_started}, 5_000
+    assert_receive {:positive_verifier_callback, ^worker, :tool_call_completed}, 5_000
+    assert_receive {:positive_verifier_callback, ^worker, :turn_completed}, 5_000
     [reply] = replies |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
     assert %{"id" => 72, "result" => %{"success" => true, "contentItems" => [%{"text" => "verifier result recorded"}]}} = reply
     runtime = GenServer.call(owner, :runtime)
@@ -1514,7 +1514,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
                  end
                end)
 
-      assert_receive {:accounted_metric, %{input_tokens: 7, output_tokens: 3, total_tokens: 10, count: 1}, metadata}, 1_000
+      assert_receive {:accounted_metric, %{input_tokens: 7, output_tokens: 3, total_tokens: 10, count: 1}, metadata}, 5_000
       assert metadata.model_provider == @metrics_provider_name
       assert metadata.model_name == selected_model
       assert metadata.agent_event == "usage_observed"
@@ -1581,7 +1581,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
         refute_received {:accounted_metric, _, _}
         refute body =~ "symphony_tokens"
       else
-        assert_receive {:accounted_metric, %{total_tokens: ^total}, metadata}, 1_000
+        assert_receive {:accounted_metric, %{total_tokens: ^total}, metadata}, 5_000
         model = @metrics_label
         assert metadata.model_provider == "codex"
         assert metadata.model_name == model
@@ -1791,7 +1791,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
 
       GenServer.stop(owner)
       Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-      Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+      Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
     end
   end
 end

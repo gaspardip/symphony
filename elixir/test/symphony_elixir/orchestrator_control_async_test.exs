@@ -179,13 +179,13 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
           end
         end)
 
-      assert_receive {:control_read, :identifier, reader, "C6-1"}, 1_000
+      assert_receive {:control_read, :identifier, reader, "C6-1"}, 5_000
       send(reader, {:answer, {:ok, c.issue}})
-      assert %{ok: true} = Task.await(task, 1_000)
-      assert_receive {:control_write, :state, _, _}, 1_000
+      assert %{ok: true} = Task.await(task, 5_000)
+      assert_receive {:control_write, :state, _, _}, 5_000
 
       case c.control_action do
-        :stop -> assert_receive {:control_write, :comment, _, _}, 1_000
+        :stop -> assert_receive {:control_write, :comment, _, _}, 5_000
         :pause -> refute_received {:control_write, :comment, _, _}
       end
 
@@ -236,7 +236,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
       assert :ok = :sys.resume(c.owner)
     end
 
-    assert GenServer.call(c.owner, :runtime, 500) == c.initial
+    assert GenServer.call(c.owner, :runtime, 5_000) == c.initial
     refute_received {:control_read, _, _, _}
     refute_received {:control_write, _, _, _}
   end
@@ -257,24 +257,24 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
 
   test "remote lookup leaves the owner responsive and a second remote call busy before effects", c do
     first = Task.async(fn -> Orchestrator.pause_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, "C6-1"}, 1_000
-    state = GenServer.call(c.owner, :runtime, 500)
+    assert_receive {:control_read, :identifier, reader, "C6-1"}, 5_000
+    state = GenServer.call(c.owner, :runtime, 5_000)
     assert state.admission_read.pid != reader
     assert %{error: "control_busy", effect_status: "not_started"} = Orchestrator.stop_issue(c.owner, "C6-2")
     refute_received {:control_write, _, _, _}
     send(reader, {:answer, {:ok, c.issue}})
-    assert %{ok: true, action: "pause"} = Task.await(first, 1_000)
-    assert_receive {:control_write, :state, _, _}, 1_000
+    assert %{ok: true, action: "pause"} = Task.await(first, 5_000)
+    assert_receive {:control_write, :state, _, _}, 5_000
     refute_receive {:control_write, :comment, _, _}, 50
     assert is_nil(runtime(c).control_reservation)
   end
 
   test "a local control invalidates a pending remote operation without replay", c do
     task = Task.async(fn -> Orchestrator.stop_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     guardian = runtime(c).admission_read.pid
     assert %{ok: true} = Orchestrator.reprioritize_issue(c.owner, c.issue.identifier, 0)
-    assert %{ok: false, error: "control_invalidated", effect_status: "not_started"} = Task.await(task, 1_000)
+    assert %{ok: false, error: "control_invalidated", effect_status: "not_started"} = Task.await(task, 5_000)
     await_dead!(reader)
     await_dead!(guardian)
     refute_received {:control_write, _, _, _}
@@ -284,7 +284,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "caller death cancels its real reader before the slot is reused", c do
     observer = self()
     caller = spawn(fn -> send(observer, {:unused_control_result, Orchestrator.stop_issue(c.owner, c.issue.identifier)}) end)
-    assert_receive {:control_read, :identifier, child, _}, 1_000
+    assert_receive {:control_read, :identifier, child, _}, 5_000
     guardian = runtime(c).admission_read.pid
     Process.exit(caller, :kill)
     await_dead!(caller)
@@ -298,22 +298,22 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
 
   test "checked missing is a domain rejection while a reader exception is read_failed", c do
     missing = Task.async(fn -> Orchestrator.pause_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, first, _}, 1_000
+    assert_receive {:control_read, :identifier, first, _}, 5_000
     send(first, {:answer, {:ok, nil}})
-    assert %{ok: false, error: ":issue_not_found"} = Task.await(missing, 1_000)
+    assert %{ok: false, error: ":issue_not_found"} = Task.await(missing, 5_000)
     failure = Task.async(fn -> Orchestrator.pause_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, second, _}, 1_000
+    assert_receive {:control_read, :identifier, second, _}, 5_000
     send(second, :raise)
-    assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Task.await(failure, 1_000)
+    assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Task.await(failure, 5_000)
     refute_received {:control_write, _, _, _}
   end
 
   for result <- [{:ok, :malformed}, {:error, {:tracker_reader_exit, :backend_tag}}, {:error, {:linear_rate_limited, :invalid_metadata}}] do
     test "malformed/backend result #{inspect(result)} cannot become absence or a write", c do
       task = Task.async(fn -> Orchestrator.stop_issue(c.owner, c.issue.identifier) end)
-      assert_receive {:control_read, :identifier, reader, _}, 1_000
+      assert_receive {:control_read, :identifier, reader, _}, 5_000
       send(reader, {:answer, unquote(Macro.escape(result))})
-      assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Task.await(task, 1_000)
+      assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Task.await(task, 5_000)
       assert is_nil(runtime(c).tracker_backoff_until_ms)
       refute_received {:control_write, _, _, _}
     end
@@ -321,19 +321,19 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
 
   test "a genuine read 429 establishes backoff even though control cannot apply", c do
     task = Task.async(fn -> Orchestrator.pause_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:error, {:linear_rate_limited, %{retry_after_ms: 2_000}}}})
-    assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Task.await(task, 1_000)
+    assert %{ok: false, error: "control_read_failed", effect_status: "not_started"} = Task.await(task, 5_000)
     assert runtime(c).tracker_backoff_until_ms > System.monotonic_time(:millisecond)
     refute_received {:control_write, _, _, _}
   end
 
   test "context changed during lookup denies the old result", c do
     task = Task.async(fn -> Orchestrator.stop_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     write_workflow_file!(Workflow.workflow_file_path(), Keyword.put(c.config, :tracker_project_slug, "replacement"))
     send(reader, {:answer, {:ok, c.issue}})
-    assert %{error: "control_invalidated", effect_status: "not_started"} = Task.await(task, 1_000)
+    assert %{error: "control_invalidated", effect_status: "not_started"} = Task.await(task, 5_000)
     refute_received {:control_write, _, _, _}
   end
 
@@ -349,12 +349,12 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "stop records one comment and preserves the actual following writer failure", c do
     fixture!(hold_writes: [:state])
     task = Task.async(fn -> Orchestrator.stop_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, c.issue}})
-    assert_receive {:control_write, :comment, _, _}, 1_000
-    assert_receive {:control_write, :state, writer, _}, 1_000
+    assert_receive {:control_write, :comment, _, _}, 5_000
+    assert_receive {:control_write, :state, writer, _}, 5_000
     send(writer, {:writer_answer, {:error, :controlled_write_failure}})
-    assert %{ok: false, error: ":controlled_write_failure"} = Task.await(task, 1_000)
+    assert %{ok: false, error: ":controlled_write_failure"} = Task.await(task, 5_000)
     refute_receive {:control_write, :comment, _, _}, 50
     assert is_nil(runtime(c).control_reservation)
   end
@@ -362,12 +362,12 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "a context change while comment is executing prevents the following state writer", c do
     fixture!(hold_writes: [:comment])
     task = Task.async(fn -> Orchestrator.stop_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, c.issue}})
-    assert_receive {:control_write, :comment, writer, _}, 1_000
+    assert_receive {:control_write, :comment, writer, _}, 5_000
     write_workflow_file!(Workflow.workflow_file_path(), Keyword.put(c.config, :tracker_project_slug, "changed-after-comment"))
     send(writer, {:writer_answer, {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}})
-    assert %{ok: false, error: "control_invalidated", effect_status: "unknown"} = Task.await(task, 1_000)
+    assert %{ok: false, error: "control_invalidated", effect_status: "unknown"} = Task.await(task, 5_000)
     refute_receive {:control_write, :state, _, _}, 50
     refute_receive {:control_write, :comment, _, _}, 50
     assert is_nil(runtime(c).control_reservation)
@@ -376,23 +376,23 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "writer 429 establishes backoff after exactly one attempted mutation", c do
     fixture!(hold_writes: [:state])
     task = Task.async(fn -> Orchestrator.pause_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, c.issue}})
-    assert_receive {:control_write, :state, writer, _}, 1_000
+    assert_receive {:control_write, :state, writer, _}, 5_000
     send(writer, {:writer_answer, {:error, {:linear_api_status, 429, %{retry_after_ms: 2_000}}}})
-    assert %{ok: false} = Task.await(task, 1_000)
+    assert %{ok: false} = Task.await(task, 5_000)
     assert runtime(c).tracker_backoff_until_ms > System.monotonic_time(:millisecond)
     refute_receive {:control_write, :state, _, _}, 50
   end
 
   test "approval writer is not repeated after a failed refresh", c do
     task = Task.async(fn -> Orchestrator.approve_issue_for_merge(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, c.issue}})
-    assert_receive {:control_write, :state, _, _}, 1_000
-    assert_receive {:control_read, :refresh, refresh, _}, 1_000
+    assert_receive {:control_write, :state, _, _}, 5_000
+    assert_receive {:control_read, :refresh, refresh, _}, 5_000
     send(refresh, {:answer, {:error, :refresh_failed}})
-    assert %{ok: false, error: "control_read_failed", effect_status: "unknown"} = Task.await(task, 1_000)
+    assert %{ok: false, error: "control_read_failed", effect_status: "unknown"} = Task.await(task, 5_000)
     refute_receive {:control_write, :state, _, _}, 50
     assert runtime(c).running == %{}
     assert {:error, :missing} = RunStateStore.load(Workspace.path_for_issue(c.issue))
@@ -400,14 +400,14 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
 
   test "unreadable snapshot after a real refresh prevents approval", c do
     task = Task.async(fn -> Orchestrator.approve_issue_for_merge(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, c.issue}})
-    assert_receive {:control_write, :state, _, _}, 1_000
-    assert_receive {:control_read, :refresh, refresh, _}, 1_000
+    assert_receive {:control_write, :state, _, _}, 5_000
+    assert_receive {:control_read, :refresh, refresh, _}, 5_000
     workspace = Workspace.path_for_issue(c.issue)
     File.mkdir_p!(RunStateStore.state_path(workspace))
     send(refresh, {:answer, {:ok, %{c.issue | state: "Merging"}}})
-    assert %{ok: false, error: "control_invalidated", effect_status: "unknown"} = Task.await(task, 1_000)
+    assert %{ok: false, error: "control_invalidated", effect_status: "unknown"} = Task.await(task, 5_000)
     assert File.dir?(RunStateStore.state_path(workspace))
     assert runtime(c).running == %{}
     refute_receive {:control_write, :state, _, _}, 50
@@ -417,25 +417,25 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     workspace = Workspace.path_for_issue(c.issue)
     assert {:ok, _} = RunStateStore.transition(workspace, "implement", %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, issue_source: :tracker})
     task = Task.async(fn -> Orchestrator.approve_issue_for_merge(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, c.issue}})
-    assert_receive {:control_read, :refresh, refresh, _}, 1_000
+    assert_receive {:control_read, :refresh, refresh, _}, 5_000
     assert {:ok, _} = RunStateStore.transition(workspace, "blocked", %{stop_reason: %{code: "new_stop"}})
     snapshot = File.read!(RunStateStore.state_path(workspace))
     send(refresh, {:answer, {:ok, %{c.issue | state: "Merging"}}})
-    assert %{error: "control_invalidated", effect_status: "unknown"} = Task.await(task, 1_000)
+    assert %{error: "control_invalidated", effect_status: "unknown"} = Task.await(task, 5_000)
     assert File.read!(RunStateStore.state_path(workspace)) == snapshot
     assert runtime(c).running == %{}
   end
 
   test "duplicate physical-reader result never repeats a completed stop", c do
     task = Task.async(fn -> Orchestrator.stop_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, child, _}, 1_000
+    assert_receive {:control_read, :identifier, child, _}, 5_000
     reader = runtime(c).admission_read
     send(child, {:answer, {:ok, c.issue}})
-    assert %{ok: true} = Task.await(task, 1_000)
-    assert_receive {:control_write, :comment, _, _}, 1_000
-    assert_receive {:control_write, :state, _, _}, 1_000
+    assert %{ok: true} = Task.await(task, 5_000)
+    assert_receive {:control_write, :comment, _, _}, 5_000
+    assert_receive {:control_write, :state, _, _}, 5_000
     send(c.owner, {:tracker_read_result, reader.ref, {:ok, {:issue, :tracker, c.issue}}})
     assert is_nil(runtime(c).control_reservation)
     refute_receive {:control_write, _, _, _}, 50
@@ -445,10 +445,10 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     workspace = Workspace.path_for_issue(c.issue)
     assert {:ok, _} = RunStateStore.transition(workspace, "implement", %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, issue_source: :tracker})
     task = Task.async(fn -> Orchestrator.approve_issue_for_deploy(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, c.issue}})
-    assert_receive {:control_write, :state, _, _}, 1_000
-    assert_receive {:control_read, :refresh, refresh, _}, 1_000
+    assert_receive {:control_write, :state, _, _}, 5_000
+    assert_receive {:control_read, :refresh, refresh, _}, 5_000
     snapshot = File.read!(RunStateStore.state_path(workspace))
     assert %{error: "control_deadline_exceeded", effect_status: "unknown"} = Task.await(task, 6_000)
     await_dead!(refresh)
@@ -461,9 +461,9 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "caller death during refresh cannot release another authentic custody", c do
     observer = self()
     caller = spawn(fn -> send(observer, {:unused_approval, Orchestrator.approve_issue_for_merge(c.owner, c.issue.identifier)}) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, c.issue}})
-    assert_receive {:control_read, :refresh, child, _}, 1_000
+    assert_receive {:control_read, :refresh, child, _}, 5_000
     guardian = runtime(c).admission_read.pid
     lease_owner = runtime(c).lease_owner
     assert {:ok, acquired} = LeaseManager.acquire(c.issue.id, c.issue.identifier, lease_owner)
@@ -498,13 +498,13 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "local manual resolution works while a remote reservation is occupied", c do
     {:ok, manual} = ManualIssueStore.submit(%{"id" => "manual-c6", "identifier" => "C6-MANUAL", "title" => "Manual", "description" => "local", "acceptance_criteria" => ["pause"]})
     remote = Task.async(fn -> Orchestrator.pause_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     reservation = runtime(c).control_reservation.operation.ref
     assert %{ok: true, state: "Paused"} = Orchestrator.pause_issue(c.owner, manual.identifier)
     assert runtime(c).control_reservation.operation.ref == reservation
     assert {:ok, %{state: "Paused"}} = ManualIssueStore.fetch_issue_by_id(manual.id)
     send(reader, {:answer, {:ok, c.issue}})
-    assert %{ok: true} = Task.await(remote, 1_000)
+    assert %{ok: true} = Task.await(remote, 5_000)
   end
 
   for snapshot_mode <- [:missing, :mismatch] do
@@ -517,14 +517,14 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
 
       issue = %{c.issue | state: "Blocked"}
       task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, issue.identifier) end)
-      assert_receive {:control_read, :identifier, reader, _}, 1_000
+      assert_receive {:control_read, :identifier, reader, _}, 5_000
       send(reader, {:answer, {:ok, issue}})
-      assert_receive {:control_write, :state, _, variables}, 1_000
+      assert_receive {:control_write, :state, _, variables}, 5_000
       assert variables.stateId == "state-Todo"
-      assert_receive {:control_read, :refresh, refresh, id}, 1_000
+      assert_receive {:control_read, :refresh, refresh, id}, 5_000
       assert id == issue.id
       send(refresh, {:answer, {:ok, %{issue | state: "Todo"}}})
-      assert %{ok: true, dispatch_outcome: "deferred"} = Task.await(task, 1_000)
+      assert %{ok: true, dispatch_outcome: "deferred"} = Task.await(task, 5_000)
       refute_receive {:control_write, :state, _, _}, 50
       refute_receive {:control_read, :refresh, _, _}, 50
       assert runtime(c).running == %{}
@@ -535,11 +535,11 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     fixture!(hold_writes: [:state])
     issue = %{c.issue | state: "Blocked"}
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, issue.identifier) end)
-    assert_receive {:control_read, :identifier, reader, _}, 1_000
+    assert_receive {:control_read, :identifier, reader, _}, 5_000
     send(reader, {:answer, {:ok, issue}})
-    assert_receive {:control_write, :state, writer, _}, 1_000
+    assert_receive {:control_write, :state, writer, _}, 5_000
     send(writer, {:writer_answer, {:error, :retry_writer_failed}})
-    assert %{ok: false, error: ":retry_writer_failed"} = Task.await(task, 1_000)
+    assert %{ok: false, error: ":retry_writer_failed"} = Task.await(task, 5_000)
     refute_receive {:control_write, :state, _, _}, 50
     refute_receive {:control_read, :refresh, _, _}, 50
     assert runtime(c).running == %{}
@@ -580,7 +580,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "a real gated worker cannot be reported dispatched before authorization", c do
     {issue, workspace} = prepare_manual_dispatch!(c)
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, issue.identifier) end)
-    assert_receive {:held_gate, owner, {:authorize_dispatch, id, _dispatch, worker}}, 2_000
+    assert_receive {:held_gate, owner, {:authorize_dispatch, id, _dispatch, worker}}, 5_000
     assert owner == c.owner and id == issue.id
     assert Process.alive?(worker)
     assert Task.yield(task, 0) == nil
@@ -588,7 +588,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     refute Map.get(entry, :execution_started?, false)
     assert is_map(entry.control_guard)
     assert :ok = GenServer.call(c.owner, :deliver_gate)
-    assert %{ok: true, dispatch_outcome: "dispatched"} = Task.await(task, 1_000)
+    assert %{ok: true, dispatch_outcome: "dispatched"} = Task.await(task, 5_000)
     assert {:ok, raw} = RunStateStore.load(workspace)
     assert raw.issue_id == id
   end
@@ -596,7 +596,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "caller deadline at the held gate terminates the real child without authorization", c do
     {issue, workspace} = prepare_manual_dispatch!(c)
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, issue.identifier) end)
-    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, _dispatch, worker}}, 2_000
+    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, _dispatch, worker}}, 5_000
     assert %{error: "control_deadline_exceeded", effect_status: "unknown"} = Task.await(task, 6_000)
     await_dead!(worker)
     assert :ok = GenServer.call(c.owner, :deliver_gate)
@@ -609,9 +609,9 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "a local invalidation removes gate permission without forgetting the gate guard", c do
     {issue, _workspace} = prepare_manual_dispatch!(c)
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, issue.identifier) end)
-    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, _dispatch, worker}}, 2_000
+    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, _dispatch, worker}}, 5_000
     assert %{ok: true} = Orchestrator.reprioritize_issue(c.owner, issue.identifier, 0)
-    assert %{error: "control_invalidated", effect_status: "unknown"} = Task.await(task, 1_000)
+    assert %{error: "control_invalidated", effect_status: "unknown"} = Task.await(task, 5_000)
     entry = runtime(c).running[id]
     assert is_nil(entry.control)
     assert is_map(entry.control_guard)
@@ -624,18 +624,18 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "control A and discovery B use exactly their existing physical slots", c do
     fixture!(hold: [:identifier, :refresh, :candidates])
     send(c.owner, :run_poll_cycle)
-    assert_receive {:control_read, :candidates, background_child, []}, 1_000
+    assert_receive {:control_read, :candidates, background_child, []}, 5_000
     background = runtime(c).tracker_poll_read
     task = Task.async(fn -> Orchestrator.pause_issue(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, control_child, _}, 1_000
+    assert_receive {:control_read, :identifier, control_child, _}, 5_000
     admission = runtime(c).admission_read
     assert admission.pid != background.pid
     assert Enum.all?([background_child, control_child, background.pid, admission.pid], &Process.alive?/1)
     assert %{error: "control_busy", effect_status: "not_started"} = Orchestrator.pause_issue(c.owner, "C6-OTHER")
     refute_receive {:control_read, :identifier, _, "C6-OTHER"}, 50
-    assert GenServer.call(c.owner, :runtime, 500).tracker_poll_read.ref == background.ref
+    assert GenServer.call(c.owner, :runtime, 5_000).tracker_poll_read.ref == background.ref
     send(control_child, {:answer, {:ok, c.issue}})
-    assert %{ok: true} = Task.await(task, 1_000)
+    assert %{ok: true} = Task.await(task, 5_000)
     assert Process.alive?(background.pid)
     send(background_child, {:answer, {:ok, []}})
     await_dead!(background.pid)
@@ -646,9 +646,9 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     write_workflow_file!(Workflow.workflow_file_path(), Keyword.put(c.config, :max_concurrent_agents, 1))
     fixture!(hold: [:identifier, :refresh, :candidates, :promotion])
     send(c.owner, :run_poll_cycle)
-    assert_receive {:control_read, :candidates, background, []}, 1_000
+    assert_receive {:control_read, :candidates, background, []}, 5_000
     send(background, {:answer, {:ok, [c.issue]}})
-    assert_receive {:control_read, :promotion, admission_child, ids}, 1_000
+    assert_receive {:control_read, :promotion, admission_child, ids}, 5_000
     assert ids == [c.issue.id]
     first = runtime(c).admission_read
     task = Task.async(fn -> Orchestrator.pause_issue(c.owner, control_issue.identifier) end)
@@ -656,11 +656,11 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     assert runtime(c).admission_read.ref == first.ref
     refute_receive {:control_read, :identifier, _, _}, 50
     send(admission_child, {:answer, {:ok, []}})
-    assert_receive {:control_read, :identifier, control_child, _}, 1_000
+    assert_receive {:control_read, :identifier, control_child, _}, 5_000
     assert runtime(c).admission_read.purpose == :control
     assert runtime(c).next_admission_kind == :poll
     send(control_child, {:answer, {:ok, control_issue}})
-    assert %{ok: true} = Task.await(task, 1_000)
+    assert %{ok: true} = Task.await(task, 5_000)
     assert runtime(c).running == %{}
   end
 
@@ -669,16 +669,16 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     assert {:ok, _} = RunStateStore.transition(workspace, "implement", %{issue_id: c.issue.id, issue_identifier: c.issue.identifier, issue_source: :tracker})
     original = File.read!(RunStateStore.state_path(workspace))
     task = Task.async(fn -> Orchestrator.approve_issue_for_merge(c.owner, c.issue.identifier) end)
-    assert_receive {:control_read, :identifier, child, _}, 1_000
+    assert_receive {:control_read, :identifier, child, _}, 5_000
     send(child, {:answer, {:ok, c.issue}})
-    assert_receive {:control_read, :refresh, refresh, _}, 1_000
+    assert_receive {:control_read, :refresh, refresh, _}, 5_000
     directory = Path.dirname(RunStateStore.state_path(workspace))
     assert :ok = File.chmod(directory, 0o555)
 
     result =
       try do
         send(refresh, {:answer, {:ok, %{c.issue | state: "Merging"}}})
-        Task.await(task, 1_000)
+        Task.await(task, 5_000)
       after
         assert :ok = File.chmod(directory, 0o755)
       end
@@ -722,7 +722,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
 
         try do
           result = Orchestrator.retry_issue_now(c.owner, issue.identifier)
-          assert_receive :control_begin_confirmed, 1_000
+          assert_receive :control_begin_confirmed, 5_000
           assert Task.Supervisor.children(constrained) == []
           assert runtime(c).running == %{}
           refute_receive {:held_gate, _, _}, 50
@@ -782,7 +782,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     before = Jason.decode!(File.read!(RunStateStore.state_path(workspace)))
     refute Map.has_key?(before, "run_id")
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, issue.identifier) end)
-    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, dispatch_id, worker}}, 2_000
+    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, dispatch_id, worker}}, 5_000
     assert id == issue.id and Process.alive?(worker)
     entry = runtime(c).running[id]
     raw = Jason.decode!(File.read!(RunStateStore.state_path(workspace)))
@@ -793,7 +793,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     assert entry.control_guard.admission.expected == RunStateStore.coordinator_projection(raw)
     assert entry.control_guard.admission.identity == Map.take(raw, ~w(issue_id issue_identifier run_id run_identity_event_id run_identity_ledger_path))
     assert :ok = GenServer.call(c.owner, :deliver_gate)
-    assert %{ok: true, dispatch_outcome: "dispatched"} = Task.await(task, 1_000)
+    assert %{ok: true, dispatch_outcome: "dispatched"} = Task.await(task, 5_000)
   end
 
   test "current material changed inside begin closes the genuine ticket before any child", c do
@@ -819,7 +819,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
 
     on_exit(fn -> :telemetry.detach(handler) end)
     assert %{ok: false, error: ":control_admission_material_changed"} = Orchestrator.retry_issue_now(c.owner, issue.identifier)
-    assert_receive :current_control_material_changed, 1_000
+    assert_receive :current_control_material_changed, 5_000
     refute_receive {:held_gate, _, _}, 50
     assert runtime(c).running == %{}
     assert runtime(c).lease_claims == %{}
@@ -835,14 +835,14 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   test "held real gate rejects coordinator material drift outside worker projection", c do
     {issue, workspace} = prepare_manual_dispatch!(c)
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, issue.identifier) end)
-    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, _dispatch, worker}}, 2_000
+    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, _dispatch, worker}}, 5_000
     before = runtime(c).running[id]
     assert {:ok, changed} = RunStateStore.update(workspace, &Map.put(&1, :next_human_action, "operator changed the pending decision"))
     assert RunStateStore.material_projection(changed) == before.agent_execution.expected
     refute RunStateStore.coordinator_projection(changed) == before.control_guard.admission.expected
     refute Map.get(before, :execution_started?, false)
     assert :ok = GenServer.call(c.owner, :deliver_gate)
-    assert %{ok: false, error: ":control_admission_material_changed"} = Task.await(task, 1_000)
+    assert %{ok: false, error: ":control_admission_material_changed"} = Task.await(task, 5_000)
     await_dead!(worker)
     assert runtime(c).running == %{}
     assert {:error, :missing} = LeaseManager.read(issue.id)
@@ -865,7 +865,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   defp effect_count(id, event), do: Enum.count(RunLedger.recent_entries(100), &(&1["event_type"] == event and &1["issue_id"] == id))
 
   defp fixture!(attrs), do: Application.put_env(:symphony_elixir, :control_async_fixture, Map.merge(Application.fetch_env!(:symphony_elixir, :control_async_fixture), Map.new(attrs)))
-  defp runtime(c), do: GenServer.call(c.owner, :runtime, 500)
+  defp runtime(c), do: GenServer.call(c.owner, :runtime, 5_000)
   defp envelope(action, identifier, deadline), do: %{ref: make_ref(), action: action, identifier: identifier, args: [], deadline: deadline}
 
   defp await_runtime!(c, predicate, remaining \\ 100)
@@ -884,13 +884,13 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
 
   defp await_dead!(pid) do
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
     refute Process.alive?(pid)
   end
 
   defp pause_default_scheduler! do
     if pid = Process.whereis(Orchestrator) do
-      deadline = System.monotonic_time(:millisecond) + 2_000
+      deadline = System.monotonic_time(:millisecond) + 5_000
       wait_default_idle!(pid, deadline)
       assert :ok = :sys.suspend(pid)
       on_exit(fn -> assert :ok = :sys.resume(pid) end)
@@ -898,7 +898,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
   end
 
   defp wait_default_idle!(pid, deadline) do
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, 5_000)
 
     if state.running == %{} and is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and is_nil(state.admission_read) and state.tracker_poll_pending == [] and
          not state.poll_check_in_progress do

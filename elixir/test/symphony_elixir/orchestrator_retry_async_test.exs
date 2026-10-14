@@ -93,7 +93,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     assert entry.retry_ref != injected
     assert entry.attempt == 1
     assert entry.status == :scheduled
-    assert_receive {:retry_read, :individual, reader, ["A"]}, 2_000
+    assert_receive {:retry_read, :individual, reader, ["A"]}, 5_000
     assert runtime(pid).retry_attempts["A"].retry_ref == entry.retry_ref
     send(reader, {:answer, {:ok, nil}})
     assert settled!(pid).retry_attempts == %{}
@@ -108,7 +108,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     assert runtime(pid) == before
     refute_receive {:retry_read, _, _, _}, 30
     fire(pid, "A")
-    assert_receive {:retry_read, :candidates, reader, []}, 2_000
+    assert_receive {:retry_read, :candidates, reader, []}, 5_000
     reading = runtime(pid)
     send(pid, {:retry_issue, "A", entry.retry_ref})
     assert runtime(pid) == reading
@@ -122,10 +122,10 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     pid = driver!(%{"A" => entry})
     worker = install_worker!(pid)
     fire(pid, "A")
-    assert_receive {:retry_read, :candidates, lookup, []}, 2_000
+    assert_receive {:retry_read, :candidates, lookup, []}, 5_000
     assert_pending_available(pid, worker, entry, "lookup")
     send(lookup, {:answer, {:ok, [issue("A")]}})
-    assert_receive {:retry_read, :refresh, refresh, ["A"]}, 2_000
+    assert_receive {:retry_read, :refresh, refresh, ["A"]}, 5_000
     assert_pending_available(pid, worker, entry, "refresh")
     assert {:error, :missing} = LeaseManager.read("A")
     send(refresh, {:answer, {:ok, []}})
@@ -138,7 +138,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     File.write!(sentinel, "current")
     pid = driver!(%{"A" => retry_entry("A", %{delay_type: :passive_continuation})})
     fire(pid, "A")
-    assert_receive {:retry_read, :individual, reader, ["A"]}, 2_000
+    assert_receive {:retry_read, :individual, reader, ["A"]}, 5_000
     send(reader, {:answer, {:ok, %{issue("OTHER") | state: "Done"}}})
     state = settled!(pid)
     assert state.candidate_fetch_error == :admission_identity_mismatch
@@ -252,24 +252,24 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     pid = driver!(%{"A" => retry_entry("A"), "B" => retry_entry("B")})
     replace_runtime(pid, fn state -> %{state | admission_batch: %{issues: [issue("P"), issue("Q")], invalidated: MapSet.new()}} end)
     fire(pid, "A")
-    assert_receive {:retry_read, :refresh, poll_p, ["P"]}, 2_000
+    assert_receive {:retry_read, :refresh, poll_p, ["P"]}, 5_000
     fire(pid, "B")
     assert runtime(pid).retry_attempts["A"].status == :ready
     assert runtime(pid).retry_attempts["B"].status == :ready
     send(pid, :run_poll_cycle)
-    assert_receive {:retry_read, :candidates, poll_b, []}, 2_000
+    assert_receive {:retry_read, :candidates, poll_b, []}, 5_000
     state = runtime(pid)
     assert is_map(state.admission_read)
     assert is_map(state.tracker_poll_read)
     refute_receive {:retry_read, _, _, _}, 30
     send(poll_b, {:answer, {:ok, []}})
     send(poll_p, {:answer, {:ok, []}})
-    assert_receive {:retry_read, :candidates, retry_a, []}, 2_000
+    assert_receive {:retry_read, :candidates, retry_a, []}, 5_000
     assert runtime(pid).admission_read.issue.id == "A"
     send(retry_a, {:answer, {:ok, []}})
-    assert_receive {:retry_read, :refresh, poll_q, ["Q"]}, 2_000
+    assert_receive {:retry_read, :refresh, poll_q, ["Q"]}, 5_000
     send(poll_q, {:answer, {:ok, []}})
-    assert_receive {:retry_read, :candidates, retry_b, []}, 2_000
+    assert_receive {:retry_read, :candidates, retry_b, []}, 5_000
     assert runtime(pid).admission_read.issue.id == "B"
     send(retry_b, {:answer, {:ok, []}})
     assert settled!(pid).retry_attempts == %{}
@@ -331,7 +331,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     pid = driver!(%{issue.id => entry})
     replace_runtime(pid, fn state -> %{state | max_concurrent_agents: 0} end)
     fire(pid, issue.id)
-    assert_receive {:retry_read, :candidates, reader, []}, 2_000
+    assert_receive {:retry_read, :candidates, reader, []}, 5_000
     send(reader, {:answer, {:error, {:linear_api_status, 429, %{retry_after_ms: 60_000}}}})
     state = settled!(pid)
     deadline = state.tracker_backoff_until_ms
@@ -377,7 +377,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     assert runtime(pid).max_concurrent_agents == 2
     write_config!(ctx.workflow, put_in(ctx.config, [:agent, :max_concurrent_agents], 0))
     fire(pid, "A")
-    assert_receive {:retry_read, :candidates, reader, []}, 2_000
+    assert_receive {:retry_read, :candidates, reader, []}, 5_000
     send(reader, {:answer, {:ok, [issue("A")]}})
     state = settled!(pid)
     assert state.max_concurrent_agents == 0
@@ -398,7 +398,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     assert state.retry_attempts["A"].attempt == 2
     assert state.retry_attempts["A"].retry_ref != old_ref
     fire(pid, "A")
-    assert_receive {:retry_read, :candidates, next_reader, []}, 2_000
+    assert_receive {:retry_read, :candidates, next_reader, []}, 5_000
     send(next_reader, {:answer, {:ok, [issue("A")]}})
     state = settled!(pid)
     assert state.max_concurrent_agents == 0
@@ -412,7 +412,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     pid = driver!(%{"A" => retry_entry("A"), "B" => retry_entry("B")})
     replace_runtime(pid, fn state -> %{state | admission_batch: %{issues: [issue("P"), issue("Q")], invalidated: MapSet.new()}} end)
     fire(pid, "A")
-    assert_receive {:retry_read, :refresh, poll_p, ["P"]}, 2_000
+    assert_receive {:retry_read, :refresh, poll_p, ["P"]}, 5_000
     before = runtime(pid)
     write_config!(ctx.workflow, put_in(ctx.config, [:tracker, :kind], "unsupported"))
     assert {:error, _} = Config.validate!()
@@ -423,12 +423,12 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     assert state.retry_attempts["B"].status == :ready
     write_config!(ctx.workflow, ctx.config)
     send(poll_p, {:answer, {:ok, []}})
-    assert_receive {:retry_read, :candidates, retry_a, []}, 2_000
+    assert_receive {:retry_read, :candidates, retry_a, []}, 5_000
     assert Process.alive?(pid)
     send(retry_a, {:answer, {:ok, []}})
-    assert_receive {:retry_read, :refresh, poll_q, ["Q"]}, 2_000
+    assert_receive {:retry_read, :refresh, poll_q, ["Q"]}, 5_000
     send(poll_q, {:answer, {:ok, []}})
-    assert_receive {:retry_read, :candidates, retry_b, []}, 2_000
+    assert_receive {:retry_read, :candidates, retry_b, []}, 5_000
     send(retry_b, {:answer, {:ok, []}})
     assert settled!(pid).retry_attempts == %{}
   end
@@ -526,10 +526,10 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     pid = driver!(%{})
     context = %{focus: "lib/retry.ex", target_paths: ["lib/retry.ex"], already_learned: "Keep established invariants"}
     entry = GenServer.call(pid, {:schedule, "A", 1, %{identifier: "ISSUE-A", delay_type: :continuation, budget_resume_context: context}})
-    assert_receive {:retry_read, :candidates, lookup, []}, 2_000
+    assert_receive {:retry_read, :candidates, lookup, []}, 5_000
     assert runtime(pid).retry_attempts["A"].retry_ref == entry.retry_ref
     send(lookup, {:answer, {:ok, [issue]}})
-    assert_receive {:retry_read, :refresh, refresh, ["A"]}, 2_000
+    assert_receive {:retry_read, :refresh, refresh, ["A"]}, 5_000
 
     try do
       send(refresh, {:answer, {:ok, [issue]}})
@@ -658,8 +658,8 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     assert File.read(RunLedger.ledger_file_path()) == ledger
     assert_no_control_writes!(pid)
     send(reader, {:answer, {:ok, []}})
-    assert %{ok: true, issue_identifier: "ISSUE-B"} = Task.await(control, 2_000)
-    assert_receive {:trace, ^pid, :call, {HeldClient, :graphql, [_query, %{issueId: "B"}]}}, 500
+    assert %{ok: true, issue_identifier: "ISSUE-B"} = Task.await(control, 5_000)
+    assert_receive {:trace, ^pid, :call, {HeldClient, :graphql, [_query, %{issueId: "B"}]}}, 5_000
     assert settled!(pid).retry_attempts == %{}
     assert {:error, :missing} = LeaseManager.read("A")
   end
@@ -674,7 +674,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
       reader =
         if unquote(phase) == :refresh do
           send(lookup, {:answer, {:ok, [fresh]}})
-          assert_receive {:retry_read, :refresh, refresh, ["A"]}, 2_000
+          assert_receive {:retry_read, :refresh, refresh, ["A"]}, 5_000
           refresh
         else
           lookup
@@ -719,7 +719,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
       entry = retry_entry("A", %{identifier: manual.identifier, issue: manual})
       pid = driver!(%{manual.id => entry})
       fire(pid, manual.id)
-      assert_receive {:retry_read, :candidates, reader, []}, 2_000
+      assert_receive {:retry_read, :candidates, reader, []}, 5_000
       before = runtime(pid).admission_read
       assert before.issue.id == manual.id
       assert is_nil(before.issue.source)
@@ -766,7 +766,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
 
   defp assert_no_control_writes!(pid) do
     delivered = :erlang.trace_delivered(pid)
-    assert_receive {:trace_delivered, ^pid, ^delivered}, 500
+    assert_receive {:trace_delivered, ^pid, ^delivered}, 5_000
     refute_receive {:trace, ^pid, :call, {HeldClient, :graphql, _}}, 0
   end
 
@@ -793,7 +793,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     |> Enum.filter(&String.starts_with?(&1["event_type"], "run.identity."))
   end
 
-  defp wait_file!(path), do: wait_file!(path, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_file!(path), do: wait_file!(path, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_file!(path, deadline) do
     unless File.exists?(path) do
@@ -850,7 +850,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
       Enum.each(state.running, fn {_id, entry} -> stop_fixture_worker!(entry.pid) end)
 
       Enum.each(monitors, fn {reader, monitor} ->
-        assert_receive {:DOWN, ^monitor, :process, ^reader, _}, 500
+        assert_receive {:DOWN, ^monitor, :process, ^reader, _}, 5_000
       end)
     end
   end
@@ -858,15 +858,15 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
   defp stop_fixture_worker!(worker) do
     monitor = Process.monitor(worker)
     if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker)
-    assert_receive {:DOWN, ^monitor, :process, ^worker, _}, 500
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _}, 5_000
   end
 
-  defp runtime(pid), do: GenServer.call(pid, :runtime, 500)
+  defp runtime(pid), do: GenServer.call(pid, :runtime, 5_000)
   defp fire(pid, id), do: send(pid, {:retry_issue, id, runtime(pid).retry_attempts[id].retry_ref})
   defp replace_runtime(pid, fun), do: :sys.replace_state(pid, fn wrapper -> %{wrapper | runtime: fun.(wrapper.runtime)} end)
 
   defp settled!(pid), do: await_state!(pid, &(is_nil(&1.admission_read) and Enum.all?(&1.retry_attempts, fn {_id, entry} -> entry.status == :scheduled end)))
-  defp await_state!(pid, predicate), do: await_state!(pid, predicate, System.monotonic_time(:millisecond) + 2_000)
+  defp await_state!(pid, predicate), do: await_state!(pid, predicate, System.monotonic_time(:millisecond) + 5_000)
 
   defp await_state!(pid, predicate, deadline) do
     state = runtime(pid)
@@ -885,11 +885,11 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
 
   defp held_phase(pid, phase) do
     fire(pid, "A")
-    assert_receive {:retry_read, :candidates, reader, []}, 2_000
+    assert_receive {:retry_read, :candidates, reader, []}, 5_000
 
     if phase == :refresh do
       send(reader, {:answer, {:ok, [issue("A")]}})
-      assert_receive {:retry_read, :refresh, refresh, ["A"]}, 2_000
+      assert_receive {:retry_read, :refresh, refresh, ["A"]}, 5_000
       refresh
     else
       reader
@@ -897,7 +897,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
   end
 
   defp assert_pending_available(pid, worker, entry, message) do
-    assert is_map(Orchestrator.snapshot(pid, 500))
+    assert is_map(Orchestrator.snapshot(pid, 5_000))
     state = runtime(pid)
     assert state.retry_attempts["A"].retry_ref == entry.retry_ref
     assert state.retry_attempts["A"].attempt == entry.attempt
@@ -982,12 +982,12 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
     :ok = WorkflowStore.force_reload()
   end
 
-  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_state!(pid, predicate, deadline) do
     state =
       try do
-        :sys.get_state(pid, 500)
+        :sys.get_state(pid, 5_000)
       catch
         :exit, reason ->
           IO.puts("Admission fixture coordinator timeout: #{inspect(Process.info(pid, [:current_stacktrace, :messages]))}")

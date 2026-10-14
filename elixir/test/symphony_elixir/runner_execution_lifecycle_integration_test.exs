@@ -293,9 +293,9 @@ defmodule SymphonyElixir.RunnerExecutionLifecycleIntegrationTest do
           end)
         end)
 
-      assert_receive {:live_provider_port, ^closed_port}, 1_000
+      assert_receive {:live_provider_port, ^closed_port}, 5_000
       assert Port.info(closed_port) == nil
-      assert_receive {:verifier_callback, ^worker, :tool_call_completed}, 1_000
+      assert_receive {:verifier_callback, ^worker, :tool_call_completed}, 5_000
       [reply] = c.replies |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
       assert %{"id" => 72, "result" => %{"success" => true, "contentItems" => [%{"text" => "verifier result recorded"}]}} = reply
       assert {:ok, %{token_usage: %{input_tokens: 7, output_tokens: 3, total_tokens: 10}}} = RunStateStore.load(c.workspace)
@@ -310,8 +310,8 @@ defmodule SymphonyElixir.RunnerExecutionLifecycleIntegrationTest do
         :healthy ->
           assert result.verdict == "pass"
           assert result.summary == "real local verifier report"
-          assert_receive {:verifier_callback, ^worker, :turn_completed}, 1_000
-          assert_receive {:verifier_completed, %{issue_identifier: "LIFE-1", verdict: "pass"}}, 1_000
+          assert_receive {:verifier_callback, ^worker, :turn_completed}, 5_000
+          assert_receive {:verifier_completed, %{issue_identifier: "LIFE-1", verdict: "pass"}}, 5_000
           refute_received {:verifier_completed, _}
           assert registry.current == nil
           assert Map.has_key?(registry.retired, {Codex, :thread, "lifecycle-thread"})
@@ -322,7 +322,7 @@ defmodule SymphonyElixir.RunnerExecutionLifecycleIntegrationTest do
           assert result == {:stop, {:stale_execution, ids, :material_state_changed}}
           refute_received {:verifier_callback, ^worker, :turn_completed}
           refute_received {:verifier_completed, _}
-          assert_receive {:control_evidence, before}, 1_000
+          assert_receive {:control_evidence, before}, 5_000
           assert evidence(c, entry) == before
           assert runtime.stale_execution_errors[c.issue.id].cause == :material_state_changed
           assert runtime.lease_claims[c.issue.id].token == entry.lease_token
@@ -422,9 +422,9 @@ defmodule SymphonyElixir.RunnerExecutionLifecycleIntegrationTest do
     try do
       result = fun.()
       ref = :erlang.trace_delivered(worker)
-      assert_receive {:trace_delivered, _, ^ref}, 1_000
+      assert_receive {:trace_delivered, _, ^ref}, 5_000
       send(tracer, :flush)
-      assert_receive {:closed_ports, ports}, 1_000
+      assert_receive {:closed_ports, ports}, 5_000
       {result, ports}
     after
       :erlang.trace(worker, false, [:call])

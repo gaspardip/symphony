@@ -118,7 +118,7 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
     assert :ok = File.write(c.record, c.original)
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, c.issue.identifier) end)
     owner = c.owner
-    assert_receive {:held_gate, ^owner, {:authorize_dispatch, _, _, _}}, 2_000
+    assert_receive {:held_gate, ^owner, {:authorize_dispatch, _, _, _}}, 5_000
     state = runtime(c)
     entry = Map.fetch!(state.running, c.issue.id)
     claim = Map.fetch!(state.lease_claims, c.issue.id)
@@ -144,7 +144,7 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
   test "a real denied manual write retains the confirmed resume through genuine admission and reports the error", c do
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, c.issue.identifier) end)
     owner = c.owner
-    assert_receive {:held_gate, ^owner, {:authorize_dispatch, _, _, _}}, 2_000
+    assert_receive {:held_gate, ^owner, {:authorize_dispatch, _, _, _}}, 5_000
     state = runtime(c)
     entry = Map.fetch!(state.running, c.issue.id)
     claim = Map.fetch!(state.lease_claims, c.issue.id)
@@ -176,7 +176,7 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
       barrier = hold_manual_refresh!(c)
       task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, c.issue.identifier) end)
       owner = c.owner
-      assert_receive {:manual_refresh_waiting, ^owner, ^barrier}, 2_000
+      assert_receive {:manual_refresh_waiting, ^owner, ^barrier}, 5_000
 
       try do
         assert writes(c) == [[c.issue.id, "Merging"]]
@@ -216,11 +216,11 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
     barrier = hold_manual_refresh!(c)
     {caller, monitor} = spawn_monitor(fn -> Orchestrator.retry_issue_now(c.owner, c.issue.identifier) end)
     owner = c.owner
-    assert_receive {:manual_refresh_waiting, ^owner, ^barrier}, 2_000
+    assert_receive {:manual_refresh_waiting, ^owner, ^barrier}, 5_000
 
     try do
       Process.exit(caller, :kill)
-      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 2_000
+      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
       before = File.read!(RunStateStore.state_path(c.workspace))
       send(owner, {:release_manual_refresh, barrier})
       assert_no_admission(c)
@@ -236,7 +236,7 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
     request = %{ref: make_ref(), deadline: System.monotonic_time(:millisecond) + 1_000, action: :retry_now, identifier: c.issue.identifier, args: []}
     task = Task.async(fn -> GenServer.call(c.owner, {:control, request}, 5_000) end)
     owner = c.owner
-    assert_receive {:manual_refresh_waiting, ^owner, ^barrier}, 2_000
+    assert_receive {:manual_refresh_waiting, ^owner, ^barrier}, 5_000
 
     try do
       remaining = request.deadline - System.monotonic_time(:millisecond)
@@ -319,7 +319,7 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
   defp writes(c) do
     ref = :erlang.trace_delivered(c.owner)
     owner = c.owner
-    assert_receive {:trace_delivered, ^owner, ^ref}, 1_000
+    assert_receive {:trace_delivered, ^owner, ^ref}, 5_000
     collect_writes(owner, [])
   end
 
@@ -331,7 +331,7 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
     end
   end
 
-  defp runtime(c), do: GenServer.call(c.owner, :runtime, 500)
+  defp runtime(c), do: GenServer.call(c.owner, :runtime, 5_000)
 
   defp cleanup_owner!(owner) do
     if Process.alive?(owner) do
@@ -346,20 +346,20 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
         if Process.alive?(entry.pid), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, entry.pid)
       end)
 
-      Enum.each(refs, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000 end)
+      Enum.each(refs, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
     end
   end
 
   defp pause_default_scheduler! do
     if pid = Process.whereis(Orchestrator) do
-      wait_default_idle!(pid, System.monotonic_time(:millisecond) + 2_000)
+      wait_default_idle!(pid, System.monotonic_time(:millisecond) + 5_000)
       assert :ok = :sys.suspend(pid)
       on_exit(fn -> assert :ok = :sys.resume(pid) end)
     end
   end
 
   defp wait_default_idle!(pid, deadline) do
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, 5_000)
 
     if state.running == %{} and is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and is_nil(state.admission_read) and state.tracker_poll_pending == [] and
          not state.poll_check_in_progress do

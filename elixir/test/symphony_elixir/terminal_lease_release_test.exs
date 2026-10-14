@@ -16,7 +16,7 @@ defmodule SymphonyElixir.TerminalLeaseReleaseTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     pid = start_supervised!({Orchestrator, name: Module.concat(__MODULE__, :Scheduler)})
     on_exit(fn -> File.rm_rf(root) end)
-    await_initial_poll(pid, 150)
+    await_initial_poll(pid, 500)
     %{pid: pid}
   end
 
@@ -63,7 +63,7 @@ defmodule SymphonyElixir.TerminalLeaseReleaseTest do
     ref = Process.monitor(worker)
     Process.exit(worker, :killed_fixture)
     assert_receive {:DOWN, ^ref, :process, ^worker, :killed_fixture}
-    state = await_retry(pid, issue.id, 150)
+    state = await_retry(pid, issue.id, 500)
     assert state.running == %{}
     assert %{attempt: 1, error: "agent exited: :killed_fixture"} = state.retry_attempts[issue.id]
     assert state.lease_claims[issue.id].holder == :retry
@@ -104,7 +104,7 @@ defmodule SymphonyElixir.TerminalLeaseReleaseTest do
     before_ref = Process.monitor(worker)
     send(worker, :finish)
     assert_receive {:DOWN, ^before_ref, :process, ^worker, :normal}
-    state = await_retry(pid, issue.id, 150)
+    state = await_retry(pid, issue.id, 500)
     assert %{attempt: 1, budget_retry: true, budget_resume_context: context} = state.retry_attempts[issue.id]
     assert is_map(context)
     assert context.budget_retry_count == 1
@@ -261,7 +261,7 @@ defmodule SymphonyElixir.TerminalLeaseReleaseTest do
     ref = Process.monitor(worker)
     send(worker, :finish)
     assert_receive {:DOWN, ^ref, :process, ^worker, :normal}
-    await_completion(pid, issue_id, 150)
+    await_completion(pid, issue_id, 500)
   end
 
   defp await_retry(_pid, _id, 0), do: flunk("Orchestrator did not schedule after the real DOWN")

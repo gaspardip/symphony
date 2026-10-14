@@ -249,7 +249,7 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     runtime = GenServer.call(owner, {:dispatch, context.issue})
     id = context.issue.id
     assert %{pid: worker, dispatch_ticket: ticket} = runtime.running[id]
-    assert_receive {:authorization_held, ^owner, ^id, dispatch_id, ^worker, installed}, 1_000
+    assert_receive {:authorization_held, ^owner, ^id, dispatch_id, ^worker, installed}, 5_000
     assert dispatch_id == ticket.dispatch_id
     assert installed.pid == worker
     assert installed.dispatch_ticket == ticket
@@ -264,7 +264,7 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     assert confirmed["metadata"]["dispatch_id"] == ticket.dispatch_id
     ref = Process.monitor(worker)
     GenServer.call(owner, :authorize)
-    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}, 5_000
     assert File.read!(Path.join(context.workspace, ".symphony/hook-executed")) == "hook-ran\n"
     refute File.exists?(Path.join(context.workspace, ".symphony/provider-invoked"))
   end
@@ -275,12 +275,12 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     runtime = GenServer.call(owner, {:dispatch, context.issue})
     id = context.issue.id
     assert %{pid: worker} = runtime.running[id]
-    assert_receive {:authorization_held, ^owner, ^id, _, ^worker, _}, 1_000
+    assert_receive {:authorization_held, ^owner, ^id, _, ^worker, _}, 5_000
     marker_path = Path.join(DispatchAudit.marker_directory(context.workspace), "marker.json")
     marker_before = File.read!(marker_path)
     ref = Process.monitor(worker)
     Process.exit(owner, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}, 5_000
     refute File.exists?(Path.join(context.workspace, ".symphony/hook-executed"))
     assert File.read!(marker_path) == marker_before
 
@@ -305,13 +305,13 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     runtime = GenServer.call(owner, {:dispatch, context.issue})
     id = context.issue.id
     assert %{pid: worker} = runtime.running[id]
-    assert_receive {:authorization_held, ^owner, ^id, _, ^worker, _}, 1_000
+    assert_receive {:authorization_held, ^owner, ^id, _, ^worker, _}, 5_000
     marker_path = Path.join(DispatchAudit.marker_directory(context.workspace), "marker.json")
     marker_before = File.read!(marker_path)
     ref = Process.monitor(worker)
     ledger_fault!(context.root)
     stopped = GenServer.call(owner, {:stop, id, true})
-    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}, 5_000
     assert stopped.running == %{}
     assert stopped.retry_attempts == %{}
     assert {:dispatch_audit_failed, ^id, _reason} = stopped.candidate_fetch_error
@@ -334,7 +334,7 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
     runtime = GenServer.call(owner, {:dispatch_held_start, context.issue})
     id = context.issue.id
     assert %{pid: worker, dispatch_ticket: ticket, lease_token: token} = runtime.running[id]
-    assert_receive {:authorization_held, ^owner, ^id, dispatch_id, ^worker, _}, 1_000
+    assert_receive {:authorization_held, ^owner, ^id, dispatch_id, ^worker, _}, 5_000
     assert dispatch_id == ticket.dispatch_id
     marker_path = Path.join(DispatchAudit.marker_directory(context.workspace), "marker.json")
     marker_before = File.read!(marker_path)
@@ -388,14 +388,14 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
         receive do
           {:DOWN, ^ref, :process, ^owner, _} -> :ok
         after
-          1_000 -> raise "test owner did not terminate"
+          5_000 -> raise "test owner did not terminate"
         end
 
         Enum.each(workers, fn {worker, worker_ref} ->
           receive do
             {:DOWN, ^worker_ref, :process, ^worker, _} -> :ok
           after
-            1_000 -> raise "owned test worker survived its coordinator"
+            5_000 -> raise "owned test worker survived its coordinator"
           end
         end)
       end

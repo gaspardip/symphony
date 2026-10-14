@@ -10,6 +10,9 @@ jobs:
   make-all:
     # Execution boundary integration tests require Darwin.
     runs-on: macos-15
+    env:
+      # Subprocesses run `mise exec -- mix` from fixture dirs without a mise config; resolve them to the repo's tools.
+      MISE_GLOBAL_CONFIG_FILE: ${{ github.workspace }}/elixir/mise.toml
     defaults:
       run:
         working-directory: elixir

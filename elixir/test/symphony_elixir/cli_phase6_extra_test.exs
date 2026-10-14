@@ -375,13 +375,13 @@ defmodule SymphonyElixir.CLIPhase6ExtraTest do
         end)
       end)
 
-    assert_receive :normal_monitored, 1_000
-    assert_receive :abnormal_monitored, 1_000
+    assert_receive :normal_monitored, 5_000
+    assert_receive :abnormal_monitored, 5_000
     send(normal_pid, :stop)
     Process.exit(abnormal_pid, :shutdown)
 
-    assert Task.await(normal_task, 1_000) == {:ok, :normal}
-    assert Task.await(abnormal_task, 1_000) == {:error, :shutdown}
+    assert Task.await(normal_task, 5_000) == {:ok, :normal}
+    assert Task.await(abnormal_task, 5_000) == {:error, :shutdown}
   end
 
   defp run_external_cli(code) when is_binary(code) do

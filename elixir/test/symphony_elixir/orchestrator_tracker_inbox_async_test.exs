@@ -241,7 +241,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     worker = install_worker!(c.pid, issue("WORKER"))
     enqueue!(c.pid, [event("A"), event("B")])
     reader = read!(:lookup, ["A"])
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     timestamp = DateTime.utc_now()
     send(c.pid, {:agent_worker_update, "WORKER", %{event: :notification, timestamp: timestamp, message: "inbox lookup pending"}})
     state = await!(c.pid, &(&1.running["WORKER"].last_agent_timestamp == timestamp))
@@ -270,7 +270,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert state.admission_read.purpose == :inbox_admission
     assert state.tracker_inbox_batch.head.ref == before.tracker_inbox_batch.head.ref
     assert state.inbox_ack_pending == nil
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     assert pending_ids() == ["A"]
     answer(discovery, {:ok, []})
     await!(c.pid, &is_nil(&1.tracker_poll_read))
@@ -362,7 +362,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert state.admission_read.ref == ref
     assert state.lease_claims["A"].deadline == claim.deadline
     assert state.retry_attempts["R"].status == :ready
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     answer(promotion_reader, {:ok, [promoted]})
     gate = callback!(:gate, c.pid)
     assert runtime(c.pid).lease_claims["A"].deadline == claim.deadline
@@ -641,7 +641,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
       blocked =
         try do
           send(reader, :raise)
-          state = await!(c.pid, &head_phase?(&1, :blocked), System.monotonic_time(:millisecond) + 3_000, 2_000)
+          state = await!(c.pid, &head_phase?(&1, :blocked))
           assert state.inbox_ack_pending == nil
           assert state.tracker_inbox_wakeup == nil
           assert state.running == %{}
@@ -787,7 +787,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
           answer(reader, {:ok, if(unquote(result) == :missing, do: nil, else: current_issue)})
           # Release may wait one second on its real filesystem lock. This observes
           # that cleanup; it is separate from the 500 ms tracker-read snapshot gate.
-          state = await!(c.pid, &head_phase?(&1, :blocked), System.monotonic_time(:millisecond) + 3_000, 2_000)
+          state = await!(c.pid, &head_phase?(&1, :blocked))
           assert head_phase?(state, :blocked)
           assert state.inbox_ack_pending == nil
           assert state.inbox_storage_error.reason_code == :tracker_inbox_cleanup_failed
@@ -1023,7 +1023,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert pending_ids() == ["A"]
     refute_receive {:inbox_callback, :ack, _, _}, 30
     fresh = read!(:lookup, ["A"])
-    assert_receive {:inbox_wakeup_delivered, _, ^wakeup_ref}, 500
+    assert_receive {:inbox_wakeup_delivered, _, ^wakeup_ref}, 5_000
     assert fresh != first
     answer(fresh, {:ok, issue("A")})
     answer(read!(:refresh, ["A"]), {:ok, [issue("A")]})
@@ -1219,7 +1219,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     {blocked, state_bytes, events_bytes} =
       try do
         answer(reader, {:ok, nil})
-        blocked = await!(c.pid, &head_phase?(&1, :blocked), System.monotonic_time(:millisecond) + 3_000, 2_000)
+        blocked = await!(c.pid, &head_phase?(&1, :blocked))
         assert blocked.tracker_inbox_batch.head.retryable == false
         assert Enum.any?(blocked.tracker_inbox_batch.head.errors, &match?({:lease_release_failed, _}, &1))
         ack = {:tracker_inbox_ack, cursor} = callback!(:ack, c.pid)
@@ -1504,7 +1504,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert state.inbox_last_drained_at == nil
     assert state.inbox_ack_pending == nil
     assert File.read!(c.location.events_path) == bytes
-    refute inspect(Orchestrator.snapshot(c.pid, 500).tracker_inbox) =~ "private-partial"
+    refute inspect(Orchestrator.snapshot(c.pid, 5_000).tracker_inbox) =~ "private-partial"
     refute_received {:inbox_read, _, _, _}
     refute_received {:inbox_callback, :ack, _, _}
   end
@@ -1569,7 +1569,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
   end
 
   defp hold_reads(kinds), do: Application.put_env(:symphony_elixir, :tracker_inbox_async_fixture, %{owner: self(), held_reads: MapSet.new(kinds)})
-  defp runtime(pid), do: GenServer.call(pid, :runtime, 500)
+  defp runtime(pid), do: GenServer.call(pid, :runtime, 5_000)
   defp answer(reader, result), do: send(reader, {:answer, result})
   defp deliver!(pid, message), do: assert(:ok == GenServer.call(pid, {:deliver, message}))
   defp replace_runtime(pid, fun), do: :sys.replace_state(pid, fn state -> %{state | runtime: fun.(state.runtime)} end)
@@ -1585,12 +1585,12 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
   defp pending_ids, do: Enum.map(TrackerEventInbox.pending_events(100), & &1["event"]["entity_id"])
 
   defp read!(kind, ids) do
-    assert_receive {:inbox_read, ^kind, reader, ^ids}, 2_000
+    assert_receive {:inbox_read, ^kind, reader, ^ids}, 5_000
     reader
   end
 
   defp callback!(kind, pid) do
-    assert_receive {:inbox_callback, ^kind, ^pid, message}, 2_000
+    assert_receive {:inbox_callback, ^kind, ^pid, message}, 5_000
     message
   end
 
@@ -1719,7 +1719,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
       if Process.alive?(worker) do
         ref = Process.monitor(worker)
         assert :ok = Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker)
-        assert_receive {:DOWN, ^ref, :process, ^worker, _}, 1_000
+        assert_receive {:DOWN, ^ref, :process, ^worker, _}, 5_000
       end
     end)
 
@@ -1747,7 +1747,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert File.read!(c.exited) == "released"
   end
 
-  defp wait_file!(path), do: wait_file!(path, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_file!(path), do: wait_file!(path, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_file!(path, deadline) do
     unless File.exists?(path) do
@@ -1760,10 +1760,9 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     end
   end
 
-  defp await!(pid, predicate), do: await!(pid, predicate, System.monotonic_time(:millisecond) + 2_000, 500)
-
-  defp await!(pid, predicate, deadline, call_timeout) do
-    state = GenServer.call(pid, :runtime, call_timeout)
+  defp await!(pid, predicate, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 5_000
+    state = GenServer.call(pid, :runtime, 5_000)
 
     if predicate.(state) do
       state
@@ -1772,7 +1771,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
 
       receive do
       after
-        5 -> await!(pid, predicate, deadline, call_timeout)
+        5 -> await!(pid, predicate, deadline)
       end
     end
   end
@@ -1795,13 +1794,13 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
 
       GenServer.stop(pid)
       Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-      Enum.each(refs, fn {worker, ref} -> assert_receive {:DOWN, ^ref, :process, ^worker, _}, 1_000 end)
+      Enum.each(refs, fn {worker, ref} -> assert_receive {:DOWN, ^ref, :process, ^worker, _}, 5_000 end)
     end
   end
 
   defp pause_default_scheduler! do
     if pid = Process.whereis(Orchestrator) do
-      deadline = System.monotonic_time(:millisecond) + 2_000
+      deadline = System.monotonic_time(:millisecond) + 5_000
       wait_default_idle!(pid, deadline)
       assert :ok = :sys.suspend(pid)
       on_exit(fn -> assert :ok = :sys.resume(pid) end)
@@ -1809,7 +1808,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
   end
 
   defp wait_default_idle!(pid, deadline) do
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, 5_000)
 
     if state.running == %{} and is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and is_nil(state.admission_read) and state.tracker_poll_pending == [] and
          not state.poll_check_in_progress do

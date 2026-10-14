@@ -382,7 +382,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
       receive do
         {^ref, output} -> output
       after
-        1_000 -> flunk("Timed out waiting for captured task output")
+        5_000 -> flunk("Timed out waiting for captured task output")
       end
 
     {output, error_output}

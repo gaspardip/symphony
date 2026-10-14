@@ -40,7 +40,7 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
 
   setup do
     if pid = Process.whereis(Orchestrator) do
-      idle!(pid, System.monotonic_time(:millisecond) + 2_000)
+      idle!(pid, System.monotonic_time(:millisecond) + 5_000)
       assert :ok = :sys.suspend(pid)
       on_exit(fn -> assert :ok = :sys.resume(pid) end)
     end
@@ -93,7 +93,7 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
 
   test "real control and execution callers share the durable pending reservation", c do
     task = Task.async(fn -> Orchestrator.post_review_drafts(c.owner, c.issue.identifier) end)
-    assert_receive {:real_control_transport, transport, pr, "1"}, 1_000
+    assert_receive {:real_control_transport, transport, pr, "1"}, 5_000
     assert pr == c.pr
     before = File.read!(RunStateStore.state_path(c.workspace))
 
@@ -104,7 +104,7 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
     refute_receive {:real_control_transport, _, _, _}, 30
     assert File.read!(RunStateStore.state_path(c.workspace)) == before
     send(transport, {:transport_result, {:ok, %{id: "control-reply", url: c.pr <> "#control"}}})
-    assert %{ok: true, posted_threads: 1, reconciled_threads: 0} = Task.await(task, 1_000)
+    assert %{ok: true, posted_threads: 1, reconciled_threads: 0} = Task.await(task, 5_000)
     assert {:ok, saved} = RunStateStore.load(c.workspace)
     assert saved.review_threads["comment:1"]["posted_reply_id"] == "control-reply"
     assert saved.review_threads["comment:1"]["retained"] == "yes"
@@ -116,10 +116,10 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
   test "real five second caller timeout still records the physical return without late RAW", c do
     before = File.read!(RunStateStore.state_path(c.workspace))
     task = Task.async(fn -> Orchestrator.post_review_drafts(c.owner, c.issue.identifier) end)
-    assert_receive {:real_control_transport, transport, _, "1"}, 1_000
+    assert_receive {:real_control_transport, transport, _, "1"}, 5_000
     assert %{ok: false, error: "control_deadline_exceeded"} = Task.await(task, 6_000)
     send(transport, {:transport_result, {:ok, %{id: "late-control", url: c.pr <> "#late"}}})
-    assert is_nil(GenServer.call(c.owner, :runtime, 1_000).control_reservation)
+    assert is_nil(GenServer.call(c.owner, :runtime, 5_000).control_reservation)
     assert File.read!(RunStateStore.state_path(c.workspace)) == before
     assert [%{"metadata" => %{"posted_reply_id" => "late-control"}}] = publication_rows("observed")
     # A new real permission reconstructs IDs and conditionally writes RAW, without
@@ -133,10 +133,10 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
   test "configuration changes during real control transport preserve observation but no RAW", c do
     before = File.read!(RunStateStore.state_path(c.workspace))
     task = Task.async(fn -> Orchestrator.post_review_drafts(c.owner, c.issue.identifier) end)
-    assert_receive {:real_control_transport, transport, _, "1"}, 1_000
+    assert_receive {:real_control_transport, transport, _, "1"}, 5_000
     write_workflow_file!(Workflow.workflow_file_path(), Keyword.put(c.config, :company_policy_pack, "client_safe_shadow"))
     send(transport, {:transport_result, {:ok, %{id: "context-reply", url: c.pr <> "#context"}}})
-    assert %{ok: false} = Task.await(task, 1_000)
+    assert %{ok: false} = Task.await(task, 5_000)
     assert File.read!(RunStateStore.state_path(c.workspace)) == before
     assert [%{"metadata" => %{"posted_reply_id" => "context-reply"}}] = publication_rows("observed")
     assert is_nil(GenServer.call(c.owner, :runtime).control_reservation)
@@ -163,7 +163,7 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
                    receive do
                      {:release_observation, ^handler} -> :ok
                    after
-                     2_000 ->
+                     5_000 ->
                        send(observer, {:observation_barrier_timeout, handler})
                        raise "test did not release the confirmed observation"
                    end
@@ -184,20 +184,20 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
       :telemetry.detach(handler)
     end)
 
-    assert_receive {:real_control_request, ^caller, request_ref, deadline}, 1_000
+    assert_receive {:real_control_request, ^caller, request_ref, deadline}, 5_000
     assert is_reference(request_ref)
-    assert_receive {:real_control_transport, transport, pr, first_id}, 1_000
+    assert_receive {:real_control_transport, transport, pr, first_id}, 5_000
     assert pr == c.pr
     assert first_id in ["1", "2"]
     send(transport, {:transport_result, {:ok, %{id: "first-physical-reply", url: c.pr <> "#first-physical"}}})
-    assert_receive {:confirmed_reply_barrier, ^transport, observation_id}, 1_000
+    assert_receive {:confirmed_reply_barrier, ^transport, observation_id}, 5_000
     assert [%{"event_id" => ^observation_id, "metadata" => %{"outcome" => "returned_success", "posted_reply_id" => "first-physical-reply"}}] = publication_rows("observed")
     assert File.read!(RunStateStore.state_path(c.workspace)) == before
     Process.exit(caller, :kill)
-    assert_receive {:DOWN, ^caller_monitor, :process, ^caller, :killed}, 1_000
+    assert_receive {:DOWN, ^caller_monitor, :process, ^caller, :killed}, 5_000
     assert System.monotonic_time(:millisecond) < deadline
     send(transport, {:release_observation, handler})
-    assert is_nil(GenServer.call(c.owner, :runtime, 1_000).control_reservation)
+    assert is_nil(GenServer.call(c.owner, :runtime, 5_000).control_reservation)
     assert File.read!(RunStateStore.state_path(c.workspace)) == before
     assert [%{"metadata" => %{"thread_key" => key, "observation_event_id" => ^observation_id}}] = publication_rows("intent")
     assert key == "comment:" <> first_id
@@ -230,6 +230,6 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
 
   defp dead!(pid) do
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
   end
 end

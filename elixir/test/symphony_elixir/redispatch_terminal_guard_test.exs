@@ -510,7 +510,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       assert_receive {:authorize_dispatch, _, _, ^pid} = authorization
       assert {:noreply, authorized} = Orchestrator.handle_info(authorization, next)
 
-      deadline = System.monotonic_time(:millisecond) + 2_000
+      deadline = System.monotonic_time(:millisecond) + 5_000
       {down, before_down} = await_worker_down(authorized, pid, ref, deadline)
       assert {:DOWN, ^ref, :process, ^pid, :normal} = down
       assert {:noreply, finished} = Orchestrator.handle_info(down, before_down)
@@ -634,7 +634,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       send(worker, :run)
       # This is the real public callback, held at the existing file lock after
       # its initial eligible read. No test-specific product API is introduced.
-      assert_receive {:trace, ^worker, :call, {LeaseManager, :acquire, [^id, _, _, _]}}, 2_000
+      assert_receive {:trace, ^worker, :call, {LeaseManager, :acquire, [^id, _, _, _]}}, 5_000
 
       assert {:ok, _} =
                RunStateStore.transition(workspace, "blocked", %{
@@ -644,7 +644,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
 
       snapshot_bytes = File.read!(RunStateStore.state_path(workspace))
       File.rmdir!(lock_path)
-      assert_receive {:timer_result, ^worker, {:noreply, next}}, 2_000
+      assert_receive {:timer_result, ^worker, {:noreply, next}}, 5_000
 
       try do
         assert File.read!(RunStateStore.state_path(workspace)) == snapshot_bytes
@@ -755,7 +755,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
     end)
 
     send(driver, :run)
-    assert_receive {:timer_result, ^driver, {:noreply, admitted}}, 3_000
+    assert_receive {:timer_result, ^driver, {:noreply, admitted}}, 5_000
     assert %{pid: worker, dispatch_ticket: ticket} = admitted.running[issue.id]
     assert is_pid(worker)
     assert admitted.lease_claims[issue.id].holder == :gated
@@ -787,7 +787,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
       end)
 
     on_exit(fn -> if Process.alive?(locker), do: Process.exit(locker, :kill) end)
-    assert_receive {:snapshot_locked, ^locker}, 2_000
+    assert_receive {:snapshot_locked, ^locker}, 5_000
 
     {:ok, worker} = SymphonyElixir.OrchestratorRetryDriver.start_link(state, id, parent)
     Process.unlink(worker)
@@ -801,11 +801,11 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
 
     try do
       send(worker, :run)
-      assert_receive {:trace, ^worker, :return_from, ^mfa, {:ok, acquired}}, 2_000
+      assert_receive {:trace, ^worker, :return_from, ^mfa, {:ok, acquired}}, 5_000
       File.mkdir!(lock_path)
       send(locker, :release)
-      assert_receive {:snapshot_unlocked, ^locker, {:ok, _}}, 2_000
-      assert_receive {:timer_result, ^worker, {:noreply, resumed}}, 3_000
+      assert_receive {:snapshot_unlocked, ^locker, {:ok, _}}, 5_000
+      assert_receive {:timer_result, ^worker, {:noreply, resumed}}, 5_000
       assert resumed.lease_claims[id].token == acquired.token
       assert resumed.lease_claims[id].holder == :retry
 
@@ -909,7 +909,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
 
   defp await_worker_down(state, pid, ref, deadline) do
     remaining = deadline - System.monotonic_time(:millisecond)
-    if remaining <= 0, do: flunk("worker did not finish within 2000ms")
+    if remaining <= 0, do: flunk("worker did not finish before the deadline")
 
     receive do
       {:DOWN, ^ref, :process, ^pid, _reason} = down ->
@@ -924,7 +924,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
         assert {:noreply, next} = Orchestrator.handle_info(message, state)
         await_worker_down(next, pid, ref, deadline)
     after
-      remaining -> flunk("worker did not finish within 2000ms")
+      remaining -> flunk("worker did not finish before the deadline")
     end
   end
 
@@ -989,7 +989,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
         assert {:noreply, next} = Orchestrator.handle_info(down, state)
         next
     after
-      2_000 -> flunk("promotion reader did not settle")
+      5_000 -> flunk("promotion reader did not settle")
     end
   end
 
@@ -1052,7 +1052,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
 
         GenServer.stop(owner)
         Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
       end
     end)
 

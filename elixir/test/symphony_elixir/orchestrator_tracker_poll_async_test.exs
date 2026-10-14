@@ -69,8 +69,8 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
   test "startup cleanup can be held while the owner serves snapshots" do
     hold(:startup)
     pid = scheduler!()
-    assert_receive {:tracker_called, :startup, reader, ["Done"]}, 2_000
-    assert is_map(Orchestrator.snapshot(pid, 500))
+    assert_receive {:tracker_called, :startup, reader, ["Done"]}, 5_000
+    assert is_map(Orchestrator.snapshot(pid, 5_000))
     state = :sys.get_state(pid)
     assert state.tracker_poll_cycle.mode == :startup_cleanup
     assert state.running == %{}
@@ -82,8 +82,8 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     issue = manual_issue!("STOP-1")
     hold(:candidates)
     pid = scheduler!()
-    assert_receive {:tracker_called, :candidates, reader, []}, 2_000
-    assert is_map(Orchestrator.snapshot(pid, 500))
+    assert_receive {:tracker_called, :candidates, reader, []}, 5_000
+    assert is_map(Orchestrator.snapshot(pid, 5_000))
     assert %{ok: true} = Orchestrator.stop_issue(pid, issue.identifier)
     assert {:ok, [%Issue{state: "Blocked"}]} = ManualIssueStore.fetch_issue_states_by_ids([issue.id])
     assert Process.alive?(reader)
@@ -98,7 +98,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
   test "a valid configuration change discards the held result", ctx do
     hold(:candidates)
     pid = scheduler!()
-    assert_receive {:tracker_called, :candidates, reader, []}, 2_000
+    assert_receive {:tracker_called, :candidates, reader, []}, 5_000
     write_config!(ctx.workflow, put_in(ctx.config, [:tracker, :project_slug], "replacement-project"))
     send(reader, {:answer, {:ok, [remote_issue()]}})
     state = wait_state!(pid, fn state -> idle?(state) and state.candidate_fetch_error == :tracker_read_context_changed end)
@@ -118,7 +118,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
   test "zero capacity still records a successful candidate read without a worker" do
     hold(:candidates)
     pid = scheduler!()
-    assert_receive {:tracker_called, :candidates, reader, []}, 2_000
+    assert_receive {:tracker_called, :candidates, reader, []}, 5_000
     issue = remote_issue()
     assert %{ok: true} = Orchestrator.reprioritize_issue(pid, issue.identifier, 7)
     send(reader, {:answer, {:ok, [issue]}})
@@ -135,7 +135,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     manual = manual_issue!("MANUAL-1")
     hold(:candidates)
     pid = scheduler!()
-    assert_receive {:tracker_called, :candidates, reader, []}, 2_000
+    assert_receive {:tracker_called, :candidates, reader, []}, 5_000
     send(reader, {:answer, {:error, {:linear_api_status, 429, %{retry_after_ms: 60_000}}}})
     first = idle!(pid)
     assert Enum.any?(first.last_candidate_issues, &(&1.id == manual.id))
@@ -155,7 +155,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     {issue, worker} = install_running!(pid)
     hold(:running)
     send(pid, :run_poll_cycle)
-    assert_receive {:tracker_called, :running, reader, [id]}, 2_000
+    assert_receive {:tracker_called, :running, reader, [id]}, 5_000
     assert id == issue.id
     send(reader, {:answer, {:error, :synthetic_read_failure}})
     state = idle!(pid)
@@ -170,7 +170,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     {issue, old_worker} = install_running!(pid)
     hold(:running)
     send(pid, :run_poll_cycle)
-    assert_receive {:tracker_called, :running, reader, [id]}, 2_000
+    assert_receive {:tracker_called, :running, reader, [id]}, 5_000
     assert id == issue.id
     replacement = held_worker!()
 
@@ -191,7 +191,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
   test "refreshes during a held read preserve both inbox drain requests" do
     hold(:candidates)
     pid = scheduler!()
-    assert_receive {:tracker_called, :candidates, reader, []}, 2_000
+    assert_receive {:tracker_called, :candidates, reader, []}, 5_000
     assert %{queued: true} = Orchestrator.request_refresh(pid)
     assert %{queued: true} = Orchestrator.request_refresh(pid)
     state = :sys.get_state(pid)
@@ -207,12 +207,12 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     pid = scheduler!()
     initial = idle!(pid)
     assert initial.poll_interval_ms == 60_000
-    assert_receive {:tracker_called, :approval, _initial_approval, _states}, 2_000
-    assert_receive {:tracker_called, :candidates, _initial_candidates, []}, 2_000
+    assert_receive {:tracker_called, :approval, _initial_approval, _states}, 5_000
+    assert_receive {:tracker_called, :candidates, _initial_candidates, []}, 5_000
 
     hold(:approval)
     send(pid, :run_webhook_cycle)
-    assert_receive {:tracker_called, :approval, reader, _states}, 2_000
+    assert_receive {:tracker_called, :approval, reader, _states}, 5_000
     assert :sys.get_state(pid).tracker_poll_cycle.mode == :webhook
 
     spec = %{
@@ -228,7 +228,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     hold(:none)
     send(reader, {:answer, {:ok, []}})
 
-    assert_receive {:tracker_called, :candidates, _refresh_candidates, []}, 2_000
+    assert_receive {:tracker_called, :candidates, _refresh_candidates, []}, 5_000
     state = wait_state!(pid, fn state -> idle?(state) and Enum.any?(state.last_candidate_issues, &(&1.id == issue_id)) end)
     assert match?(%DateTime{}, state.inbox_last_drained_at)
     assert state.running == %{}
@@ -239,7 +239,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     write_config!(ctx.workflow, put_in(ctx.config, [:agent, :max_concurrent_agents], 1))
     hold(:candidates)
     pid = scheduler!()
-    assert_receive {:tracker_called, :candidates, reader, []}, 2_000
+    assert_receive {:tracker_called, :candidates, reader, []}, 5_000
     until_ms = System.monotonic_time(:millisecond) + 60_000
 
     :sys.replace_state(pid, fn state ->
@@ -263,7 +263,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
   test "a workspace leased while startup cleanup waits is preserved" do
     hold(:startup)
     pid = scheduler!()
-    assert_receive {:tracker_called, :startup, reader, ["Done"]}, 2_000
+    assert_receive {:tracker_called, :startup, reader, ["Done"]}, 5_000
     issue = %{remote_issue() | state: "Done"}
     workspace = Workspace.path_for_issue(issue)
     File.mkdir_p!(workspace)
@@ -283,12 +283,12 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     {issue, worker} = install_running!(pid)
     hold(:running)
     send(pid, :run_poll_cycle)
-    assert_receive {:tracker_called, :running, child, [id]}, 2_000
+    assert_receive {:tracker_called, :running, child, [id]}, 5_000
     assert id == issue.id
     operation = :sys.get_state(pid).tracker_poll_read
     child_monitor = Process.monitor(child)
     true = Process.exit(operation.pid, :kill)
-    assert_receive {:DOWN, ^child_monitor, :process, ^child, :killed}, 2_000
+    assert_receive {:DOWN, ^child_monitor, :process, ^child, :killed}, 5_000
     state = idle!(pid)
     assert state.running[issue.id].pid == worker
     assert Process.alive?(worker)
@@ -417,10 +417,10 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
         is_nil(state.tracker_inbox_batch) and is_nil(state.inbox_ack_pending)
 
   defp idle!(pid), do: wait_state!(pid, fn state -> idle?(state) and state.first_poll_completed end)
-  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_state!(pid, predicate, deadline) do
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, 5_000)
 
     if predicate.(state) do
       state

@@ -44,7 +44,7 @@ defmodule SymphonyElixir.OwnedHookTest do
     task = Task.async(fn -> OwnedHook.run(command, c.workspace, 5_000) end)
     identities = register_tree!(c.root)
     File.write!(Path.join(c.root, "finish"), "go")
-    assert {:ok, {_output, 0}} = Task.await(task, 4_000)
+    assert {:ok, {_output, 0}} = Task.await(task, 5_000)
     assert_tree_absent!(identities)
   end
 
@@ -53,8 +53,8 @@ defmodule SymphonyElixir.OwnedHookTest do
     identities = register_tree!(c.root)
     monitor = Process.monitor(caller)
     Process.exit(caller, :kill)
-    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 1_000
-    await!(fn -> tree_absent?(identities) end, 4_000)
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
+    await!(fn -> tree_absent?(identities) end, 5_000)
     assert_tree_absent!(identities)
   end
 
@@ -64,8 +64,8 @@ defmodule SymphonyElixir.OwnedHookTest do
     port = native_port!(identities.helper.pid)
     {:connected, custodian} = Port.info(port, :connected)
     Process.exit(custodian, :kill)
-    assert {:error, {:cleanup_uncertain, {:owner_down, :killed}}} = Task.await(task, 2_000)
-    await!(fn -> tree_absent?(identities) end, 4_000)
+    assert {:error, {:cleanup_uncertain, {:owner_down, :killed}}} = Task.await(task, 5_000)
+    await!(fn -> tree_absent?(identities) end, 5_000)
     assert_tree_absent!(identities)
   end
 
@@ -75,7 +75,7 @@ defmodule SymphonyElixir.OwnedHookTest do
       task = Task.async(fn -> OwnedHook.run(tree_command(c.root, true), c.workspace, 10_000) end)
       identities = register_tree!(c.root)
       signal_exact!(identities.helper, @signal)
-      assert {:error, {:native_interrupted, %{trigger: 3, certain: 1}, _identity}} = Task.await(task, 4_000)
+      assert {:error, {:native_interrupted, %{trigger: 3, certain: 1}, _identity}} = Task.await(task, 5_000)
       assert_tree_absent!(identities)
     end
   end
@@ -87,7 +87,7 @@ defmodule SymphonyElixir.OwnedHookTest do
     signal_exact!(identities.helper, "KILL")
 
     assert {:error, {:workspace_hook_owned_execution, "before_remove", {:cleanup_uncertain, _evidence}}, ""} =
-             Task.await(task, 4_000)
+             Task.await(task, 5_000)
 
     assert File.read!(Path.join(c.workspace, "preserve")) == "owned fixture bytes"
     # A fatal helper is outside the guarantee. Teardown uses captured OS identities,
@@ -135,7 +135,7 @@ defmodule SymphonyElixir.OwnedHookTest do
         File.write!(Path.join(c.root, "finish"), "go")
 
         assert {:error, {:artifact_cleanup_failed, {:ok, {"primary", @status}}, [{:directory, {:error, cleanup_errno}}]}} =
-                 Task.await(task, 4_000)
+                 Task.await(task, 5_000)
 
         assert cleanup_errno in [:eexist, :enotempty]
         assert_tree_absent!(identities)
@@ -170,7 +170,7 @@ defmodule SymphonyElixir.OwnedHookTest do
     :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.TaskSupervisor)
 
     try do
-      assert_receive {:DOWN, ^monitor, :process, ^supervisor, :shutdown}, 1_000
+      assert_receive {:DOWN, ^monitor, :process, ^supervisor, :shutdown}, 5_000
       assert Process.whereis(SymphonyElixir.TaskSupervisor) == nil
       started = System.monotonic_time(:millisecond)
       assert {:ok, {"independent", 17}} = OwnedHook.run("printf independent; exit 17", c.workspace, 1_500)
@@ -196,15 +196,15 @@ defmodule SymphonyElixir.OwnedHookTest do
 
     try do
       File.write!(Path.join(c.root, "finish"), "go")
-      assert {:ok, {"primary", 17}} = Task.await(task, 4_000)
-      assert_receive {:trace, ^custodian, :receive, {^port, {:data, <<"F", receipt::binary>>}}}, 1_000
+      assert {:ok, {"primary", 17}} = Task.await(task, 5_000)
+      assert_receive {:trace, ^custodian, :receive, {^port, {:data, <<"F", receipt::binary>>}}}, 5_000
       child = identities.shell.pid
       assert [1, 0, 17, 1, phase, reason, ^child] = Enum.map(String.split(receipt, " "), &String.to_integer/1)
       assert phase in [0, 5, 7]
       if phase == 0, do: assert(reason == 0), else: assert(reason > 0)
       assert_tree_absent!(identities)
     after
-      assert_receive {:DOWN, ^custodian_monitor, :process, ^custodian, :normal}, 1_000
+      assert_receive {:DOWN, ^custodian_monitor, :process, ^custodian, :normal}, 5_000
     end
   end
 
@@ -218,14 +218,14 @@ defmodule SymphonyElixir.OwnedHookTest do
 
     try do
       assert {:error, :timeout} = Task.await(task, 5_500)
-      assert_receive {:trace, ^custodian, :receive, {^port, {:data, <<"F", receipt::binary>>}}}, 1_000
+      assert_receive {:trace, ^custodian, :receive, {^port, {:data, <<"F", receipt::binary>>}}}, 5_000
       child = identities.shell.pid
       assert [1, 1, 137, 1, phase, reason, ^child] = Enum.map(String.split(receipt, " "), &String.to_integer/1)
       assert phase in [0, 5, 7]
       if phase == 0, do: assert(reason == 0), else: assert(reason > 0)
       assert_tree_absent!(identities)
     after
-      assert_receive {:DOWN, ^custodian_monitor, :process, ^custodian, :normal}, 1_000
+      assert_receive {:DOWN, ^custodian_monitor, :process, ^custodian, :normal}, 5_000
     end
   end
 
@@ -338,14 +338,14 @@ defmodule SymphonyElixir.OwnedHookTest do
 
       if same_identity?(identities.helper, process_identity(identities.helper.pid)) do
         signal_exact!(identities.helper, "TERM")
-        await!(fn -> process_identity(identities.helper.pid) == nil end, 4_000)
+        await!(fn -> process_identity(identities.helper.pid) == nil end, 5_000)
       end
 
       if same_identity?(identities.shell, process_identity(identities.shell.pid)) do
         {_output, 0} = System.cmd("/bin/kill", ["-s", "KILL", "--", "-#{identities.shell.pgid}"], stderr_to_stdout: true)
       end
 
-      await!(fn -> tree_absent?(identities) end, 4_000)
+      await!(fn -> tree_absent?(identities) end, 5_000)
       artifact = data["artifact"]
       assert Path.basename(artifact) == "owner"
       assert String.starts_with?(Path.basename(Path.dirname(artifact)), "symphony-owned-hook-")

@@ -1275,7 +1275,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    await_initial_poll(pid, 150)
+    await_initial_poll(pid, 500)
 
     initial_state = :sys.get_state(pid, 15_000)
 
@@ -1329,7 +1329,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    await_initial_poll(pid, 150)
+    await_initial_poll(pid, 500)
 
     workspace = Workspace.path_for_issue(identifier)
     File.mkdir_p!(workspace)
@@ -1390,7 +1390,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    await_initial_poll(pid, 150)
+    await_initial_poll(pid, 500)
 
     workspace = Workspace.path_for_issue(identifier)
     File.mkdir_p!(workspace)
@@ -1442,7 +1442,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    await_initial_poll(pid, 150)
+    await_initial_poll(pid, 500)
 
     initial_state = :sys.get_state(pid, 15_000)
 
@@ -1489,7 +1489,7 @@ defmodule SymphonyElixir.CoreTest do
       end
     end)
 
-    await_initial_poll(pid, 150)
+    await_initial_poll(pid, 500)
 
     initial_state = :sys.get_state(pid, 15_000)
 

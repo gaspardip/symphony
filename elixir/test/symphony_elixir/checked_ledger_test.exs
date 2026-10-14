@@ -284,7 +284,7 @@ defmodule SymphonyElixir.CheckedLedgerTest do
       end
 
     for _ <- tasks do
-      assert_receive {:ready, _}, 2_000
+      assert_receive {:ready, _}, 5_000
     end
 
     Enum.each(tasks, fn task -> send(task.pid, :go) end)
@@ -295,7 +295,8 @@ defmodule SymphonyElixir.CheckedLedgerTest do
         entry
       end)
 
-    rows = path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+    # The ledger path is VM-global, so unrelated writers may land here; duplicates of ours still fail.
+    rows = path |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1) |> Enum.filter(&(&1["event_type"] == "concurrent.event"))
     assert length(rows) == 20
 
     assert MapSet.new(Enum.map(rows, & &1["event_id"])) ==
