@@ -401,6 +401,68 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
     assert raw!(c)["stage"] == "implement"
   end
 
+  test "G04 authority lost after transport stops local Git effects before staging", c do
+    cli!(c)
+    {owner, worker, entry} = start_worker(c)
+    observer = self()
+    ids = ids(entry)
+    state_path = RunStateStore.state_path(c.workspace)
+    stale_path = Path.join(c.root, "stale-state.json")
+    File.write!(Path.join(c.workspace, "keep.txt"), "agent change")
+
+    # The detection command swaps in a material change, so the lease is lost
+    # after transport and usage were confirmed but before any local Git effect.
+    in_worker(worker, fn ->
+      original = File.read!(state_path)
+      assert {:ok, _} = RunStateStore.update(c.workspace, &Map.put(&1, :policy_override, "operator"))
+      File.cp!(state_path, stale_path)
+      File.write!(state_path, original)
+    end)
+
+    write_script!(Path.join(c.bin, "git"), """
+    printf 'git %s\\n' "$*" >> #{quote_shell(c.commands)}
+    if [ "$*" = "diff --name-only HEAD" ] && [ -f #{quote_shell(stale_path)} ]; then
+      mv #{quote_shell(stale_path)} #{quote_shell(state_path)}
+      printf 'lease-lost\\n' >> #{quote_shell(c.commands)}
+    fi
+    exec #{quote_shell(c.git)} "$@"
+    """)
+
+    before_head = System.cmd(c.git, ["rev-parse", "HEAD"], cd: c.workspace) |> elem(0)
+
+    assert {:stop, {:stale_execution, ^ids, :material_state_changed}} =
+             in_worker(worker, fn ->
+               {:ok, session, binding} = AgentProvider.open_session(Claude, c.workspace, c.issue, :main)
+
+               AgentProvider.run_turn(
+                 Claude,
+                 session,
+                 c.workspace,
+                 "lease lost before commit",
+                 c.issue,
+                 [
+                   execution_binding: binding,
+                   on_message: fn update ->
+                     send(observer, {:callback, self(), update.event})
+                     :ok
+                   end,
+                   tool_executor: fn tool, _ ->
+                     send(observer, {:tool, tool})
+                     %{"success" => true}
+                   end
+                 ],
+                 :delivery
+               )
+             end)
+
+    assert after_marker(c, "lease-lost") == ["git ls-files --others --exclude-standard"]
+    refute_received {:tool, _}
+    refute_received {:callback, ^worker, :turn_completed}
+    assert System.cmd(c.git, ["rev-parse", "HEAD"], cd: c.workspace) |> elem(0) == before_head
+    assert raw!(c)["policy_override"] == "operator"
+    assert runtime(owner).stale_execution_errors[c.issue.id].cause == :material_state_changed
+  end
+
   test "G07 control after owner confirmation rejects the worker precheck before lifecycle", c do
     {owner, worker, entry} = start_worker(c)
     before = evidence(c, entry)

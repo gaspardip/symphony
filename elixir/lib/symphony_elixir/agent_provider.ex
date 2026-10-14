@@ -146,6 +146,7 @@ defmodule SymphonyElixir.AgentProvider do
       |> Keyword.put(:on_usage, fn raw ->
         guarded_callback(invocation, fn -> AgentExecution.observe_usage(invocation, raw) end)
       end)
+      |> Keyword.put(:effect_guard, fn -> effect_authority(invocation) end)
       |> Keyword.put(:on_message, fn message ->
         guarded_callback(invocation, fn ->
           require_accounting(AgentExecution.forward_update(invocation, message))
@@ -162,6 +163,14 @@ defmodule SymphonyElixir.AgentProvider do
       end)
     else
       opts
+    end
+  end
+
+  # Local Git effects need the same owner-confirmed authority as tool calls.
+  defp effect_authority(invocation) do
+    case AgentExecution.confirm_invocation(invocation) do
+      {:discard, reason} -> {:error, {:execution_discarded, reason}}
+      authority -> authority
     end
   end
 
