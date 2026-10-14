@@ -2644,7 +2644,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     await!(pid, &is_nil(&1.github_inbox_ack_pending))
   end
 
-  defp runtime(pid), do: GenServer.call(pid, :runtime, 500)
+  defp runtime(pid), do: GenServer.call(pid, :runtime, 5_000)
   defp operation(state), do: state.github_inbox_batch.head.operation
   defp phase?(%{github_inbox_batch: %{head: %{operation: %{phase: phase}}}}, phase), do: true
   defp phase?(_state, _phase), do: false

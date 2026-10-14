@@ -106,7 +106,7 @@ defmodule SymphonyElixir.TestSupport.StageSessionFixture do
   end
 
   def cli_fixture!(plan, implement) do
-    root = Path.join(System.tmp_dir!(), "stage-admitted-#{System.unique_integer([:positive])}")
+    root = Path.join(physical_tmp_dir!(), "stage-admitted-#{System.unique_integer([:positive])}")
     bin = Path.join(root, "bin")
     File.mkdir_p!(bin)
 
@@ -240,6 +240,20 @@ defmodule SymphonyElixir.TestSupport.StageSessionFixture do
         "printf '%s\\n' '#{provider} change' >> existing.txt\n" <> Enum.map_join(events, "\n", &("printf '%s\\n' " <> quote_shell(Jason.encode!(&1)))) <> "\nexit 0\n"
 
     write_script!(Path.join(c.bin, if(provider == "claude", do: "claude", else: "codex")), body)
+  end
+
+  # The execution boundary rejects symlinked roots, and macOS TMPDIR sits under the /var -> /private/var link.
+  defp physical_tmp_dir! do
+    System.tmp_dir!()
+    |> Path.split()
+    |> Enum.reduce(fn part, dir ->
+      path = Path.join(dir, part)
+
+      case File.read_link(path) do
+        {:ok, target} -> Path.expand(target, dir)
+        {:error, _} -> path
+      end
+    end)
   end
 
   defp write_script!(path, body) do
