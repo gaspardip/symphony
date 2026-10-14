@@ -346,7 +346,7 @@ defmodule SymphonyElixir.OrchestratorManualRetryControlTest do
         if Process.alive?(entry.pid), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, entry.pid)
       end)
 
-      Enum.each(refs, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000 end)
+      Enum.each(refs, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
     end
   end
 

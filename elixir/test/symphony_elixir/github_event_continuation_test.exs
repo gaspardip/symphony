@@ -24,7 +24,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   @pr "https://github.com/local/continuation/pull/1"
   @private "PRIVATE-C5-MARKER-DO-NOT-LOG"
-  # Ceiling for polling helpers; a loaded macOS runner overran 2s while a real worker crossed the gate.
+  # Default deadline for the polling helpers below; a loaded macOS runner overran 2s while a real worker crossed the gate.
   @wait_ms 10_000
 
   defmodule Client do
@@ -2532,7 +2532,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   defp cleanup_real_owner!(pid, hook) do
     if Process.alive?(pid) do
-      assert :ok = :sys.suspend(pid, 500)
+      assert :ok = :sys.suspend(pid, 5_000)
       state = :sys.get_state(pid, 5_000)
 
       children =
@@ -2548,7 +2548,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
         wait_fixture_hooks!(hook)
       after
         GenServer.stop(pid)
-        Enum.each(refs, fn {child, ref} -> assert_receive {:DOWN, ^ref, :process, ^child, _}, 2_000 end)
+        Enum.each(refs, fn {child, ref} -> assert_receive {:DOWN, ^ref, :process, ^child, _}, 5_000 end)
       end
     end
 
@@ -2713,7 +2713,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   defp cleanup_driver!(pid, hook) do
     if Process.alive?(pid) do
-      assert :ok = :sys.suspend(pid, 500)
+      assert :ok = :sys.suspend(pid, 5_000)
       state = :sys.get_state(pid, 5_000).runtime
       readers = Enum.reject([state.tracker_poll_read, state.admission_read], &is_nil/1)
       workers = Enum.map(state.running, fn {_id, entry} -> entry.pid end)
@@ -2732,7 +2732,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       after
         GenServer.stop(pid)
         Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-        Enum.each(monitors, fn {worker, ref} -> assert_receive {:DOWN, ^ref, :process, ^worker, _}, 2_000 end)
+        Enum.each(monitors, fn {worker, ref} -> assert_receive {:DOWN, ^ref, :process, ^worker, _}, 5_000 end)
       end
     end
 

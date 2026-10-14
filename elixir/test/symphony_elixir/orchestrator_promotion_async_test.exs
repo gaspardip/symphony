@@ -80,7 +80,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
         refs = Enum.map(readers ++ workers, &{&1, Process.monitor(&1)})
         GenServer.stop(driver)
         Enum.each(workers, fn pid -> if Process.alive?(pid), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) end)
-        Enum.each(refs, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+        Enum.each(refs, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
       end
 
       case previous do

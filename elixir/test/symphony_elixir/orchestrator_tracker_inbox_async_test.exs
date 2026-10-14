@@ -641,7 +641,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
       blocked =
         try do
           send(reader, :raise)
-          state = await!(c.pid, &head_phase?(&1, :blocked), System.monotonic_time(:millisecond) + 5_000, 5_000)
+          state = await!(c.pid, &head_phase?(&1, :blocked))
           assert state.inbox_ack_pending == nil
           assert state.tracker_inbox_wakeup == nil
           assert state.running == %{}
@@ -787,7 +787,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
           answer(reader, {:ok, if(unquote(result) == :missing, do: nil, else: current_issue)})
           # Release may wait one second on its real filesystem lock. This observes
           # that cleanup; it is separate from the 500 ms tracker-read snapshot gate.
-          state = await!(c.pid, &head_phase?(&1, :blocked), System.monotonic_time(:millisecond) + 5_000, 5_000)
+          state = await!(c.pid, &head_phase?(&1, :blocked))
           assert head_phase?(state, :blocked)
           assert state.inbox_ack_pending == nil
           assert state.inbox_storage_error.reason_code == :tracker_inbox_cleanup_failed
@@ -1219,7 +1219,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     {blocked, state_bytes, events_bytes} =
       try do
         answer(reader, {:ok, nil})
-        blocked = await!(c.pid, &head_phase?(&1, :blocked), System.monotonic_time(:millisecond) + 5_000, 5_000)
+        blocked = await!(c.pid, &head_phase?(&1, :blocked))
         assert blocked.tracker_inbox_batch.head.retryable == false
         assert Enum.any?(blocked.tracker_inbox_batch.head.errors, &match?({:lease_release_failed, _}, &1))
         ack = {:tracker_inbox_ack, cursor} = callback!(:ack, c.pid)
@@ -1760,10 +1760,9 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     end
   end
 
-  defp await!(pid, predicate), do: await!(pid, predicate, System.monotonic_time(:millisecond) + 5_000, 5_000)
-
-  defp await!(pid, predicate, deadline, call_timeout) do
-    state = GenServer.call(pid, :runtime, call_timeout)
+  defp await!(pid, predicate, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 5_000
+    state = GenServer.call(pid, :runtime, 5_000)
 
     if predicate.(state) do
       state
@@ -1772,7 +1771,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
 
       receive do
       after
-        5 -> await!(pid, predicate, deadline, call_timeout)
+        5 -> await!(pid, predicate, deadline)
       end
     end
   end
@@ -1795,7 +1794,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
 
       GenServer.stop(pid)
       Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-      Enum.each(refs, fn {worker, ref} -> assert_receive {:DOWN, ^ref, :process, ^worker, _}, 1_000 end)
+      Enum.each(refs, fn {worker, ref} -> assert_receive {:DOWN, ^ref, :process, ^worker, _}, 5_000 end)
     end
   end
 

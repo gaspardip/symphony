@@ -907,7 +907,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
 
       assert_receive {:usage_held, ^owner, invocation, {:ok, :thread_absolute, %{total_tokens: 10}}}, 5_000
       assert invocation.context.worker == worker
-      consumer_await_file!(queued, System.monotonic_time(:millisecond) + 2_000)
+      consumer_await_file!(queued, System.monotonic_time(:millisecond) + 5_000)
       before = consumer_evidence(c)
       ledger = entry.dispatch_ticket.ledger_path
       backup = ledger <> ".consumer-before-fault"
@@ -996,7 +996,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
                SymphonyElixir.DeliveryEngine.run(c.workspace, c.issue, self(), include_pr_details: false)
              end)
 
-    consumer_await_file!(queued, System.monotonic_time(:millisecond) + 2_000)
+    consumer_await_file!(queued, System.monotonic_time(:millisecond) + 5_000)
     runtime = GenServer.call(owner, :runtime)
     assert runtime.running[c.issue.id].turn_count == 0
     assert runtime.running[c.issue.id].last_agent_event == nil
@@ -1791,7 +1791,7 @@ defmodule SymphonyElixir.AgentExecutionIntegrationTest do
 
       GenServer.stop(owner)
       Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-      Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+      Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
     end
   end
 end

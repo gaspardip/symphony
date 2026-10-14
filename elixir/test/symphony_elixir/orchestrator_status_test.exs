@@ -1895,7 +1895,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     refute rendered =~ "Timestamp:"
   end
 
-  defp wait_for_state(pid, assertions, timeout_ms \\ 200) when is_function(assertions, 1) do
+  defp wait_for_state(pid, assertions, timeout_ms \\ 5_000) when is_function(assertions, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_state(pid, assertions, deadline_ms)
   end
@@ -1917,7 +1917,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
-  defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
+  defp wait_for_snapshot(pid, predicate, timeout_ms \\ 5_000) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
   end

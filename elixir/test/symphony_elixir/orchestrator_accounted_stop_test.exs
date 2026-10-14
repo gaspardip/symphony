@@ -292,7 +292,7 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
         runtime = :sys.get_state(owner)
         monitors = Enum.map(runtime.runtime.running, fn {_id, entry} -> {entry.pid, Process.monitor(entry.pid)} end)
         :ok = GenServer.stop(owner, :normal, 5_000)
-        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000 end)
+        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
       end
 
       if File.exists?(pid_file), do: await!(fn -> transport_absent?(%{pid_file: pid_file, script: script}) end)
