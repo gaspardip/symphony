@@ -188,6 +188,9 @@ static void control_packet(struct owner *o, const unsigned char *data, size_t si
 
 static void read_control(struct owner *o, int64_t now) {
     if (!o->control_open) return;
+    /* Unreachable: a rejected frame closes control before the buffer fills.
+       GCC cannot see that across calls, and fortify needs the bound. */
+    if (o->control_size >= sizeof(o->control)) return;
     /* A single bounded read cannot starve the native deadline. */
     ssize_t n = read(STDIN_FILENO, o->control + o->control_size,
                      sizeof(o->control) - o->control_size);
@@ -203,7 +206,7 @@ static void read_control(struct owner *o, int64_t now) {
         uint32_t length;
         memcpy(&length, o->control, 4); length = ntohl(length);
         if (length == 0 || length > (o->stream ? CHUNK + 5 : 24)) {
-            remember(o, CONTROL, EPROTO); begin_stop(o, FAILED, now); return;
+            o->control_open = 0; remember(o, CONTROL, EPROTO); begin_stop(o, FAILED, now); return;
         }
         if (o->control_size < (size_t)length + 4) return;
         control_packet(o, o->control + 4, length, now);
