@@ -24,6 +24,8 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   @pr "https://github.com/local/continuation/pull/1"
   @private "PRIVATE-C5-MARKER-DO-NOT-LOG"
+  # Ceiling for polling helpers; a loaded macOS runner overran 2s while a real worker crossed the gate.
+  @wait_ms 10_000
 
   defmodule Client do
     def fetch_issue_by_id(id) do
@@ -2554,7 +2556,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp wait_until!(predicate, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    deadline = deadline || System.monotonic_time(:millisecond) + @wait_ms
 
     unless predicate.() do
       assert System.monotonic_time(:millisecond) < deadline, "condition did not become true"
@@ -2681,7 +2683,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp await!(pid, predicate, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    deadline = deadline || System.monotonic_time(:millisecond) + @wait_ms
     state = runtime(pid)
 
     if predicate.(state) do
@@ -2697,7 +2699,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp wait_file!(path, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    deadline = deadline || System.monotonic_time(:millisecond) + @wait_ms
 
     unless File.exists?(path) do
       assert System.monotonic_time(:millisecond) < deadline, "worker did not cross real gate"
@@ -2786,7 +2788,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp wait_fixture_hooks!(hook, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    deadline = deadline || System.monotonic_time(:millisecond) + @wait_ms
 
     case fixture_hook_pids(hook) do
       [] ->
@@ -2801,7 +2803,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   defp pause_default_scheduler! do
     if pid = Process.whereis(Orchestrator) do
-      wait_default_idle!(pid, System.monotonic_time(:millisecond) + 2_000)
+      wait_default_idle!(pid, System.monotonic_time(:millisecond) + @wait_ms)
       assert :ok = :sys.suspend(pid)
       on_exit(fn -> assert :ok = :sys.resume(pid) end)
     end
