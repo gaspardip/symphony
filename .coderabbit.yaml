@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit review config. Reference: https://docs.coderabbit.ai/reference/configuration
+# Only non-default settings live here; auto review already covers PRs against main.
+language: es-AR
+tone_instructions: "Revisor técnico directo. Priorizá defectos, regresiones y tests faltantes por sobre el estilo."
+
+reviews:
+  # pr-description-lint rejects any `<!--` in the PR body, and CodeRabbit wraps the
+  # summary it writes into the description in HTML comments. Keep it in the walkthrough.
+  high_level_summary_in_walkthrough: true
+  path_filters:
+    - "!log/**"
+    - "!elixir/mix.lock"
+    - "!.symphony/progress/**"
+    - "!.github/media/**"
+  path_instructions:
+    - path: "elixir/lib/**/*.ex"
+      instructions: |
+        CI ya corre `mix format --check-formatted`, `mix credo --strict` y `mix dialyzer`:
+        no comentes formato ni nits que esas herramientas detectan. Enfocate en errores de
+        lógica, manejo de `{:ok, _}`/`{:error, _}`, procesos y supervisión, y en cambios
+        de contrato del estado de ejecución.
+    - path: "elixir/test/**/*.exs"
+      instructions: |
+        Marcá tests tautológicos: los que afirman lo mismo que configuran, verifican un mock
+        en vez del comportamiento, o pasarían aunque se rompa el código bajo prueba. Pedí
+        aserciones sobre resultados observables. No pidas fixtures en disco: los tests crean
+        workspaces temporales en `System.tmp_dir!()`.
+    - path: "tesis/**"
+      instructions: |
+        Material académico en español. Revisá solo coherencia con el código y datos
+        verificables; no corrijas estilo ni redacción.
+  tools:
+    markdownlint:
+      enabled: false
