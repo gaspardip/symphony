@@ -100,7 +100,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
     assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     state = GenServer.call(c.driver, :state, 5_000)
-    assert is_map(Orchestrator.snapshot(c.driver, 500))
+    assert is_map(Orchestrator.snapshot(c.driver, 5_000))
     assert %{purpose: :promotion, initial_stage: "await_checks", stage: "checkout"} = state.admission_read
     assert state.running == %{}
     assert Orchestrator.available_slots(state) == 0

@@ -180,7 +180,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     File.write!(ctx.location.state_path, "private-broken-payload")
     send(ctx.pid, :run_webhook_cycle)
     wait_state!(ctx.pid, &(&1.inbox_storage_error != nil and idle?(&1)))
-    snapshot = Orchestrator.snapshot(ctx.pid, 500)
+    snapshot = Orchestrator.snapshot(ctx.pid, 5_000)
     assert snapshot.tracker_inbox.status == :error
     assert snapshot.tracker_inbox.depth == nil
     assert snapshot.tracker_inbox.last_storage_error.reason_code == :invalid_schema

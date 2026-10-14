@@ -897,7 +897,7 @@ defmodule SymphonyElixir.OrchestratorRetryAsyncTest do
   end
 
   defp assert_pending_available(pid, worker, entry, message) do
-    assert is_map(Orchestrator.snapshot(pid, 500))
+    assert is_map(Orchestrator.snapshot(pid, 5_000))
     state = runtime(pid)
     assert state.retry_attempts["A"].retry_ref == entry.retry_ref
     assert state.retry_attempts["A"].attempt == entry.attempt

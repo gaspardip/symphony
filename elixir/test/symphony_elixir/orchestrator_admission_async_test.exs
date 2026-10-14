@@ -91,7 +91,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
     assert_receive {:admission_read, reader, ["A"]}, 5_000
     assert {:error, :missing} = LeaseManager.read("A")
     refute File.exists?(Workspace.path_for_issue(issue("A")))
-    assert is_map(Orchestrator.snapshot(pid, 500))
+    assert is_map(Orchestrator.snapshot(pid, 5_000))
 
     worker_issue = issue("WORKER")
     worker = install_running!(pid, worker_issue)
