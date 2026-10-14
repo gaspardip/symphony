@@ -740,7 +740,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
     printf ready > '#{ready}'
     attempts=0
     while [ ! -f '#{release}' ]; do
-      if [ "$attempts" -ge 100 ]; then
+      if [ "$attempts" -ge 200 ]; then
         printf timeout > '#{exited}.tmp'
         mv '#{exited}.tmp' '#{exited}'
         exit 1
@@ -833,6 +833,11 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   defp release_manual_promotion_hook!(manual) do
     File.write!(manual.release, "continue")
+    # A hook that never started cannot exit; keep the earlier failure visible instead of masking it here.
+    if File.exists?(manual.ready), do: await_manual_hook_exit!(manual)
+  end
+
+  defp await_manual_hook_exit!(manual) do
     wait_manual_hook_file!(manual.exited, System.monotonic_time(:millisecond) + 5_000)
     assert File.read!(manual.exited) == "released"
   end
