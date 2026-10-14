@@ -162,6 +162,7 @@ pre,
 .dashboard-shell {
   display: grid;
   gap: 2.5rem;
+  align-content: start;
   max-width: 1240px;
   padding: 2rem 2.5rem 4rem;
 }
