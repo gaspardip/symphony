@@ -543,6 +543,7 @@ button {
   gap: 0.1rem;
   min-width: 0;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .activity-copy .muted {
@@ -734,6 +735,7 @@ button {
 
 .activity-feed-copy {
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .activity-feed-meta {
