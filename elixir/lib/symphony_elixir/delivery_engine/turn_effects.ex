@@ -139,36 +139,38 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffects do
   """
   def maybe_auto_commit(state, workspace, guard \\ &unguarded/0)
 
-  @spec maybe_auto_commit(map(), Path.t(), (-> :ok | term())) :: {:ok, map()} | {:error, {:turn_effect_failed, map()}} | term()
+  @spec maybe_auto_commit(map(), Path.t(), (-> :ok | {:discard, atom()} | {:stop, term()})) ::
+          {:ok, map()} | {:error, {:turn_effect_failed, map()}} | {:discard, atom()} | {:stop, term()}
   def maybe_auto_commit(%{files_touched: []} = state, _workspace, _guard), do: {:ok, state}
 
   def maybe_auto_commit(%{} = state, workspace, guard) do
-    with :ok <- format_workspace(workspace, guard),
+    with :ok <- guard.(),
+         :ok <- format_workspace(workspace),
          :ok <- guard.(),
          {:ok, _} <- run_command(:stage, "git", ["add", "-A"], workspace),
          {:ok, {_, status}} <- run_command(:index_diff, "git", ["diff", "--cached", "--quiet"], workspace, [0, 1]),
-         :ok <- commit_changes(status, state, workspace, guard) do
+         :ok <- guard.(),
+         :ok <- commit_changes(status, state, workspace) do
       {:ok, state}
     end
   end
 
-  defp format_workspace(workspace, guard) do
+  defp format_workspace(workspace) do
     elixir_dir = Path.join(workspace, "elixir")
 
     if File.dir?(elixir_dir) do
-      with :ok <- guard.(), {:ok, _} <- run_command(:format, "mix", ["format"], elixir_dir), do: :ok
+      with {:ok, _} <- run_command(:format, "mix", ["format"], elixir_dir), do: :ok
     else
       :ok
     end
   end
 
-  defp commit_changes(0, _state, _workspace, _guard), do: :ok
+  defp commit_changes(0, _state, _workspace), do: :ok
 
-  defp commit_changes(1, state, workspace, guard) do
+  defp commit_changes(1, state, workspace) do
     message = state.result_text || "Agent turn completed"
 
-    with :ok <- guard.(),
-         {:ok, _} <- run_command(:commit, "git", ["commit", "-m", message], workspace) do
+    with {:ok, _} <- run_command(:commit, "git", ["commit", "-m", message], workspace) do
       Logger.info("Auto-committed agent changes in #{workspace}")
       :ok
     end

@@ -460,7 +460,9 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
     refute_received {:callback, ^worker, :turn_completed}
     assert System.cmd(c.git, ["rev-parse", "HEAD"], cd: c.workspace) |> elem(0) == before_head
     assert raw!(c)["policy_override"] == "operator"
-    assert runtime(owner).stale_execution_errors[c.issue.id].cause == :material_state_changed
+    send(worker, :finish)
+    assert_receive {:worker_down, ^owner, _, stopped}, 5_000
+    assert_stale_hold(c, entry, stopped, :material_state_changed)
   end
 
   test "G07 control after owner confirmation rejects the worker precheck before lifecycle", c do

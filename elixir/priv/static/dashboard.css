@@ -10,7 +10,6 @@
   --line: #e6e6e3;
   --line-strong: #d4d4d0;
   --accent: #0e7490;
-  --accent-soft: rgba(14, 116, 144, 0.08);
   --good: #15803d;
   --warn: #a16207;
   --danger: #b91c1c;
@@ -32,7 +31,6 @@
     --line: #1f2023;
     --line-strong: #2c2e33;
     --accent: #22d3ee;
-    --accent-soft: rgba(34, 211, 238, 0.08);
     --good: #4ade80;
     --warn: #fbbf24;
     --danger: #f87171;
@@ -567,10 +565,6 @@ button {
   background: var(--surface);
 }
 
-.run-card .run-body {
-  background: transparent;
-}
-
 .run-card-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -695,6 +689,7 @@ button {
 }
 
 .run-card .run-body {
+  background: transparent;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   margin-top: 0.75rem;
 }
