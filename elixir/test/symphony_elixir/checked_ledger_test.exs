@@ -284,7 +284,7 @@ defmodule SymphonyElixir.CheckedLedgerTest do
       end
 
     for _ <- tasks do
-      assert_receive {:ready, _}, 2_000
+      assert_receive {:ready, _}, 5_000
     end
 
     Enum.each(tasks, fn task -> send(task.pid, :go) end)

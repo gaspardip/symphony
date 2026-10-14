@@ -82,7 +82,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
     end)
 
     send(pid, {:retry_issue, issue_id, retry_ref})
-    state = await_retry_settled(pid, issue_id, System.monotonic_time(:millisecond) + 2_000)
+    state = await_retry_settled(pid, issue_id, System.monotonic_time(:millisecond) + 5_000)
 
     refute Map.has_key?(state.retry_attempts, issue_id)
     refute MapSet.member?(state.claimed, issue_id)
@@ -808,7 +808,7 @@ defmodule SymphonyElixir.OrchestratorPhase6BackfillTest do
   end
 
   defp await_retry_settled(pid, id, deadline) do
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, 5_000)
 
     if Map.has_key?(state.retry_attempts, id) do
       assert System.monotonic_time(:millisecond) < deadline

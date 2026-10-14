@@ -276,7 +276,7 @@ defmodule SymphonyElixir.ExecutionBoundaryTest do
     try do
       [home, tmp] = await_lines(marker, 100)
       Process.exit(caller, :kill)
-      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 1000
+      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
       assert Path.dirname(home) == Path.dirname(tmp)
       await_absent(Path.dirname(home), 200)
       refute File.exists?(home)

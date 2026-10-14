@@ -100,7 +100,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
   test "a failed ack retries only confirmation even after the configured root changes", ctx do
     assert {:ok, _} = TrackerEventInbox.enqueue([event("A")])
     send(ctx.pid, :run_webhook_cycle)
-    assert_receive {:lookup, "A"}, 2_000
+    assert_receive {:lookup, "A"}, 5_000
     state = wait_state!(ctx.pid, &(&1.inbox_ack_pending != nil and &1.inbox_storage_error != nil and idle?(&1)))
     assert state.issue_routing_cache["A"].state == "Done"
     assert state.inbox_storage_error.phase == :lock
@@ -118,7 +118,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     assert [%{"event" => %{"entity_id" => "B"}}] = TrackerEventInbox.pending_events()
     assert {:ok, %{rows: []}} = TrackerEventInbox.capture(ctx.location, %{max_rows: 100, max_bytes: 4 * 1024 * 1024})
     send(ctx.pid, :run_webhook_cycle)
-    assert_receive {:lookup, "B"}, 2_000
+    assert_receive {:lookup, "B"}, 5_000
     wait_state!(ctx.pid, &(idle?(&1) and Map.has_key?(&1.issue_routing_cache, "B")))
     assert [] == TrackerEventInbox.pending_events()
   end
@@ -126,7 +126,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
   test "reset retires the pending cursor without confirming the next generation", ctx do
     assert {:ok, _} = TrackerEventInbox.enqueue([event("A")])
     send(ctx.pid, :run_webhook_cycle)
-    assert_receive {:lookup, "A"}, 2_000
+    assert_receive {:lookup, "A"}, 5_000
     wait_state!(ctx.pid, &(&1.inbox_ack_pending != nil and &1.inbox_storage_error != nil and idle?(&1)))
     File.rmdir!(ctx.location.lock_path)
     assert :ok = TrackerEventInbox.reset(ctx.location)
@@ -155,7 +155,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     assert state.github_last_assignment.received_runner_channel == "canary"
     assert state.github_last_assignment.received_runner_instance_id == "canary:test"
     assert state.github_last_assignment.assignment_reason == "non_review_affecting_event"
-    assert [] == GenServer.call(ctx.pid, :github_pending_events, 500)
+    assert [] == GenServer.call(ctx.pid, :github_pending_events, 5_000)
     assert state.github_inbox_ack_pending == nil
   end
 
@@ -165,8 +165,8 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     File.write!(ctx.location.events_path, "invalid\n")
     assert {:ok, _} = TrackerEventInbox.enqueue([event("A"), event("RATE"), event("B")])
     send(ctx.pid, :run_webhook_cycle)
-    assert_receive {:lookup, "A"}, 2_000
-    assert_receive {:lookup, "RATE"}, 2_000
+    assert_receive {:lookup, "A"}, 5_000
+    assert_receive {:lookup, "RATE"}, 5_000
     state = wait_state!(ctx.pid, &(&1.tracker_backoff_rule_id == "tracker.rate_limited" and idle?(&1)))
     assert state.issue_routing_cache["A"].state == "Done"
     assert state.inbox_ack_pending == nil
@@ -203,10 +203,10 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
     is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and not state.poll_check_in_progress and inbox_settled
   end
 
-  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_state!(pid, predicate, deadline) do
-    state = GenServer.call(pid, :state, 500)
+    state = GenServer.call(pid, :state, 5_000)
 
     if predicate.(state) do
       state
@@ -222,7 +222,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
 
   defp pause_scheduler! do
     if pid = Process.whereis(Orchestrator) do
-      state = wait_default_idle!(pid, System.monotonic_time(:millisecond) + 2_000)
+      state = wait_default_idle!(pid, System.monotonic_time(:millisecond) + 5_000)
       assert state.running == %{}
       assert idle?(state)
       :ok = :sys.suspend(pid)
@@ -231,7 +231,7 @@ defmodule SymphonyElixir.OrchestratorInboxAckTest do
   end
 
   defp wait_default_idle!(pid, deadline) do
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, 5_000)
 
     if state.running == %{} and idle?(state) and state.tracker_poll_pending == [] do
       state

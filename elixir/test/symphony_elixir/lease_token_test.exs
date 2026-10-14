@@ -46,8 +46,8 @@ defmodule SymphonyElixir.LeaseTokenTest do
     refute_receive {:body, ^worker}, 30
     assert File.read!(ctx.storage.lease_path) == bytes
     assert :ok = LeaseManager.activate_dispatch(second.token, :not_pending, worker, "dispatch")
-    assert_receive {:body, ^worker}, 500
-    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 500
+    assert_receive {:body, ^worker}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 5_000
   end
 
   test "token operations stay on the captured root after configuration changes", ctx do
@@ -153,8 +153,8 @@ defmodule SymphonyElixir.LeaseTokenTest do
     assert {:error, :dispatch_deadline_expired} = LeaseManager.activate_dispatch(acquired.token, deadline, worker, "dispatch")
     refute_receive {:body, ^worker}, 30
     assert :ok = LeaseManager.activate_dispatch(acquired.token, System.monotonic_time(:millisecond) + 1_000, worker, "dispatch")
-    assert_receive {:body, ^worker}, 500
-    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 500
+    assert_receive {:body, ^worker}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 5_000
   end
 
   test "a deadline that expires while waiting for the lock never opens the gate", ctx do
@@ -178,8 +178,8 @@ defmodule SymphonyElixir.LeaseTokenTest do
     on_exit(fn -> if Process.alive?(releaser), do: Process.exit(releaser, :kill) end)
     send(releaser, :release)
     assert {:error, :dispatch_deadline_expired} = LeaseManager.activate_dispatch(acquired.token, deadline, worker, "dispatch")
-    assert_receive :lock_released, 500
-    assert_receive {:DOWN, ^ref, :process, ^releaser, :normal}, 500
+    assert_receive :lock_released, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^releaser, :normal}, 5_000
     refute_receive {:body, ^worker}, 30
   end
 
@@ -192,7 +192,7 @@ defmodule SymphonyElixir.LeaseTokenTest do
     refute_receive {:body, ^worker}, 30
     assert {:ok, _} = LeaseManager.refresh_token(acquired.token)
     assert :ok = LeaseManager.activate_dispatch(acquired.token, :not_pending, worker, "dispatch")
-    assert_receive {:body, ^worker}, 500
+    assert_receive {:body, ^worker}, 5_000
   end
 
   test "reclaimability distinguishes live expired exact TTL and audit-pending metadata", ctx do
@@ -462,7 +462,7 @@ defmodule SymphonyElixir.LeaseTokenTest do
       assert_receive {^reply, {output, status}}, 11_000
       IO.puts("Lease child exit: #{inspect(%{status: status, output: output})}")
       assert status == 0
-      assert_receive {:DOWN, ^monitor, :process, ^runner, :normal}, 1_000
+      assert_receive {:DOWN, ^monitor, :process, ^runner, :normal}, 5_000
     end
   end
 

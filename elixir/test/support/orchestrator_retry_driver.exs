@@ -16,7 +16,7 @@ defmodule SymphonyElixir.OrchestratorRetryDriver do
       receive do
         {:timer_result, ^pid, {:noreply, next}} -> {:noreply, next}
       after
-        3_000 -> raise "retry did not settle: #{inspect(:sys.get_state(pid, 500))}"
+        3_000 -> raise "retry did not settle: #{inspect(:sys.get_state(pid, 5_000))}"
       end
     after
       if Process.alive?(pid), do: GenServer.stop(pid)

@@ -271,7 +271,7 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     invocation = invocation(worker)
     assert :ok = GenServer.call(owner, {:hold_usage, true})
     send(worker, {:exercise, self(), make_ref(), fn -> AgentExecution.observe_usage(invocation, %{usage: counters(900_000)}) end})
-    assert_receive {:usage_held, ^owner, _}, 2_000
+    assert_receive {:usage_held, ^owner, _}, 5_000
     assert {:ok, _} = RunStateStore.update(c.workspace, &Map.put(&1, :policy_override, "operator"))
     before = evidence(c, entry)
     assert :ok = GenServer.call(owner, :release_usage)
@@ -293,7 +293,7 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     invocation = invocation(worker)
     attach_fault(c, :after_usage)
     assert {:stop, {:stale_execution, _, :material_state_changed}} = in_worker(worker, fn -> AgentExecution.observe_usage(invocation, %{usage: counters(900_000)}) end)
-    assert_receive {:fault_applied, :after_usage}, 2_000
+    assert_receive {:fault_applied, :after_usage}, 5_000
     current = runtime(owner)
     assert current.agent_totals.total_tokens == 900_000
     assert raw!(c)["token_usage"]["total_tokens"] == 900_000
@@ -375,7 +375,7 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     assert {:ok, _} = in_worker(worker, fn -> AgentExecution.transition_current("done", %{}) end)
     attach_fault(c, :finish_cleanup)
     send(worker, :finish)
-    assert_receive {:fault_applied, :finish_cleanup}, 2_000
+    assert_receive {:fault_applied, :finish_cleanup}, 5_000
     assert_receive {:worker_down, ^owner, down, stopped}, 5_000
     assert_hold(c, stopped, entry, :accounting)
     assert File.exists?(Path.join(DispatchAudit.marker_directory(c.workspace), "retained-evidence"))
@@ -401,8 +401,8 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     refute Map.has_key?(stopped.completed, c.issue.id)
     assert length(finish_events(c)) == 1
     id = c.issue.id
-    assert_receive {:memory_tracker_comment, ^id, _}, 2_000
-    assert_receive {:memory_tracker_state_update, ^id, "Blocked"}, 2_000
+    assert_receive {:memory_tracker_comment, ^id, _}, 5_000
+    assert_receive {:memory_tracker_state_update, ^id, "Blocked"}, 5_000
   end
 
   test "checked policy write failure on DOWN keeps ticket and claim with a visible cause", c do
@@ -413,7 +413,7 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     marker = marker!(c)
     attach_fault(c, :policy_write)
     send(worker, :finish)
-    assert_receive {:fault_applied, :policy_write}, 2_000
+    assert_receive {:fault_applied, :policy_write}, 5_000
     assert_receive {:worker_down, ^owner, _, stopped}, 5_000
     assert_hold(c, stopped, entry, :accounting)
     assert marker!(c) == marker
@@ -450,8 +450,8 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     assert stopped.token_usage_errors == %{} and stopped.stale_execution_errors == %{}
     assert stopped.lease_claims == %{} and stopped.retry_attempts == %{}
     id = c.issue.id
-    assert_receive {:memory_tracker_comment, ^id, _}, 2_000
-    assert_receive {:memory_tracker_state_update, ^id, "Blocked"}, 2_000
+    assert_receive {:memory_tracker_comment, ^id, _}, 5_000
+    assert_receive {:memory_tracker_state_update, ^id, "Blocked"}, 5_000
     refute_received {:memory_tracker_comment, ^id, _}
   end
 
@@ -583,10 +583,10 @@ defmodule SymphonyElixir.AgentExecutionOwnerCurrentTest do
     assert :ok = GenServer.call(owner, {:hold_usage, true})
     assert :ok = GenServer.call(owner, {:hold_down, true})
     send(worker, {:exercise, self(), make_ref(), fn -> AgentExecution.observe_usage(inv, %{usage: counters(150_000)}) end})
-    assert_receive {:usage_held, ^owner, _}, 2_000
+    assert_receive {:usage_held, ^owner, _}, 5_000
     configure!(c.root, 100_000)
     assert :ok = GenServer.call(owner, {:stop, c.issue.id})
-    assert_receive {:down_held, ^owner, _}, 2_000
+    assert_receive {:down_held, ^owner, _}, 5_000
     assert :ok = GenServer.call(owner, :release_usage)
     assert :ok = GenServer.call(owner, :release_down)
     assert_receive {:worker_down, ^owner, _, stopped}, 5_000

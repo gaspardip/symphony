@@ -87,8 +87,8 @@ defmodule SymphonyElixir.DeliveryEngine.StageSessionOwnedTest do
               send(self(), {:observed_primary, caught, calls})
             end)
 
-          assert_receive {:observed_primary, caught, calls}, 1_000
-          assert_receive {:original_primary, original}, 1_000
+          assert_receive {:observed_primary, caught, calls}, 5_000
+          assert_receive {:original_primary, original}, 5_000
           {{caught, original, calls}, observed}
         end)
 

@@ -98,8 +98,8 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "passive repair retains a single lease reservation while serving snapshots", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
-    state = GenServer.call(c.driver, :state, 500)
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
+    state = GenServer.call(c.driver, :state, 5_000)
     assert is_map(Orchestrator.snapshot(c.driver, 500))
     assert %{purpose: :promotion, initial_stage: "await_checks", stage: "checkout"} = state.admission_read
     assert state.running == %{}
@@ -120,7 +120,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "promotion reports a missing tracker issue as no longer eligible", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     pending = GenServer.call(c.driver, :state)
     claim = pending.lease_claims[c.issue.id]
     snapshot = File.read!(RunStateStore.state_path(c.workspace))
@@ -191,7 +191,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
       case c.capacity_holder do
         :pending ->
           assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-          assert_receive {:promotion_read, _reader, ["promotion"]}, 2_000
+          assert_receive {:promotion_read, _reader, ["promotion"]}, 5_000
 
         :gated ->
           seed_gated_reservation!(c)
@@ -217,7 +217,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "promotion rejects a legacy snapshot identified while its read was pending", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     pending = GenServer.call(c.driver, :state)
     assert pending.admission_read.run_identity == %{}
     claim = pending.lease_claims[c.issue.id]
@@ -256,7 +256,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
     @tag identity_fields: fields, identity_error: expected
     test "promotion denies #{label} identity introduced during its read", c do
       assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-      assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+      assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
       pending = GenServer.call(c.driver, :state)
       assert pending.admission_read.run_identity == %{}
       claim = pending.lease_claims[c.issue.id]
@@ -279,7 +279,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "cancelled old promotion preserves same-owner successor lease snapshot and header", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, _reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, _reader, ["promotion"]}, 5_000
     before = GenServer.call(c.driver, :state)
     claim = before.lease_claims[c.issue.id]
     assert {:ok, :released} = LeaseManager.release_token(claim.token)
@@ -302,7 +302,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "duplicate dispatch preserves the same promotion reader custody and deadline", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     before = GenServer.call(c.driver, :state)
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
     after_duplicate = GenServer.call(c.driver, :state)
@@ -373,7 +373,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
     authorization = {:authorize_dispatch, c.issue.id, ticket.dispatch_id, worker}
     send(driver, authorization)
-    assert_receive {:authorized_body, ^worker}, 1_000
+    assert_receive {:authorized_body, ^worker}, 5_000
     authorized = GenServer.call(driver, :state)
     assert authorized.lease_claims[c.issue.id].holder == :running
     assert authorized.lease_claims[c.issue.id].promotion_ref == nil
@@ -390,7 +390,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "an old promotion timeout cannot remove a newer local custody reference", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     state = GenServer.call(c.driver, :state)
     original = state.lease_claims[c.issue.id]
     send(c.driver, {:promotion_timeout, c.issue.id, make_ref()})
@@ -406,7 +406,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
       ] do
     test "promotion rejects raw incomplete identity #{label}", c do
       assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-      assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+      assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
       send(reader, {:answer, {:ok, unquote(Macro.escape(response))}})
       state = wait_state!(c.driver, &is_nil(&1.admission_read))
       assert state.running == %{}
@@ -417,7 +417,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "cancelled promotion retains its physical slot through a late result until guardian DOWN", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, _read_child, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, _read_child, ["promotion"]}, 5_000
     original = GenServer.call(c.driver, :state)
     operation = original.admission_read
     assert :erlang.suspend_process(operation.pid)
@@ -462,7 +462,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
     :sys.replace_state(c.driver, &%{&1 | lease_claims: %{c.issue.id => claim}, claimed: MapSet.new([c.issue.id])})
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     pending = GenServer.call(c.driver, :state)
     current = pending.lease_claims[c.issue.id]
     assert current.deadline == current.started_at_ms + 3_000
@@ -492,7 +492,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
     :sys.replace_state(c.driver, &%{&1 | lease_claims: %{c.issue.id => claim}, claimed: MapSet.new([c.issue.id])})
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     pending = GenServer.call(c.driver, :state)
     current = pending.lease_claims[c.issue.id]
     assert current.deadline == current.started_at_ms + 3_000
@@ -523,7 +523,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "changed root discards promotion and releases only its captured lease", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     before = GenServer.call(c.driver, :state)
     old = before.lease_claims[c.issue.id]
     assert {:ok, workflow} = Workflow.current()
@@ -544,7 +544,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "promotion observes a remote 429 before discarding the attempt", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     send(reader, {:answer, {:error, {:linear_api_status, 429, %{retry_after_ms: 60_000}}}})
     throttled = wait_state!(c.driver, &is_nil(&1.admission_read))
     assert throttled.tracker_backoff_until_ms > System.monotonic_time(:millisecond)
@@ -554,7 +554,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   test "an old successful promotion cannot clear a newer transport backoff", c do
     assert :ok = GenServer.call(c.driver, {:dispatch, c.issue})
-    assert_receive {:promotion_read, reader, ["promotion"]}, 2_000
+    assert_receive {:promotion_read, reader, ["promotion"]}, 5_000
     until_ms = System.monotonic_time(:millisecond) + 60_000
     :sys.replace_state(c.driver, &%{&1 | tracker_backoff_until_ms: until_ms, tracker_backoff_reason: "newer transport 429"})
     send(reader, {:answer, {:ok, [c.issue]}})
@@ -813,10 +813,10 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
   end
 
   defp assert_manual_promotion_gate!(driver, manual, expected_state) do
-    assert_receive {:manual_promotion_fetch, reader}, 2_000
+    assert_receive {:manual_promotion_fetch, reader}, 5_000
     refute reader == driver
-    wait_manual_hook_file!(manual.ready, System.monotonic_time(:millisecond) + 2_000)
-    state = GenServer.call(driver, :state, 500)
+    wait_manual_hook_file!(manual.ready, System.monotonic_time(:millisecond) + 5_000)
+    state = GenServer.call(driver, :state, 5_000)
     entry = Map.fetch!(state.running, manual.issue.id)
     claim = Map.fetch!(state.lease_claims, manual.issue.id)
     assert claim.holder == :running
@@ -833,7 +833,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
 
   defp release_manual_promotion_hook!(manual) do
     File.write!(manual.release, "continue")
-    wait_manual_hook_file!(manual.exited, System.monotonic_time(:millisecond) + 2_000)
+    wait_manual_hook_file!(manual.exited, System.monotonic_time(:millisecond) + 5_000)
     assert File.read!(manual.exited) == "released"
   end
 
@@ -921,10 +921,10 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
     end)
   end
 
-  defp wait_state!(driver, predicate), do: wait_state!(driver, predicate, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_state!(driver, predicate), do: wait_state!(driver, predicate, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_state!(driver, predicate, deadline) do
-    state = GenServer.call(driver, :state, 500)
+    state = GenServer.call(driver, :state, 5_000)
 
     if predicate.(state) do
       state

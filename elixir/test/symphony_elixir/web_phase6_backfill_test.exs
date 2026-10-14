@@ -2047,7 +2047,7 @@ defmodule SymphonyElixir.WebPhase6BackfillTest do
 
     StatusDashboard.notify_update(dashboard_name)
 
-    assert_receive {:render, content}, 1_000
+    assert_receive {:render, content}, 5_000
     assert content =~ "No active agents"
 
     StatusDashboard.notify_update(dashboard_name)

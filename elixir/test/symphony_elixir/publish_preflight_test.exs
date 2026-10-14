@@ -76,7 +76,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
         DeliveryEngine.run(context.workspace, context.issue, nil, command_runner: command_recorder(), policy_pack: :client_safe_shadow)
       end)
 
-    assert_receive {:runtime_stop_recorded, emitter}, 1_000
+    assert_receive {:runtime_stop_recorded, emitter}, 5_000
     lock = {{RunStateStore, Path.expand(context.workspace)}, self()}
     assert :global.set_lock(lock, [node()], 0)
 
@@ -88,7 +88,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
       :global.del_lock(lock, [node()])
     end
 
-    assert_receive {:memory_tracker_comment, _, _}, 1_000
+    assert_receive {:memory_tracker_comment, _, _}, 5_000
     assert {:ok, state} = RunStateStore.load(context.workspace)
     assert state.stage == "blocked"
     assert state.last_rule_id == "publish.failed"

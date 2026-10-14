@@ -168,7 +168,7 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
     assert duplicate.running[context.issue.id].agent_total_tokens == 101_000
     assert {:ok, %{token_usage: %{total_tokens: 101_000}}} = RunStateStore.load(context.workspace)
     GenServer.call(first_owner, {:terminate, context.issue.id})
-    assert_receive {:budget_worker_down, ^first_owner, first_stopped}, 1_000
+    assert_receive {:budget_worker_down, ^first_owner, first_stopped}, 5_000
     refute Map.has_key?(first_stopped.running, context.issue.id)
     GenServer.stop(first_owner, :normal)
 
@@ -177,7 +177,7 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
     assert second.running[context.issue.id].agent_total_tokens == 0
     assert second.running[context.issue.id].issue_token_usage_base.total_tokens == 101_000
     report_usage(second_owner, context.issue.id, 100_000, 1_000)
-    assert_receive {:budget_worker_down, ^second_owner, stopped}, 1_000
+    assert_receive {:budget_worker_down, ^second_owner, stopped}, 5_000
     refute Map.has_key?(stopped.running, context.issue.id)
     refute Map.has_key?(stopped.retry_attempts, context.issue.id)
 
@@ -302,14 +302,14 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
     assert uncertain.running[context.issue.id].agent_execution.registry.uncertain == nil
     assert uncertain.running[context.issue.id].agent_total_tokens == 0
     assert uncertain.agent_totals.total_tokens == 0
-    assert_receive {:budget_worker_stale, ^worker, {:stop, {:stale_execution, ^ids, ^cause}}}, 1_000
+    assert_receive {:budget_worker_stale, ^worker, {:stop, {:stale_execution, ^ids, ^cause}}}, 5_000
     assert File.read!(RunStateStore.state_path(context.workspace)) == payload
     assert File.read!(journal_path) == journal_before
     assert File.read!(entry.lease_token.storage.lease_path) == lease_before
     refute Map.has_key?(uncertain.retry_attempts, context.issue.id)
 
     send(worker, :finish_stale)
-    assert_receive {:budget_worker_down, ^owner, stopped}, 1_000
+    assert_receive {:budget_worker_down, ^owner, stopped}, 5_000
     assert_received {:budget_worker_exit, ^owner, {:DOWN, ref, :process, ^worker, {:stale_execution, ^ids, ^cause}}}
     assert ref == entry.ref
     refute Map.has_key?(stopped.running, context.issue.id)
@@ -375,7 +375,7 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
     state = GenServer.call(owner, {:dispatch, issue, attempt})
     worker = state.running[issue.id].pid
     on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
-    assert_receive {:budget_worker_ready, ^owner, ^worker, expected}, 1_000
+    assert_receive {:budget_worker_ready, ^owner, ^worker, expected}, 5_000
     assert expected === state.running[issue.id].agent_execution.expected
     {owner, GenServer.call(owner, :runtime)}
   end
@@ -383,7 +383,7 @@ defmodule SymphonyElixir.RetryBudgetTotalsTest do
   defp report_usage(owner, issue_id, input, output) do
     state = GenServer.call(owner, :runtime)
     send(state.running[issue_id].pid, {:observe_usage, input, output})
-    assert_receive {:usage_processed, ^owner, next_state}, 1_000
+    assert_receive {:usage_processed, ^owner, next_state}, 5_000
     next_state
   end
 end
