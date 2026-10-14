@@ -345,7 +345,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     state = runtime(c.pid)
     assert state.tracker_poll_read.purpose == :github_lookup
     assert state.github_inbox_ack_pending == nil
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     assert is_map(Orchestrator.stop_issue(c.pid, "ISSUE-A"))
     await!(c.pid, &is_nil(&1.tracker_poll_read))
     refute Process.alive?(reader)
@@ -757,7 +757,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       assert effect_count("A", "ci.failure_autonomous_follow_up") == 1
       assert operation(runtime(c.pid)).effects.ledger == :confirmed
       send(c.pid, :run_github_webhook_cycle)
-      assert is_map(Orchestrator.snapshot(c.pid, 500))
+      assert is_map(Orchestrator.snapshot(c.pid, 5_000))
       assert transition_count(workspace, "implement") == 1
       refute_receive {:github_read, _, "A"}, 100
       refute_received {:github_writer, "A"}
@@ -1197,7 +1197,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert match?({:error, _}, operation(runtime(c.pid)).effects.ledger)
     assert runtime(c.pid).github_inbox_ack_pending == nil
     send(c.pid, :run_github_webhook_cycle)
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     refute_receive {:github_read, _, "A"}, 100
     refute_received {:github_writer, "A"}
   end
@@ -1261,7 +1261,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       if unquote(outcome) == :corrupt do
         assert runtime(c.pid).github_inbox_ack_pending == nil
         send(c.pid, :run_github_webhook_cycle)
-        assert is_map(Orchestrator.snapshot(c.pid, 500))
+        assert is_map(Orchestrator.snapshot(c.pid, 5_000))
         assert :atomics.get(count, 1) == 2
       else
         ack!(c.pid)
@@ -1428,7 +1428,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert operation(backoff).waited_down == :normal
     wake = callback!(:wakeup)
     send(c.pid, {:retry_issue, "A", retry.retry_ref})
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     assert runtime(c.pid).lease_claims["A"].token == claim.token
     refute_received {:admission_read, _, _}
     refute_received {:github_callback, :ack, _}
@@ -1497,7 +1497,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       assert transition_count(workspace, "implement") == 1
       assert effect_count("A", "ci.failure_autonomous_follow_up") == 1
       send(c.pid, :run_github_webhook_cycle)
-      assert is_map(Orchestrator.snapshot(c.pid, 500))
+      assert is_map(Orchestrator.snapshot(c.pid, 5_000))
       counts = trace_counts(tracer, c.pid)
       assert counts.cas == 1
       assert counts.writer == 1

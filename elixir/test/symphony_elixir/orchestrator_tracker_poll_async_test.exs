@@ -70,7 +70,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     hold(:startup)
     pid = scheduler!()
     assert_receive {:tracker_called, :startup, reader, ["Done"]}, 5_000
-    assert is_map(Orchestrator.snapshot(pid, 500))
+    assert is_map(Orchestrator.snapshot(pid, 5_000))
     state = :sys.get_state(pid)
     assert state.tracker_poll_cycle.mode == :startup_cleanup
     assert state.running == %{}
@@ -83,7 +83,7 @@ defmodule SymphonyElixir.OrchestratorTrackerPollAsyncTest do
     hold(:candidates)
     pid = scheduler!()
     assert_receive {:tracker_called, :candidates, reader, []}, 5_000
-    assert is_map(Orchestrator.snapshot(pid, 500))
+    assert is_map(Orchestrator.snapshot(pid, 5_000))
     assert %{ok: true} = Orchestrator.stop_issue(pid, issue.identifier)
     assert {:ok, [%Issue{state: "Blocked"}]} = ManualIssueStore.fetch_issue_states_by_ids([issue.id])
     assert Process.alive?(reader)

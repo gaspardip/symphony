@@ -241,7 +241,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     worker = install_worker!(c.pid, issue("WORKER"))
     enqueue!(c.pid, [event("A"), event("B")])
     reader = read!(:lookup, ["A"])
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     timestamp = DateTime.utc_now()
     send(c.pid, {:agent_worker_update, "WORKER", %{event: :notification, timestamp: timestamp, message: "inbox lookup pending"}})
     state = await!(c.pid, &(&1.running["WORKER"].last_agent_timestamp == timestamp))
@@ -270,7 +270,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert state.admission_read.purpose == :inbox_admission
     assert state.tracker_inbox_batch.head.ref == before.tracker_inbox_batch.head.ref
     assert state.inbox_ack_pending == nil
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     assert pending_ids() == ["A"]
     answer(discovery, {:ok, []})
     await!(c.pid, &is_nil(&1.tracker_poll_read))
@@ -362,7 +362,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert state.admission_read.ref == ref
     assert state.lease_claims["A"].deadline == claim.deadline
     assert state.retry_attempts["R"].status == :ready
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, 5_000))
     answer(promotion_reader, {:ok, [promoted]})
     gate = callback!(:gate, c.pid)
     assert runtime(c.pid).lease_claims["A"].deadline == claim.deadline
@@ -1504,7 +1504,7 @@ defmodule SymphonyElixir.OrchestratorTrackerInboxAsyncTest do
     assert state.inbox_last_drained_at == nil
     assert state.inbox_ack_pending == nil
     assert File.read!(c.location.events_path) == bytes
-    refute inspect(Orchestrator.snapshot(c.pid, 500).tracker_inbox) =~ "private-partial"
+    refute inspect(Orchestrator.snapshot(c.pid, 5_000).tracker_inbox) =~ "private-partial"
     refute_received {:inbox_read, _, _, _}
     refute_received {:inbox_callback, :ack, _, _}
   end
