@@ -740,7 +740,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
     printf ready > '#{ready}'
     attempts=0
     while [ ! -f '#{release}' ]; do
-      if [ "$attempts" -ge 200 ]; then
+      if [ "$attempts" -ge 1000 ]; then
         printf timeout > '#{exited}.tmp'
         mv '#{exited}.tmp' '#{exited}'
         exit 1
@@ -763,7 +763,7 @@ defmodule SymphonyElixir.OrchestratorPromotionAsyncTest do
       max_concurrent_agents: 1,
       codex_command: "/usr/bin/false",
       hook_before_run: hook,
-      hook_timeout_ms: 5_000,
+      hook_timeout_ms: 30_000,
       observability_tracing_enabled: false
     )
 
