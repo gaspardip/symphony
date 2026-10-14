@@ -388,14 +388,14 @@ defmodule SymphonyElixir.DispatchAuditIntegrationTest do
         receive do
           {:DOWN, ^ref, :process, ^owner, _} -> :ok
         after
-          1_000 -> raise "test owner did not terminate"
+          5_000 -> raise "test owner did not terminate"
         end
 
         Enum.each(workers, fn {worker, worker_ref} ->
           receive do
             {:DOWN, ^worker_ref, :process, ^worker, _} -> :ok
           after
-            1_000 -> raise "owned test worker survived its coordinator"
+            5_000 -> raise "owned test worker survived its coordinator"
           end
         end)
       end

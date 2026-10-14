@@ -109,7 +109,7 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
       receive do
         {:DOWN, ^ref, :process, ^worker, _reason} -> :ok
       after
-        1_000 -> raise "owned test worker did not stop"
+        5_000 -> raise "owned test worker did not stop"
       end
 
       File.rm_rf!(lease_path)

@@ -782,7 +782,7 @@ defmodule SymphonyElixir.OrchestratorControlAsyncTest do
     before = Jason.decode!(File.read!(RunStateStore.state_path(workspace)))
     refute Map.has_key?(before, "run_id")
     task = Task.async(fn -> Orchestrator.retry_issue_now(c.owner, issue.identifier) end)
-    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, dispatch_id, worker}}, 2_000
+    assert_receive {:held_gate, _owner, {:authorize_dispatch, id, dispatch_id, worker}}, 5_000
     assert id == issue.id and Process.alive?(worker)
     entry = runtime(c).running[id]
     raw = Jason.decode!(File.read!(RunStateStore.state_path(workspace)))

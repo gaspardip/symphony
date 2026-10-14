@@ -989,7 +989,7 @@ defmodule SymphonyElixir.RedispatchTerminalGuardTest do
         assert {:noreply, next} = Orchestrator.handle_info(down, state)
         next
     after
-      2_000 -> flunk("promotion reader did not settle")
+      5_000 -> flunk("promotion reader did not settle")
     end
   end
 

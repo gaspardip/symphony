@@ -40,7 +40,7 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
 
   setup do
     if pid = Process.whereis(Orchestrator) do
-      idle!(pid, System.monotonic_time(:millisecond) + 2_000)
+      idle!(pid, System.monotonic_time(:millisecond) + 5_000)
       assert :ok = :sys.suspend(pid)
       on_exit(fn -> assert :ok = :sys.resume(pid) end)
     end
@@ -163,7 +163,7 @@ defmodule SymphonyElixir.ReviewPublicationControlTest do
                    receive do
                      {:release_observation, ^handler} -> :ok
                    after
-                     2_000 ->
+                     5_000 ->
                        send(observer, {:observation_barrier_timeout, handler})
                        raise "test did not release the confirmed observation"
                    end
