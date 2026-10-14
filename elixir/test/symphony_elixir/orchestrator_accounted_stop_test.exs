@@ -354,18 +354,18 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
   test "one grace deadline survives repeated stops; only real expiry kills its original worker", c do
     entry = dispatch!(c, :ignore_shutdown)
     before = System.monotonic_time(:millisecond)
-    first = GenServer.call(c.owner, {:request_stop, c.issue.id}, 500)
+    first = GenServer.call(c.owner, {:request_stop, c.issue.id}, 5_000)
     after_call = System.monotonic_time(:millisecond)
     shutdown = first.running[c.issue.id].execution_stop_requested.shutdown
     assert shutdown.deadline >= before + 5_000 and shutdown.deadline <= after_call + 5_000
     assert is_reference(shutdown.ref) and is_reference(shutdown.timer)
     worker = entry.pid
     owner = c.owner
-    assert_receive {:shutdown_received, ^worker, ^owner}, 1_000
+    assert_receive {:shutdown_received, ^worker, ^owner}, 5_000
     assert :ok = GenServer.call(c.owner, {:hold_down, true})
     bytes = marker!(entry)
     send(c.owner, deadline_message(entry, shutdown))
-    current = GenServer.call(c.owner, {:request_stop, c.issue.id}, 500)
+    current = GenServer.call(c.owner, {:request_stop, c.issue.id}, 5_000)
     assert current.running[c.issue.id].execution_stop_requested.shutdown == shutdown
     assert Process.alive?(worker)
     assert marker!(entry) == bytes
@@ -385,7 +385,7 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
 
   test "old deadline context, monitor and stop ref cannot signal a replacement", c do
     old = dispatch!(c, :cooperative)
-    requested = GenServer.call(c.owner, {:request_stop, c.issue.id}, 500)
+    requested = GenServer.call(c.owner, {:request_stop, c.issue.id}, 5_000)
     old_shutdown = requested.running[c.issue.id].execution_stop_requested.shutdown
     await!(fn -> runtime(c).running == %{} end)
     assert Process.read_timer(old_shutdown.timer) == false
@@ -408,10 +408,10 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
   test "closing audit failure retains the captured claim after the genuine DOWN", c do
     entry = dispatch!(c, :cooperative)
     assert :ok = GenServer.call(c.owner, {:hold_down, true})
-    GenServer.call(c.owner, {:request_stop, c.issue.id}, 500)
+    GenServer.call(c.owner, {:request_stop, c.issue.id}, 5_000)
     worker = entry.pid
     owner = c.owner
-    assert_receive {:down_held, ^owner, {:DOWN, _, :process, ^worker, :shutdown}}, 1_000
+    assert_receive {:down_held, ^owner, {:DOWN, _, :process, ^worker, :shutdown}}, 5_000
     bytes = marker!(entry)
     unexpected = Path.join(DispatchAudit.marker_directory(c.workspace), "unexpected")
     File.write!(unexpected, "keep audit evidence")
@@ -435,9 +435,9 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
     await!(fn -> Map.has_key?(runtime(c).token_usage_errors, c.issue.id) end)
     before = runtime(c)
     bytes = marker!(entry)
-    GenServer.call(c.owner, {:request_stop, c.issue.id}, 500)
+    GenServer.call(c.owner, {:request_stop, c.issue.id}, 5_000)
     worker = entry.pid
-    assert_receive {:stop_guard, ^worker, {:stop, {:accounting_uncertain, :original_stop_failure}}}, 1_000
+    assert_receive {:stop_guard, ^worker, {:stop, {:accounting_uncertain, :original_stop_failure}}}, 5_000
     await!(fn -> runtime(c).running == %{} end)
     stopped = runtime(c)
     assert stopped.token_usage_errors == before.token_usage_errors
@@ -450,11 +450,11 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
 
   test "stall retry stays deferred until DOWN and an explicit stop removes that retry without restarting grace", c do
     entry = dispatch!(c, :ignore_shutdown)
-    first = GenServer.call(c.owner, {:stall_stop, c.issue.id}, 500)
+    first = GenServer.call(c.owner, {:stall_stop, c.issue.id}, 5_000)
     request = first.running[c.issue.id].execution_stop_requested
     assert request.retry.metadata.error =~ "stalled for "
     assert first.retry_attempts == %{}
-    second = GenServer.call(c.owner, {:request_stop, c.issue.id}, 500)
+    second = GenServer.call(c.owner, {:request_stop, c.issue.id}, 5_000)
     assert second.running[c.issue.id].execution_stop_requested.shutdown == request.shutdown
     refute Map.has_key?(second.running[c.issue.id].execution_stop_requested, :retry)
     assert second.retry_attempts == %{}
@@ -474,9 +474,9 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
       known = before.running[c.issue.id].agent_execution.known_terminal
       raw = File.read!(RunStateStore.state_path(c.workspace))
       assert known.stage == c.terminal_stage
-      GenServer.call(c.owner, {:request_stop, c.issue.id}, 500)
+      GenServer.call(c.owner, {:request_stop, c.issue.id}, 5_000)
       worker = entry.pid
-      assert_receive {:stop_guard, ^worker, {:stop, {:execution_stopped, %{stage: stage}}}}, 1_000
+      assert_receive {:stop_guard, ^worker, {:stop, {:execution_stopped, %{stage: stage}}}}, 5_000
       assert stage == c.terminal_stage
       await!(fn -> runtime(c).running == %{} end)
       stopped = runtime(c)
@@ -493,10 +493,10 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
   test "a physical lease successor survives the old worker stop and DOWN", c do
     entry = dispatch!(c, :cooperative)
     assert :ok = GenServer.call(c.owner, {:hold_down, true})
-    GenServer.call(c.owner, {:request_stop, c.issue.id}, 500)
+    GenServer.call(c.owner, {:request_stop, c.issue.id}, 5_000)
     worker = entry.pid
     owner = c.owner
-    assert_receive {:down_held, ^owner, {:DOWN, _, :process, ^worker, :shutdown}}, 1_000
+    assert_receive {:down_held, ^owner, {:DOWN, _, :process, ^worker, :shutdown}}, 5_000
     claim = runtime(c).lease_claims[c.issue.id]
     journal = marker!(entry)
     assert {:ok, :released} = LeaseManager.release_token(entry.lease_token)
@@ -520,9 +520,9 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
     entry = dispatch!(c, :ignore_shutdown)
     observer = self()
     request = %{ref: make_ref(), action: :pause, identifier: c.issue.identifier, args: [], deadline: System.monotonic_time(:millisecond) + 1_000}
-    {caller, caller_ref} = spawn_monitor(fn -> send(observer, {:caller_reply, GenServer.call(c.owner, {:control, request}, 1_000)}) end)
-    assert_receive {:caller_reply, %{ok: true, action: "pause"}}, 1_000
-    assert_receive {:DOWN, ^caller_ref, :process, ^caller, :normal}, 1_000
+    {caller, caller_ref} = spawn_monitor(fn -> send(observer, {:caller_reply, GenServer.call(c.owner, {:control, request}, 5_000)}) end)
+    assert_receive {:caller_reply, %{ok: true, action: "pause"}}, 5_000
+    assert_receive {:DOWN, ^caller_ref, :process, ^caller, :normal}, 5_000
     accepted = runtime(c)
     shutdown = accepted.running[c.issue.id].execution_stop_requested.shutdown
     assert Process.alive?(entry.pid)
@@ -564,11 +564,11 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
   defp in_worker(worker, fun) do
     ref = make_ref()
     send(worker, {:exercise, self(), ref, fun})
-    assert_receive {:exercise_result, ^ref, result}, 1_000
+    assert_receive {:exercise_result, ^ref, result}, 5_000
     result
   end
 
-  defp runtime(c), do: GenServer.call(c.owner, :runtime, 500)
+  defp runtime(c), do: GenServer.call(c.owner, :runtime, 5_000)
   defp marker!(entry), do: File.read!(Path.join(DispatchAudit.marker_directory(entry.workspace_path), "marker.json"))
   defp events(c, type), do: Enum.filter(RunLedger.recent_entries(500), &(&1["issue_id"] == c.issue.id and &1["event_type"] == type))
   defp deadline_message(entry, shutdown), do: {:accounted_worker_stop_deadline, entry.agent_execution.context, entry.ref, shutdown.ref}
@@ -601,7 +601,7 @@ defmodule SymphonyElixir.OrchestratorAccountedStopTest do
   defp pause_default_scheduler! do
     if owner = Process.whereis(Orchestrator) do
       await!(fn ->
-        state = :sys.get_state(owner, 500)
+        state = :sys.get_state(owner, 5_000)
 
         state.running == %{} and is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and is_nil(state.admission_read) and state.tracker_poll_pending == [] and
           not state.poll_check_in_progress

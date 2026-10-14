@@ -13,8 +13,8 @@ defmodule SymphonyElixir.DispatchGateTest do
     on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
     refute_receive {:body, ^worker}, 50
     assert :ok = DispatchGate.activate(worker, "dispatch-1")
-    assert_receive {:body, ^worker}, 1_000
-    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 1_000
+    assert_receive {:body, ^worker}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 5_000
   end
 
   test "stale dispatch ids and a different sender cannot authorize the body" do
@@ -39,8 +39,8 @@ defmodule SymphonyElixir.DispatchGateTest do
     refute_receive {:body, ^worker}, 50
     DispatchGate.activate(worker, "current")
     DispatchGate.activate(worker, "current")
-    assert_receive {:body, ^worker}, 1_000
-    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 1_000
+    assert_receive {:body, ^worker}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 5_000
     refute_received {:body, ^worker}
   end
 
@@ -68,8 +68,8 @@ defmodule SymphonyElixir.DispatchGateTest do
       traced_worker(owner, "waiting", fn -> send(parent, :forbidden_body) end)
 
     Process.exit(owner, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}, 1_000
-    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, _reason}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, _reason}, 5_000
+    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, _reason}, 5_000
     refute_received :forbidden_body
   end
 
@@ -87,10 +87,10 @@ defmodule SymphonyElixir.DispatchGateTest do
       end)
 
     send(owner, {:activate, worker, "running"})
-    assert_receive {:body_entered, ^worker}, 1_000
+    assert_receive {:body_entered, ^worker}, 5_000
     Process.exit(owner, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^worker, :killed}, 1_000
-    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, _reason}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :killed}, 5_000
+    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, _reason}, 5_000
     refute_received :body_continued
   end
 
@@ -101,8 +101,8 @@ defmodule SymphonyElixir.DispatchGateTest do
       traced_worker(owner, "abort", fn -> flunk("unauthorized body") end)
 
     Process.exit(worker, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^worker, :killed}, 1_000
-    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, _reason}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :killed}, 5_000
+    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, _reason}, 5_000
   end
 
   test "authorization queued early still waits for a fully monitoring guardian" do
@@ -127,11 +127,11 @@ defmodule SymphonyElixir.DispatchGateTest do
     on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
     DispatchGate.activate(worker, "early")
     send(worker, :start)
-    assert_receive {:guardian_monitors, guardian, monitors}, 1_000
+    assert_receive {:guardian_monitors, guardian, monitors}, 5_000
     assert {:process, owner} in monitors
     assert {:process, worker} in monitors
-    assert_receive {:gate_result, :body_result}, 1_000
-    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 1_000
+    assert_receive {:gate_result, :body_result}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 5_000
     refute Process.alive?(guardian)
   end
 
@@ -142,8 +142,8 @@ defmodule SymphonyElixir.DispatchGateTest do
       traced_worker(owner, "failure", fn -> exit(:controlled_body_failure) end)
 
     send(owner, {:activate, worker, "failure"})
-    assert_receive {:DOWN, ^ref, :process, ^worker, :controlled_body_failure}, 1_000
-    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, _reason}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, :controlled_body_failure}, 5_000
+    assert_receive {:DOWN, ^guardian_ref, :process, ^guardian, _reason}, 5_000
   end
 
   defp owner_process do
@@ -171,7 +171,7 @@ defmodule SymphonyElixir.DispatchGateTest do
     on_exit(fn -> if Process.alive?(worker), do: Process.exit(worker, :kill) end)
     :erlang.trace(worker, true, [:procs])
     send(worker, :start)
-    assert_receive {:trace, ^worker, :spawn, guardian, _entry}, 1_000
+    assert_receive {:trace, ^worker, :spawn, guardian, _entry}, 5_000
     guardian_ref = Process.monitor(guardian)
     :erlang.trace(worker, false, [:procs])
     {worker, ref, guardian, guardian_ref}

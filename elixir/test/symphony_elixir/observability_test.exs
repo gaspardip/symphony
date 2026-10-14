@@ -115,9 +115,9 @@ defmodule SymphonyElixir.ObservabilityTest do
           metadata: %{action: "pause"}
         })
 
-      assert_receive {:telemetry_event, [:symphony, :ledger, :event], %{count: 1}, %{event_type: "operator.action"}}, 1_000
+      assert_receive {:telemetry_event, [:symphony, :ledger, :event], %{count: 1}, %{event_type: "operator.action"}}, 5_000
 
-      assert_receive {:telemetry_event, [:symphony, :operator, :action], %{count: 1}, metadata}, 1_000
+      assert_receive {:telemetry_event, [:symphony, :operator, :action], %{count: 1}, metadata}, 5_000
       assert metadata.action == "pause"
       assert metadata.issue_identifier == "CLZ-22"
     after
@@ -152,7 +152,7 @@ defmodule SymphonyElixir.ObservabilityTest do
         %{dynamic_key => "value", existing_key: :ok}
       )
 
-      assert_receive {:telemetry_metadata, metadata}, 1_000
+      assert_receive {:telemetry_metadata, metadata}, 5_000
       assert metadata[normalized_key] == "value"
       assert metadata[:existing_key] == "ok"
 

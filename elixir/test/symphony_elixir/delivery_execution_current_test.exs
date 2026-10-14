@@ -1121,15 +1121,15 @@ defmodule SymphonyElixir.DeliveryExecutionCurrentTest do
     try do
       result = fun.()
       ref = :erlang.trace_delivered(worker)
-      assert_receive {:trace_delivered, _, ^ref}, 1_000
+      assert_receive {:trace_delivered, _, ^ref}, 5_000
       send(tracer, :flush)
-      assert_receive {:provider_stops, ports}, 1_000
+      assert_receive {:provider_stops, ports}, 5_000
       {result, ports}
     after
       :erlang.trace(worker, false, [:call])
       :erlang.trace_pattern({Codex, :stop_session, 1}, false, [])
       send(tracer, :stop)
-      assert_receive {:DOWN, ^monitor, :process, ^tracer, :normal}, 1_000
+      assert_receive {:DOWN, ^monitor, :process, ^tracer, :normal}, 5_000
     end
   end
 

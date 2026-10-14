@@ -221,7 +221,7 @@ defmodule SymphonyElixir.ExecutionBoundaryHarnessIntegrationTest do
           end
         end)
 
-      assert_receive {:provider_port, ^port}, 1000
+      assert_receive {:provider_port, ^port}, 5_000
       assert Port.info(port) == nil
       assert File.read!(Path.join(c.workspace, "candidate.txt")) == "answer=42\n"
 

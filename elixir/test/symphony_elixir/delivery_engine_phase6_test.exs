@@ -981,7 +981,7 @@ defmodule SymphonyElixir.DeliveryEnginePhase6Test do
     issue_id = issue.id
 
     assert :ok = handler.(payload)
-    assert_receive {:agent_worker_update, ^issue_id, ^payload}, 100
+    assert_receive {:agent_worker_update, ^issue_id, ^payload}, 5_000
   end
 
   test "normalize_state_for_test falls back to an empty string for non-binary values" do

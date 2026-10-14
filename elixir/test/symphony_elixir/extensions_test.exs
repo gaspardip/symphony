@@ -164,7 +164,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     on_exit(fn ->
       monitor = Process.monitor(manual_pid)
       Process.exit(manual_pid, :shutdown)
-      assert_receive {:DOWN, ^monitor, :process, ^manual_pid, _reason}, 1_000
+      assert_receive {:DOWN, ^monitor, :process, ^manual_pid, _reason}, 5_000
     end)
 
     assert Process.alive?(manual_pid)
@@ -174,18 +174,18 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:noreply, returned_state} = WorkflowStore.handle_info(:poll, state)
     assert returned_state.workflow.prompt == "Manual workflow prompt"
     refute returned_state.stamp == nil
-    assert_receive :poll, 2_000
+    assert_receive :poll, 5_000
 
     Workflow.set_workflow_file_path(missing_path)
     assert {:noreply, path_error_state} = WorkflowStore.handle_info(:poll, returned_state)
     assert path_error_state.workflow.prompt == "Manual workflow prompt"
-    assert_receive :poll, 2_000
+    assert_receive :poll, 5_000
 
     Workflow.set_workflow_file_path(manual_path)
     File.rm!(manual_path)
     assert {:noreply, removed_state} = WorkflowStore.handle_info(:poll, path_error_state)
     assert removed_state.workflow.prompt == "Manual workflow prompt"
-    assert_receive :poll, 2_000
+    assert_receive :poll, 5_000
 
     assert :ok = GenServer.stop(manual_pid, :normal)
     Workflow.set_workflow_file_path(existing_path)

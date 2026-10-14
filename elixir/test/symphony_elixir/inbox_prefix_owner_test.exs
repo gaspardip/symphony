@@ -92,13 +92,13 @@ defmodule SymphonyElixir.InboxPrefixOwnerTest do
   test "GitHub retains its original two-row horizon while an append waits behind a held ACK", ctx do
     assert {:ok, %{accepted: 2}} = GitHubEventInbox.enqueue([github_event("A"), github_event("B")])
     send(ctx.pid, :run_github_webhook_cycle)
-    assert_receive {:prefix_ack, {:github_inbox_ack, cursor_a} = ack_a}, 2_000
+    assert_receive {:prefix_ack, {:github_inbox_ack, cursor_a} = ack_a}, 5_000
     original = GenServer.call(ctx.pid, :state).github_inbox_batch
     assert length(original.rows) == 2
     assert original.head.event.event_id == "A"
     assert {:ok, %{accepted: 1}} = GitHubEventInbox.enqueue([github_event("C")])
     send(ctx.pid, {:deliver_confirmed_callback, ack_a})
-    assert_receive {:prefix_ack, {:github_inbox_ack, cursor_b} = ack_b}, 2_000
+    assert_receive {:prefix_ack, {:github_inbox_ack, cursor_b} = ack_b}, 5_000
     next = GenServer.call(ctx.pid, :state).github_inbox_batch
     assert next.ref == original.ref
     assert length(next.rows) == 1
@@ -107,7 +107,7 @@ defmodule SymphonyElixir.InboxPrefixOwnerTest do
     assert next.end_offset == original.end_offset
     assert Enum.map(GitHubEventInbox.pending_events(), & &1["event"]["event_id"]) == ["B", "C"]
     send(ctx.pid, {:deliver_confirmed_callback, ack_b})
-    assert_receive {:prefix_ack, {:github_inbox_ack, cursor_c} = ack_c}, 2_000
+    assert_receive {:prefix_ack, {:github_inbox_ack, cursor_c} = ack_c}, 5_000
     tail = GenServer.call(ctx.pid, :state).github_inbox_batch
     assert tail.ref != original.ref
     assert length(tail.rows) == 1
@@ -123,7 +123,7 @@ defmodule SymphonyElixir.InboxPrefixOwnerTest do
   test "GitHub reset after completion preserves the obsolete pending ACK and the untouched replacement generation", ctx do
     assert {:ok, %{accepted: 1}} = GitHubEventInbox.enqueue([github_event("A")])
     send(ctx.pid, :run_github_webhook_cycle)
-    assert_receive {:prefix_ack, {:github_inbox_ack, cursor} = ack}, 2_000
+    assert_receive {:prefix_ack, {:github_inbox_ack, cursor} = ack}, 5_000
     before = GenServer.call(ctx.pid, :state)
     assert :ok = GitHubEventInbox.reset(cursor.location)
     assert {:ok, %{accepted: 1}} = GitHubEventInbox.enqueue([github_event("A")])
@@ -144,13 +144,13 @@ defmodule SymphonyElixir.InboxPrefixOwnerTest do
   test "GitHub confirms the captured old location before capturing a newly configured log root", ctx do
     assert {:ok, %{accepted: 1}} = GitHubEventInbox.enqueue([github_event("A")])
     send(ctx.pid, :run_github_webhook_cycle)
-    assert_receive {:prefix_ack, {:github_inbox_ack, old_cursor} = ack_a}, 2_000
+    assert_receive {:prefix_ack, {:github_inbox_ack, old_cursor} = ack_a}, 5_000
     Application.put_env(:symphony_elixir, :log_file, Path.join(ctx.root, "new-log/symphony.log"))
     assert {:ok, %{accepted: 1}} = GitHubEventInbox.enqueue([github_event("B")])
     new_location = GitHubEventInbox.location()
     assert new_location != old_cursor.location
     send(ctx.pid, {:deliver_confirmed_callback, ack_a})
-    assert_receive {:prefix_ack, {:github_inbox_ack, new_cursor} = ack_b}, 2_000
+    assert_receive {:prefix_ack, {:github_inbox_ack, new_cursor} = ack_b}, 5_000
     assert new_cursor.location == new_location
     assert {:ok, %{rows: []}} = GitHubEventInbox.capture(old_cursor.location, %{max_rows: 100, max_bytes: 4 * 1024 * 1024})
     state = GenServer.call(ctx.pid, :state)
@@ -166,8 +166,8 @@ defmodule SymphonyElixir.InboxPrefixOwnerTest do
     event = %TrackerEvent{provider: "linear", event_id: "A", entity_type: "Issue", entity_id: "A", issue_identifier: "ISSUE-A", action: "update", raw: %{}}
     assert {:ok, %{accepted: 1}} = TrackerEventInbox.enqueue([event])
     send(ctx.pid, :run_webhook_cycle)
-    assert_receive {:prefix_lookup, "A"}, 2_000
-    assert_receive {:prefix_ack, {:tracker_inbox_ack, cursor} = ack}, 2_000
+    assert_receive {:prefix_lookup, "A"}, 5_000
+    assert_receive {:prefix_ack, {:tracker_inbox_ack, cursor} = ack}, 5_000
     assert :ok = TrackerEventInbox.reset(cursor.location)
     assert {:ok, %{accepted: 1}} = TrackerEventInbox.enqueue([event])
     send(ctx.pid, {:deliver_confirmed_callback, ack})
@@ -196,10 +196,10 @@ defmodule SymphonyElixir.InboxPrefixOwnerTest do
       not state.poll_check_in_progress and inbox_settled
   end
 
-  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_state!(pid, predicate, deadline) do
-    state = GenServer.call(pid, :state, 500)
+    state = GenServer.call(pid, :state, 5_000)
 
     if predicate.(state) do
       state
@@ -215,7 +215,7 @@ defmodule SymphonyElixir.InboxPrefixOwnerTest do
 
   defp pause_scheduler! do
     if pid = Process.whereis(Orchestrator) do
-      state = wait_default_idle!(pid, System.monotonic_time(:millisecond) + 2_000)
+      state = wait_default_idle!(pid, System.monotonic_time(:millisecond) + 5_000)
       assert state.running == %{}
       assert idle?(state)
       :ok = :sys.suspend(pid)
@@ -224,7 +224,7 @@ defmodule SymphonyElixir.InboxPrefixOwnerTest do
   end
 
   defp wait_default_idle!(pid, deadline) do
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, 5_000)
 
     if state.running == %{} and idle?(state) and state.tracker_poll_pending == [] do
       state

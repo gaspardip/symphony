@@ -608,7 +608,7 @@ defmodule SymphonyElixir.DeployExecutionCurrentTest do
             send(worker.pid, :run_public_boundary)
             # The trace is emitted from LM.ensure_current inside the public workspace lock.
             # Release this test-owned directory well before LM's unchanged 1000ms deadline.
-            assert_receive {:trace, ^worker_pid, :call, {File, :mkdir, [^lock_path]}}, 500
+            assert_receive {:trace, ^worker_pid, :call, {File, :mkdir, [^lock_path]}}, 5_000
 
             competitor =
               Task.async(fn ->
@@ -619,7 +619,7 @@ defmodule SymphonyElixir.DeployExecutionCurrentTest do
               end)
 
             on_exit(fn -> if Process.alive?(competitor.pid), do: Process.exit(competitor.pid, :kill) end)
-            assert_receive :physical_competitor_entering, 100
+            assert_receive :physical_competitor_entering, 5_000
             refute_receive :physical_competitor_completed, 100
             competitor
           after

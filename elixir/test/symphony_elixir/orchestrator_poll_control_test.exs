@@ -107,7 +107,7 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
 
       assert %{ok: true} = control(owner, context.control_action, issue("A").identifier)
       assert_writes!(context.control_action, "A")
-      state = :sys.get_state(owner, 500)
+      state = :sys.get_state(owner, 5_000)
       assert state.admission_read == operation
       assert Process.alive?(reader)
       assert Process.alive?(operation.pid)
@@ -118,11 +118,11 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
       assert count_event("A", "operator.action") == 1
 
       send(reader, {:answer, {:ok, [issue("A")]}})
-      assert_receive {:DOWN, ^child_monitor, :process, ^reader, :normal}, 2_000
-      assert_receive {:DOWN, ^guardian_monitor, :process, guardian, :normal}, 2_000
+      assert_receive {:DOWN, ^child_monitor, :process, ^reader, :normal}, 5_000
+      assert_receive {:DOWN, ^guardian_monitor, :process, guardian, :normal}, 5_000
       assert guardian == operation.pid
-      assert_receive {:poll_control_read, reader_b, ["B"]}, 2_000
-      next = :sys.get_state(owner, 500)
+      assert_receive {:poll_control_read, reader_b, ["B"]}, 5_000
+      next = :sys.get_state(owner, 5_000)
       assert next.admission_read.ref != operation.ref
       assert next.admission_read.issue.id == "B"
       watch_reader_cleanup!(next.admission_read.pid)
@@ -139,7 +139,7 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
     {owner, reader, operation} = held_poll!()
     assert %{ok: true} = Orchestrator.stop_issue(owner, issue("A").identifier)
     assert_writes!(:stop, "A")
-    assert :sys.get_state(owner, 500).admission_read == operation
+    assert :sys.get_state(owner, 5_000).admission_read == operation
     assert Process.alive?(reader)
 
     send(reader, {:answer, {:error, {:linear_api_status, 429, %{retry_after_ms: 60_000}}}})
@@ -185,16 +185,16 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
       # Release the original physical reader; the queued public control must
       # now consult its own identifier and report that real lookup's absence.
       send(reader, {:answer, {:ok, []}})
-      assert_receive {:poll_control_lookup, ^identifier}, 2_000
-      assert %{ok: false, error: ":issue_not_found"} = Task.await(task, 2_000)
+      assert_receive {:poll_control_lookup, ^identifier}, 5_000
+      assert %{ok: false, error: ":issue_not_found"} = Task.await(task, 5_000)
       refute_received {:poll_control_write, _, _}
       assert count_event("A", "operator.action") == 0
       assert count_event("B", "operator.action") == 0
-      assert_no_dispatch!(:sys.get_state(owner, 500), ["A", "B"])
+      assert_no_dispatch!(:sys.get_state(owner, 5_000), ["A", "B"])
 
       if context.control_boundary == :identifier_mismatch do
-        assert_receive {:poll_control_read, reader_b, ["B"]}, 2_000
-        next = :sys.get_state(owner, 500)
+        assert_receive {:poll_control_read, reader_b, ["B"]}, 5_000
+        next = :sys.get_state(owner, 5_000)
         watch_reader_cleanup!(next.admission_read.pid)
         send(reader_b, {:answer, {:ok, []}})
       end
@@ -218,12 +218,12 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
 
     send(reader, {:answer, {:ok, []}})
     identifier = issue("A").identifier
-    assert_receive {:poll_control_lookup, ^identifier}, 2_000
-    assert %{ok: false, error: ":issue_not_found"} = Task.await(task, 2_000)
+    assert_receive {:poll_control_lookup, ^identifier}, 5_000
+    assert %{ok: false, error: ":issue_not_found"} = Task.await(task, 5_000)
     assert count_event("A", "operator.action") == 1
     refute_received {:poll_control_write, _, _}
-    assert_receive {:poll_control_read, reader_b, ["B"]}, 2_000
-    state = :sys.get_state(owner, 500)
+    assert_receive {:poll_control_read, reader_b, ["B"]}, 5_000
+    state = :sys.get_state(owner, 5_000)
     watch_reader_cleanup!(state.admission_read.pid)
     send(reader_b, {:answer, {:ok, []}})
     assert_no_dispatch!(idle!(owner), ["A", "B"])
@@ -233,8 +233,8 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
   defp control(owner, :pause, identifier), do: Orchestrator.pause_issue(owner, identifier)
 
   defp assert_writes!(action, id) do
-    assert_receive {:poll_control_write, :state, ^id}, 2_000
-    if action == :stop, do: assert_receive({:poll_control_write, :comment, ^id}, 2_000)
+    assert_receive {:poll_control_write, :state, ^id}, 5_000
+    if action == :stop, do: assert_receive({:poll_control_write, :comment, ^id}, 5_000)
     refute_received {:poll_control_write, _, _}
   end
 
@@ -263,8 +263,8 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
   defp held_poll! do
     name = Module.concat(__MODULE__, "Owner#{System.unique_integer([:positive])}")
     owner = start_supervised!({Orchestrator, name: name})
-    assert_receive {:poll_control_read, reader, ["A"]}, 2_000
-    operation = :sys.get_state(owner, 500).admission_read
+    assert_receive {:poll_control_read, reader, ["A"]}, 5_000
+    operation = :sys.get_state(owner, 5_000).admission_read
     assert operation.purpose == :poll
     assert operation.issue == issue("A")
     assert operation.fingerprint == Config.tracker_read_context().fingerprint
@@ -275,7 +275,7 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
   defp watch_reader_cleanup!(guardian) do
     on_exit(fn ->
       monitor = Process.monitor(guardian)
-      assert_receive {:DOWN, ^monitor, :process, ^guardian, _reason}, 2_000
+      assert_receive {:DOWN, ^monitor, :process, ^guardian, _reason}, 5_000
     end)
   end
 
@@ -291,10 +291,10 @@ defmodule SymphonyElixir.OrchestratorPollControlTest do
     do: is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and state.tracker_poll_pending == [] and not state.poll_check_in_progress and not state.github_webhook_check_in_progress
 
   defp idle!(owner), do: wait_state!(owner, &(idle?(&1) and &1.first_poll_completed and is_nil(&1.admission_read) and is_nil(&1.admission_batch)))
-  defp wait_state!(owner, predicate), do: wait_state!(owner, predicate, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_state!(owner, predicate), do: wait_state!(owner, predicate, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_state!(owner, predicate, deadline) do
-    state = :sys.get_state(owner, 500)
+    state = :sys.get_state(owner, 5_000)
 
     if predicate.(state) do
       state

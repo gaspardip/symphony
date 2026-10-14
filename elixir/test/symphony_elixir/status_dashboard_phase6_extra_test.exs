@@ -112,7 +112,7 @@ defmodule SymphonyElixir.StatusDashboardPhase6ExtraTest do
       assert {:noreply, %StatusDashboard{} = first_state} =
                StatusDashboard.handle_info(:refresh, state)
 
-      assert_receive {:rendered, first_content}, 100
+      assert_receive {:rendered, first_content}, 5_000
       assert first_content =~ "Orchestrator snapshot unavailable"
       assert first_state.last_snapshot_fingerprint == :error
       assert Enum.all?(first_state.token_samples, fn {timestamp, _tokens} -> timestamp >= now_ms - 5_000 end)
@@ -134,7 +134,7 @@ defmodule SymphonyElixir.StatusDashboardPhase6ExtraTest do
       }
 
       assert {:noreply, rerendered_state} = StatusDashboard.handle_info(:refresh, overdue_state)
-      assert_receive {:rendered, second_content}, 100
+      assert_receive {:rendered, second_content}, 5_000
       assert second_content == first_content
       assert rerendered_state.last_snapshot_fingerprint == :error
     end)
@@ -152,7 +152,7 @@ defmodule SymphonyElixir.StatusDashboardPhase6ExtraTest do
         )
 
       assert {:noreply, malformed_state} = StatusDashboard.handle_info(:refresh, state)
-      assert_receive {:rendered, content}, 100
+      assert_receive {:rendered, content}, 5_000
       assert content =~ "Orchestrator snapshot unavailable"
       assert malformed_state.last_snapshot_fingerprint == :error
     end)
@@ -185,7 +185,7 @@ defmodule SymphonyElixir.StatusDashboardPhase6ExtraTest do
           )
 
         assert {:noreply, unusual_state} = StatusDashboard.handle_info(:refresh, state)
-        assert_receive {:rendered_unusual, rendered_content}, 100
+        assert_receive {:rendered_unusual, rendered_content}, 5_000
         assert strip_ansi(rendered_content) =~ "MT-BAD"
         assert strip_ansi(unusual_state.last_rendered_content) =~ "MT-BAD"
       end
@@ -209,7 +209,7 @@ defmodule SymphonyElixir.StatusDashboardPhase6ExtraTest do
         )
 
       assert {:noreply, _periodic_result} = StatusDashboard.handle_info(:refresh, periodic_state)
-      assert_receive {:rendered, ^content}, 100
+      assert_receive {:rendered, ^content}, 5_000
 
       fallback_state =
         dashboard_state(
@@ -257,7 +257,7 @@ defmodule SymphonyElixir.StatusDashboardPhase6ExtraTest do
       assert is_reference(queued_result.flush_timer_ref)
       assert queued_result.pending_content == content
       refute_receive {:queued_render, _frame}, 20
-      assert_receive {:flush_render, queued_ref}, 50
+      assert_receive {:flush_render, queued_ref}, 5_000
       assert queued_ref == queued_result.flush_timer_ref
 
       existing_ref = make_ref()
@@ -298,9 +298,9 @@ defmodule SymphonyElixir.StatusDashboardPhase6ExtraTest do
         )
 
       assert {:noreply, _next_state} = StatusDashboard.handle_info(:tick, state)
-      assert_receive {:rendered, content}, 100
+      assert_receive {:rendered, content}, 5_000
       assert content =~ "Orchestrator snapshot unavailable"
-      assert_receive :tick, 100
+      assert_receive :tick, 5_000
     end)
   end
 

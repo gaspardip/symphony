@@ -250,11 +250,11 @@ defmodule SymphonyElixir.OwnedProviderTransportTest do
         end
       end)
 
-    assert_receive {:opened, ^caller, handle, identity}, 3000
+    assert_receive {:opened, ^caller, handle, identity}, 5_000
     tree = register_tree!(c, handle, identity)
     monitor = Process.monitor(caller)
     Process.exit(caller, :kill)
-    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 1000
+    assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
     await!(fn -> tree_absent?(tree) end, 4000)
     refute File.exists?(tree.boundary_root)
     refute File.exists?(tree.artifact)

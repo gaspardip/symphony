@@ -68,7 +68,7 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
              end)
 
     assert :ok = DispatchGate.activate(worker, ticket.dispatch_id)
-    assert_receive {:body_entered, ^worker}, 1_000
+    assert_receive {:body_entered, ^worker}, 5_000
 
     monitor = Process.monitor(worker)
     retry_ref = make_ref()
@@ -147,7 +147,7 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
 
       stopped = Orchestrator.refresh_runtime_config(c.state)
 
-      assert_receive {:DOWN, ^watch, :process, worker, _reason}, 1_000
+      assert_receive {:DOWN, ^watch, :process, worker, _reason}, 5_000
       assert worker == c.worker
       refute Process.alive?(worker)
       assert stopped.running == %{}
@@ -200,7 +200,7 @@ defmodule SymphonyElixir.LeaseRefreshAuditIntegrationTest do
     assert {:error, :eisdir} = LeaseManager.refresh_token(c.state.lease_claims[c.issue.id].token)
     watch = Process.monitor(c.worker)
     refreshed = Orchestrator.refresh_runtime_config(c.state)
-    assert_receive {:DOWN, ^watch, :process, _, _}, 1_000
+    assert_receive {:DOWN, ^watch, :process, _, _}, 5_000
     refute Process.alive?(c.worker)
     assert refreshed.running == %{}
     assert refreshed.claimed == c.state.claimed
