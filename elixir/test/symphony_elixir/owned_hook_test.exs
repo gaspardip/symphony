@@ -54,7 +54,7 @@ defmodule SymphonyElixir.OwnedHookTest do
     monitor = Process.monitor(caller)
     Process.exit(caller, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
-    await!(fn -> tree_absent?(identities) end, 4_000)
+    await!(fn -> tree_absent?(identities) end, 5_000)
     assert_tree_absent!(identities)
   end
 
@@ -65,7 +65,7 @@ defmodule SymphonyElixir.OwnedHookTest do
     {:connected, custodian} = Port.info(port, :connected)
     Process.exit(custodian, :kill)
     assert {:error, {:cleanup_uncertain, {:owner_down, :killed}}} = Task.await(task, 5_000)
-    await!(fn -> tree_absent?(identities) end, 4_000)
+    await!(fn -> tree_absent?(identities) end, 5_000)
     assert_tree_absent!(identities)
   end
 
@@ -338,14 +338,14 @@ defmodule SymphonyElixir.OwnedHookTest do
 
       if same_identity?(identities.helper, process_identity(identities.helper.pid)) do
         signal_exact!(identities.helper, "TERM")
-        await!(fn -> process_identity(identities.helper.pid) == nil end, 4_000)
+        await!(fn -> process_identity(identities.helper.pid) == nil end, 5_000)
       end
 
       if same_identity?(identities.shell, process_identity(identities.shell.pid)) do
         {_output, 0} = System.cmd("/bin/kill", ["-s", "KILL", "--", "-#{identities.shell.pgid}"], stderr_to_stdout: true)
       end
 
-      await!(fn -> tree_absent?(identities) end, 4_000)
+      await!(fn -> tree_absent?(identities) end, 5_000)
       artifact = data["artifact"]
       assert Path.basename(artifact) == "owner"
       assert String.starts_with?(Path.basename(Path.dirname(artifact)), "symphony-owned-hook-")

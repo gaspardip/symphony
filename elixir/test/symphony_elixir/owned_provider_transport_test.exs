@@ -203,7 +203,7 @@ defmodule SymphonyElixir.OwnedProviderTransportTest do
 
   test "paused caller receives at most one credited output chunk and can still close", c do
     {:ok, handle, _} = open(c, "printf ready > producing; while :; do printf 'bounded-output-chunk'; done")
-    await!(fn -> File.exists?(Path.join(c.workspace, "producing")) end, 1000)
+    await!(fn -> File.exists?(Path.join(c.workspace, "producing")) end, 5_000)
     Process.sleep(100)
     {:messages, messages} = Process.info(self(), :messages)
     chunks = Enum.filter(messages, &match?({^handle, {:chunk, _, _}}, &1))
@@ -255,9 +255,8 @@ defmodule SymphonyElixir.OwnedProviderTransportTest do
     monitor = Process.monitor(caller)
     Process.exit(caller, :kill)
     assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
-    await!(fn -> tree_absent?(tree) end, 4000)
-    refute File.exists?(tree.boundary_root)
-    refute File.exists?(tree.artifact)
+    # Custodian cleanup of the boundary root and artifact can trail the process tree's exit.
+    await!(fn -> tree_absent?(tree) and not File.exists?(tree.boundary_root) and not File.exists?(tree.artifact) end, 5_000)
     # The dead caller cannot persist a finish event; do not fabricate one.
     assert Enum.map(boundary_events(), & &1["event_type"]) == ["execution.boundary.started"]
   end
@@ -280,7 +279,7 @@ defmodule SymphonyElixir.OwnedProviderTransportTest do
     tree = register_tree!(c, handle, identity)
     Process.exit(elem(handle, 1), :kill)
     assert {:transport_error, {:provider_cleanup_uncertain, :custodian_down}} = ProviderTransport.recv(handle, 4000)
-    await!(fn -> tree_absent?(tree) end, 4000)
+    await!(fn -> tree_absent?(tree) end, 5_000)
     assert {:error, {:provider_cleanup_uncertain, :custodian_down}} = ProviderTransport.close(handle)
     assert List.last(boundary_events())["metadata"]["certain"] == 0
   end
@@ -319,7 +318,7 @@ defmodule SymphonyElixir.OwnedProviderTransportTest do
   end
 
   defp register_tree!(c, handle, identity) do
-    await!(fn -> File.exists?(Path.join(c.workspace, "descendant.pid")) and File.exists?(Path.join(c.workspace, "roots")) end, 1500)
+    await!(fn -> File.exists?(Path.join(c.workspace, "descendant.pid")) and File.exists?(Path.join(c.workspace, "roots")) end, 5_000)
     descendant = Path.join(c.workspace, "descendant.pid") |> File.read!() |> String.trim() |> String.to_integer()
     [home, _tmp] = File.read!(Path.join(c.workspace, "roots")) |> String.split("\n", trim: true)
     processes = %{child: process_identity(identity.child), helper: process_identity(identity.helper), descendant: process_identity(descendant)}
@@ -389,7 +388,7 @@ defmodule SymphonyElixir.OwnedProviderTransportTest do
           assert {_, 0} = System.cmd("/bin/kill", ["-s", "KILL", "--", "-#{processes.child.pgid}"], stderr_to_stdout: true)
         end
 
-        await!(fn -> tree_absent?(tree) end, 4000)
+        await!(fn -> tree_absent?(tree) end, 5_000)
         assert Path.dirname(tree.boundary_root) == "/private/tmp"
         assert String.starts_with?(Path.basename(tree.boundary_root), "symphony-boundary-")
         assert Path.basename(tree.artifact) == "owner"

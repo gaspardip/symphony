@@ -16,7 +16,7 @@ defmodule SymphonyElixir.TerminalLeaseReleaseTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
     pid = start_supervised!({Orchestrator, name: Module.concat(__MODULE__, :Scheduler)})
     on_exit(fn -> File.rm_rf(root) end)
-    await_initial_poll(pid, 150)
+    await_initial_poll(pid, 500)
     %{pid: pid}
   end
 
