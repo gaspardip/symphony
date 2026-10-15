@@ -396,7 +396,7 @@ button {
 
 .run-body {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
@@ -692,7 +692,7 @@ button {
 
 .run-card .run-body {
   background: transparent;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
   margin-top: 0.75rem;
 }
 
