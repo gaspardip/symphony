@@ -574,7 +574,7 @@ defmodule SymphonyElixir.ProviderBoundaryIntegrationTest do
             assert String.trim(text) == ""
         end
 
-        await_absent!(child, System.monotonic_time(:millisecond) + 3000)
+        await_absent!(child, System.monotonic_time(:millisecond) + 5_000)
         {groups, 0} = System.cmd("/bin/ps", ["-axo", "pgid="])
         refute to_string(child) in String.split(groups)
         resource = data["resource"]

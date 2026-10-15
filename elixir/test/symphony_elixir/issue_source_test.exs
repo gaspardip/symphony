@@ -404,7 +404,7 @@ defmodule SymphonyElixir.IssueSourceTest do
       hold_ref = make_ref()
       checked_action!({:hold, hold_ref})
       reader = checked_reader!(c, supervisor)
-      assert_receive {:checked_source_held, child, ^hold_ref}, 1_000
+      assert_receive {:checked_source_held, child, ^hold_ref}, 5_000
       Process.exit(child, :kill)
       assert_checked_reader_result(reader, {:error, {:tracker_reader_exit, :killed}})
     end
@@ -611,7 +611,7 @@ defmodule SymphonyElixir.IssueSourceTest do
       ref = make_ref()
       identifier_action!({:hold, ref})
       assert {:ok, reader} = SymphonyElixir.TrackerReader.start(fn -> IssueSource.fetch_issue_by_identifier_checked("REQUEST-1", :tracker, c.identifier_context) end, supervisor: supervisor)
-      assert_receive {:checked_identifier_held, child, ^ref}, 1_000
+      assert_receive {:checked_identifier_held, child, ^ref}, 5_000
       Process.exit(child, :kill)
       assert_checked_reader_result(reader, {:error, {:tracker_reader_exit, :killed}})
     end
@@ -668,8 +668,8 @@ defmodule SymphonyElixir.IssueSourceTest do
 
   defp assert_checked_reader_result(reader, expected) do
     %{ref: ref, pid: pid, monitor: monitor} = reader
-    assert_receive {:tracker_read_result, ^ref, ^expected}, 1_000
-    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+    assert_receive {:tracker_read_result, ^ref, ^expected}, 5_000
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 5_000
     refute Process.alive?(pid)
   end
 end

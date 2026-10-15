@@ -253,7 +253,7 @@ defmodule SymphonyElixir.ExecutionBoundaryTest do
     task = Task.async(fn -> ExecutionBoundary.run(c.workspace, "record-private-roots-and-wait") end)
 
     try do
-      [_, _] = await_lines(marker, 100)
+      [_, _] = await_lines(marker, 250)
       assert File.exists?(marker)
       [home, tmp] = File.read!(marker) |> String.split("\n", trim: true)
       assert File.dir?(home)
@@ -263,7 +263,7 @@ defmodule SymphonyElixir.ExecutionBoundaryTest do
       refute File.exists?(tmp)
     after
       if Process.alive?(task.pid), do: Task.shutdown(task, :brutal_kill)
-      Enum.each(MapSet.difference(private_roots(), before), &await_absent(&1, 200))
+      Enum.each(MapSet.difference(private_roots(), before), &await_absent(&1, 250))
     end
   end
 
@@ -274,11 +274,11 @@ defmodule SymphonyElixir.ExecutionBoundaryTest do
     monitor = Process.monitor(caller)
 
     try do
-      [home, tmp] = await_lines(marker, 100)
+      [home, tmp] = await_lines(marker, 250)
       Process.exit(caller, :kill)
-      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 1000
+      assert_receive {:DOWN, ^monitor, :process, ^caller, :killed}, 5_000
       assert Path.dirname(home) == Path.dirname(tmp)
-      await_absent(Path.dirname(home), 200)
+      await_absent(Path.dirname(home), 250)
       refute File.exists?(home)
       refute File.exists?(tmp)
     after

@@ -24,6 +24,8 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   @pr "https://github.com/local/continuation/pull/1"
   @private "PRIVATE-C5-MARKER-DO-NOT-LOG"
+  # Ceiling for every wait in this file; a loaded macOS runner overran 2s, and once 5s, while a real worker crossed the gate.
+  @wait_ms 10_000
 
   defmodule Client do
     def fetch_issue_by_id(id) do
@@ -343,7 +345,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     state = runtime(c.pid)
     assert state.tracker_poll_read.purpose == :github_lookup
     assert state.github_inbox_ack_pending == nil
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, @wait_ms))
     assert is_map(Orchestrator.stop_issue(c.pid, "ISSUE-A"))
     await!(c.pid, &is_nil(&1.tracker_poll_read))
     refute Process.alive?(reader)
@@ -513,7 +515,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace = workspace!("A", %{stage: "blocked", stop_reason: %{code: "previous"}, resume_context: %{token_pressure: "high", retained: 7}})
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     initial = runtime(c.pid)
     operation = operation(initial)
@@ -538,7 +540,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace = workspace!("A")
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     before = runtime(c.pid)
     original = before.lease_claims["A"]
@@ -637,7 +639,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
       write_config!(c.workflow, put_in(c.config, [:agent, :max_concurrent_agents], 1))
       send(c.pid, :run_poll_cycle)
-      assert_receive :candidate_read, 2_000
+      assert_receive :candidate_read, @wait_ms
       await!(c.pid, &(is_nil(&1.tracker_poll_cycle) and is_nil(&1.tracker_poll_read) and is_nil(&1.admission_read)))
       assert runtime(c.pid).running == %{}
       refute File.exists?(c.ready)
@@ -701,9 +703,9 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   test "review uses the same continuation and preserves fresh budget context", c do
     workspace = workspace!("A", %{resume_context: %{token_pressure: "high", retained: "usage"}})
     enqueue!(c.pid, :review)
-    assert_receive {:review_read, ^workspace}, 2_000
+    assert_receive {:review_read, ^workspace}, @wait_ms
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     persisted = raw(workspace)
     assert persisted["stage"] in ["implement", "review_verification"]
@@ -723,7 +725,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       workspace = workspace!("A")
       enqueue!(c.pid)
       send(read!("A"), {:answer, {:ok, issue("A")}})
-      assert_receive {:github_writer, "A"}, 2_000
+      assert_receive {:github_writer, "A"}, @wait_ms
       refresh = read!("A")
       after_apply = bytes(workspace)
       send(refresh, {:answer, unquote(Macro.escape(answer))})
@@ -750,12 +752,12 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
         end)
 
       refute log =~ @private
-      assert_receive {:github_writer, "A"}, 2_000
+      assert_receive {:github_writer, "A"}, @wait_ms
       assert raw(workspace)["stage"] == "implement"
       assert effect_count("A", "ci.failure_autonomous_follow_up") == 1
       assert operation(runtime(c.pid)).effects.ledger == :confirmed
       send(c.pid, :run_github_webhook_cycle)
-      assert is_map(Orchestrator.snapshot(c.pid, 500))
+      assert is_map(Orchestrator.snapshot(c.pid, @wait_ms))
       assert transition_count(workspace, "implement") == 1
       refute_receive {:github_read, _, "A"}, 100
       refute_received {:github_writer, "A"}
@@ -782,7 +784,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace = workspace!("A")
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     before = runtime(c.pid)
     send(refresh, {:answer, {:error, {:linear_rate_limited, %{retry_after_ms: 100}}}})
@@ -800,7 +802,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace = workspace!("A")
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     deadline = operation(runtime(c.pid)).authority.deadline
     now = System.monotonic_time(:millisecond)
@@ -873,7 +875,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace = workspace!("A")
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     reader = read!("A")
     assert is_map(Orchestrator.pause_issue(c.pid, "ISSUE-A"))
     await!(c.pid, &is_nil(&1.tracker_poll_read))
@@ -920,7 +922,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     updated = Map.put(raw(workspace), "next_human_action", "control after admission")
     write_raw!(workspace, updated)
     deliver!(c.pid, gate)
-    assert_receive {:DOWN, ^ref, :process, ^worker, _}, 2_000
+    assert_receive {:DOWN, ^ref, :process, ^worker, _}, @wait_ms
     refute File.exists?(c.ready)
     assert raw(workspace)["next_human_action"] == "control after admission"
     assert runtime(c.pid).running == %{}
@@ -954,7 +956,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert {:ok, %{accepted: 1}} = GitHubEventInbox.enqueue([event(:ci)])
     send(pid, :run_github_webhook_cycle)
     wait_file!(c.ready)
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, @wait_ms)
     entry = state.running["manual:REAL"]
     assert entry.execution_started?
     assert Process.alive?(entry.pid)
@@ -986,7 +988,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert effect_count("A", "ci.failure_autonomous_follow_up") == 0
     monitor = Process.monitor(worker)
     send(worker, :finish)
-    assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^worker, :normal}, @wait_ms
     reader = read!("A")
     state = runtime(c.pid)
     retry = state.retry_attempts["A"]
@@ -997,7 +999,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert operation(state).waited_down == :normal
     send(c.pid, {:retry_issue, "A", retry.retry_ref})
     send(reader, {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     acquired = runtime(c.pid)
     assert acquired.retry_attempts["A"].attempt == retry.attempt
@@ -1045,7 +1047,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       send(c.pid, {:retry_issue, "A", retry.retry_ref})
       send(read!("A"), {:answer, {:ok, %{issue("A") | state: "Human Review"}}})
       send(read!("A"), {:answer, {:ok, %{issue("A") | state: "Human Review"}}})
-      assert_receive {:github_writer, "A"}, 2_000
+      assert_receive {:github_writer, "A"}, @wait_ms
       send(read!("A"), {:answer, {:ok, issue("A")}})
       deliver!(c.pid, callback!(:gate))
       wait_file!(c.ready)
@@ -1104,7 +1106,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace = workspace!("A")
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     original = runtime(c.pid).lease_claims["A"]
     successor_ref = make_ref()
@@ -1133,7 +1135,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     monitor = Process.monitor(worker)
     assert is_map(Orchestrator.pause_issue(c.pid, "ISSUE-A"))
     deliver!(c.pid, gate)
-    assert_receive {:DOWN, ^monitor, :process, ^worker, _}, 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _}, @wait_ms
     refute File.exists?(c.ready)
     assert raw(workspace)["stage"] == "implement"
     assert effect_count("manual:A", "ci.failure_autonomous_follow_up") == 1
@@ -1144,10 +1146,10 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace!("A")
     fixture(%{hold_admission: true, candidates: [issue("OTHER")]})
     send(c.pid, :run_poll_cycle)
-    assert_receive {:admission_read, admission, ["OTHER"]}, 2_000
+    assert_receive {:admission_read, admission, ["OTHER"]}, @wait_ms
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     send(refresh, {:answer, {:ok, issue("A")}})
     state = await!(c.pid, &phase?(&1, :waiting_admission))
@@ -1187,7 +1189,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     enqueue!(c.pid)
     reader = read!("A")
     send(reader, {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     await!(c.pid, &blocked?/1)
     assert raw(workspace)["stage"] == "implement"
     assert operation(runtime(c.pid)).effects.cas == :confirmed
@@ -1195,7 +1197,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert match?({:error, _}, operation(runtime(c.pid)).effects.ledger)
     assert runtime(c.pid).github_inbox_ack_pending == nil
     send(c.pid, :run_github_webhook_cycle)
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, @wait_ms))
     refute_receive {:github_read, _, "A"}, 100
     refute_received {:github_writer, "A"}
   end
@@ -1220,7 +1222,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
                      receive do
                        :continue_manual_refresh -> :ok
                      after
-                       2_000 -> raise "manual refresh barrier expired"
+                       @wait_ms -> raise "manual refresh barrier expired"
                      end
                    end
                  end,
@@ -1229,7 +1231,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
       enqueue!(c.pid)
-      assert_receive {:manual_refresh_before_read, reader}, 2_000
+      assert_receive {:manual_refresh_before_read, reader}, @wait_ms
       assert raw(workspace)["stage"] == "implement"
       assert Jason.decode!(File.read!(manual_path(c, "manual:A")))["issue"]["state"] == "In Progress"
       applied = bytes(workspace)
@@ -1259,7 +1261,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       if unquote(outcome) == :corrupt do
         assert runtime(c.pid).github_inbox_ack_pending == nil
         send(c.pid, :run_github_webhook_cycle)
-        assert is_map(Orchestrator.snapshot(c.pid, 500))
+        assert is_map(Orchestrator.snapshot(c.pid, @wait_ms))
         assert :atomics.get(count, 1) == 2
       else
         ack!(c.pid)
@@ -1310,7 +1312,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace!("A")
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     reader = read!("A")
     old = runtime(c.pid).lease_claims["A"].token
     assert {:ok, :released} = LeaseManager.release_token(old)
@@ -1343,7 +1345,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace = workspace!("A", %{token_usage: %{total_tokens: 250_000, input_tokens: 250_000, output_tokens: 0}})
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     send(read!("A"), {:answer, {:ok, issue("A")}})
     await!(c.pid, &blocked?/1)
     assert raw(workspace)["token_usage"]["total_tokens"] == 250_000
@@ -1426,7 +1428,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert operation(backoff).waited_down == :normal
     wake = callback!(:wakeup)
     send(c.pid, {:retry_issue, "A", retry.retry_ref})
-    assert is_map(Orchestrator.snapshot(c.pid, 500))
+    assert is_map(Orchestrator.snapshot(c.pid, @wait_ms))
     assert runtime(c.pid).lease_claims["A"].token == claim.token
     refute_received {:admission_read, _, _}
     refute_received {:github_callback, :ack, _}
@@ -1441,7 +1443,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert fresh.retry.attempt == retry.attempt
     assert fresh.view.resume_context["fresh_during_backoff"] == "retained"
     send(reader, {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     acquired = runtime(c.pid).lease_claims["A"]
     assert acquired.custody_ref != claim.custody_ref
@@ -1484,7 +1486,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
         end)
 
       refute log =~ @private
-      assert_receive {:github_writer, "A"}, 2_000
+      assert_receive {:github_writer, "A"}, @wait_ms
       state = runtime(c.pid)
       assert operation(state).effects.writer == error
       assert operation(state).effects.ledger == :confirmed
@@ -1495,7 +1497,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       assert transition_count(workspace, "implement") == 1
       assert effect_count("A", "ci.failure_autonomous_follow_up") == 1
       send(c.pid, :run_github_webhook_cycle)
-      assert is_map(Orchestrator.snapshot(c.pid, 500))
+      assert is_map(Orchestrator.snapshot(c.pid, @wait_ms))
       counts = trace_counts(tracer, c.pid)
       assert counts.cas == 1
       assert counts.writer == 1
@@ -1522,7 +1524,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     fixture(%{review_consumed: true})
     tracer = trace_effects!(c.pid)
     send(worker, :finish)
-    assert_receive {:review_read, ^workspace}, 2_000
+    assert_receive {:review_read, ^workspace}, @wait_ms
     ack = callback!(:ack)
     counts = trace_counts(tracer, c.pid)
     assert counts.cas == 0
@@ -1545,7 +1547,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     enqueue!(c.pid)
     await!(c.pid, &phase?(&1, :waiting_worker))
     send(worker, {:transition, self(), "done", %{last_decision_summary: "W1 already completed the run"}})
-    assert_receive {:worker_transition, ^worker, {:ok, %{stage: "done"}}}, 2_000
+    assert_receive {:worker_transition, ^worker, {:ok, %{stage: "done"}}}, @wait_ms
     assert runtime(c.pid).running["A"].agent_execution.known_terminal.stage == "done"
     tracer = trace_effects!(c.pid)
     send(worker, :finish)
@@ -1612,7 +1614,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     workspace = workspace!("A")
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     monitor = Process.monitor(refresh)
     before = runtime(c.pid)
@@ -1634,7 +1636,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     end
 
     assert System.monotonic_time(:millisecond) >= deadline
-    assert_receive {:DOWN, ^monitor, :process, ^refresh, _}, 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^refresh, _}, @wait_ms
     ack = callback!(:ack)
     assert runtime(c.pid).tracker_poll_read == nil
     deliver!(c.pid, ack)
@@ -1673,7 +1675,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert runtime(c.pid).lease_claims["manual:A"].deadline == deadline
     assert Process.alive?(worker)
     deliver!(c.pid, gate)
-    assert_receive {:DOWN, ^monitor, :process, ^worker, _}, 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^worker, _}, @wait_ms
     refute File.exists?(c.ready)
     assert runtime(c.pid).running == %{}
     assert trace_counts(tracer, c.pid).gate == 0
@@ -1907,7 +1909,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
         end
 
       assert %{ok: true} = reply
-      assert_receive {:github_writer, "A"}, 2_000
+      assert_receive {:github_writer, "A"}, @wait_ms
       current = runtime(c.pid)
       assert operation(current) == retained
       assert current.lease_claims["A"] == claim
@@ -1992,7 +1994,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       tracer = trace_effects!(c.pid)
       enqueue!(c.pid)
       send(read!("A"), {:answer, {:ok, issue("A")}})
-      assert_receive {:github_writer, "A"}, 2_000
+      assert_receive {:github_writer, "A"}, @wait_ms
       refresh = read!("A")
       assert :ok = GenServer.call(c.pid, {:hold, :result, true})
       send(refresh, {:answer, {:ok, issue("A")}})
@@ -2035,7 +2037,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
         try do
           deliver!(c.pid, result)
-          assert_receive :spawn_begin_confirmed, 2_000
+          assert_receive :spawn_begin_confirmed, @wait_ms
           state = runtime(c.pid)
           assert blocked?(state)
           assert state.running == %{}
@@ -2120,7 +2122,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     assert :ok = GenServer.call(c.pid, {:hold, :continue, true})
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     send(read!("A"), {:answer, {:ok, nil}})
     continuation = callback!(:continue)
     cursor = runtime(c.pid).github_inbox_batch.head.row.cursor
@@ -2261,7 +2263,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   defp hold_poll_reader!(pid) do
     fixture(%{hold_poll_states: true})
     send(pid, :run_poll_cycle)
-    assert_receive {:poll_states_read, child, _states}, 2_000
+    assert_receive {:poll_states_read, child, _states}, @wait_ms
     reader = runtime(pid).tracker_poll_read
     assert reader.phase == :approval
     assert Process.alive?(child)
@@ -2275,8 +2277,8 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     child_monitor = held.child_monitor
     guardian_monitor = held.guardian_monitor
     send(child, {:answer, {:ok, []}})
-    assert_receive {:DOWN, ^child_monitor, :process, ^child, :normal}, 2_000
-    assert_receive {:DOWN, ^guardian_monitor, :process, ^guardian, :normal}, 2_000
+    assert_receive {:DOWN, ^child_monitor, :process, ^child, :normal}, @wait_ms
+    assert_receive {:DOWN, ^guardian_monitor, :process, ^guardian, :normal}, @wait_ms
   end
 
   defp reject_admission_during_begin!(c, close_failure) do
@@ -2286,7 +2288,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     tracer = trace_effects!(c.pid)
     enqueue!(c.pid)
     send(read!("A"), {:answer, {:ok, issue("A")}})
-    assert_receive {:github_writer, "A"}, 2_000
+    assert_receive {:github_writer, "A"}, @wait_ms
     refresh = read!("A")
     before = runtime(c.pid)
     handler = "c5-admission-#{System.unique_integer([:positive])}"
@@ -2304,7 +2306,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
             receive do
               :continue_admission_begin -> :ok
             after
-              2_000 -> raise "Admission begin fixture barrier expired"
+              @wait_ms -> raise "Admission begin fixture barrier expired"
             end
           end
         end,
@@ -2317,7 +2319,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
     end)
 
     send(refresh, {:answer, {:ok, issue("A")}})
-    assert_receive {:admission_begin_barrier, ^owner}, 2_000
+    assert_receive {:admission_begin_barrier, ^owner}, @wait_ms
     original = raw(workspace)
     changed = Map.put(original, "next_human_action", "changed while begin held its real lock")
     assert RunStateStore.material_projection(changed) == RunStateStore.material_projection(original)
@@ -2476,7 +2478,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       Enum.each(functions, &:erlang.trace_pattern(&1, false, [:local]))
       ref = Process.monitor(tracer)
       send(tracer, :stop)
-      assert_receive {:DOWN, ^ref, :process, ^tracer, :normal}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^tracer, :normal}, @wait_ms
     end)
 
     tracer
@@ -2521,17 +2523,17 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   defp trace_counts(tracer, owner) do
     delivered = :erlang.trace_delivered(owner)
-    assert_receive {:trace_delivered, ^owner, ^delivered}, 1_000
+    assert_receive {:trace_delivered, ^owner, ^delivered}, @wait_ms
     ref = make_ref()
     send(tracer, {:counts, self(), ref})
-    assert_receive {:counts, ^ref, counts}, 1_000
+    assert_receive {:counts, ^ref, counts}, @wait_ms
     counts
   end
 
   defp cleanup_real_owner!(pid, hook) do
     if Process.alive?(pid) do
-      assert :ok = :sys.suspend(pid, 500)
-      state = :sys.get_state(pid, 500)
+      assert :ok = :sys.suspend(pid, @wait_ms)
+      state = :sys.get_state(pid, @wait_ms)
 
       children =
         Enum.map(state.running, fn {_id, entry} -> entry.pid end) ++
@@ -2546,7 +2548,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
         wait_fixture_hooks!(hook)
       after
         GenServer.stop(pid)
-        Enum.each(refs, fn {child, ref} -> assert_receive {:DOWN, ^ref, :process, ^child, _}, 2_000 end)
+        Enum.each(refs, fn {child, ref} -> assert_receive {:DOWN, ^ref, :process, ^child, _}, @wait_ms end)
       end
     end
 
@@ -2554,7 +2556,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp wait_until!(predicate, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    deadline = deadline || System.monotonic_time(:millisecond) + @wait_ms
 
     unless predicate.() do
       assert System.monotonic_time(:millisecond) < deadline, "condition did not become true"
@@ -2623,28 +2625,28 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp enqueue!(pid, kind \\ :ci) do
-    assert {:ok, %{accepted: 1}} = GenServer.call(pid, {:enqueue, event(kind)}, 5_000)
+    assert {:ok, %{accepted: 1}} = GenServer.call(pid, {:enqueue, event(kind)}, @wait_ms)
     send(pid, :run_github_webhook_cycle)
   end
 
   defp read!(id) do
-    assert_receive {:github_read, reader, ^id}, 2_000
+    assert_receive {:github_read, reader, ^id}, @wait_ms
     reader
   end
 
   defp callback!(kind) do
-    assert_receive {:github_callback, ^kind, message}, 2_000
+    assert_receive {:github_callback, ^kind, message}, @wait_ms
     message
   end
 
-  defp deliver!(pid, message), do: assert(:ok == GenServer.call(pid, {:deliver, message}, 5_000))
+  defp deliver!(pid, message), do: assert(:ok == GenServer.call(pid, {:deliver, message}, @wait_ms))
 
   defp ack!(pid) do
     deliver!(pid, callback!(:ack))
     await!(pid, &is_nil(&1.github_inbox_ack_pending))
   end
 
-  defp runtime(pid), do: GenServer.call(pid, :runtime, 500)
+  defp runtime(pid), do: GenServer.call(pid, :runtime, @wait_ms)
   defp operation(state), do: state.github_inbox_batch.head.operation
   defp phase?(%{github_inbox_batch: %{head: %{operation: %{phase: phase}}}}, phase), do: true
   defp phase?(_state, _phase), do: false
@@ -2681,7 +2683,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp await!(pid, predicate, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    deadline = deadline || System.monotonic_time(:millisecond) + @wait_ms
     state = runtime(pid)
 
     if predicate.(state) do
@@ -2697,7 +2699,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp wait_file!(path, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    deadline = deadline || System.monotonic_time(:millisecond) + @wait_ms
 
     unless File.exists?(path) do
       assert System.monotonic_time(:millisecond) < deadline, "worker did not cross real gate"
@@ -2711,8 +2713,8 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   defp cleanup_driver!(pid, hook) do
     if Process.alive?(pid) do
-      assert :ok = :sys.suspend(pid, 500)
-      state = :sys.get_state(pid, 500).runtime
+      assert :ok = :sys.suspend(pid, @wait_ms)
+      state = :sys.get_state(pid, @wait_ms).runtime
       readers = Enum.reject([state.tracker_poll_read, state.admission_read], &is_nil/1)
       workers = Enum.map(state.running, fn {_id, entry} -> entry.pid end)
       monitors = Enum.map(Enum.uniq(Enum.map(readers, & &1.pid) ++ workers), &{&1, Process.monitor(&1)})
@@ -2730,7 +2732,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
       after
         GenServer.stop(pid)
         Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-        Enum.each(monitors, fn {worker, ref} -> assert_receive {:DOWN, ^ref, :process, ^worker, _}, 2_000 end)
+        Enum.each(monitors, fn {worker, ref} -> assert_receive {:DOWN, ^ref, :process, ^worker, _}, @wait_ms end)
       end
     end
 
@@ -2786,7 +2788,7 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
   end
 
   defp wait_fixture_hooks!(hook, deadline \\ nil) do
-    deadline = deadline || System.monotonic_time(:millisecond) + 2_000
+    deadline = deadline || System.monotonic_time(:millisecond) + @wait_ms
 
     case fixture_hook_pids(hook) do
       [] ->
@@ -2801,14 +2803,14 @@ defmodule SymphonyElixir.GitHubEventContinuationTest do
 
   defp pause_default_scheduler! do
     if pid = Process.whereis(Orchestrator) do
-      wait_default_idle!(pid, System.monotonic_time(:millisecond) + 2_000)
+      wait_default_idle!(pid, System.monotonic_time(:millisecond) + @wait_ms)
       assert :ok = :sys.suspend(pid)
       on_exit(fn -> assert :ok = :sys.resume(pid) end)
     end
   end
 
   defp wait_default_idle!(pid, deadline) do
-    state = :sys.get_state(pid, 500)
+    state = :sys.get_state(pid, @wait_ms)
 
     if state.running == %{} and is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and is_nil(state.admission_read) and state.tracker_poll_pending == [] and
          not state.poll_check_in_progress do

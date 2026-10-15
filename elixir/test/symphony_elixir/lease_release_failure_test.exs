@@ -183,7 +183,7 @@ defmodule SymphonyElixir.LeaseReleaseFailureTest do
 
         GenServer.stop(owner)
         Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+        Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
       end
     end)
 

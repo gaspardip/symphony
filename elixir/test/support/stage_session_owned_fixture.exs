@@ -85,7 +85,7 @@ defmodule SymphonyElixir.TestSupport.StageSessionOwnedFixture do
   end
 
   def assert_tree_absent!(tree) do
-    await_tree_absent!(tree, System.monotonic_time(:millisecond) + 4_000)
+    await_tree_absent!(tree, System.monotonic_time(:millisecond) + 5_000)
   end
 
   def cleanup_uncertain!(tree) do
@@ -111,7 +111,7 @@ defmodule SymphonyElixir.TestSupport.StageSessionOwnedFixture do
   end
 
   def assert_closed!(tree) do
-    deadline = System.monotonic_time(:millisecond) + 4_000
+    deadline = System.monotonic_time(:millisecond) + 5_000
     await_closed!(tree, deadline)
   end
 

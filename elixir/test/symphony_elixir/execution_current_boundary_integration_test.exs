@@ -248,7 +248,7 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
                )
              end)
 
-    assert_receive {:callback, ^worker, :notification}, 2_000
+    assert_receive {:callback, ^worker, :notification}, 5_000
     refute_received {:callback, ^worker, _}
     refute_received {:tool, _}
     assert after_marker(c, "stale-boundary") == []
@@ -293,7 +293,7 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
                )
              end)
 
-    assert_receive {:callback, ^worker, :notification}, 2_000
+    assert_receive {:callback, ^worker, :notification}, 5_000
     refute_received {:callback, ^worker, _}
     refute_received {:tool, _}
     assert after_marker(c, "done-boundary") == []
@@ -342,10 +342,10 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
                result
              end)
 
-    assert_receive {:tool, "report_agent_turn_result"}, 2_000
-    assert_receive {:callback, ^worker, :turn_ended_with_error}, 2_000
-    assert_receive :next_tool, 2_000
-    assert_receive {:callback, ^worker, :turn_completed}, 2_000
+    assert_receive {:tool, "report_agent_turn_result"}, 5_000
+    assert_receive {:callback, ^worker, :turn_ended_with_error}, 5_000
+    assert_receive :next_tool, 5_000
+    assert_receive {:callback, ^worker, :turn_completed}, 5_000
     current = runtime(owner)
     assert current.token_usage_errors == %{} and current.stale_execution_errors == %{}
     assert current.running[c.issue.id].agent_execution.terminal == nil
@@ -392,7 +392,7 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
                result
              end)
 
-    assert_receive {:callback, ^worker, :turn_ended_with_error}, 2_000
+    assert_receive {:callback, ^worker, :turn_ended_with_error}, 5_000
     refute_received {:callback, ^worker, _}
     refute_received {:tool, _}
     current = runtime(owner)
@@ -471,7 +471,7 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
     control = raw!(c) |> Map.put("stage", "blocked") |> Map.put("policy_override", "operator-between-guards") |> Jason.encode!()
     assert :ok = GenServer.call(owner, :hold_next_confirm)
     ref = request_worker(worker, fn -> Workspace.create_for_issue(c.issue) end)
-    assert_receive {:owner_confirmed, ^owner, :ok}, 2_000
+    assert_receive {:owner_confirmed, ^owner, :ok}, 5_000
     observer = self()
 
     controller =
@@ -491,7 +491,7 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
         end
       end)
 
-    assert_receive {:control_written, ^controller}, 2_000
+    assert_receive {:control_written, ^controller}, 5_000
     assert :ok = GenServer.call(owner, :release_confirm)
     send(controller, :release)
     ids = ids(entry)
@@ -560,8 +560,8 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
     ledger = File.read!(entry.lease_token.storage.ledger_path)
     assert length(finish_events(c)) == 1
     id = c.issue.id
-    assert_receive {:memory_tracker_comment, ^id, _}, 2_000
-    assert_receive {:memory_tracker_state_update, ^id, "Blocked"}, 2_000
+    assert_receive {:memory_tracker_comment, ^id, _}, 5_000
+    assert_receive {:memory_tracker_state_update, ^id, "Blocked"}, 5_000
     assert :ok = GenServer.call(owner, :release_usage)
     assert runtime(owner) == stopped
     assert File.read!(RunStateStore.state_path(c.workspace)) == snapshot
@@ -585,7 +585,7 @@ defmodule SymphonyElixir.ExecutionCurrentBoundaryIntegrationTest do
                AgentExecution.fail(:later_accounting_cause)
              end)
 
-    assert_receive {:stale_held, ^owner, {:agent_execution_stale, context, ^ids, :worker_first_cause}}, 2_000
+    assert_receive {:stale_held, ^owner, {:agent_execution_stale, context, ^ids, :worker_first_cause}}, 5_000
     assert context == entry.agent_execution.context
     assert runtime(owner).running[c.issue.id].agent_execution.terminal == nil
     before = evidence(c, entry)

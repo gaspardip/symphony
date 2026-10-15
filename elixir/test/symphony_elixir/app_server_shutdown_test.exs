@@ -216,7 +216,7 @@ defmodule SymphonyElixir.AppServerShutdownTest do
       receive do
         {:worker_result, ^worker, result} -> result
       after
-        1_000 -> flunk("Worker result was not delivered")
+        5_000 -> flunk("Worker result was not delivered")
       end
 
     eof = wait_value(fn -> read_optional(context.directory, "provider-exit.json") end)
@@ -360,7 +360,7 @@ defmodule SymphonyElixir.AppServerShutdownTest do
       {:trace, _, _, _} = event -> trace_events(reference, [event | events])
       {:trace, _, _, _, _} = event -> trace_events(reference, [event | events])
     after
-      2_000 -> flunk("Trace delivery was not confirmed")
+      5_000 -> flunk("Trace delivery was not confirmed")
     end
   end
 

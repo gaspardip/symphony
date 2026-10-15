@@ -482,13 +482,13 @@ defmodule SymphonyElixir.RunTraceabilityTest do
 
     try do
       send(reader, :read)
-      assert_receive {:trace, ^reader, :call, {RunStateStore, :with_workspace_lock, [workspace, _fun]}}, 2_000
+      assert_receive {:trace, ^reader, :call, {RunStateStore, :with_workspace_lock, [workspace, _fun]}}, 5_000
       assert workspace == f.workspace
       event = RunLedger.record("traceability.test.concurrent", %{issue_id: f.issue.id, issue_identifier: f.issue.identifier})
       assert is_binary(event.event_id)
       assert :global.del_lock(lock, [node()])
-      assert_receive {:query_result, ^reader, {:error, 409, %{error: %{code: "source_changed", cause: "ledger_changed"}}}}, 2_000
-      assert_receive {:DOWN, ^monitor, :process, ^reader, :normal}, 2_000
+      assert_receive {:query_result, ^reader, {:error, 409, %{error: %{code: "source_changed", cause: "ledger_changed"}}}}, 5_000
+      assert_receive {:DOWN, ^monitor, :process, ^reader, :normal}, 5_000
     after
       :global.del_lock(lock, [node()])
       :erlang.trace_pattern({RunStateStore, :with_workspace_lock, 2}, false, [:local])

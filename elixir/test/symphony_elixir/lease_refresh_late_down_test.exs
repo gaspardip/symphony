@@ -68,7 +68,7 @@ defmodule SymphonyElixir.LeaseRefreshLateDownTest do
       end)
 
     assert :ok = DispatchGate.activate(worker, ticket.dispatch_id)
-    assert_receive {:body_entered, ^worker}, 1_000
+    assert_receive {:body_entered, ^worker}, 5_000
 
     monitor = Process.monitor(worker)
     retry_ref = make_ref()
@@ -109,7 +109,7 @@ defmodule SymphonyElixir.LeaseRefreshLateDownTest do
       receive do
         {:DOWN, ^ref, :process, ^worker, _reason} -> :ok
       after
-        1_000 -> raise "owned test worker did not stop"
+        5_000 -> raise "owned test worker did not stop"
       end
 
       File.rm_rf!(lease_path)
@@ -139,7 +139,7 @@ defmodule SymphonyElixir.LeaseRefreshLateDownTest do
   test "late DOWN after an unconfirmed stop preserves the uncertain dispatch", c do
     {blocked, pending_bytes, reason} = timeout_on_uncertain_lease(c)
     send(c.worker, :finish)
-    assert_receive {:DOWN, ref, :process, worker, :normal} = down, 1_000
+    assert_receive {:DOWN, ref, :process, worker, :normal} = down, 5_000
     assert ref == c.monitor
     assert worker == c.worker
 
@@ -167,7 +167,7 @@ defmodule SymphonyElixir.LeaseRefreshLateDownTest do
 
     # A barrier lets the same unsupervised worker accept the next shutdown.
     send(c.worker, :accept_shutdown)
-    assert_receive {:accepting_shutdown, worker}, 1_000
+    assert_receive {:accepting_shutdown, worker}, 5_000
     assert worker == c.worker
     stopped = Orchestrator.terminate_running_issue(refreshed, c.issue.id, true)
     refute Process.alive?(c.worker)
@@ -180,7 +180,7 @@ defmodule SymphonyElixir.LeaseRefreshLateDownTest do
     File.write!(c.lease_path, pending)
     reason = {:lease_audit_pending, "lease_op_late_down"}
     blocked = Orchestrator.refresh_runtime_config(c.state)
-    assert_receive {:shutdown_ignored, worker}, 1_000
+    assert_receive {:shutdown_ignored, worker}, 5_000
     assert worker == c.worker
     assert Process.alive?(worker)
     assert blocked.running[c.issue.id].pid == c.worker

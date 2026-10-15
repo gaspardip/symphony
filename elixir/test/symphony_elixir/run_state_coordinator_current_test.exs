@@ -483,7 +483,7 @@ defmodule SymphonyElixir.RunStateCoordinatorCurrentTest do
 
       try do
         send(worker_pid, :go)
-        assert_receive {:trace, ^worker_pid, :call, {File, :mkdir, [^lock_path]}}, 500
+        assert_receive {:trace, ^worker_pid, :call, {File, :mkdir, [^lock_path]}}, 5_000
 
         competitor =
           Task.async(fn ->
@@ -491,7 +491,7 @@ defmodule SymphonyElixir.RunStateCoordinatorCurrentTest do
             RunStateStore.with_workspace_lock(c.workspace, fn -> send(parent, :competitor_entered) end)
           end)
 
-        assert_receive :competitor_entering, 100
+        assert_receive :competitor_entering, 5_000
         refute_receive :competitor_entered, 50
         expire(c)
         File.rmdir!(lock_path)
@@ -598,7 +598,7 @@ defmodule SymphonyElixir.RunStateCoordinatorCurrentTest do
           for {mfa, pattern} <- patterns, do: assert(:erlang.trace_pattern(mfa, pattern, [:local]) == 1)
           :erlang.trace(worker_pid, true, [:call, {:tracer, self()}])
           send(worker_pid, :go)
-          assert_receive {:trace, ^worker_pid, :call, {File, :mkdir, [^lock_path]}}, 500
+          assert_receive {:trace, ^worker_pid, :call, {File, :mkdir, [^lock_path]}}, 5_000
 
           case c.failure do
             :cleanup_denied ->
@@ -640,7 +640,7 @@ defmodule SymphonyElixir.RunStateCoordinatorCurrentTest do
 
       assert result == expected_error
       trace_ref = :erlang.trace_delivered(:all)
-      assert_receive {:trace_delivered, :all, ^trace_ref}, 500
+      assert_receive {:trace_delivered, :all, ^trace_ref}, 5_000
       assert_received {:trace, ^worker_pid, :return_from, {File, :mkdir_p, 1}, :ok}
       assert_received {:trace, ^worker_pid, :call, {File, :write, [temporary, _payload, [:write]]}}
       assert String.starts_with?(temporary, path <> ".tmp-")

@@ -252,7 +252,7 @@ defmodule SymphonyElixir.OrchestratorArchivedWorkspaceTest do
 
     monitor = Process.monitor(pid)
     assert :ok = GenServer.stop(pid, :normal, 5_000)
-    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 1_000
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :normal}, 5_000
   end
 
   defp read_snapshot!(workspace) do

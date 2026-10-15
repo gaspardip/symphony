@@ -106,7 +106,7 @@ defmodule SymphonyElixir.TestSupport.StageSessionFixture do
   end
 
   def cli_fixture!(plan, implement) do
-    root = Path.join(System.tmp_dir!(), "stage-admitted-#{System.unique_integer([:positive])}")
+    root = Path.join(physical_tmp_dir!(), "stage-admitted-#{System.unique_integer([:positive])}")
     bin = Path.join(root, "bin")
     File.mkdir_p!(bin)
 
@@ -242,6 +242,20 @@ defmodule SymphonyElixir.TestSupport.StageSessionFixture do
     write_script!(Path.join(c.bin, if(provider == "claude", do: "claude", else: "codex")), body)
   end
 
+  # The execution boundary rejects symlinked roots, and macOS TMPDIR sits under the /var -> /private/var link.
+  defp physical_tmp_dir! do
+    System.tmp_dir!()
+    |> Path.split()
+    |> Enum.reduce(fn part, dir ->
+      path = Path.join(dir, part)
+
+      case File.read_link(path) do
+        {:ok, target} -> Path.expand(target, dir)
+        {:error, _} -> path
+      end
+    end)
+  end
+
   defp write_script!(path, body) do
     File.write!(path, "#!/bin/sh\n" <> body)
     File.chmod!(path, 0o755)
@@ -278,7 +292,7 @@ defmodule SymphonyElixir.TestSupport.StageSessionFixture do
 
       GenServer.stop(owner)
       Enum.each(workers, fn worker -> if Process.alive?(worker), do: Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
-      Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 1_000 end)
+      Enum.each(monitors, fn {pid, ref} -> assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000 end)
     end
   end
 

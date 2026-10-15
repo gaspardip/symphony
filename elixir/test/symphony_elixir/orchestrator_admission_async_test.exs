@@ -88,10 +88,10 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
   test "a held admission has no lease and serves snapshots and worker messages", ctx do
     write_config!(ctx.workflow, put_in(ctx.config, [:agent, :max_concurrent_agents], 2))
     pid = scheduler!()
-    assert_receive {:admission_read, reader, ["A"]}, 2_000
+    assert_receive {:admission_read, reader, ["A"]}, 5_000
     assert {:error, :missing} = LeaseManager.read("A")
     refute File.exists?(Workspace.path_for_issue(issue("A")))
-    assert is_map(Orchestrator.snapshot(pid, 500))
+    assert is_map(Orchestrator.snapshot(pid, 5_000))
 
     worker_issue = issue("WORKER")
     worker = install_running!(pid, worker_issue)
@@ -129,19 +129,19 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
     candidates = [issue("A"), issue("B")]
     fixture(candidates)
     pid = scheduler!()
-    assert_receive {:admission_read, reader_a, ["A"]}, 2_000
+    assert_receive {:admission_read, reader_a, ["A"]}, 5_000
     operation_a = :sys.get_state(pid).admission_read
     fixture([issue("A"), issue("C")])
-    assert_receive {:candidates_read, _}, 2_000
+    assert_receive {:candidates_read, _}, 5_000
     send(pid, :run_poll_cycle)
-    assert_receive {:candidates_read, _}, 2_000
+    assert_receive {:candidates_read, _}, 5_000
     state = wait_state!(pid, &(Enum.map(&1.last_candidate_issues, fn issue -> issue.id end) == ["A", "C"]))
     assert state.admission_read.ref == operation_a.ref
     assert Enum.map(state.admission_batch.issues, & &1.id) == ["B"]
     refute_receive {:admission_read, _, _}, 50
 
     send(reader_a, {:answer, {:ok, []}})
-    assert_receive {:admission_read, reader_b, ["B"]}, 2_000
+    assert_receive {:admission_read, reader_b, ["B"]}, 5_000
     operation_b = :sys.get_state(pid).admission_read
     send(pid, {:tracker_read_result, operation_a.ref, {:ok, [issue("A")]}})
     assert :sys.get_state(pid).admission_read.ref == operation_b.ref
@@ -151,8 +151,8 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
     # dispatch gate opened; do not race post-read synchronous effects or retries.
     try do
       send(reader_b, {:answer, {:ok, [issue("B")]}})
-      wait_file!(ready, System.monotonic_time(:millisecond) + 2_000)
-      state = :sys.get_state(pid, 500)
+      wait_file!(ready, System.monotonic_time(:millisecond) + 5_000)
+      state = :sys.get_state(pid, 5_000)
       assert is_nil(state.admission_batch)
       assert Process.alive?(state.running["B"].pid)
       assert {:ok, lease} = LeaseManager.read("B")
@@ -163,7 +163,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
       # Persistent release also covers an assertion failing before the hook starts.
       # The hook is independently bounded; timeout must never enable the provider.
       File.write!(release, "continue")
-      wait_file!(exited, System.monotonic_time(:millisecond) + 2_000)
+      wait_file!(exited, System.monotonic_time(:millisecond) + 5_000)
       assert File.read!(exited) == "released"
     end
 
@@ -173,7 +173,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
   for action <- [:stop_issue, :pause_issue] do
     test "#{action} completes during the read and suppresses the late answer" do
       pid = scheduler!()
-      assert_receive {:admission_read, reader, ["A"]}, 2_000
+      assert_receive {:admission_read, reader, ["A"]}, 5_000
       assert %{ok: true} = apply(Orchestrator, unquote(action), [pid, issue("A").identifier])
       assert Process.alive?(reader)
       send(reader, {:answer, {:ok, [issue("A")]}})
@@ -188,7 +188,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
     test "a #{change} change invalidates the entire old batch", ctx do
       fixture([issue("A"), issue("B")])
       pid = scheduler!()
-      assert_receive {:admission_read, reader, ["A"]}, 2_000
+      assert_receive {:admission_read, reader, ["A"]}, 5_000
 
       config =
         case unquote(change) do
@@ -210,7 +210,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
     test "#{outcome} response cannot acquire a lease and advances the cursor" do
       fixture([issue("A"), issue("B")])
       pid = scheduler!()
-      assert_receive {:admission_read, reader, ["A"]}, 2_000
+      assert_receive {:admission_read, reader, ["A"]}, 5_000
 
       result =
         case unquote(outcome) do
@@ -222,7 +222,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
         end
 
       send(reader, {:answer, result})
-      assert_receive {:admission_read, reader_b, ["B"]}, 2_000
+      assert_receive {:admission_read, reader_b, ["B"]}, 5_000
       assert {:error, :missing} = LeaseManager.read("A")
       send(reader_b, {:answer, {:ok, []}})
       assert idle!(pid).running == %{}
@@ -231,7 +231,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
 
   test "a current worker keeps its lease and workspace when old admission returns" do
     pid = scheduler!()
-    assert_receive {:admission_read, reader, ["A"]}, 2_000
+    assert_receive {:admission_read, reader, ["A"]}, 5_000
     worker = install_running!(pid, issue("A"))
     workspace = Workspace.path_for_issue(issue("A"))
     sentinel = Path.join(workspace, "current.txt")
@@ -248,12 +248,12 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
   test "reader DOWN is diagnosed and advances to the next issue" do
     fixture([issue("A"), issue("B")])
     pid = scheduler!()
-    assert_receive {:admission_read, child, ["A"]}, 2_000
+    assert_receive {:admission_read, child, ["A"]}, 5_000
     operation = :sys.get_state(pid).admission_read
     monitor = Process.monitor(child)
     Process.exit(operation.pid, :kill)
-    assert_receive {:DOWN, ^monitor, :process, ^child, :killed}, 2_000
-    assert_receive {:admission_read, reader_b, ["B"]}, 2_000
+    assert_receive {:DOWN, ^monitor, :process, ^child, :killed}, 5_000
+    assert_receive {:admission_read, reader_b, ["B"]}, 5_000
     assert :sys.get_state(pid).candidate_fetch_error == {:admission_read_failed, {:tracker_reader_down, :killed}}
     send(reader_b, {:answer, {:ok, []}})
     idle!(pid)
@@ -262,7 +262,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
   test "429 from admission keeps tracker backoff and does not start B" do
     fixture([issue("A"), issue("B")])
     pid = scheduler!()
-    assert_receive {:admission_read, reader, ["A"]}, 2_000
+    assert_receive {:admission_read, reader, ["A"]}, 5_000
     send(reader, {:answer, {:error, {:linear_api_status, 429, %{retry_after_ms: 60_000}}}})
     state = idle!(pid)
     assert state.tracker_backoff_until_ms > System.monotonic_time(:millisecond)
@@ -273,7 +273,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
   test "a 429 still throttles B after a stop invalidates the pending issue" do
     fixture([issue("A"), issue("B")])
     pid = scheduler!()
-    assert_receive {:admission_read, reader, ["A"]}, 2_000
+    assert_receive {:admission_read, reader, ["A"]}, 5_000
     assert %{ok: true} = Orchestrator.stop_issue(pid, issue("A").identifier)
     send(reader, {:answer, {:error, {:linear_api_status, 429, %{retry_after_ms: 60_000}}}})
     state = idle!(pid)
@@ -287,7 +287,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
     test "a newer webhook #{observation} observation invalidates the held admission" do
       fixture([issue("A"), issue("B")])
       pid = scheduler!()
-      assert_receive {:admission_read, reader, ["A"]}, 2_000
+      assert_receive {:admission_read, reader, ["A"]}, 5_000
 
       candidates =
         case unquote(observation) do
@@ -315,7 +315,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
       assert TrackerEventInbox.pending_events(10) == []
       assert Process.alive?(reader)
       send(reader, {:answer, {:ok, [issue("A")]}})
-      assert_receive {:admission_read, reader_b, ["B"]}, 2_000
+      assert_receive {:admission_read, reader_b, ["B"]}, 5_000
       assert {:error, :missing} = LeaseManager.read("A")
       refute File.exists?(Workspace.path_for_issue(issue("A")))
       send(reader_b, {:answer, {:ok, []}})
@@ -325,7 +325,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
 
   test "newer backoff cannot be cleared by an old successful admission" do
     pid = scheduler!()
-    assert_receive {:admission_read, reader, ["A"]}, 2_000
+    assert_receive {:admission_read, reader, ["A"]}, 5_000
     until_ms = System.monotonic_time(:millisecond) + 60_000
     :sys.replace_state(pid, &%{&1 | tracker_backoff_until_ms: until_ms, tracker_backoff_reason: "new backoff"})
     send(reader, {:answer, {:ok, [issue("A")]}})
@@ -336,7 +336,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
 
   test "capacity consumed during the read prevents admission" do
     pid = scheduler!()
-    assert_receive {:admission_read, reader, ["A"]}, 2_000
+    assert_receive {:admission_read, reader, ["A"]}, 5_000
     worker = install_running!(pid, issue("OTHER"))
     send(reader, {:answer, {:ok, [issue("A")]}})
     state = idle!(pid)
@@ -347,7 +347,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
 
   test "budget accumulated while reading is checked before acquiring the lease" do
     pid = scheduler!()
-    assert_receive {:admission_read, reader, ["A"]}, 2_000
+    assert_receive {:admission_read, reader, ["A"]}, 5_000
     issue = issue("A")
     workspace = Workspace.path_for_issue(issue)
     File.mkdir_p!(workspace)
@@ -363,7 +363,7 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
 
   test "a deploy journal created during reading blocks admission and stays intact" do
     pid = scheduler!()
-    assert_receive {:admission_read, reader, ["A"]}, 2_000
+    assert_receive {:admission_read, reader, ["A"]}, 5_000
     workspace = Workspace.path_for_issue(issue("A"))
     marker = DeployAudit.marker_directory(workspace)
     File.mkdir_p!(marker)
@@ -472,12 +472,12 @@ defmodule SymphonyElixir.OrchestratorAdmissionAsyncTest do
     do: is_nil(state.tracker_poll_cycle) and is_nil(state.tracker_poll_read) and state.tracker_poll_pending == [] and not state.poll_check_in_progress and not state.github_webhook_check_in_progress
 
   defp idle!(pid), do: wait_state!(pid, fn state -> idle?(state) and state.first_poll_completed and is_nil(state.admission_read) and is_nil(state.admission_batch) end)
-  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 2_000)
+  defp wait_state!(pid, predicate), do: wait_state!(pid, predicate, System.monotonic_time(:millisecond) + 5_000)
 
   defp wait_state!(pid, predicate, deadline) do
     state =
       try do
-        :sys.get_state(pid, 500)
+        :sys.get_state(pid, 5_000)
       catch
         :exit, reason ->
           IO.puts("Admission fixture coordinator timeout: #{inspect(Process.info(pid, [:current_stacktrace, :messages]))}")
