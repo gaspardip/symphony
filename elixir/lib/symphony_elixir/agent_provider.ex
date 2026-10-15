@@ -146,6 +146,7 @@ defmodule SymphonyElixir.AgentProvider do
       |> Keyword.put(:on_usage, fn raw ->
         guarded_callback(invocation, fn -> AgentExecution.observe_usage(invocation, raw) end)
       end)
+      |> Keyword.put(:effect_guard, fn -> AgentExecution.confirm_invocation(invocation) end)
       |> Keyword.put(:on_message, fn message ->
         guarded_callback(invocation, fn ->
           require_accounting(AgentExecution.forward_update(invocation, message))
