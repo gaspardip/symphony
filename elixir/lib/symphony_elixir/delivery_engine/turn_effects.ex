@@ -6,6 +6,10 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffects do
   Verification emits the terminal callback without preparing or synthesizing a
   delivery result. Neither purpose fills progress evidence. Failed commands or report
   executors stop delivery with a structured error; prior effects are not rolled back.
+
+  Accounted callers pass `:effect_guard`, which re-checks execution authority before
+  each local Git write. A lost authority stops the remaining effects and is returned
+  unchanged. Terminal transport results pass through without local effects.
   """
 
   require Logger
@@ -20,6 +24,7 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffects do
     case {cli_profile(provider), transport_result} do
       {nil, _} -> transport_result
       {_profile, {:error, _reason}} -> transport_result
+      {_profile, {:stop, _reason}} -> transport_result
       {profile, result} -> apply_cli_result(profile, result, workspace, opts, purpose)
     end
   end
@@ -63,21 +68,25 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffects do
 
   defp apply_effects(profile, result, observation, workspace, opts, :delivery) do
     executor = Keyword.get(opts, :tool_executor)
+    guard = Keyword.get(opts, :effect_guard, &unguarded/0)
 
     with :ok <- validate_executor(executor),
-         {:ok, prepared} <- prepare_turn(result.result, observation, workspace, profile),
+         {:ok, prepared} <- prepare_turn(result.result, observation, workspace, profile, guard),
          {:ok, _report} <- synthesize_turn_result(prepared, executor) do
       :ok
     end
   end
 
-  defp prepare_turn(:turn_failed, observation, _workspace, _profile), do: {:ok, observation}
+  defp prepare_turn(:turn_failed, observation, _workspace, _profile, _guard), do: {:ok, observation}
 
-  defp prepare_turn(:turn_completed, observation, workspace, profile) do
+  defp prepare_turn(:turn_completed, observation, workspace, profile, guard) do
     with {:ok, observed} <- detect_changed_files(observation, workspace, profile) do
-      maybe_auto_commit(observed, workspace)
+      maybe_auto_commit(observed, workspace, guard)
     end
   end
+
+  # Legacy callers hold no execution authority to re-check.
+  defp unguarded, do: :ok
 
   defp validate_observation(profile, {:ok, %{result: status, usage: %{}, cli_observation: %{profile: profile, files_touched: paths, result_text: summary, error: _error} = observation} = result})
        when status in [:turn_completed, :turn_failed] and is_list(paths) and
@@ -122,14 +131,25 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffects do
     end
   end
 
-  @doc "Format, stage and commit in order; stop on failure without undoing partial effects."
-  @spec maybe_auto_commit(map(), Path.t()) :: {:ok, map()} | {:error, {:turn_effect_failed, map()}}
-  def maybe_auto_commit(%{files_touched: []} = state, _workspace), do: {:ok, state}
+  @doc """
+  Format, stage and commit in order; stop on failure without undoing partial effects.
 
-  def maybe_auto_commit(%{} = state, workspace) do
-    with :ok <- format_workspace(workspace),
+  `guard` runs before each write and must return `:ok`; anything else stops the
+  remaining effects and is returned as is.
+  """
+  def maybe_auto_commit(state, workspace, guard \\ &unguarded/0)
+
+  @spec maybe_auto_commit(map(), Path.t(), (-> :ok | {:discard, atom()} | {:stop, term()})) ::
+          {:ok, map()} | {:error, {:turn_effect_failed, map()}} | {:discard, atom()} | {:stop, term()}
+  def maybe_auto_commit(%{files_touched: []} = state, _workspace, _guard), do: {:ok, state}
+
+  def maybe_auto_commit(%{} = state, workspace, guard) do
+    with :ok <- guard.(),
+         :ok <- format_workspace(workspace),
+         :ok <- guard.(),
          {:ok, _} <- run_command(:stage, "git", ["add", "-A"], workspace),
          {:ok, {_, status}} <- run_command(:index_diff, "git", ["diff", "--cached", "--quiet"], workspace, [0, 1]),
+         :ok <- guard.(),
          :ok <- commit_changes(status, state, workspace) do
       {:ok, state}
     end

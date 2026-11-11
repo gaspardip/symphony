@@ -552,6 +552,44 @@ defmodule SymphonyElixir.DeliveryEngine.TurnEffectsTest do
     assert command_steps(context.root) == ["git add -A"]
   end
 
+  for {allowed, completed} <- [
+        {0, []},
+        {1, ["mix format"]},
+        {2, ["mix format", "git add -A", "git diff --cached --quiet"]}
+      ] do
+    @allowed allowed
+    @completed completed
+    test "P3-B2-15: authority lost after #{@allowed} Git writes stops the next one", context do
+      prepare_changed_workspace!(context)
+      before_head = git!(context.workspace, ["rev-parse", "HEAD"])
+      lost = {:stop, {:execution_stopped, %{stage: "done"}}}
+
+      guard = fn ->
+        checks = Process.get(:authority_checks, 0)
+        Process.put(:authority_checks, checks + 1)
+        if checks < @allowed, do: :ok, else: lost
+      end
+
+      assert ^lost = TurnEffects.maybe_auto_commit(%Claude.StreamState{files_touched: ["existing.txt"]}, context.workspace, guard)
+      assert command_steps(context.root) == @completed
+      assert git!(context.workspace, ["rev-parse", "HEAD"]) == before_head
+    end
+  end
+
+  test "P3-B2-16: terminal transport results keep their cause without effects or events", context do
+    prepare_changed_workspace!(context)
+    caller = self()
+    terminal = {:stop, {:stale_execution, %{run_id: "run", dispatch_id: "dispatch"}, :material_state_changed}}
+    opts = [tool_executor: fn _, _ -> flunk("report after terminal") end, on_message: fn event -> send(caller, {:terminal_event, event}) end]
+
+    for provider <- [Claude, CodexCLI], purpose <- [:delivery, :verifier] do
+      assert ^terminal = TurnEffects.apply_result(provider, terminal, context.workspace, %{}, opts, purpose)
+    end
+
+    refute_received {:terminal_event, _}
+    assert command_steps(context.root) == []
+  end
+
   test "P3-B2-06: index exit zero skips commit but reports once", context do
     caller = self()
 

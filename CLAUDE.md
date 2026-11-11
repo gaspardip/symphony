@@ -39,6 +39,8 @@ mix build                     # escript → bin/symphony
 
 If CI fails on one of these with all other tests passing: rerun.
 
+A long-lived checkout breaks the full suite on its own: the default app appends to `elixir/log/run_ledger.jsonl` (rereads it whole per append) and an interrupted VM leaves `run_ledger.jsonl.checked.lock`, which the app refuses by design and then crashes. Global `commit.gpgsign=true` also slows fixture commits. For a full-suite verdict, use a clean clone with `GIT_CONFIG_GLOBAL=/dev/null` and an isolated `TMPDIR`.
+
 ## Dialyzer
 
 Ignore file: `elixir/.dialyzer_ignore.exs`. Format is Elixir list of tuples:
